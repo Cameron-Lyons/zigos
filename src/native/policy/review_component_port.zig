@@ -13,6 +13,7 @@ pub const Error = error{
     SubjectTaskMismatch,
     UnexpectedOperation,
     UnsupportedAbiVersion,
+    InvalidRequestFlags,
 } || permission_review_service.Error;
 
 pub const ReviewBundleRequest = struct {

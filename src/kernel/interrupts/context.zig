@@ -30,7 +30,7 @@ pub fn leave() void {
     depth.* = previous - 1;
 }
 
-pub fn active() bool {
+pub inline fn active() bool {
     return depthSlot().* != 0;
 }
 

@@ -3,8 +3,6 @@
 
 .extern isrHandler
 .extern syscall_handler
-.extern zigos_userspace_resume_requested
-.extern zigos_userspace_resume_eip
 .extern zigos_resume_from_userspace_interrupt
 
 .equ SYSCALL_CALL_YIELD, 0
@@ -12,8 +10,6 @@
 .equ USERSPACE_YIELD_VECTOR, 129
 .equ USER_DATA_SELECTOR, 0x1b
 .equ USER_CODE_SELECTOR, 0x23
-.equ CPU_KERNEL_STACK_TOP, 0
-.equ CPU_USER_STACK_POINTER, 8
 
 .macro SAVE_REGISTERS
     pushq %rax
@@ -95,9 +91,9 @@ zigos_syscall_entry:
 .yield_dispatch:
     call isrHandler
 .dispatch_complete:
-    cmpl $0, zigos_userspace_resume_requested(%rip)
+    cmpl $0, %gs:CPU_RESUME_REQUESTED
     je .restore_user_xstate
-    cmpq $0, zigos_userspace_resume_eip(%rip)
+    cmpq $0, %gs:CPU_RESUME_RIP
     jne .userspace_resume
 .restore_user_xstate:
     LEAVE_KERNEL_XSTATE 160

@@ -3,8 +3,6 @@
 
 .extern isrHandler
 .extern syscall_handler
-.extern zigos_userspace_resume_requested
-.extern zigos_userspace_resume_eip
 .extern zigos_resume_from_userspace_interrupt
 
 #include "fred_frame64.inc"
@@ -25,6 +23,7 @@ zigos_fred_entry:
 zigos_fred_kernel_entry:
     .byte 0xf3, 0x0f, 0x1e, 0xfa
 .fred_common_entry:
+    # FRED establishes kernel GS for user events and preserves it for CPL0.
     ZIGOS_FRED_TEST_SYSCALL
     je .fred_syscall
 
@@ -54,9 +53,9 @@ zigos_fred_kernel_entry:
     # task retirement has requested a later userspace-to-scheduler handoff.
     cmpq $USER_CODE_SELECTOR, FRAME_CS(%r12)
     jne .fred_restore_interrupted_xstate
-    cmpl $0, zigos_userspace_resume_requested(%rip)
+    cmpl $0, %gs:CPU_RESUME_REQUESTED
     je .fred_restore_interrupted_xstate
-    cmpq $0, zigos_userspace_resume_eip(%rip)
+    cmpq $0, %gs:CPU_RESUME_RIP
     jne .fred_userspace_resume
 .fred_restore_interrupted_xstate:
     LEAVE_KERNEL_XSTATE FRAME_CS

@@ -1,25 +1,24 @@
 #include "../../arch/xstate64.inc"
+#include "idt_return64.inc"
 .section .text
 
 .extern isrHandler
-.extern zigos_userspace_resume_requested
-.extern zigos_userspace_resume_eip
 .extern zigos_resume_from_userspace_interrupt
 .extern zigos_handle_invalid_interrupt_return
 
-.equ KERNEL_CODE_SELECTOR, 0x08
-.equ USER_DATA_SEGMENT, 0x18
-.equ USER_DATA_SELECTOR, 0x1b
-.equ USER_CODE_SELECTOR, 0x23
-.equ SELECTOR_RPL_MASK, 0x3
+.equ KERNEL_CODE_SELECTOR, IDT_KERNEL_CODE_SELECTOR
+.equ USER_DATA_SEGMENT, IDT_USER_DATA_SEGMENT
+.equ USER_DATA_SELECTOR, IDT_USER_DATA_SELECTOR
+.equ USER_CODE_SELECTOR, IDT_USER_CODE_SELECTOR
+.equ SELECTOR_RPL_MASK, IDT_SELECTOR_RPL_MASK
 .equ FRAME_INT_NO, 136
-.equ FRAME_RIP, 152
-.equ FRAME_CS, 160
-.equ FRAME_RFLAGS, 168
-.equ FRAME_USER_RSP, 176
-.equ FRAME_USER_SS, 184
-.equ RFLAGS_RESERVED, 0x2
-.equ RFLAGS_FORBIDDEN_RETURN, 0x27000
+.equ FRAME_RIP, IDT_FRAME_RIP
+.equ FRAME_CS, IDT_FRAME_CS
+.equ FRAME_RFLAGS, IDT_FRAME_RFLAGS
+.equ FRAME_USER_RSP, IDT_FRAME_USER_RSP
+.equ FRAME_USER_SS, IDT_FRAME_USER_SS
+.equ RFLAGS_RESERVED, IDT_RFLAGS_RESERVED
+.equ RFLAGS_FORBIDDEN_RETURN, IDT_RFLAGS_FORBIDDEN_RETURN
 .equ DESCRIPTOR_RIGHTS_MASK, 0x00f0ff00
 .equ USER_DATA_RIGHTS, 0x00c0f300
 .equ USER_CODE_RIGHTS, 0x00a0fb00
@@ -120,6 +119,10 @@ ISR_NOERRCODE 65
 ISR_NOERRCODE 66
 ISR_NOERRCODE 67
 ISR_NOERRCODE 112
+ISR_NOERRCODE 113
+ISR_NOERRCODE 114
+ISR_NOERRCODE 115
+ISR_NOERRCODE 116
 ISR_NOERRCODE 255
 
 isr_common_stub:
@@ -136,20 +139,7 @@ isr_common_stub:
     movq %r12, %rdi
     call isrHandler
 
-    movq FRAME_CS(%r12), %rax
-    cmpq $KERNEL_CODE_SELECTOR, %rax
-    je .validate_common_return
-    cmpq $USER_CODE_SELECTOR, %rax
-    jne .invalid_interrupt_return
-    # Normalize only the saved RPL after proving the exact user-data GDT slot.
-    movq FRAME_USER_SS(%r12), %rax
-    andq $~SELECTOR_RPL_MASK, %rax
-    cmpq $USER_DATA_SEGMENT, %rax
-    jne .invalid_interrupt_return
-    orq $SELECTOR_RPL_MASK, FRAME_USER_SS(%r12)
-    movq FRAME_USER_RSP(%r12), %rax
-    shrq $47, %rax
-    jne .invalid_interrupt_return
+    ZIGOS_IDT_VALIDATE_RETURN_PREFIX %r12, .invalid_interrupt_return, .validate_common_return
 
     movl $USER_DATA_SELECTOR, %eax
     larl %eax, %eax
@@ -165,14 +155,7 @@ isr_common_stub:
     jne .invalid_interrupt_return
 
 .validate_common_return:
-    movq FRAME_RIP(%r12), %rax
-    shrq $47, %rax
-    jne .invalid_interrupt_return
-    movq FRAME_RFLAGS(%r12), %rax
-    testq $RFLAGS_RESERVED, %rax
-    jz .invalid_interrupt_return
-    testq $RFLAGS_FORBIDDEN_RETURN, %rax
-    jnz .invalid_interrupt_return
+    ZIGOS_IDT_VALIDATE_RETURN_RIP_FLAGS %r12, .invalid_interrupt_return
     jmp .isr_dispatch_complete
 
 .invalid_interrupt_return:
@@ -184,9 +167,9 @@ isr_common_stub:
     # only when returning to that user, never before scheduler C code.
     cmpq $USER_CODE_SELECTOR, FRAME_CS(%r12)
     jne .restore_interrupted_xstate
-    cmpl $0, zigos_userspace_resume_requested(%rip)
+    cmpl $0, %gs:CPU_RESUME_REQUESTED
     je .restore_interrupted_xstate
-    cmpq $0, zigos_userspace_resume_eip(%rip)
+    cmpq $0, %gs:CPU_RESUME_RIP
     jne .userspace_resume
 .restore_interrupted_xstate:
     LEAVE_KERNEL_XSTATE FRAME_CS

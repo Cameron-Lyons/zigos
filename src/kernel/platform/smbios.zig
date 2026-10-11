@@ -69,40 +69,236 @@ const EntryPoint = struct {
     table_length: usize,
 };
 
+const TargetSkuCapture = struct {
+    system_table_address: u64 = 0,
+    attempted: bool = false,
+    conflicted: bool = false,
+    matched: bool = false,
+
+    fn contains(self: *const TargetSkuCapture, address: u64, target: []const u8) bool {
+        return self.attempted and !self.conflicted and self.matched and
+            self.system_table_address == address and std.mem.eql(u8, target, NUC15CRSU7_SKU);
+    }
+};
+
+// BSP-only publication before allocator opening and AP startup. No pointer
+// into EFI boot-services storage survives capture, so later frame reuse cannot
+// change the hardware identity result or cause a firmware graph dereference.
+var target_sku_capture: TargetSkuCapture = .{};
+
+pub fn captureTargetSku(system_table_address: u64) void {
+    captureWithReader(&target_sku_capture, system_table_address, NativeReader{});
+}
+
 pub fn efiSystemTableContainsTargetSku(system_table_address: u64, target: []const u8) bool {
+    return target_sku_capture.contains(system_table_address, target);
+}
+
+fn captureWithReader(capture: *TargetSkuCapture, system_table_address: u64, reader: anytype) void {
+    if (capture.attempted) {
+        if (capture.system_table_address != system_table_address) {
+            capture.conflicted = true;
+            capture.matched = false;
+        }
+        return;
+    }
+    capture.system_table_address = system_table_address;
+    capture.matched = efiSystemTableContainsTargetSkuUncached(system_table_address, NUC15CRSU7_SKU, reader);
+    capture.attempted = true;
+}
+
+fn efiSystemTableContainsTargetSkuUncached(system_table_address: u64, target: []const u8, reader: anytype) bool {
     if (target.len == 0) return false;
 
-    const system_table_bytes = mappedPhysicalBytes(system_table_address, EFI_SYSTEM_TABLE_BYTES) orelse
-        return false;
+    var system_table_bytes: []const u8 = undefined;
+    if (!checkedPhysicalBytesInto(reader, system_table_address, EFI_SYSTEM_TABLE_BYTES, &system_table_bytes)) return false;
     const system_table = parseEfiSystemTable(system_table_bytes) catch return false;
     const entries_length = std.math.mul(
         usize,
         system_table.configuration_table_count,
         EFI_CONFIGURATION_ENTRY_BYTES,
     ) catch return false;
-    const entries = mappedPhysicalBytes(system_table.configuration_table_address, entries_length) orelse
-        return false;
+    var entries: []const u8 = undefined;
+    if (!checkedPhysicalBytesInto(reader, system_table.configuration_table_address, entries_length, &entries)) return false;
     const entry_point_address = findSmbios3EntryPointAddress(entries) orelse return false;
 
-    const fixed_entry_point = mappedPhysicalBytes(entry_point_address, SMBIOS3_MIN_LENGTH) orelse return false;
+    var fixed_entry_point: []const u8 = undefined;
+    if (!checkedPhysicalBytesInto(reader, entry_point_address, SMBIOS3_MIN_LENGTH, &fixed_entry_point)) return false;
     const entry_point_length = fixed_entry_point[SMBIOS3_LENGTH_OFFSET];
     if (entry_point_length < SMBIOS3_MIN_LENGTH) return false;
-    const entry_point_bytes = mappedPhysicalBytes(entry_point_address, entry_point_length) orelse return false;
+    var entry_point_bytes: []const u8 = undefined;
+    if (!checkedPhysicalBytesInto(reader, entry_point_address, entry_point_length, &entry_point_bytes)) return false;
     const entry_point = parseSmbios3EntryPoint(entry_point_bytes) catch return false;
-    const table = mappedPhysicalBytes(entry_point.table_address, entry_point.table_length) orelse return false;
+    var table: []const u8 = undefined;
+    if (!checkedPhysicalBytesInto(reader, entry_point.table_address, entry_point.table_length, &table)) return false;
     return tableContainsTargetSku(table, target);
 }
 
-fn mappedPhysicalBytes(physical_address: u64, length: usize) ?[]const u8 {
-    if (length == 0) return null;
-    const last_physical_address = std.math.add(
-        u64,
-        physical_address,
-        std.math.cast(u64, length - 1) orelse return null,
-    ) catch return null;
-    _ = paging.directMapAddress(last_physical_address) orelse return null;
-    const alias = paging.directMapAddress(physical_address) orelse return null;
-    return @as([*]const u8, @ptrFromInt(alias))[0..length];
+fn checkedPhysicalBytesInto(reader: anytype, physical_address: u64, length: usize, out: *[]const u8) bool {
+    if (physical_address == 0 or length == 0) return false;
+    const bytes = std.math.cast(u64, length) orelse return false;
+    _ = std.math.add(u64, physical_address, bytes) catch return false;
+    var result: []const u8 = undefined;
+    if (!reader.readInto(physical_address, length, &result) or result.len != length) return false;
+    out.* = result;
+    return true;
+}
+
+const NativeReader = struct {
+    fn readInto(_: NativeReader, physical_address: u64, length: usize, out: *[]const u8) bool {
+        const alias = paging.mappedRamSpan(physical_address, @intCast(length)) orelse return false;
+        out.* = @as([*]const u8, @ptrFromInt(alias))[0..length];
+        return true;
+    }
+};
+
+const FirmwareFixture = struct {
+    const Node = enum { system, configuration, entry, table };
+    const SYSTEM_ADDRESS: u64 = 0x8000_1000;
+    const CONFIGURATION_ADDRESS: u64 = 0x8000_2000;
+    const ENTRY_ADDRESS: u64 = 0x8000_3000;
+    const TABLE_ADDRESS: u64 = 0x8000_4000;
+    system: [EFI_SYSTEM_TABLE_BYTES]u8 = @splat(0),
+    configuration: [EFI_CONFIGURATION_ENTRY_BYTES]u8 = @splat(0),
+    entry: [32]u8 = @splat(0),
+    table: [32]u8 = @splat(0),
+    denied: ?Node = null,
+    deny_entry_extension: bool = false,
+    short_span: bool = false,
+    reads: usize = 0,
+
+    fn init() FirmwareFixture {
+        var result: FirmwareFixture = .{};
+        writeU64Le(result.system[0..8], EFI_SYSTEM_TABLE_SIGNATURE);
+        writeU32Le(result.system[EFI_SYSTEM_TABLE_REVISION_OFFSET..][0..4], EFI_SYSTEM_TABLE_MIN_REVISION);
+        writeU32Le(result.system[EFI_SYSTEM_TABLE_HEADER_SIZE_OFFSET..][0..4], EFI_SYSTEM_TABLE_BYTES);
+        writeU64Le(result.system[EFI_SYSTEM_TABLE_ENTRY_COUNT_OFFSET..][0..8], 1);
+        writeU64Le(result.system[EFI_SYSTEM_TABLE_CONFIG_ADDRESS_OFFSET..][0..8], CONFIGURATION_ADDRESS);
+        result.systemChecksum();
+        @memcpy(result.configuration[0..SMBIOS3_TABLE_GUID.len], &SMBIOS3_TABLE_GUID);
+        writeU64Le(result.configuration[EFI_CONFIGURATION_ENTRY_ADDRESS_OFFSET..][0..8], ENTRY_ADDRESS);
+        @memcpy(result.entry[0..SMBIOS3_ANCHOR.len], SMBIOS3_ANCHOR);
+        result.entry[SMBIOS3_LENGTH_OFFSET] = SMBIOS3_MIN_LENGTH;
+        result.entry[SMBIOS3_MAJOR_VERSION_OFFSET] = SMBIOS3_MAJOR_VERSION;
+        writeU32Le(result.entry[SMBIOS3_TABLE_LENGTH_OFFSET..][0..4], result.table.len);
+        writeU64Le(result.entry[SMBIOS3_TABLE_ADDRESS_OFFSET..][0..8], TABLE_ADDRESS);
+        checksum.finishSum8(result.entry[0..SMBIOS3_MIN_LENGTH], SMBIOS3_CHECKSUM_OFFSET);
+        result.table[0] = SYSTEM_INFORMATION_TYPE;
+        result.table[1] = STRUCTURE_HEADER_BYTES;
+        @memcpy(result.table[STRUCTURE_HEADER_BYTES..][0..NUC15CRSU7_SKU.len], NUC15CRSU7_SKU);
+        return result;
+    }
+
+    fn systemChecksum(self: *FirmwareFixture) void {
+        writeU32Le(self.system[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], 0);
+        writeU32Le(self.system[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], std.hash.Crc32.hash(&self.system));
+    }
+
+    fn readInto(self: *FirmwareFixture, physical: u64, length: usize, out: *[]const u8) bool {
+        self.reads += 1;
+        const node: Node = switch (physical) {
+            SYSTEM_ADDRESS => .system,
+            CONFIGURATION_ADDRESS => .configuration,
+            ENTRY_ADDRESS => .entry,
+            TABLE_ADDRESS => .table,
+            else => return false,
+        };
+        if (self.denied == node or node == .entry and self.deny_entry_extension and length > SMBIOS3_MIN_LENGTH) return false;
+        const bytes: []const u8 = switch (node) {
+            .system => &self.system,
+            .configuration => &self.configuration,
+            .entry => &self.entry,
+            .table => &self.table,
+        };
+        if (length > bytes.len) return false;
+        out.* = bytes[0 .. length - @as(usize, if (self.short_span) 1 else 0)];
+        return true;
+    }
+};
+
+test "SMBIOS capture checks every physical graph span and freezes only a bounded result" {
+    var memory = FirmwareFixture.init();
+    var capture: TargetSkuCapture = .{};
+    try std.testing.expect(!capture.contains(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU));
+    captureWithReader(&capture, FirmwareFixture.SYSTEM_ADDRESS, &memory);
+    try std.testing.expectEqual(@as(usize, 5), memory.reads);
+    try std.testing.expect(capture.contains(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU));
+    try std.testing.expect(!capture.contains(FirmwareFixture.SYSTEM_ADDRESS + 4096, NUC15CRSU7_SKU));
+    try std.testing.expect(!capture.contains(FirmwareFixture.SYSTEM_ADDRESS, "rnuc15crsu7"));
+    try std.testing.expect(!capture.contains(FirmwareFixture.SYSTEM_ADDRESS, ""));
+    @memset(&memory.system, 0);
+    @memset(&memory.configuration, 0);
+    @memset(&memory.entry, 0);
+    @memset(&memory.table, 0);
+    memory.denied = .system;
+    captureWithReader(&capture, FirmwareFixture.SYSTEM_ADDRESS, &memory);
+    try std.testing.expectEqual(@as(usize, 5), memory.reads);
+    try std.testing.expect(capture.contains(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU));
+    captureWithReader(&capture, FirmwareFixture.SYSTEM_ADDRESS + 4096, &memory);
+    captureWithReader(&capture, FirmwareFixture.SYSTEM_ADDRESS, &memory);
+    try std.testing.expectEqual(@as(usize, 5), memory.reads);
+    try std.testing.expect(!capture.contains(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU));
+}
+
+test "SMBIOS capture fails closed for missing graph nodes and incomplete checked spans" {
+    for ([_]FirmwareFixture.Node{ .system, .configuration, .entry, .table }) |node| {
+        var memory = FirmwareFixture.init();
+        memory.denied = node;
+        var capture: TargetSkuCapture = .{};
+        captureWithReader(&capture, FirmwareFixture.SYSTEM_ADDRESS, &memory);
+        try std.testing.expect(capture.attempted and !capture.matched);
+        try std.testing.expect(!capture.contains(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU));
+    }
+    var memory = FirmwareFixture.init();
+    memory.short_span = true;
+    try std.testing.expect(!efiSystemTableContainsTargetSkuUncached(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU, &memory));
+    try std.testing.expectEqual(@as(usize, 1), memory.reads);
+    memory = FirmwareFixture.init();
+    memory.entry[SMBIOS3_LENGTH_OFFSET] = memory.entry.len;
+    checksum.finishSum8(&memory.entry, SMBIOS3_CHECKSUM_OFFSET);
+    memory.deny_entry_extension = true;
+    try std.testing.expect(!efiSystemTableContainsTargetSkuUncached(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU, &memory));
+    try std.testing.expectEqual(@as(usize, 4), memory.reads);
+}
+
+test "SMBIOS physical span wrapper rejects empty wrapping and unadmitted addresses before reads" {
+    var memory = FirmwareFixture.init();
+    const sentinel: []const u8 = "untouched";
+    var out = sentinel;
+    try std.testing.expect(!checkedPhysicalBytesInto(&memory, 0, 1, &out));
+    try std.testing.expect(!checkedPhysicalBytesInto(&memory, FirmwareFixture.SYSTEM_ADDRESS, 0, &out));
+    try std.testing.expect(!checkedPhysicalBytesInto(&memory, std.math.maxInt(u64), 1, &out));
+    try std.testing.expect(!checkedPhysicalBytesInto(&memory, std.math.maxInt(u64) - 1, 4, &out));
+    try std.testing.expectEqual(@as(usize, 0), memory.reads);
+    try std.testing.expect(!checkedPhysicalBytesInto(&memory, FirmwareFixture.SYSTEM_ADDRESS + 1, EFI_SYSTEM_TABLE_BYTES, &out));
+    try std.testing.expectEqual(@as(usize, 1), memory.reads);
+    memory.short_span = true;
+    try std.testing.expect(!checkedPhysicalBytesInto(&memory, FirmwareFixture.SYSTEM_ADDRESS, EFI_SYSTEM_TABLE_BYTES, &out));
+    try std.testing.expectEqual(sentinel.ptr, out.ptr);
+    try std.testing.expectEqual(sentinel.len, out.len);
+    memory = FirmwareFixture.init();
+    writeU64Le(memory.system[EFI_SYSTEM_TABLE_CONFIG_ADDRESS_OFFSET..][0..8], std.math.maxInt(u64) - 1);
+    memory.systemChecksum();
+    try std.testing.expect(!efiSystemTableContainsTargetSkuUncached(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU, &memory));
+    try std.testing.expectEqual(@as(usize, 1), memory.reads);
+}
+
+test "SMBIOS public lookup performs no uncaptured native graph read" {
+    const saved = target_sku_capture;
+    defer target_sku_capture = saved;
+    target_sku_capture = .{};
+    try std.testing.expect(!efiSystemTableContainsTargetSku(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU));
+    if (comptime @import("builtin").target.os.tag != .freestanding) {
+        captureTargetSku(FirmwareFixture.SYSTEM_ADDRESS);
+        try std.testing.expect(!efiSystemTableContainsTargetSku(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU));
+        target_sku_capture = .{};
+    }
+    var memory = FirmwareFixture.init();
+    captureWithReader(&target_sku_capture, FirmwareFixture.SYSTEM_ADDRESS, &memory);
+    @memset(&memory.table, 0);
+    try std.testing.expect(efiSystemTableContainsTargetSku(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU));
+    try std.testing.expect(!efiSystemTableContainsTargetSku(FirmwareFixture.SYSTEM_ADDRESS, "different"));
+    try std.testing.expectEqual(@as(usize, 5), memory.reads);
 }
 
 fn parseEfiSystemTable(bytes: []const u8) Error!EfiSystemTable {

@@ -429,18 +429,19 @@ fn FixedWithReservationCapacity(
             };
         }
 
-        pub fn isReserved(self: *const Self, frame_address: PhysicalAddress) bool {
+        pub inline fn isReserved(self: *const Self, frame_address: PhysicalAddress) bool {
             if (frame_address % page_size != 0 or frame_address >= memory_bytes) return false;
             const frame: u32 = @intCast(frame_address / page_size);
             if (!self.reservations_sealed) return self.bitIsSet(&self.storage.unavailable_bitmap, frame);
             return self.frameIsReserved(frame);
         }
 
-        pub fn isAllocated(self: *const Self, frame_address: PhysicalAddress) bool {
+        pub inline fn isAllocated(self: *const Self, frame_address: PhysicalAddress) bool {
             if (frame_address % page_size != 0 or frame_address >= memory_bytes) return false;
             if (!self.reservations_sealed) return false;
             const frame: u32 = @intCast(frame_address / page_size);
-            return self.bitIsSet(&self.storage.unavailable_bitmap, frame) and !self.frameIsReserved(frame);
+            return self.bitIsSet(&self.storage.unavailable_bitmap, frame) and
+                (self.rangeIsKnownUnreserved(frame, frame + 1) or !self.frameIsReserved(frame));
         }
 
         fn validateRun(run: FrameRun) Error!u32 {
@@ -1073,7 +1074,18 @@ test "recent allocations cache only their immutable unreserved span" {
     const run = allocator.allocate(2).?;
     try std.testing.expect(allocator.rangeIsKnownUnreserved(0, 2));
     try std.testing.expect(!allocator.rangeIsKnownUnreserved(1, 3));
+    try std.testing.expect(allocator.isAllocated(run.base));
+    try std.testing.expect(allocator.isAllocated(run.base + page_size));
+    try std.testing.expect(!allocator.isAllocated(2 * page_size));
+    const next = allocator.allocate(2).?;
+    try std.testing.expect(allocator.isAllocated(run.base));
+    try std.testing.expect(allocator.isAllocated(next.base));
+    try std.testing.expect(!allocator.isAllocated(3 * page_size));
     try allocator.release(run);
+    try std.testing.expect(!allocator.isAllocated(run.base));
+    try std.testing.expect(allocator.isAllocated(next.base));
+    try allocator.release(next);
+    try std.testing.expect(!allocator.isAllocated(next.base));
     try std.testing.expectError(
         error.FrameReserved,
         allocator.release(.{ .base = 2 * page_size, .count = 1 }),

@@ -7,7 +7,7 @@ const spin = @import("../utils/spin.zig");
 const interrupt_context = @import("../interrupts/context.zig");
 const worker_context = @import("../../native/task/cooperative_worker.zig");
 
-pub const Error = crb.Error || error{ AlreadyInitialized, Unavailable, Busy, InterruptContext };
+pub const Error = crb.Error || error{ AlreadyInitialized, Unavailable, Busy, InterruptContext, MmioMappingFailed };
 var attempted = false;
 var online = false;
 var transport: crb.Transport = undefined;
@@ -23,7 +23,7 @@ pub fn initialize(discovery: crb.Discovery) Error!u32 {
     const base = discovery.physical_base;
     if (base == 0 or base & (crb.PAGE_BYTES - 1) != 0 or base > 0x000f_ffff_ffff_f000)
         return error.InvalidAddress;
-    paging.mapKernelBorrowedPage(windows.tpm_crb.base, @intCast(base), paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE | paging.PAGE_WRITE_THROUGH);
+    paging.mapKernelDeviceRange(windows.tpm_crb.base, base, crb.PAGE_BYTES, true) catch return error.MmioMappingFailed;
     transport = .{ .discovery = discovery };
     var io = HardwareIo{};
     var response: [27]u8 = undefined;

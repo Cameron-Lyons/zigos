@@ -381,7 +381,7 @@ fn handle(manager: anytype, s: *State, channel: *Channel, frame: protocol.Frame,
             queue(channel, frame.gesture, .{ .status = .unavailable }, true);
             return;
         };
-        const text = s.grants.read(.{
+        const text_len = s.grants.read(.{
             .subject = destination.owner,
             .destination_task_id = destination.id,
             .token_id = grant.token_id,
@@ -393,7 +393,7 @@ fn handle(manager: anytype, s: *State, channel: *Channel, frame: protocol.Frame,
             queue(channel, frame.gesture, .{ .status = .unavailable }, true);
             return;
         };
-        channel.length = @intCast(text.len);
+        channel.length = text_len;
         pasteReply(channel, frame.gesture);
         return;
     }

@@ -190,7 +190,7 @@ pub const inventory_layout = .{
     .heap_backs_inventory_on_freestanding = HEAP_BACKED_PCI_INVENTORY_ON_FREESTANDING,
 };
 
-pub const InitError = error{InvalidEcamAllocation};
+pub const InitError = error{InvalidEcamAllocation} || paging.DeviceMapError;
 pub const QuiesceError = error{
     MalformedCapabilityList,
     InterruptDisableFailed,
@@ -220,6 +220,8 @@ pub fn init(allocation: mcfg.Allocation) InitError!void {
     const last_address = std.math.add(u64, allocation.base_address, span - 1) catch
         return error.InvalidEcamAllocation;
     _ = std.math.cast(usize, last_address) orelse return error.InvalidEcamAllocation;
+
+    if (comptime builtin.target.os.tag == .freestanding) try paging.registerPciEcam(allocation);
 
     releaseBootInventory();
     ecam_allocation = allocation;
@@ -270,11 +272,12 @@ fn mappedRegister(bus: u8, device: u8, function: u8, offset: u16) ?*volatile u32
     const physical_address = ecamPhysicalAddress(allocation, bus, device, function, aligned_offset) orelse return null;
     const physical_page = physical_address & ~(ECAM_FUNCTION_BYTES - 1);
     if (mapped_configuration_page == null or mapped_configuration_page.? != physical_page) {
-        paging.mapKernelBorrowedPage(
+        paging.mapKernelDeviceRange(
             mmio_windows.pci_ecam.base,
             physical_page,
-            paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE,
-        );
+            ECAM_FUNCTION_BYTES,
+            true,
+        ) catch return null;
         mapped_configuration_page = physical_page;
     }
     return @ptrFromInt(mmio_windows.pci_ecam.base + (physical_address & (ECAM_FUNCTION_BYTES - 1)));
@@ -491,20 +494,79 @@ pub fn disableBusMastering(device_info: PCIDevice) void {
     );
 }
 
-pub fn enableMemoryBusMastering(device_info: PCIDevice) void {
-    const command = readConfigWord(
+pub fn enableMemoryBusMastering(device_info: PCIDevice) error{ ConfigurationUnavailable, BusMasterEnableFailed }!void {
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    const pointer = mappedRegister(
         device_info.bus,
         device_info.device,
         device_info.function,
         PCI_COMMAND_OFFSET,
     );
-    writeConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        PCI_COMMAND_OFFSET,
-        command | PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER,
-    );
+    const CommandRegister = struct {
+        pointer: *volatile u32,
+
+        inline fn read(self: @This()) u32 {
+            return self.pointer.*;
+        }
+
+        inline fn write(self: @This(), value: u32) void {
+            self.pointer.* = value;
+        }
+    };
+    const register: ?CommandRegister = if (pointer) |mapped| .{ .pointer = mapped } else null;
+    try enableMemoryBusMasteringRegister(register);
+}
+
+inline fn enableMemoryBusMasteringRegister(optional_register: anytype) error{ ConfigurationUnavailable, BusMasterEnableFailed }!void {
+    const register = optional_register orelse return error.ConfigurationUnavailable;
+    const command: u16 = @truncate(register.read());
+    if (command == std.math.maxInt(u16)) return error.ConfigurationUnavailable;
+    const required = PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER;
+    // The upper status word is write-one-to-clear. Never copy its read value
+    // into a command update, including after a missing ECAM mapping.
+    register.write(@as(u32, command | required));
+    const observed = register.read();
+    if (observed == std.math.maxInt(u32)) return error.ConfigurationUnavailable;
+    if (@as(u16, @truncate(observed)) & required != required) return error.BusMasterEnableFailed;
+}
+
+test "PCI bus mastering requires an exact command register and verified decoding without clearing status" {
+    const Register = struct {
+        value: u32 = 0xabcd0400,
+        reject: u16 = 0,
+        disappear: bool = false,
+        writes: usize = 0,
+        written: u32 = 0,
+
+        fn read(self: *@This()) u32 {
+            if (self.disappear and self.writes != 0) return std.math.maxInt(u32);
+            return self.value;
+        }
+
+        fn write(self: *@This(), value: u32) void {
+            self.writes += 1;
+            self.written = value;
+            self.value = (self.value & 0xffff0000) | (@as(u16, @truncate(value)) & ~self.reject);
+        }
+    };
+    try std.testing.expectError(error.ConfigurationUnavailable, enableMemoryBusMasteringRegister(@as(?*Register, null)));
+    var register = Register{};
+    try enableMemoryBusMasteringRegister(@as(?*Register, &register));
+    try std.testing.expectEqual(@as(u32, 0x406), register.written);
+    try std.testing.expectEqual(@as(u32, 0xabcd0406), register.value);
+    try std.testing.expectEqual(@as(usize, 1), register.writes);
+    for ([_]u16{ PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_BUS_MASTER }) |rejected| {
+        register = .{ .reject = rejected };
+        try std.testing.expectError(error.BusMasterEnableFailed, enableMemoryBusMasteringRegister(@as(?*Register, &register)));
+        try std.testing.expectEqual(@as(u32, 0), register.written >> 16);
+    }
+    register = .{ .value = std.math.maxInt(u32) };
+    try std.testing.expectError(error.ConfigurationUnavailable, enableMemoryBusMasteringRegister(@as(?*Register, &register)));
+    try std.testing.expectEqual(@as(usize, 0), register.writes);
+    register = .{ .disappear = true };
+    try std.testing.expectError(error.ConfigurationUnavailable, enableMemoryBusMasteringRegister(@as(?*Register, &register)));
+    try std.testing.expectEqual(@as(usize, 1), register.writes);
 }
 
 pub fn busMasteringEnabled(device_info: PCIDevice) bool {

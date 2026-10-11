@@ -1,7 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const kernel_address = @import("../../arch/kernel_address.zig");
 const framebuffer = @import("../platform/framebuffer.zig");
 const endian = @import("../utils/endian.zig");
 const multiboot2 = @import("multiboot2.zig");
+pub const MemoryKind = @import("../../boot/memory_kind.zig").Kind;
 
 const readU32Le = endian.readU32Le;
 const readU64Le = endian.readU64Le;
@@ -21,7 +24,7 @@ const FRAMEBUFFER_RGB_COLOR_INFO_BYTES: usize = 6;
 const MULTIBOOT2_INFO_HEADER_BYTES: usize = 8;
 const MULTIBOOT2_MMAP_ENTRY_BYTES: usize = 24;
 const MAX_MULTIBOOT2_INFO_BYTES: usize = 1024 * 1024;
-const BOOT_IDENTITY_BYTES: u64 = 128 * 1024 * 1024;
+const BOOT_HANDOFF_PHYSICAL_BYTES: u64 = 128 * 1024 * 1024;
 
 pub export var zigos_multiboot_magic: u32 = 0;
 pub export var zigos_multiboot_info_addr: u32 = 0;
@@ -55,6 +58,7 @@ pub const Info = struct {
     efi64_system_table_addr: u64 = 0,
     boot_image: ?multiboot2.image_info.Info = null,
     boot_tpm: ?multiboot2.tpm_info.Info = null,
+    boot_paging: ?multiboot2.paging_info.Info = null,
 
     pub fn hasMemoryInfo(self: Info) bool {
         return (self.flags & FLAG_MEMORY_INFO) != 0;
@@ -99,6 +103,8 @@ pub const MemoryMapEntry = struct {
     length: u64,
     end: u64,
     kind: u32,
+    firmware_type: u32 = std.math.maxInt(u32),
+    attributes: u64 = 0,
 
     pub fn isUsable(self: MemoryMapEntry) bool {
         return self.kind == 1 and self.length != 0;
@@ -122,7 +128,7 @@ pub const MemoryMapIterator = struct {
     offset: usize = 0,
     entry_size: u32 = 0,
 
-    pub fn next(self: *MemoryMapIterator) Error!?MemoryMapEntry {
+    pub inline fn next(self: *MemoryMapIterator) Error!?MemoryMapEntry {
         if (self.offset == self.bytes.len) return null;
 
         const stride = std.math.cast(usize, self.entry_size) orelse
@@ -143,6 +149,8 @@ pub const MemoryMapIterator = struct {
             .length = length,
             .end = end,
             .kind = kind,
+            .firmware_type = if (stride >= 32) readU32Le(entry[20..24]) else std.math.maxInt(u32),
+            .attributes = if (stride >= 32) readU64Le(entry[24..32]) else 0,
         };
     }
 };
@@ -201,6 +209,7 @@ pub fn parseMultiboot2Info(bytes: []const u8, physical_base: u32) Error!Info {
         .efi64_system_table_addr = parsed.efi64_system_table_addr,
         .boot_image = parsed.boot_image,
         .boot_tpm = parsed.boot_tpm,
+        .boot_paging = parsed.boot_paging,
     };
 }
 
@@ -270,7 +279,7 @@ pub fn framebufferInfo(info: Info) Error!framebuffer.Info {
         .reserved = reservedMask(info.framebuffer_rgb),
     };
 
-    return framebuffer.validate(.{
+    const result = framebuffer.Info{
         .physical_address = info.framebuffer_addr,
         .width = info.framebuffer_width,
         .height = info.framebuffer_height,
@@ -278,7 +287,9 @@ pub fn framebufferInfo(info: Info) Error!framebuffer.Info {
         .format = .bitmask,
         .pixel_mask = pixel_mask,
         .buffer_bytes = @as(u64, info.framebuffer_pitch) * @as(u64, info.framebuffer_height),
-    }) catch error.InvalidFramebuffer;
+    };
+    framebuffer.validate(result) catch return error.InvalidFramebuffer;
+    return result;
 }
 
 pub fn commandLineHasFlag(info: Info, flag: []const u8) bool {
@@ -339,13 +350,17 @@ fn checkedPhysicalExtent(address: u32, length: usize) ?PhysicalExtent {
 
     const physical_end = std.math.add(u64, address, std.math.cast(u64, length) orelse return null) catch
         return null;
-    if (physical_end > BOOT_IDENTITY_BYTES) return null;
+    if (physical_end > BOOT_HANDOFF_PHYSICAL_BYTES) return null;
     return .{ .base = base, .length = length };
 }
 
 fn checkedPhysicalBytes(address: u32, length: usize) ?[]const u8 {
     const extent = checkedPhysicalExtent(address, length) orelse return null;
-    return @as([*]const u8, @ptrFromInt(extent.base))[0..extent.length];
+    const alias = if (comptime builtin.os.tag == .freestanding)
+        kernel_address.directMappedAddress(extent.base, kernel_address.image_physical_limit) orelse return null
+    else
+        extent.base;
+    return @as([*]const u8, @ptrFromInt(alias))[0..extent.length];
 }
 
 fn maskFromField(position: u8, size: u8) ?u32 {

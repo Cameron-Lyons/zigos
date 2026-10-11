@@ -32,17 +32,17 @@ pub fn productCapacityUsage(store: *const object_store.Store, workspaces: *const
         .version_records = store.versionCount(),
         .blob_records = store.blobCount(),
         .chunk_records = store.chunkCount(),
-        .workspaces = workspaceCount(workspaces),
-        .snapshots = snapshotCount(workspaces),
         .object_payload_bytes = store.maxBlobPayloadBytes(),
     };
 
     for (&workspaces.workspaces.slots) |*slot| {
         if (!persistableWorkspaceSlot(slot)) continue;
+        usage.workspaces += 1;
         usage.max_workspace_entries = @max(usage.max_workspace_entries, slot.workspace.counts.entry_count);
     }
     for (&workspaces.snapshots.slots) |*slot| {
         if (!persistableSnapshotSlot(slot)) continue;
+        usage.snapshots += 1;
         usage.max_workspace_entries = @max(usage.max_workspace_entries, slot.snapshot.entry_count);
     }
     return usage;
@@ -122,4 +122,100 @@ fn quotaRejection(limit: QuotaLimit, requested: usize, allowed: usize) QuotaReje
         .requested = requested,
         .allowed = allowed,
     };
+}
+
+test "storage quota excludes every malformed workspace and snapshot metadata combination" {
+    const std = @import("std");
+    const store = try std.testing.allocator.create(object_store.Store);
+    defer std.testing.allocator.destroy(store);
+    store.* = object_store.Store.init();
+    const directory = try std.testing.allocator.create(workspace.Directory);
+    defer std.testing.allocator.destroy(directory);
+    directory.* = workspace.Directory.init();
+
+    // Directly populate the last physical slots: persistability accounting must
+    // inspect the whole arena, independently of its live counters and indexes.
+    const workspace_slot = &directory.workspaces.slots[workspace.MAX_WORKSPACES - 1];
+    for (0..64) |invalid| {
+        workspace_slot.in_use = invalid & 1 == 0;
+        workspace_slot.workspace.label_len = if (invalid & 2 == 0) workspace.MAX_WORKSPACE_LABEL_BYTES else workspace.MAX_WORKSPACE_LABEL_BYTES + 1;
+        workspace_slot.workspace.counts = .{
+            .entry_count = if (invalid & 4 == 0) workspace.MAX_WORKSPACE_ENTRIES else workspace.MAX_WORKSPACE_ENTRIES + 1,
+            .entry_mutation_count = if (invalid & 8 == 0) workspace.MAX_WORKSPACE_ENTRY_MUTATIONS else workspace.MAX_WORKSPACE_ENTRY_MUTATIONS + 1,
+            .share_grant_count = if (invalid & 16 == 0) workspace.MAX_SHARE_GRANTS else workspace.MAX_SHARE_GRANTS + 1,
+            .deleted_count = if (invalid & 32 == 0) workspace.MAX_RECOVERABLE_DELETES else workspace.MAX_RECOVERABLE_DELETES + 1,
+        };
+        const usage = productCapacityUsage(store, directory);
+        const expected_count: usize = if (invalid == 0) 1 else 0;
+        try std.testing.expectEqual(expected_count, usage.workspaces);
+        try std.testing.expectEqual(expected_count * workspace.MAX_WORKSPACE_ENTRIES, usage.max_workspace_entries);
+        try std.testing.expectEqual(@as(usize, 0), usage.snapshots);
+        try std.testing.expectEqual(expected_count, workspaceCount(directory));
+    }
+    workspace_slot.in_use = false;
+
+    const snapshot_slot = &directory.snapshots.slots[workspace.MAX_SNAPSHOTS - 1];
+    for (0..8) |invalid| {
+        snapshot_slot.in_use = invalid & 1 == 0;
+        snapshot_slot.snapshot.label_len = if (invalid & 2 == 0) workspace.MAX_WORKSPACE_LABEL_BYTES else workspace.MAX_WORKSPACE_LABEL_BYTES + 1;
+        snapshot_slot.snapshot.entry_count = if (invalid & 4 == 0) workspace.MAX_WORKSPACE_ENTRIES else workspace.MAX_WORKSPACE_ENTRIES + 1;
+        const usage = productCapacityUsage(store, directory);
+        const expected_count: usize = if (invalid == 0) 1 else 0;
+        try std.testing.expectEqual(expected_count, usage.snapshots);
+        try std.testing.expectEqual(expected_count * workspace.MAX_WORKSPACE_ENTRIES, usage.max_workspace_entries);
+        try std.testing.expectEqual(@as(usize, 0), usage.workspaces);
+        try std.testing.expectEqual(expected_count, snapshotCount(directory));
+    }
+    try std.testing.expectEqual(@as(u64, 0), directory.dirty_revision);
+    try std.testing.expectEqual(@as(usize, 0), directory.workspaceCount());
+    try std.testing.expectEqual(@as(usize, 0), directory.snapshotCount());
+}
+
+test "storage quota aggregates mixed physical slots and preserves rejection priority" {
+    const std = @import("std");
+    const store = try std.testing.allocator.create(object_store.Store);
+    defer std.testing.allocator.destroy(store);
+    store.* = object_store.Store.init();
+    store.max_blob_payload_bytes = 1_234;
+    const directory = try std.testing.allocator.create(workspace.Directory);
+    defer std.testing.allocator.destroy(directory);
+    directory.* = workspace.Directory.init();
+    for (&directory.workspaces.slots, 0..) |*slot, index| {
+        slot.in_use = true;
+        slot.workspace.counts.entry_count = @intCast(index + 1);
+    }
+    directory.workspaces.slots[3].workspace.counts.deleted_count = workspace.MAX_RECOVERABLE_DELETES + 1;
+    // A malformed slot's high entry count must not affect the accepted maximum.
+    directory.workspaces.slots[3].workspace.counts.entry_count = workspace.MAX_WORKSPACE_ENTRIES;
+    for (&directory.snapshots.slots, 0..) |*slot, index| {
+        slot.in_use = true;
+        slot.snapshot.entry_count = @intCast(index + 1);
+    }
+    directory.snapshots.slots[0].snapshot.label_len = workspace.MAX_WORKSPACE_LABEL_BYTES + 1;
+    directory.snapshots.slots[1].snapshot.entry_count = workspace.MAX_WORKSPACE_ENTRIES + 1;
+    directory.snapshots.slots[workspace.MAX_SNAPSHOTS - 1].snapshot.entry_count = workspace.MAX_WORKSPACE_ENTRIES;
+
+    const usage = productCapacityUsage(store, directory);
+    try std.testing.expectEqual(ProductCapacityUsage{
+        .object_payload_bytes = 1_234,
+        .workspaces = workspace.MAX_WORKSPACES - 1,
+        .snapshots = workspace.MAX_SNAPSHOTS - 2,
+        .max_workspace_entries = workspace.MAX_WORKSPACE_ENTRIES,
+    }, usage);
+    var envelope = first_supported_capacity_envelope;
+    envelope.max_workspaces = usage.workspaces - 1;
+    envelope.max_workspace_entries_per_workspace = usage.max_workspace_entries - 1;
+    envelope.max_snapshots = usage.snapshots - 1;
+    try std.testing.expectEqual(QuotaLimit.workspaces, quotaRejectionForCurrentState(store, directory, envelope).?.limit);
+    envelope.max_workspaces = usage.workspaces;
+    try std.testing.expectEqual(QuotaLimit.workspace_entries, quotaRejectionForCurrentState(store, directory, envelope).?.limit);
+    envelope.max_workspace_entries_per_workspace = usage.max_workspace_entries;
+    const rejection = quotaRejectionForCurrentState(store, directory, envelope).?;
+    try std.testing.expectEqual(QuotaLimit.snapshots, rejection.limit);
+    try std.testing.expectEqual(usage.snapshots, rejection.used);
+    try std.testing.expectEqual(usage.snapshots, rejection.requested);
+    try std.testing.expectEqual(envelope.max_snapshots, rejection.allowed);
+    envelope.max_snapshots = usage.snapshots;
+    try std.testing.expect(quotaRejectionForCurrentState(store, directory, envelope) == null);
+    try std.testing.expectEqual(@as(u64, 0), directory.dirty_revision);
 }

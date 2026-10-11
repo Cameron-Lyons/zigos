@@ -15,7 +15,6 @@ const principal = @import("../core/principal.zig");
 const shared_memory = @import("shared_memory.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
-const userspace_executor = @import("../task/userspace_executor.zig");
 
 pub const EndpointCreateResult = struct {
     endpoint: abi.EndpointDescriptor,
@@ -167,7 +166,10 @@ pub const Kernel = struct {
     }
 
     pub fn deinit(self: *Kernel) void {
-        _ = self.runtime.unbindTaskRetirementSink(self.retirementSink());
+        const current = self.runtime.task_retirement_sink orelse return;
+        const expected = self.retirementSink();
+        if (current.eql(expected) and !self.runtime.unbindTaskRetirementSink(expected))
+            native_util.impossibleByInvariant("kernel resource owner outlives every execution lease");
     }
 
     fn retirementSink(self: *Kernel) task_runtime.TaskRetirementSink {
@@ -310,7 +312,10 @@ pub const Kernel = struct {
             peer_endpoint_id,
             now_ticks,
         );
+        if (context.caller_task_id == 0) try self.requireCallerZeroCapabilityAdmission(peer_capability);
         if (endpoint_capability.scope.local_only != peer_capability.scope.local_only) return error.ScopeViolation;
+        try self.requireEndpointOwnerAdmission(endpoint_capability.target.id);
+        try self.requireEndpointOwnerAdmission(peer_endpoint_id);
         try self.endpoint_table.connect(ids.endpoint(endpoint_capability.target.id), ids.endpoint(peer_endpoint_id));
         return self.endpoint_table.descriptor(ids.endpoint(endpoint_capability.target.id));
     }
@@ -327,26 +332,39 @@ pub const Kernel = struct {
     ) Error!void {
         const authorization = try self.authorizeOperationWithSubject(.endpoint_send, context, now_ticks, .{});
         const endpoint_capability = authorization.resolved_capability.capability;
+        // Either endpoint can remain physically owned by a stopped dispatch,
+        // even when a live task holds its delegated grant.
+        const source = try self.endpoint_table.routing(ids.endpoint(endpoint_capability.target.id));
+        try self.requireEndpointTaskAdmission(source.owner_task_id.raw(), authorization.subject_task);
+        const destination = if (reply_endpoint_id != 0) reply_endpoint_id else source.peer_endpoint_id.raw();
+        if (destination != 0) try self.requireEndpointOwnerAdmission(destination);
         var move_source_task: ?*task_runtime.TaskRecord = null;
+        var moved_attachment: ?capability.ResolvedCapability = null;
         if (attached_capability_id) |capability_id| {
             const attached = if (authorization.subject_task) |caller_task|
                 try self.requireResolvedTaskCapability(caller_task, capability_id, now_ticks)
-            else
-                try self.capability_table.requireUsable(capability_id, now_ticks);
+            else blk: {
+                const owned = try self.capability_table.requireUsable(capability_id, now_ticks);
+                try self.requireCallerZeroCapabilityAdmission(owned);
+                break :blk owned;
+            };
             if (!attached.rights.has(.capability_pass)) return error.PermissionDenied;
             if (attached.scope.task_id != endpoint_capability.scope.task_id) return error.ScopeViolation;
             if (move_attached_capability) {
+                moved_attachment = self.capability_table.resolve(capability_id) orelse
+                    native_util.impossibleByInvariant("freshly resolved capability remains in its slot");
                 if (attached.scope.task_id) |source_task_id| {
                     move_source_task = try self.taskForAuthorizedRequest(authorization, source_task_id);
                 }
             }
         }
 
+        const sender_task_id = if (authorization.subject_task) |task| task.id else endpoint_capability.scope.task_id orelse 0;
         const receiver_task_id = if (reply_endpoint_id != 0)
             try self.endpoint_table.reply(
                 ids.endpoint(endpoint_capability.target.id),
                 ids.endpoint(reply_endpoint_id),
-                ids.task(endpoint_capability.scope.task_id orelse 0),
+                ids.task(sender_task_id),
                 correlation_id,
                 payload,
                 if (attached_capability_id) |id| ids.capability(id) else null,
@@ -355,14 +373,21 @@ pub const Kernel = struct {
         else
             try self.endpoint_table.send(
                 ids.endpoint(endpoint_capability.target.id),
-                ids.task(endpoint_capability.scope.task_id orelse 0),
+                ids.task(sender_task_id),
                 correlation_id,
                 payload,
                 if (attached_capability_id) |id| ids.capability(id) else null,
                 move_attached_capability,
             );
-        if (move_source_task) |source_task| {
-            _ = task_runtime.revokeCapabilityFromTask(source_task, attached_capability_id.?);
+        if (moved_attachment) |resolved| {
+            // Enqueue and this ownership commit are one serialized BSP
+            // transaction. No callback can observe a queued usable gift.
+            self.capability_table.commitQueuedMoveResolved(resolved, attached_capability_id.?);
+            if (move_source_task) |source_task| {
+                _ = task_runtime.revokeCapabilityFromTask(source_task, attached_capability_id.?);
+            } else {
+                _ = self.runtime.revokeCapabilityEverywhere(attached_capability_id.?);
+            }
         }
         if (self.endpoint_wake_sink) |sink| {
             sink.wake(sink.context, receiver_task_id.raw(), now_ticks);
@@ -403,9 +428,12 @@ pub const Kernel = struct {
             errdefer if (message.move_attached_capability) releaseQueuedMove(self.capability_table, attached_capability_id);
             const receiver = authorization.task;
             try validateRuntimeGrantForTask(receiver, 1);
-            const resolved_original = try self.capability_table.resolveUsable(attached_capability_id.raw(), now_ticks);
+            const resolved_original = if (message.move_attached_capability)
+                self.capability_table.resolve(attached_capability_id.raw()) orelse return error.CapabilityNotFound
+            else
+                try self.capability_table.resolveUsable(attached_capability_id.raw(), now_ticks);
             const original = resolved_original.capability.*;
-            const passed = try self.capability_table.passResolved(.{
+            const pass_request = capability.PassRequest{
                 .capability_id = attached_capability_id.raw(),
                 .new_holder = receiver.owner,
                 .now_ticks = now_ticks,
@@ -417,7 +445,11 @@ pub const Kernel = struct {
                     .source_task_id = message.sender_task_id.raw(),
                     .broker_service_id = original.audit.broker_service_id,
                 },
-            }, resolved_original);
+            };
+            const passed = if (message.move_attached_capability)
+                try self.capability_table.passQueuedMove(pass_request)
+            else
+                try self.capability_table.passResolved(pass_request, resolved_original);
             errdefer self.capability_table.rollbackGrant(&.{passed});
             try task_runtime.grantCapabilityToTask(receiver, passed.id);
 
@@ -442,24 +474,25 @@ pub const Kernel = struct {
             break :blk task;
         } else null;
 
-        var plan = capability.GrantPlan{};
+        var plan = capability.SingleGrantPlan{};
         if (request.scope.task_id) |task_id| {
             try plan.addMint(task_id, request);
         } else {
             try plan.addMint(0, request);
         }
-        var minted_buffer: [capability.MAX_GRANT_PLAN_ENTRIES]capability.Capability = undefined;
+        var minted_buffer: [1]capability.Capability = undefined;
         const minted = (try self.applyGrantPlan(&plan, &minted_buffer, target_task))[0];
         return capabilityDescriptor(&minted);
     }
 
     fn applyGrantPlan(
         self: *Kernel,
-        plan: *const capability.GrantPlan,
+        plan: anytype,
         output: []capability.Capability,
         first_task: ?*task_runtime.TaskRecord,
     ) Error![]capability.Capability {
-        var runtime_tasks = @as([capability.MAX_GRANT_PLAN_ENTRIES]?*task_runtime.TaskRecord, @splat(null));
+        const capacity = @typeInfo(@TypeOf(plan.entries)).array.len;
+        var runtime_tasks = @as([capacity]?*task_runtime.TaskRecord, @splat(null));
         runtime_tasks[0] = first_task;
         try self.validateRuntimeGrantPlan(plan, &runtime_tasks);
         const minted = try self.capability_table.applyGrantPlan(plan, output);
@@ -534,8 +567,8 @@ pub const Kernel = struct {
         });
     }
 
-    pub fn capabilityDerive(self: *Kernel, context: KernelCallContext, request: capability.DeriveRequest) Error!abi.CapabilityDescriptor {
-        const authorization = try self.authorizeOperationWithSubject(.capability_derive, context, request.lease.issued_at_ticks, .{
+    pub fn capabilityDerive(self: *Kernel, context: KernelCallContext, request: capability.DeriveRequest, now_ticks: u64) Error!abi.CapabilityDescriptor {
+        const authorization = try self.authorizeOperationWithSubject(.capability_derive, context, now_ticks, .{
             .request_task_id = request.scope.task_id,
         });
         const target_task = if (request.scope.task_id) |task_id| blk: {
@@ -544,7 +577,7 @@ pub const Kernel = struct {
             try validateRuntimeGrantForTask(task, 1);
             break :blk task;
         } else null;
-        const derived = try self.capability_table.deriveResolved(request, authorization.resolved_capability);
+        const derived = try self.capability_table.deriveResolved(request, authorization.resolved_capability, now_ticks);
         errdefer self.capability_table.rollbackGrant(&.{derived});
         if (target_task) |task| {
             try task_runtime.grantCapabilityToTask(task, derived.id);
@@ -582,6 +615,8 @@ pub const Kernel = struct {
         if (revoke_source) {
             if (original.scope.task_id) |source_task_id| {
                 _ = try self.revokeCapabilityFromAuthorizedTask(authorization, source_task_id, original.id);
+            } else {
+                _ = self.runtime.revokeCapabilityEverywhere(original.id);
             }
         }
         return capabilityDescriptor(&passed);
@@ -596,6 +631,8 @@ pub const Kernel = struct {
         try self.capability_table.revokeTargetAuthorityResolved(capability_id, resolved_revoked);
         if (revoked.scope.task_id) |task_id| {
             _ = try self.revokeCapabilityFromAuthorizedTask(authorization, task_id, capability_id);
+        } else {
+            _ = self.runtime.revokeCapabilityEverywhere(capability_id);
         }
     }
 
@@ -690,12 +727,6 @@ pub const Kernel = struct {
     pub fn timeQuery(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!u64 {
         _ = try self.authorizeOperation(.time_query, context, now_ticks, .{});
         return now_ticks;
-    }
-
-    pub fn wait(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!bool {
-        _ = try self.authorizeOperation(.wait, context, now_ticks, .{});
-        userspace_executor.requestEventWait();
-        return true;
     }
 
     pub fn resourceQuery(
@@ -818,6 +849,7 @@ pub const Kernel = struct {
         capability_id: u64,
         now_ticks: u64,
     ) Error!*const capability.Capability {
+        try requireTaskAdmission(task);
         const owned = try self.capability_table.requireUsable(capability_id, now_ticks);
         if (!task.hasCapability(capability_id)) return error.CapabilityNotFound;
         if (!task.owner.eql(owned.holder)) return error.PermissionDenied;
@@ -864,7 +896,7 @@ pub const Kernel = struct {
     ) Error!SubjectTaskAuthorization {
         if (context.caller_task_id != 0 and context.caller_task_id != task_id) return error.SubjectTaskMismatch;
         const authorization = try self.authorizeOperationWithSubject(expected_operation, context, now_ticks, input);
-        const task = authorization.subject_task orelse self.runtime.find(task_id) orelse return error.TaskNotFound;
+        const task = try self.taskForAuthorizedRequest(authorization, task_id);
         return .{ .capability = authorization.resolved_capability.capability, .task = task };
     }
 
@@ -873,10 +905,12 @@ pub const Kernel = struct {
         authorization: AuthorizationResult,
         task_id: u64,
     ) Error!*task_runtime.TaskRecord {
-        if (authorization.subject_task) |subject_task| {
-            if (subject_task.id == task_id) return subject_task;
-        }
-        return self.runtime.find(task_id) orelse error.TaskNotFound;
+        const task = if (authorization.subject_task) |subject_task|
+            if (subject_task.id == task_id) subject_task else self.runtime.find(task_id) orelse return error.TaskNotFound
+        else
+            self.runtime.find(task_id) orelse return error.TaskNotFound;
+        try requireTaskAdmission(task);
+        return task;
     }
 
     fn revokeCapabilityFromAuthorizedTask(
@@ -903,8 +937,14 @@ pub const Kernel = struct {
         else
             null;
 
+        if (subject_task) |task| try requireTaskAdmission(task);
+
         const resolved = try self.capability_table.resolveUsable(context.presented_capability_id, now_ticks);
         const owned = resolved.capability;
+
+        // Caller zero identifies a trusted kernel caller, rather than a bypass
+        // for the authority retained while its scoped task awaits collection.
+        if (subject_task == null) try self.requireCallerZeroCapabilityAdmission(owned);
 
         if (subject_task) |task| {
             if (!task.hasCapability(context.presented_capability_id)) return error.CapabilityNotFound;
@@ -969,10 +1009,31 @@ pub const Kernel = struct {
         return peer;
     }
 
+    inline fn requireCallerZeroCapabilityAdmission(self: *Kernel, owned: *const capability.Capability) Error!void {
+        if (owned.scope.task_id) |task_id| {
+            if (self.runtime.findConst(task_id)) |task| try requireTaskAdmission(task);
+        } else if (self.runtime.hasTerminatedCapabilityHolder(owned.id, owned.holder)) return error.TaskNotFound;
+    }
+
+    fn requireEndpointOwnerAdmission(self: *Kernel, endpoint_id: u64) Error!void {
+        const route = try self.endpoint_table.routing(ids.endpoint(endpoint_id));
+        try self.requireEndpointTaskAdmission(route.owner_task_id.raw(), null);
+    }
+
+    fn requireEndpointTaskAdmission(self: *Kernel, task_id: u64, subject_task: ?*const task_runtime.TaskRecord) Error!void {
+        // Routing and authority admission have no callbacks. Reuse the live
+        // caller when it owns the source; delegated owners still resolve here.
+        const task = if (subject_task) |subject|
+            if (subject.id == task_id) subject else self.runtime.findConst(task_id)
+        else
+            self.runtime.findConst(task_id);
+        if (task) |owner| try requireTaskAdmission(owner);
+    }
+
     fn validateRuntimeGrantPlan(
         self: *Kernel,
-        plan: *const capability.GrantPlan,
-        tasks: *[capability.MAX_GRANT_PLAN_ENTRIES]?*task_runtime.TaskRecord,
+        plan: anytype,
+        tasks: anytype,
     ) Error!void {
         for (plan.slice(), 0..) |entry, index| {
             if (entry.task_id == 0) continue;
@@ -1033,10 +1094,7 @@ pub const Kernel = struct {
 
 fn releaseQueuedMove(context: *anyopaque, capability_id: ids.CapabilityId) void {
     const table: *capability.CapabilityTable = @ptrCast(@alignCast(context));
-    table.revokeGrant(capability_id.raw()) catch |err| switch (err) {
-        error.CapabilityNotFound => {}, // Revocation may have already removed it.
-        else => native_util.impossibleByInvariant("grant disposal only fails for an absent grant"),
-    };
+    _ = table.disposeQueuedMove(capability_id.raw());
 }
 
 fn retireTaskForRuntime(context: *anyopaque, retirement: task_runtime.TaskRetirement) void {
@@ -1045,9 +1103,14 @@ fn retireTaskForRuntime(context: *anyopaque, retirement: task_runtime.TaskRetire
 }
 
 fn validateRuntimeGrantForTask(task: *const task_runtime.TaskRecord, additional_count: usize) Error!void {
+    try requireTaskAdmission(task);
     if (task.capability_count + additional_count > task_runtime.MAX_TASK_CAPABILITIES) {
         return error.CapabilityTableFull;
     }
+}
+
+inline fn requireTaskAdmission(task: *const task_runtime.TaskRecord) error{TaskNotFound}!void {
+    if (task.state == .terminated) return error.TaskNotFound;
 }
 
 fn taskDescriptor(task: *const task_runtime.TaskRecord) abi.TaskDescriptor {
@@ -1117,6 +1180,95 @@ fn testContext(operation: abi.NativeOperation, capability_id: u64, target: Kerne
 }
 
 const test_policy_authority: principal.PrincipalId = .{ .kind = .policy_authority, .serial = 1 };
+
+const DeadTaskAdmissionProbe = struct {
+    kernel: *Kernel,
+    task: *task_runtime.TaskRecord,
+    creator: u64,
+    mint_authority: u64,
+    gift: u64,
+    mapping_authority: u64,
+    retained_authority: u64,
+    retained_unscoped_authority: u64,
+    live_peer_id: u64,
+    callbacks: usize = 0,
+
+    fn check(self: *@This(), before_collection: bool) !void {
+        const kernel = self.kernel;
+        const grants = kernel.capability_table.activeCount();
+        const mutation = kernel.capability_table.mutationGeneration();
+        const endpoints = kernel.endpoint_table.activeCount();
+        const objects = kernel.shared_memory_table.activeCount();
+        const mappings = kernel.shared_memory_table.mappingsForTask(ids.task(self.task.id));
+        const owned_bytes = kernel.shared_memory_table.liveOwnedBytesForTask(ids.task(self.task.id));
+        const attachments = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(self.task.capabilityIds()));
+        const capability_generation = self.task.capabilityGeneration();
+        const components = self.task.execution_component_count;
+        const component_cursor = kernel.runtime.next_component_id;
+        const audit_count = self.task.audit_count;
+        const live_peer = kernel.runtime.find(self.live_peer_id).?;
+        const live_attachments = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(live_peer.capabilityIds()));
+        const live_generation = live_peer.capabilityGeneration();
+        const request = capability.MintRequest{
+            .holder = self.task.owner,
+            .issuer = test_policy_authority,
+            .target = .{ .kind = .service, .id = 55 },
+            .rights = .{ .service = .{ .time_query = true } },
+            .scope = .{ .task_id = self.task.id, .local_only = true },
+            .lease = .{ .issued_at_ticks = 12, .expires_at_ticks = 100 },
+        };
+        const creator_context = testContext(.endpoint_create, self.creator, .none);
+        try std.testing.expectError(error.TaskNotFound, kernel.endpointCreate(creator_context, self.task.id, "stopped", .{ .local_only = true }, 12));
+        try std.testing.expectError(error.TaskNotFound, kernel.sharedMemoryCreate(creator_context, self.task.id, shared_memory.PAGE_SIZE, 12));
+        try std.testing.expectError(error.TaskNotFound, kernel.sharedMemoryMap(testContext(.shared_memory_map, self.mapping_authority, .none), self.task.id, 12));
+        try std.testing.expectError(error.TaskNotFound, kernel.capabilityMint(testContext(.capability_mint, self.mint_authority, .none), request, 12));
+        try std.testing.expectError(error.TaskNotFound, kernel.capabilityPass(testContext(.capability_pass, self.gift, .none), self.task.id, 12, true));
+        try std.testing.expectError(error.TaskNotFound, kernel.capabilityDerive(testContext(.capability_derive, self.gift, .none), .{
+            .parent_capability_id = self.gift,
+            .holder = request.holder,
+            .rights = request.rights,
+            .scope = request.scope,
+            .lease = request.lease,
+        }, 12));
+        var caller_context = testContext(.time_query, self.retained_authority, .none);
+        caller_context.caller_task_id = self.task.id;
+        try std.testing.expectError(error.TaskNotFound, kernel.timeQuery(caller_context, 12));
+        if (before_collection) {
+            try std.testing.expect(kernel.capability_table.query(self.retained_authority) != null);
+            try std.testing.expectError(error.TaskNotFound, kernel.timeQuery(testContext(.time_query, self.retained_authority, .none), 12));
+        }
+        try std.testing.expectError(error.TaskNotFound, kernel.timeQuery(testContext(.time_query, self.retained_unscoped_authority, .none), 12));
+        try std.testing.expectEqual(@as(u64, 12), try kernel.timeQuery(.{ .caller_task_id = self.live_peer_id, .presented_capability_id = self.retained_unscoped_authority, .target = .none }, 12));
+        try std.testing.expectError(error.TaskNotFound, kernel.runtime.grantCapability(self.task.id, 777));
+        try std.testing.expectError(error.TaskNotFound, kernel.runtime.attachComponent(self.task.id, .{ .label = "stopped", .entry = "stopped" }, 12));
+        var plan = capability.GrantPlan{};
+        try plan.addMint(self.task.id, request);
+        var output: [1]capability.Capability = undefined;
+        @memset(std.mem.asBytes(&output), 0xa5);
+        try std.testing.expectError(error.TaskNotFound, kernel.applyGrantPlan(&plan, &output, null));
+        try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&output), 0xa5));
+        try std.testing.expectEqual(grants, kernel.capability_table.activeCount());
+        try std.testing.expectEqual(mutation, kernel.capability_table.mutationGeneration());
+        try std.testing.expectEqual(endpoints, kernel.endpoint_table.activeCount());
+        try std.testing.expectEqual(objects, kernel.shared_memory_table.activeCount());
+        try std.testing.expectEqual(mappings, kernel.shared_memory_table.mappingsForTask(ids.task(self.task.id)));
+        try std.testing.expectEqual(owned_bytes, kernel.shared_memory_table.liveOwnedBytesForTask(ids.task(self.task.id)));
+        try std.testing.expectEqual(attachments, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(self.task.capabilityIds())));
+        try std.testing.expectEqual(capability_generation, self.task.capabilityGeneration());
+        try std.testing.expectEqual(components, self.task.execution_component_count);
+        try std.testing.expectEqual(component_cursor, kernel.runtime.next_component_id);
+        try std.testing.expectEqual(audit_count, self.task.audit_count);
+        try std.testing.expectEqual(live_attachments, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(live_peer.capabilityIds())));
+        try std.testing.expectEqual(live_generation, live_peer.capabilityGeneration());
+    }
+
+    fn wake(context: *anyopaque, _: u64, _: u64) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        std.testing.expect(self.kernel.runtime.execution.hasLeaseForTask(self.task.id)) catch @panic("retirement retains its collecting lease");
+        self.check(false) catch @panic("reentrant cleanup cannot recreate stopped resources");
+        self.callbacks += 1;
+    }
+};
 
 const TestKernelHarness = struct {
     runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
@@ -1305,7 +1457,7 @@ test "surface presentation retains the presenter across reentrant termination an
     }
 }
 
-const UndeliveredCase = enum { terminate, runtime_terminate, restore, endpoint_close, receiver_full, grants_full, expired };
+const UndeliveredCase = enum { terminate, runtime_terminate, leased_terminate, restore, endpoint_close, receiver_full, grants_full, expired };
 
 fn expectCreationRollback(shared_object: bool, task_full: bool) !void {
     var harness = TestKernelHarness{};
@@ -1381,10 +1533,20 @@ test "shared memory creation rolls back object and budget when its grant cannot 
 }
 
 fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
+    const cpu_identity = @import("../../kernel/cpu_identity.zig");
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
     var harness = TestKernelHarness{};
     var kernel: Kernel = undefined;
     harness.initKernel(&kernel);
     defer kernel.deinit();
+    defer if (case == .leased_terminate) {
+        kernel.clearEndpointWakeSink();
+        harness.runtime.reset();
+        harness.endpoints.deinit();
+        harness.shared.deinit();
+    };
     const sender = try harness.createSessionTask();
     const checkpoint = if (case == .restore) try std.testing.allocator.create(task_runtime.Snapshot) else null;
     defer if (checkpoint) |state| std.testing.allocator.destroy(state);
@@ -1447,12 +1609,108 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
     try harness.runtime.grantCapability(sender.id, gift.id);
     try harness.runtime.grantCapability(receiver.id, receiving.id);
     try harness.runtime.grantCapability(receiver.id, termination.id);
+    const delegated_sending = if (case == .leased_terminate) blk: {
+        const owned = try harness.capabilities.mintBootRoot(.{
+            .holder = receiver.owner,
+            .issuer = test_policy_authority,
+            .target = .{ .kind = .endpoint, .id = destination.id.raw() },
+            .rights = .{ .endpoint = .{ .endpoint_send = true, .capability_pass = true } },
+            .scope = .{ .task_id = receiver.id, .local_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+        });
+        try harness.runtime.grantCapability(receiver.id, owned.id);
+        break :blk try kernel.capabilityPass(.{ .caller_task_id = receiver.id, .presented_capability_id = owned.id, .target = .none }, sender.id, 1, false);
+    } else null;
+    const delegated_gift = if (case == .leased_terminate) blk: {
+        const owned = try harness.capabilities.mintBootRoot(gift_request);
+        try harness.runtime.grantCapability(sender.id, owned.id);
+        break :blk owned;
+    } else null;
     try kernel.endpointSend(.{ .caller_task_id = sender.id, .presented_capability_id = sending.id, .target = .{ .endpoint = source.id.raw() } }, 1, "in flight", 0, gift.id, moved, 10);
     try std.testing.expectEqual(!moved, sender.hasCapability(gift.id));
     var wake_probe = TestEndpointWakeProbe{};
     kernel.bindEndpointWakeSink(.{ .context = &wake_probe, .wake = TestEndpointWakeProbe.wake });
     if (case == .terminate) {
         try std.testing.expect(try kernel.taskTerminate(.{ .caller_task_id = receiver.id, .presented_capability_id = termination.id, .target = .{ .task = receiver.id } }, 11));
+    } else if (case == .leased_terminate) {
+        const address_space_id = receiver.address_space_id;
+        const attachments = receiver.capability_count;
+        const grants = harness.capabilities.activeCount();
+        const ticket = try harness.runtime.reserveExecution(receiver, 3);
+        try harness.runtime.execution.bindOwnedRoot(ticket, 1, 0x1000);
+        cpu_identity.setIndexForTest(3);
+        _ = try harness.runtime.execution.start(ticket);
+        cpu_identity.setIndexForTest(0);
+        try std.testing.expect(try harness.runtime.terminateTask(receiver.id, 11));
+        try std.testing.expect(!try harness.runtime.terminateTask(receiver.id, 12));
+        try std.testing.expectEqual(task_runtime.TaskState.terminated, receiver.state);
+        try std.testing.expectEqual(attachments, receiver.capability_count);
+        try std.testing.expectEqual(grants, harness.capabilities.activeCount());
+        try std.testing.expect(harness.runtime.findAddressSpaceConst(address_space_id) != null);
+        try std.testing.expectEqual(@as(u16, 1), (try harness.endpoints.descriptor(destination.id)).queued_messages);
+        try std.testing.expect(harness.capabilities.query(gift.id) != null);
+        try std.testing.expectEqual(@as(usize, 0), wake_probe.count);
+        var receive_output: [abi.ENDPOINT_INLINE_BYTES]u8 = @splat(0xa5);
+        try std.testing.expectError(error.TaskNotFound, kernel.endpointRecv(.{ .caller_task_id = receiver.id, .presented_capability_id = receiving.id, .target = .none }, receiver.id, &receive_output, 12));
+        try std.testing.expect(std.mem.allEqual(u8, &receive_output, 0xa5));
+        const destination_slot = harness.endpoints.arena.getByHandle(.{ .value = destination.id.raw() }).?;
+        const ring_hash = std.hash.Wyhash.hash(0, destination_slot.endpoint.data_ring);
+        const sender_generation = sender.capabilityGeneration();
+        try std.testing.expectError(error.TaskNotFound, kernel.endpointSend(.{ .caller_task_id = sender.id, .presented_capability_id = sending.id, .target = .none }, 2, "rejected", 0, gift.id, true, 12));
+        try std.testing.expectEqual(ring_hash, std.hash.Wyhash.hash(0, destination_slot.endpoint.data_ring));
+        try std.testing.expectEqual(sender_generation, sender.capabilityGeneration());
+        try std.testing.expectEqual(grants, harness.capabilities.activeCount());
+        try std.testing.expectEqual(!moved, sender.hasCapability(gift.id));
+        try std.testing.expectEqual(@as(u16, 1), (try harness.endpoints.descriptor(destination.id)).queued_messages);
+        // This source endpoint belongs to the stopped receiver, but its grant
+        // was legitimately passed and retargeted to the still-live sender.
+        const live_peer = harness.endpoints.arena.getByHandle(.{ .value = source.id.raw() }).?;
+        const peer_ring_before = try std.testing.allocator.dupe(u8, live_peer.endpoint.data_ring);
+        defer std.testing.allocator.free(peer_ring_before);
+        const destination_ring_before = try std.testing.allocator.dupe(u8, destination_slot.endpoint.data_ring);
+        defer std.testing.allocator.free(destination_ring_before);
+        const source_before = try harness.endpoints.descriptor(source.id);
+        const destination_before = try harness.endpoints.descriptor(destination.id);
+        const mutation = harness.capabilities.mutationGeneration();
+        const sender_count = sender.capability_count;
+        const receiver_generation = receiver.capabilityGeneration();
+        var sender_attachments: [task_runtime.MAX_TASK_CAPABILITIES]u64 = @splat(0);
+        var receiver_attachments: [task_runtime.MAX_TASK_CAPABILITIES]u64 = @splat(0);
+        @memcpy(sender_attachments[0..sender.capability_count], sender.capabilityIds());
+        @memcpy(receiver_attachments[0..receiver.capability_count], receiver.capabilityIds());
+        for ([_]bool{ false, true }) |move_gift| {
+            try std.testing.expectError(error.TaskNotFound, kernel.endpointSend(.{
+                .caller_task_id = sender.id,
+                .presented_capability_id = delegated_sending.?.capability_id,
+                .target = .{ .endpoint = destination.id.raw() },
+            }, 3, "rejected delegated source", 0, delegated_gift.?.id, move_gift, 12));
+            try std.testing.expectEqualDeep(source_before, try harness.endpoints.descriptor(source.id));
+            try std.testing.expectEqualDeep(destination_before, try harness.endpoints.descriptor(destination.id));
+            try std.testing.expectEqualSlices(u8, peer_ring_before, live_peer.endpoint.data_ring);
+            try std.testing.expectEqualSlices(u8, destination_ring_before, destination_slot.endpoint.data_ring);
+            try std.testing.expectEqual(mutation, harness.capabilities.mutationGeneration());
+            try std.testing.expectEqual(grants, harness.capabilities.activeCount());
+            try std.testing.expectEqual(sender_generation, sender.capabilityGeneration());
+            try std.testing.expectEqual(receiver_generation, receiver.capabilityGeneration());
+            try std.testing.expectEqual(sender_count, sender.capability_count);
+            try std.testing.expectEqual(attachments, receiver.capability_count);
+            try std.testing.expectEqualSlices(u64, sender_attachments[0..sender.capability_count], sender.capabilityIds());
+            try std.testing.expectEqualSlices(u64, receiver_attachments[0..receiver.capability_count], receiver.capabilityIds());
+            try std.testing.expectEqualDeep(delegated_gift.?, harness.capabilities.query(delegated_gift.?.id).?);
+            try std.testing.expectEqual(@as(usize, 0), wake_probe.count);
+        }
+        try std.testing.expectError(error.WrongPhase, harness.runtime.collectExecution(ticket));
+        try std.testing.expectError(error.WrongPhase, harness.runtime.cancelUnstartedExecution(ticket));
+        cpu_identity.setIndexForTest(2);
+        try std.testing.expectError(error.WrongCpu, harness.runtime.execution.acknowledgeOwnedRootReturn(ticket));
+        cpu_identity.setIndexForTest(3);
+        try std.testing.expect(harness.runtime.execution.stopRequested(ticket));
+        try harness.runtime.execution.acknowledgeOwnedRootReturn(ticket);
+        try std.testing.expectError(error.WrongCpu, harness.runtime.collectExecution(ticket));
+        cpu_identity.setIndexForTest(0);
+        try harness.runtime.collectExecution(ticket);
+        try std.testing.expect(harness.runtime.findAddressSpaceConst(address_space_id) == null);
+        try std.testing.expectError(error.StaleTicket, harness.runtime.collectExecution(ticket));
     } else if (case == .runtime_terminate) {
         try std.testing.expect(try harness.runtime.terminateTask(receiver.id, 11));
     } else if (case == .restore) {
@@ -1492,13 +1750,13 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
             .receiver_full => error.CapabilityTableFull,
             .grants_full => error.TableFull,
             .expired => error.CapabilityRevoked,
-            .terminate, .runtime_terminate, .restore, .endpoint_close => unreachable,
+            .terminate, .runtime_terminate, .leased_terminate, .restore, .endpoint_close => unreachable,
         };
         try std.testing.expectError(expected_error, kernel.endpointRecv(.{ .caller_task_id = receiver.id, .presented_capability_id = receiving.id, .target = .{ .endpoint = destination.id.raw() } }, receiver.id, &payload, if (case == .expired) 101 else 11));
         try std.testing.expectEqual(count - @intFromBool(moved), harness.capabilities.activeCount());
         try std.testing.expectEqual(@as(u16, 0), (try harness.endpoints.descriptor(destination.id)).queued_messages);
     }
-    if (case == .terminate or case == .runtime_terminate) {
+    if (case == .terminate or case == .runtime_terminate or case == .leased_terminate) {
         try std.testing.expectEqual(@as(u16, 0), harness.endpoints.activeForTask(ids.task(receiver.id)));
         try std.testing.expect(harness.capabilities.query(receiving.id) == null);
         try std.testing.expect(harness.capabilities.query(termination.id) == null);
@@ -1507,7 +1765,7 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
     }
     try std.testing.expectEqual(!moved, harness.capabilities.query(gift.id) != null);
     try std.testing.expectEqual(!moved, sender.hasCapability(gift.id));
-    if (case == .terminate or case == .runtime_terminate or case == .restore or case == .endpoint_close) {
+    if (case == .terminate or case == .runtime_terminate or case == .leased_terminate or case == .restore or case == .endpoint_close) {
         try std.testing.expectEqual(@as(usize, 1), wake_probe.count);
         try std.testing.expectEqual(sender.id, wake_probe.tasks[0]);
     }
@@ -1519,6 +1777,293 @@ test "endpoint retirement disposes unread moves while preserving sender-owned co
 
 test "direct runtime termination disposes unread moves and endpoint resources" {
     for ([_]bool{ false, true }) |moved| try expectUndeliveredCleanup(.runtime_terminate, moved);
+}
+
+test "execution retirement retains unread moves and copies until owner return is collected" {
+    for ([_]bool{ false, true }) |moved| try expectUndeliveredCleanup(.leased_terminate, moved);
+}
+
+test "endpoint queued MOVE survives source retirement but not receiver or target retirement" {
+    const Retirement = enum { source, receiver, target };
+    for ([_]bool{ false, true }) |unscoped| {
+        for (std.enums.values(Retirement)) |retirement| {
+            var harness = TestKernelHarness{};
+            var kernel: Kernel = undefined;
+            harness.initKernel(&kernel);
+            defer kernel.deinit();
+            defer {
+                harness.runtime.reset();
+                harness.endpoints.deinit();
+                harness.shared.deinit();
+            }
+            const sender = try harness.createSessionTask();
+            const sender_id = sender.id;
+            const receiver = try harness.runtime.createTask(.{
+                .owner = .{ .kind = .app, .serial = 3 },
+                .component_class = .app_component,
+                .budget = .{ .cpu_time_ticks = 100, .memory_bytes = 4096, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+                .local_only = true,
+            });
+            const receiver_id = receiver.id;
+            const target_id = if (retirement == .target) (try harness.createSessionTask()).id else 0;
+            const source = try harness.endpoints.create(ids.task(sender_id), "move source", .{});
+            const destination = try harness.endpoints.create(ids.task(receiver.id), "move receiver", .{});
+            try harness.endpoints.connect(source.id, destination.id);
+            const sending = try harness.capabilities.mintBootRoot(.{
+                .holder = sender.owner,
+                .issuer = test_policy_authority,
+                .target = .{ .kind = .endpoint, .id = source.id.raw() },
+                .rights = .{ .endpoint = .{ .endpoint_send = true } },
+                .scope = .{ .task_id = if (unscoped) null else sender_id },
+                .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+            });
+            const receiving = try harness.capabilities.mintBootRoot(.{
+                .holder = receiver.owner,
+                .issuer = test_policy_authority,
+                .target = .{ .kind = .endpoint, .id = destination.id.raw() },
+                .rights = .{ .endpoint = .{ .endpoint_recv = true } },
+                .scope = .{ .task_id = receiver.id },
+                .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+            });
+            const gift = try harness.capabilities.mintBootRoot(.{
+                .holder = sender.owner,
+                .issuer = test_policy_authority,
+                .target = if (target_id != 0) .{ .kind = .task, .id = target_id } else .{ .kind = .service, .id = 900 },
+                .rights = if (target_id != 0) .{ .task = .{ .capability_pass = true, .time_query = true } } else .{ .service = .{ .capability_pass = true, .time_query = true } },
+                .scope = .{ .task_id = if (unscoped) null else sender_id },
+                .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+            });
+            var sibling_request = capability.MintRequest{
+                .holder = sender.owner,
+                .issuer = test_policy_authority,
+                .target = gift.target,
+                .rights = gift.rights,
+                .scope = .{},
+                .lease = gift.lease,
+            };
+            sibling_request.holder.serial = 90;
+            const sibling = try harness.capabilities.mintBootRoot(sibling_request);
+            try harness.runtime.grantCapability(sender_id, sending.id);
+            try harness.runtime.grantCapability(sender_id, gift.id);
+            try harness.runtime.grantCapability(receiver.id, receiving.id);
+            try kernel.endpointSend(.{ .caller_task_id = sender_id, .presented_capability_id = sending.id, .target = .none }, 9, "owned", 0, gift.id, true, 10);
+            try std.testing.expect(!sender.hasCapability(gift.id));
+            try std.testing.expectError(error.CapabilityRevoked, harness.capabilities.requireUsable(gift.id, 11));
+            if (retirement == .target) {
+                // Ordinary policy-authorized target retirement also invalidates
+                // authority already held by an unrelated endpoint queue.
+                const termination = try harness.capabilities.mintBootRoot(.{
+                    .holder = sender.owner,
+                    .issuer = test_policy_authority,
+                    .target = .{ .kind = .task, .id = target_id },
+                    .rights = .{ .task = .{ .task_terminate = true } },
+                    .scope = .{ .task_id = sender_id },
+                    .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+                });
+                try harness.runtime.grantCapability(sender_id, termination.id);
+                try std.testing.expect(try kernel.taskTerminate(.{ .caller_task_id = sender_id, .presented_capability_id = termination.id, .target = .{ .task = target_id } }, 11));
+                try std.testing.expectEqual(task_runtime.TaskState.terminated, harness.runtime.find(target_id).?.state);
+                try std.testing.expect(harness.capabilities.query(gift.id) == null);
+                try std.testing.expect(harness.capabilities.query(sibling.id) == null);
+                try std.testing.expect(!harness.capabilities.disposeQueuedMove(gift.id));
+                try std.testing.expectEqual(@as(u16, 1), (try harness.endpoints.descriptor(destination.id)).queued_messages);
+                var payload: [endpoint.MAX_MESSAGE_BYTES]u8 = @splat(0xa5);
+                try std.testing.expectError(error.CapabilityNotFound, kernel.endpointRecv(.{ .caller_task_id = receiver_id, .presented_capability_id = receiving.id, .target = .none }, receiver_id, &payload, 12));
+                try std.testing.expectEqual(@as(u16, 0), (try harness.endpoints.descriptor(destination.id)).queued_messages);
+                try std.testing.expectEqual(@as(u16, 1), receiver.capability_count);
+                _ = try harness.capabilities.requireUsable(sending.id, 12);
+                _ = try harness.capabilities.requireUsable(receiving.id, 12);
+                continue;
+            }
+            try std.testing.expect(try harness.runtime.terminateTask(if (retirement == .source) sender_id else receiver_id, 11));
+            _ = try harness.capabilities.requireUsable(sibling.id, 12);
+            if (retirement == .source) {
+                try std.testing.expectEqual(task_runtime.TaskState.terminated, harness.runtime.find(sender_id).?.state);
+                try std.testing.expectEqual(@as(u16, 0), sender.capability_count);
+                try std.testing.expectEqual(@as(u16, 0), harness.endpoints.activeForTask(ids.task(sender_id)));
+                try std.testing.expect(harness.capabilities.query(gift.id) != null);
+                try std.testing.expectEqual(@as(u16, 1), (try harness.endpoints.descriptor(destination.id)).queued_messages);
+                var payload: [endpoint.MAX_MESSAGE_BYTES]u8 = @splat(0xa5);
+                const received = (try kernel.endpointRecv(.{ .caller_task_id = receiver_id, .presented_capability_id = receiving.id, .target = .none }, receiver_id, &payload, 12)).?;
+                try std.testing.expectEqualStrings("owned", payload[0..received.message.payload_len]);
+                try std.testing.expectEqual(sender_id, received.message.sender_task_id);
+                const delivered = received.attached_capability.?.capability_id;
+                try std.testing.expect(delivered != gift.id and receiver.hasCapability(delivered));
+                _ = try kernel.timeQuery(.{ .caller_task_id = receiver_id, .presented_capability_id = delivered, .target = .none }, 12);
+                try std.testing.expect(harness.capabilities.query(gift.id) == null);
+                try std.testing.expect(!harness.capabilities.disposeQueuedMove(gift.id));
+                try std.testing.expectEqual(@as(u16, 0), (try harness.endpoints.descriptor(destination.id)).queued_messages);
+            } else {
+                try std.testing.expectEqual(task_runtime.TaskState.terminated, harness.runtime.find(receiver_id).?.state);
+                try std.testing.expectEqual(@as(u16, 0), harness.endpoints.activeForTask(ids.task(receiver_id)));
+                try std.testing.expect(harness.capabilities.query(gift.id) == null);
+                try std.testing.expect(!harness.capabilities.disposeQueuedMove(gift.id));
+                try std.testing.expect(!sender.hasCapability(gift.id));
+                _ = try harness.capabilities.requireUsable(sending.id, 12);
+            }
+            try std.testing.expectEqualDeep(sibling, harness.capabilities.query(sibling.id).?);
+        }
+    }
+}
+
+test "endpoint execution rejects caller zero retained gifts and peer proofs but admits explicit live holders" {
+    const cpu_identity = @import("../../kernel/cpu_identity.zig");
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    var harness = TestKernelHarness{};
+    var kernel: Kernel = undefined;
+    harness.initKernel(&kernel);
+    defer kernel.deinit();
+    var retained_ticket: ?task_runtime.ExecutionTicket = null;
+    defer {
+        kernel.clearEndpointWakeSink();
+        if (retained_ticket) |ticket| {
+            harness.runtime.cancelUnstartedExecution(ticket) catch {};
+            harness.runtime.collectExecution(ticket) catch {};
+        }
+        harness.runtime.reset();
+        harness.endpoints.deinit();
+        harness.shared.deinit();
+    }
+    const stopped = try harness.createSessionTask();
+    const caller = try harness.runtime.createTask(.{
+        .owner = stopped.owner,
+        .component_class = .app_component,
+        .budget = .{ .cpu_time_ticks = 100, .memory_bytes = 4096, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+        .local_only = true,
+    });
+    const receiver = try harness.runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 3 },
+        .component_class = .app_component,
+        .budget = .{ .cpu_time_ticks = 100, .memory_bytes = 4096, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+        .local_only = true,
+    });
+    const source = try harness.endpoints.create(ids.task(caller.id), "live source", .{ .local_only = true });
+    const destination = try harness.endpoints.create(ids.task(receiver.id), "live destination", .{ .local_only = true });
+    try harness.endpoints.connect(source.id, destination.id);
+    const connect_source = try harness.endpoints.create(ids.task(caller.id), "unconnected source", .{ .local_only = true });
+    const connect_destination = try harness.endpoints.create(ids.task(receiver.id), "unconnected destination", .{ .local_only = true });
+    const sending = try harness.capabilities.mintBootRoot(.{
+        .holder = caller.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .endpoint, .id = source.id.raw() },
+        .rights = .{ .endpoint = .{ .endpoint_send = true } },
+        .scope = .{ .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    const connecting = try harness.capabilities.mintBootRoot(.{
+        .holder = caller.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .endpoint, .id = connect_source.id.raw() },
+        .rights = .{ .endpoint = .{ .endpoint_connect = true } },
+        .scope = .{ .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    const peer = try harness.capabilities.mintBootRoot(.{
+        .holder = stopped.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .endpoint, .id = connect_destination.id.raw() },
+        .rights = .{ .endpoint = .{ .ipc_peer = true } },
+        .scope = .{ .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    const gift = try harness.capabilities.mintBootRoot(.{
+        .holder = stopped.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .service, .id = 900 },
+        .rights = .{ .service = .{ .capability_pass = true, .time_query = true } },
+        .scope = .{ .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    const receiving = try harness.capabilities.mintBootRoot(.{
+        .holder = receiver.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .endpoint, .id = destination.id.raw() },
+        .rights = .{ .endpoint = .{ .endpoint_recv = true } },
+        .scope = .{ .task_id = receiver.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    for ([_]u64{ sending.id, connecting.id, peer.id, gift.id }) |id| try harness.runtime.grantCapability(caller.id, id);
+    for ([_]u64{ peer.id, gift.id }) |id| try harness.runtime.grantCapability(stopped.id, id);
+    try harness.runtime.grantCapability(receiver.id, receiving.id);
+    // A preexisting record makes queue/ring preservation observable, while all
+    // supplied primary endpoint authority still belongs to live tasks.
+    const send_context = KernelCallContext{ .caller_task_id = 0, .presented_capability_id = sending.id, .target = .none };
+    try kernel.endpointSend(send_context, 1, "preserved", 0, null, false, 10);
+    retained_ticket = try harness.runtime.reserveExecution(stopped, 3);
+    try std.testing.expect(try harness.runtime.terminateTask(stopped.id, 11));
+    var wake_probe = TestEndpointWakeProbe{};
+    kernel.bindEndpointWakeSink(.{ .context = &wake_probe, .wake = TestEndpointWakeProbe.wake });
+    const source_slot = harness.endpoints.arena.getByHandle(.{ .value = source.id.raw() }).?;
+    const destination_slot = harness.endpoints.arena.getByHandle(.{ .value = destination.id.raw() }).?;
+    const source_ring = try std.testing.allocator.dupe(u8, source_slot.endpoint.data_ring);
+    defer std.testing.allocator.free(source_ring);
+    const destination_ring = try std.testing.allocator.dupe(u8, destination_slot.endpoint.data_ring);
+    defer std.testing.allocator.free(destination_ring);
+    const source_before = try harness.endpoints.descriptor(source.id);
+    const destination_before = try harness.endpoints.descriptor(destination.id);
+    const connect_source_before = try harness.endpoints.descriptor(connect_source.id);
+    const connect_destination_before = try harness.endpoints.descriptor(connect_destination.id);
+    const grants = harness.capabilities.activeCount();
+    const mutation = harness.capabilities.mutationGeneration();
+    const stopped_generation = stopped.capabilityGeneration();
+    const caller_generation = caller.capabilityGeneration();
+    const receiver_generation = receiver.capabilityGeneration();
+    var stopped_ids: [task_runtime.MAX_TASK_CAPABILITIES]u64 = @splat(0);
+    var caller_ids: [task_runtime.MAX_TASK_CAPABILITIES]u64 = @splat(0);
+    var receiver_ids: [task_runtime.MAX_TASK_CAPABILITIES]u64 = @splat(0);
+    const stopped_count = stopped.capability_count;
+    const caller_count = caller.capability_count;
+    const receiver_count = receiver.capability_count;
+    @memcpy(stopped_ids[0..stopped_count], stopped.capabilityIds());
+    @memcpy(caller_ids[0..caller_count], caller.capabilityIds());
+    @memcpy(receiver_ids[0..receiver_count], receiver.capabilityIds());
+    for ([_]bool{ false, true }) |move_gift| {
+        try std.testing.expectError(error.TaskNotFound, kernel.endpointSend(send_context, 2, "retained gift", 0, gift.id, move_gift, 12));
+    }
+    const connect_context = KernelCallContext{ .caller_task_id = 0, .presented_capability_id = connecting.id, .target = .none };
+    try std.testing.expectError(error.TaskNotFound, kernel.endpointConnect(connect_context, peer.id, connect_destination.id.raw(), 12));
+    try std.testing.expectEqualDeep(source_before, try harness.endpoints.descriptor(source.id));
+    try std.testing.expectEqualDeep(destination_before, try harness.endpoints.descriptor(destination.id));
+    try std.testing.expectEqualDeep(connect_source_before, try harness.endpoints.descriptor(connect_source.id));
+    try std.testing.expectEqualDeep(connect_destination_before, try harness.endpoints.descriptor(connect_destination.id));
+    try std.testing.expectEqualSlices(u8, source_ring, source_slot.endpoint.data_ring);
+    try std.testing.expectEqualSlices(u8, destination_ring, destination_slot.endpoint.data_ring);
+    try std.testing.expectEqual(@as(usize, 0), harness.endpoints.arena.getByHandle(.{ .value = connect_source.id.raw() }).?.endpoint.data_ring.len);
+    try std.testing.expectEqual(@as(usize, 0), harness.endpoints.arena.getByHandle(.{ .value = connect_destination.id.raw() }).?.endpoint.data_ring.len);
+    try std.testing.expectEqual(grants, harness.capabilities.activeCount());
+    try std.testing.expectEqual(mutation, harness.capabilities.mutationGeneration());
+    try std.testing.expectEqualDeep(gift, harness.capabilities.query(gift.id).?);
+    try std.testing.expectEqualDeep(peer, harness.capabilities.query(peer.id).?);
+    try std.testing.expectEqual(stopped_generation, stopped.capabilityGeneration());
+    try std.testing.expectEqual(caller_generation, caller.capabilityGeneration());
+    try std.testing.expectEqual(receiver_generation, receiver.capabilityGeneration());
+    try std.testing.expectEqual(stopped_count, stopped.capability_count);
+    try std.testing.expectEqual(caller_count, caller.capability_count);
+    try std.testing.expectEqual(receiver_count, receiver.capability_count);
+    try std.testing.expectEqualSlices(u64, stopped_ids[0..stopped_count], stopped.capabilityIds());
+    try std.testing.expectEqualSlices(u64, caller_ids[0..caller_count], caller.capabilityIds());
+    try std.testing.expectEqualSlices(u64, receiver_ids[0..receiver_count], receiver.capabilityIds());
+    try std.testing.expectEqual(@as(usize, 0), wake_probe.count);
+    // The exact live holder remains unambiguous. It may use these same grants
+    // through the task-bound path while the stopped holder awaits collection.
+    var live_send_context = send_context;
+    live_send_context.caller_task_id = caller.id;
+    try kernel.endpointSend(live_send_context, 3, "live peer", 0, gift.id, false, 13);
+    var live_connect_context = connect_context;
+    live_connect_context.caller_task_id = caller.id;
+    _ = try kernel.endpointConnect(live_connect_context, peer.id, connect_destination.id.raw(), 13);
+    var output: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    const receive_context = KernelCallContext{ .caller_task_id = receiver.id, .presented_capability_id = receiving.id, .target = .none };
+    const first = (try kernel.endpointRecv(receive_context, receiver.id, &output, 14)).?;
+    try std.testing.expectEqualStrings("preserved", output[0..first.message.payload_len]);
+    const second = (try kernel.endpointRecv(receive_context, receiver.id, &output, 14)).?;
+    try std.testing.expectEqualStrings("live peer", output[0..second.message.payload_len]);
+    try std.testing.expect(receiver.hasCapability(second.attached_capability.?.capability_id));
+    try std.testing.expect(caller.hasCapability(gift.id));
+    try std.testing.expect(stopped.hasCapability(gift.id));
+    try std.testing.expectEqual(@as(u16, 0), (try harness.endpoints.descriptor(destination.id)).queued_messages);
 }
 
 test "checkpoint restore disposes removed receivers moves and retains live sender authority" {
@@ -1570,11 +2115,74 @@ test "capability derivation is bound to its authorized source" {
     };
     var context = testContext(.capability_derive, authorized_source.id, .none);
     context.caller_task_id = source_task.id;
-    try std.testing.expectError(error.CapabilityNotFound, kernel.capabilityDerive(context, request));
+    try std.testing.expectError(error.CapabilityNotFound, kernel.capabilityDerive(context, request, 10));
 
     request.parent_capability_id = authorized_source.id;
-    const derived = try kernel.capabilityDerive(context, request);
+    const derived = try kernel.capabilityDerive(context, request, 10);
     try std.testing.expect(receiver_task.hasCapability(derived.capability_id));
+}
+
+test "capability scalar derive uses trusted syscall time and preserves grants attachments and output on denial" {
+    const scalar = @import("capability_wire.zig");
+    const handlers = @import("capability_syscalls.zig");
+    const port_module = @import("component_port.zig");
+    const dispatch = @import("syscall_dispatch.zig");
+    var harness = TestKernelHarness{};
+    var kernel: Kernel = undefined;
+    harness.initKernel(&kernel);
+    defer {
+        harness.runtime.reset();
+        harness.endpoints.deinit();
+        harness.shared.deinit();
+        kernel.deinit();
+    }
+    const source = try harness.createSessionTask();
+    const receiver = try harness.createSessionTask();
+    const parent = try harness.capabilities.mintBootRoot(.{
+        .holder = source.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .service, .id = 42 },
+        .rights = .{ .service = .{ .capability_derive = true, .time_query = true } },
+        .scope = .{ .local_only = true },
+        .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 50 },
+    });
+    try harness.runtime.grantCapability(source.id, parent.id);
+    const request = capability.DeriveRequest{
+        .parent_capability_id = parent.id,
+        .holder = receiver.owner,
+        .rights = .{ .service = .{ .time_query = true } },
+        .scope = .{ .task_id = receiver.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 40 },
+    };
+    var encoded: abi.CapabilityDeriveWireRequest = undefined;
+    scalar.deriveToWireInto(port_module.makeHeader(.capability_derive, source.id), request, &encoded);
+    var port = port_module.KernelPort.init(&kernel);
+    port.syscall_caller_task_id = 999;
+    const memory = dispatch.UserMemoryContext{ .address_space = null, .caller_task_id = source.id };
+    var output: abi.CapabilityDescriptor = undefined;
+    @memset(std.mem.asBytes(&output), 0xa5);
+    const output_before = std.mem.toBytes(output);
+    const table_before = harness.capabilities;
+    const source_before = source.*;
+    const receiver_before = receiver.*;
+    for ([_]u64{ 9, 51, 100 }) |now_ticks| {
+        const result = handlers.dispatchCapabilityDerive(&port, memory, now_ticks, @intFromPtr(&encoded), @intFromPtr(&output), @sizeOf(@TypeOf(output)));
+        try std.testing.expectEqual(abi.SyscallStatus.denied, result.status);
+        try std.testing.expectEqual(abi.DenialReason.capability_revoked, result.denial_reason);
+        try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
+        try std.testing.expectEqualDeep(table_before, harness.capabilities);
+        try std.testing.expectEqualDeep(source_before, source.*);
+        try std.testing.expectEqualDeep(receiver_before, receiver.*);
+        try std.testing.expectEqualSlices(u8, &output_before, std.mem.asBytes(&output));
+        try std.testing.expectEqual(@as(u64, 999), port.syscall_caller_task_id);
+    }
+    const result = handlers.dispatchCapabilityDerive(&port, memory, 20, @intFromPtr(&encoded), @intFromPtr(&output), @sizeOf(@TypeOf(output)));
+    try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
+    try std.testing.expectEqual(@as(u32, @sizeOf(abi.CapabilityDescriptor)), result.bytes_written);
+    try std.testing.expect(receiver.hasCapability(output.capability_id));
+    try std.testing.expect(source.hasCapability(parent.id));
+    try std.testing.expectEqual(table_before.activeCount() + 1, harness.capabilities.activeCount());
+    try std.testing.expectEqual(@as(u64, 999), port.syscall_caller_task_id);
 }
 
 test "self-target capability mutations reuse the authorized task" {
@@ -1606,7 +2214,7 @@ test "self-target capability mutations reuse the authorized task" {
         .rights = .{ .service = .{ .time_query = true } },
         .scope = .{ .task_id = task.id, .local_only = true },
         .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 90 },
-    });
+    }, 10);
     try std.testing.expect(task.hasCapability(derived.capability_id));
 
     var pass_context = testContext(.capability_pass, authority.id, .none);
@@ -1798,7 +2406,6 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     const wake_count = wake_probe.count;
     try std.testing.expectError(error.RingFull, kernel.endpointSend(send_context, 99, "overflow", 0, null, false, 11));
     try std.testing.expectEqual(wake_count, wake_probe.count);
-    try std.testing.expect(try kernel.wait(testContext(.wait, authority_capability.id, .none), 10));
 }
 
 test "native kernel descriptor authorization enforces request task scope" {
@@ -1979,6 +2586,68 @@ test "direct runtime termination retires owned memory and all authority for dead
     try expectNativeCapabilityLifecycle(.terminate);
 }
 
+test "execution retirement retains shared backing and grants until acknowledged collection" {
+    try expectNativeCapabilityLifecycle(.leased_terminate);
+}
+
+test "execution resource owner deinit preserves a replacement and tolerates prior unbinding" {
+    var harness = TestKernelHarness{};
+    defer harness.runtime.reset();
+    var first: Kernel = undefined;
+    var replacement: Kernel = undefined;
+    harness.initKernel(&first);
+    first.deinit();
+    first.deinit();
+    harness.initKernel(&replacement);
+    defer replacement.deinit();
+    first.deinit();
+    try std.testing.expect(harness.runtime.task_retirement_sink.?.eql(replacement.retirementSink()));
+    const task = try harness.createSessionTask();
+    const ticket = try harness.runtime.reserveExecution(task, 0);
+    try std.testing.expect(!harness.runtime.unbindTaskRetirementSink(replacement.retirementSink()));
+    try harness.runtime.cancelUnstartedExecution(ticket);
+    try harness.runtime.collectExecution(ticket);
+    try std.testing.expect(harness.runtime.task_retirement_sink.?.eql(replacement.retirementSink()));
+}
+
+test "execution admission preserves active and suspended task resource operations" {
+    var harness = TestKernelHarness{};
+    var kernel: Kernel = undefined;
+    harness.initKernel(&kernel);
+    defer kernel.deinit();
+    defer {
+        harness.runtime.reset();
+        harness.endpoints.deinit();
+        harness.shared.deinit();
+    }
+    for ([_]bool{ false, true }) |suspended| {
+        const task = try harness.createSessionTask();
+        const authority = try harness.capabilities.mintBootRoot(.{
+            .holder = task.owner,
+            .issuer = test_policy_authority,
+            .target = .{ .kind = .service, .id = 42 },
+            .rights = .{ .service = .{ .time_query = true, .endpoint_create = true, .shared_memory_create = true } },
+            .scope = .{ .task_id = task.id, .local_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+        });
+        try harness.runtime.grantCapability(task.id, authority.id);
+        if (suspended) try std.testing.expect(harness.runtime.suspendResolvedTask(task, 0));
+        var context = testContext(.time_query, authority.id, .none);
+        context.caller_task_id = task.id;
+        try std.testing.expectEqual(@as(u64, 1), try kernel.timeQuery(context, 1));
+        try std.testing.expectEqual(@as(u64, 1), try kernel.timeQuery(testContext(.time_query, authority.id, .none), 1));
+        const created_endpoint = try kernel.endpointCreate(context, task.id, "admitted", .{ .local_only = true }, 1);
+        const created_shared = try kernel.sharedMemoryCreate(context, task.id, shared_memory.PAGE_SIZE, 1);
+        const map_context = KernelCallContext{ .caller_task_id = task.id, .presented_capability_id = created_shared.capability_id, .target = .none };
+        _ = try kernel.sharedMemoryMap(map_context, task.id, 1);
+        try std.testing.expectEqual(@as(u16, 1), harness.shared.mappingsForTask(ids.task(task.id)));
+        try std.testing.expectEqual(created_endpoint.endpoint.endpoint_id, (try harness.endpoints.descriptor(ids.endpoint(created_endpoint.endpoint.endpoint_id))).endpoint_id);
+        try harness.runtime.grantCapability(task.id, 777);
+        _ = try harness.runtime.attachComponent(task.id, .{ .label = "admitted", .entry = "admitted" }, 1);
+        try std.testing.expectEqual(if (suspended) task_runtime.TaskState.suspended else task_runtime.TaskState.active, task.state);
+    }
+}
+
 test "runtime reset retires owned memory endpoints and authority" {
     try expectNativeCapabilityLifecycle(.reset);
 }
@@ -1987,7 +2656,11 @@ test "checkpoint restore retires removed tasks and their kernel resources" {
     try expectNativeCapabilityLifecycle(.restore);
 }
 
-fn expectNativeCapabilityLifecycle(action: enum { syscall, terminate, reset, restore }) !void {
+fn expectNativeCapabilityLifecycle(action: enum { syscall, terminate, leased_terminate, reset, restore }) !void {
+    const cpu_identity = @import("../../kernel/cpu_identity.zig");
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
@@ -2001,6 +2674,11 @@ fn expectNativeCapabilityLifecycle(action: enum { syscall, terminate, reset, res
         &shared,
     );
     defer kernel.deinit();
+    defer if (action == .leased_terminate) {
+        runtime.reset();
+        endpoints.deinit();
+        shared.deinit();
+    };
 
     const target_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 7 },
@@ -2117,6 +2795,89 @@ fn expectNativeCapabilityLifecycle(action: enum { syscall, terminate, reset, res
     try std.testing.expect(capabilities.query(minted.capability_id) == null);
     const target_task_id = target_task.id;
     switch (action) {
+        .leased_terminate => {
+            const creator = try capabilities.mintBootRoot(.{
+                .holder = test_policy_authority,
+                .issuer = test_policy_authority,
+                .target = .{ .kind = .service, .id = 42 },
+                .rights = .{ .service = .{ .endpoint_create = true, .shared_memory_create = true } },
+                .scope = .{ .local_only = true },
+                .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+            });
+            const gift = try capabilities.mintBootRoot(.{
+                .holder = test_policy_authority,
+                .issuer = test_policy_authority,
+                .target = .{ .kind = .service, .id = 43 },
+                .rights = .{ .service = .{ .capability_pass = true, .capability_derive = true, .time_query = true } },
+                .scope = .{ .local_only = true },
+                .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+            });
+            const retained = try capabilities.mintBootRoot(.{
+                .holder = target_task.owner,
+                .issuer = test_policy_authority,
+                .target = .{ .kind = .service, .id = 44 },
+                .rights = .{ .service = .{ .time_query = true } },
+                .scope = .{ .task_id = target_task.id, .local_only = true },
+                .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+            });
+            try runtime.grantCapability(target_task.id, retained.id);
+            try std.testing.expectEqual(@as(u64, 10), try kernel.timeQuery(testContext(.time_query, retained.id, .none), 10));
+            const peer_task = try runtime.createTask(.{
+                .owner = target_task.owner,
+                .component_class = .app_component,
+                .budget = .{ .cpu_time_ticks = 100, .memory_bytes = shared_memory.PAGE_SIZE, .endpoint_slots = 2, .shared_memory_bytes = shared_memory.PAGE_SIZE },
+                .local_only = true,
+            });
+            const retained_unscoped = try capabilities.mintBootRoot(.{
+                .holder = target_task.owner,
+                .issuer = test_policy_authority,
+                .target = .{ .kind = .service, .id = 45 },
+                .rights = .{ .service = .{ .time_query = true } },
+                .scope = .{ .local_only = true },
+                .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+            });
+            try runtime.grantCapability(target_task.id, retained_unscoped.id);
+            try runtime.grantCapability(peer_task.id, retained_unscoped.id);
+            try std.testing.expectEqual(@as(u64, 10), try kernel.timeQuery(testContext(.time_query, retained_unscoped.id, .none), 10));
+            const peer_endpoint = try endpoints.create(ids.task(peer_task.id), "live-peer", .{});
+            try endpoints.connect(task_endpoint.id, peer_endpoint.id);
+            var admission_probe = DeadTaskAdmissionProbe{
+                .kernel = &kernel,
+                .task = target_task,
+                .creator = creator.id,
+                .mint_authority = admin_capability.id,
+                .gift = gift.id,
+                .mapping_authority = external_peer_shared_authority.id,
+                .retained_authority = retained.id,
+                .retained_unscoped_authority = retained_unscoped.id,
+                .live_peer_id = peer_task.id,
+            };
+            kernel.bindEndpointWakeSink(.{ .context = &admission_probe, .wake = DeadTaskAdmissionProbe.wake });
+            defer kernel.clearEndpointWakeSink();
+            const ticket = try runtime.reserveExecution(target_task, 15);
+            try runtime.execution.bindOwnedRoot(ticket, 1, 0x1000);
+            cpu_identity.setIndexForTest(15);
+            _ = try runtime.execution.start(ticket);
+            cpu_identity.setIndexForTest(0);
+            const grants = capabilities.activeCount();
+            const attached = target_task.capability_count;
+            const address_space_id = target_task.address_space_id;
+            try std.testing.expect(try runtime.terminateTask(target_task_id, 11));
+            try std.testing.expectEqual(grants, capabilities.activeCount());
+            try std.testing.expectEqual(attached, target_task.capability_count);
+            try std.testing.expect(runtime.findAddressSpaceConst(address_space_id) != null);
+            try std.testing.expectEqual(@as(u16, 1), endpoints.activeForTask(ids.task(target_task_id)));
+            try std.testing.expectEqual(@as(u16, 2), shared.mappingsForTask(ids.task(target_task_id)));
+            try std.testing.expect(shared.hasMapping(owned_shared.id, ids.task(999)));
+            try admission_probe.check(true);
+            try std.testing.expectError(error.WrongPhase, runtime.collectExecution(ticket));
+            cpu_identity.setIndexForTest(15);
+            try runtime.execution.acknowledgeOwnedRootReturn(ticket);
+            cpu_identity.setIndexForTest(0);
+            try runtime.collectExecution(ticket);
+            try std.testing.expectEqual(@as(usize, 1), admission_probe.callbacks);
+            try std.testing.expect(runtime.findAddressSpaceConst(address_space_id) == null);
+        },
         .terminate => try std.testing.expect(try runtime.terminateTask(target_task_id, 11)),
         .syscall => try std.testing.expect(try kernel.taskTerminate(testContext(.task_terminate, task_capability.id, .none), 11)),
         .reset => {
@@ -2189,7 +2950,7 @@ test "task authority graph marks target-revoked capabilities unusable" {
         .rights = .{ .object = .{ .object_read = true } },
         .scope = authority.scope,
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 90, .renewable = false },
-    });
+    }, 1);
     try runtime.grantCapability(task.id, derived.id);
     try capabilities.revokeTargetAuthority(authority.id);
     try std.testing.expectError(error.CapabilityRevoked, kernel.requireTaskCapability(task.id, derived.id, 10));

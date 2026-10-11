@@ -34,12 +34,37 @@ pub const Icr = struct {
     delivery: DeliveryMode = .fixed,
 };
 
+// Hosted tests observe the real ICR/EOI encoding without privileged writes.
+// No callback state or alternate transport is present in native images.
+pub const Testing = if (builtin.is_test and builtin.target.os.tag != .freestanding) struct {
+    pub const WriteObserver = *const fn (msr: u32, value: u64) void;
+    pub const ICR_MSR = X2APIC_ICR_MSR;
+    pub const EOI_MSR = X2APIC_EOI_MSR;
+    var observer: ?WriteObserver = null;
+
+    pub fn swapWriteObserver(next: ?WriteObserver) ?WriteObserver {
+        const previous = observer;
+        observer = next;
+        return previous;
+    }
+} else struct {};
+
+inline fn writeApicMsr(msr: u32, value: u64) void {
+    if (comptime builtin.is_test and builtin.target.os.tag != .freestanding) {
+        if (Testing.observer) |observe| {
+            observe(msr, value);
+            return;
+        }
+    }
+    x86.writeMsr(msr, value);
+}
+
 pub fn localId() u32 {
     return @truncate(x86.readMsr(X2APIC_ID_MSR));
 }
 
 pub fn acknowledge() void {
-    x86.writeMsr(X2APIC_EOI_MSR, 0);
+    writeApicMsr(X2APIC_EOI_MSR, 0);
 }
 
 pub fn icrValue(command: Icr) u64 {
@@ -49,7 +74,12 @@ pub fn icrValue(command: Icr) u64 {
 }
 
 pub fn sendIpi(command: Icr) void {
-    x86.writeMsr(X2APIC_ICR_MSR, icrValue(command));
+    if (builtin.target.os.tag == .freestanding) {
+        // Intel x2APIC WRMSR is not serializing. Drain preceding stores and
+        // prevent the ICR write from executing before that publication.
+        asm volatile ("mfence; lfence" ::: .{ .memory = true });
+    }
+    writeApicMsr(X2APIC_ICR_MSR, icrValue(command));
 }
 
 pub fn sendInit(apic_id: u32) void {
@@ -61,12 +91,12 @@ pub fn sendStartup(apic_id: u32, vector: u8) void {
 }
 
 pub fn enable() void {
-    x86.writeMsr(
+    writeApicMsr(
         IA32_APIC_BASE_MSR,
         x86.readMsr(IA32_APIC_BASE_MSR) | APIC_GLOBAL_ENABLE | X2APIC_ENABLE,
     );
     const spurious = x86.readMsr(X2APIC_SPURIOUS_VECTOR_MSR);
-    x86.writeMsr(
+    writeApicMsr(
         X2APIC_SPURIOUS_VECTOR_MSR,
         (spurious & ~@as(u64, 0xFF)) | X2APIC_SOFTWARE_ENABLE | SPURIOUS_VECTOR,
     );

@@ -207,7 +207,6 @@ pub const operations = [_]Descriptor{
             .response_type_name = "CapabilityDescriptor",
             .handler_name = "dispatchCapabilityDerive",
             .port_method_name = "capabilityDerive",
-            .port_invocation = .without_now_ticks,
         },
         .domain = .capability,
         .required_right = .capability_derive,
@@ -384,17 +383,6 @@ pub const operations = [_]Descriptor{
         .domain = .device,
         .required_right = .device_use,
         .target_kind = .{ .fixed = .device },
-    },
-    .{
-        .operation = .wait,
-        .binding = .{
-            .request_type_name = "WaitRequest",
-            .response_type_name = "BoolResponse",
-            .handler_name = "dispatchWait",
-            .port_method_name = "wait",
-        },
-        .domain = .task,
-        .required_right = .time_query,
     },
 };
 

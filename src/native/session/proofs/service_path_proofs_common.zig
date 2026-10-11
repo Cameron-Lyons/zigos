@@ -9,6 +9,7 @@ const shared_memory = @import("../../kernel_api/shared_memory.zig");
 const signing = @import("../../core/signing.zig");
 const syscall_surface = @import("../../kernel_api/syscall_surface.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
+const task_create_wire = @import("../../kernel_api/task_create_wire.zig");
 const units = @import("../../core/units.zig");
 
 pub const RESOURCE_PROBE_SHARED_MEMORY_BYTES = units.kibibytes(1);
@@ -43,33 +44,33 @@ pub fn createBootedServiceTask(
 ) !abi.TaskDescriptor {
     const image = try generated_image_fixtures.serviceImage();
     var response = std.mem.zeroes(abi.TaskDescriptor);
-    const request = component_port.TaskCreateRequest{
-        .header = component_port.makeHeader(.task_create, session_task_id),
-        .authority_capability_id = session_authority_id,
-        .request = .{
-            .owner = owner,
-            .component_class = .service_component,
-            .budget = .{
-                .cpu_time_ticks = 1_200,
-                .memory_bytes = units.kibibytes(64),
-                .endpoint_slots = 2,
-                .shared_memory_bytes = shared_memory.PAGE_SIZE,
-            },
-            .local_only = true,
-            .initial_component = .{
-                .label = label,
-                .entry = bundle_id,
-            },
-            .launch = .{
-                .boundary = .userspace_process,
-                .image_id = image_id,
-                .component_abi_version = abi.ABI_VERSION,
-                .signed = true,
-                .bundle_id = bundle_id,
-            },
-            .userspace_image = &image,
+    const task_request = task_runtime.TaskCreateRequest{
+        .owner = owner,
+        .component_class = .service_component,
+        .budget = .{
+            .cpu_time_ticks = 1_200,
+            .memory_bytes = units.kibibytes(64),
+            .endpoint_slots = 2,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
         },
+        .local_only = true,
+        .initial_component = .{
+            .label = label,
+            .entry = bundle_id,
+        },
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = image_id,
+            .component_abi_version = abi.ABI_VERSION,
+            .signed = true,
+            .bundle_id = bundle_id,
+        },
+        .userspace_image = &image,
     };
+    var image_wire: abi.ExecutableImageWireSpec = undefined;
+    task_create_wire.executableImageToWireInto(&image, &image_wire);
+    var request: abi.TaskCreateWireRequest = undefined;
+    task_create_wire.taskCreateToWireInto(component_port.makeHeader(.task_create, session_task_id), session_authority_id, &task_request, @intFromPtr(&image_wire), &request);
     const result = syscall_surface.dispatch(
         kernel_port,
         session_task_id,
@@ -96,33 +97,33 @@ pub fn createBootedProbeTask(
 ) !abi.TaskDescriptor {
     const image = try generated_image_fixtures.appImage();
     var response = std.mem.zeroes(abi.TaskDescriptor);
-    const request = component_port.TaskCreateRequest{
-        .header = component_port.makeHeader(.task_create, session_task_id),
-        .authority_capability_id = session_authority_id,
-        .request = .{
-            .owner = .{ .kind = .app, .serial = owner_serial },
-            .component_class = .app_component,
-            .budget = .{
-                .cpu_time_ticks = 1_200,
-                .memory_bytes = units.kibibytes(64),
-                .endpoint_slots = 1,
-                .shared_memory_bytes = shared_memory_bytes,
-            },
-            .local_only = true,
-            .initial_component = .{
-                .label = label,
-                .entry = bundle_id,
-            },
-            .launch = .{
-                .boundary = .userspace_process,
-                .image_id = image_id,
-                .component_abi_version = abi.ABI_VERSION,
-                .signed = true,
-                .bundle_id = bundle_id,
-            },
-            .userspace_image = &image,
+    const task_request = task_runtime.TaskCreateRequest{
+        .owner = .{ .kind = .app, .serial = owner_serial },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 1_200,
+            .memory_bytes = units.kibibytes(64),
+            .endpoint_slots = 1,
+            .shared_memory_bytes = shared_memory_bytes,
         },
+        .local_only = true,
+        .initial_component = .{
+            .label = label,
+            .entry = bundle_id,
+        },
+        .launch = .{
+            .boundary = .userspace_process,
+            .image_id = image_id,
+            .component_abi_version = abi.ABI_VERSION,
+            .signed = true,
+            .bundle_id = bundle_id,
+        },
+        .userspace_image = &image,
     };
+    var image_wire: abi.ExecutableImageWireSpec = undefined;
+    task_create_wire.executableImageToWireInto(&image, &image_wire);
+    var request: abi.TaskCreateWireRequest = undefined;
+    task_create_wire.taskCreateToWireInto(component_port.makeHeader(.task_create, session_task_id), session_authority_id, &task_request, @intFromPtr(&image_wire), &request);
     const result = syscall_surface.dispatch(
         kernel_port,
         session_task_id,
@@ -144,7 +145,7 @@ pub fn resourceQuery(
     tick: u64,
 ) !abi.ResourceDescriptor {
     var response = std.mem.zeroes(abi.ResourceDescriptor);
-    const request = component_port.ResourceQueryRequest{
+    const request = abi.ResourceQueryWireRequest{
         .header = component_port.makeHeader(.resource_query, caller_task_id),
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
@@ -162,7 +163,7 @@ pub fn accountingQuery(
     tick: u64,
 ) !abi.AccountingDescriptor {
     var response = std.mem.zeroes(abi.AccountingDescriptor);
-    const request = component_port.AccountingQueryRequest{
+    const request = abi.AccountingQueryWireRequest{
         .header = component_port.makeHeader(.accounting_query, caller_task_id),
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
@@ -232,12 +233,14 @@ pub fn endpointCreateResultIntoWithFlags(
     tick: u64,
     response: *abi.EndpointCreateResponse,
 ) syscall_surface.DispatchResult {
-    const request = component_port.EndpointCreateRequest{
+    const label_bytes = std.math.cast(u32, label.len) orelse return .{ .status = .invalid_request_pointer };
+    const request = abi.EndpointCreateWireRequest{
         .header = component_port.makeHeader(.endpoint_create, caller_task_id),
         .authority_capability_id = authority_capability_id,
         .owner_task_id = owner_task_id,
-        .label = label,
-        .flags = flags,
+        .label_address = if (label.len == 0) 0 else @intFromPtr(label.ptr),
+        .label_bytes = label_bytes,
+        .flags = @bitCast(flags),
     };
     return syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.EndpointCreateResponse));
 }
@@ -251,7 +254,7 @@ pub fn expectEndpointConnect(
     tick: u64,
 ) !abi.EndpointDescriptor {
     var response = std.mem.zeroes(abi.EndpointDescriptor);
-    const request = component_port.EndpointConnectRequest{
+    const request = abi.EndpointConnectWireRequest{
         .header = component_port.makeHeader(.endpoint_connect, caller_task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .peer_endpoint_capability_id = peer_endpoint_capability_id,
@@ -269,10 +272,12 @@ pub fn expectEndpointSend(
     payload: []const u8,
     tick: u64,
 ) !void {
-    const request = component_port.EndpointSendRequest{
+    try std.testing.expect(payload.len <= abi.ENDPOINT_INLINE_BYTES);
+    const request = abi.EndpointSendWireRequest{
         .header = component_port.makeHeader(.endpoint_send, caller_task_id),
         .endpoint_capability_id = endpoint_capability_id,
-        .payload = payload,
+        .payload_address = if (payload.len == 0) 0 else @intFromPtr(payload.ptr),
+        .payload_bytes = @intCast(payload.len),
     };
     const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), 0, 0);
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
@@ -286,11 +291,13 @@ pub fn expectEndpointReply(
     payload: []const u8,
     tick: u64,
 ) !void {
-    const request = component_port.EndpointSendRequest{
+    try std.testing.expect(payload.len <= abi.ENDPOINT_INLINE_BYTES);
+    const request = abi.EndpointSendWireRequest{
         .header = component_port.makeHeader(.endpoint_send, caller_task_id),
         .correlation_id = incoming.correlation_id,
         .endpoint_capability_id = endpoint_capability_id,
-        .payload = payload,
+        .payload_address = if (payload.len == 0) 0 else @intFromPtr(payload.ptr),
+        .payload_bytes = @intCast(payload.len),
         .reply_endpoint_id = incoming.sender_endpoint_id,
     };
     const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), 0, 0);
@@ -305,12 +312,13 @@ pub fn expectEndpointRecv(
 ) !abi.EndpointRecvResult {
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
     var received = std.mem.zeroes(abi.EndpointRecvResult);
-    const request = component_port.EndpointRecvRequest{
+    const request = abi.EndpointRecvWireRequest{
         .header = component_port.makeHeader(.endpoint_recv, caller_task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .receiver_task_id = caller_task_id,
-        .payload_out = &received.payload,
-        .attached_capability_out = &received.attached_capability,
+        .payload_address = @intFromPtr(&received.payload),
+        .payload_capacity = received.payload.len,
+        .attached_capability_address = @intFromPtr(&received.attached_capability),
     };
     const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.EndpointRecvResponse));
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
@@ -355,7 +363,7 @@ pub fn sharedMemoryCreateResultInto(
     tick: u64,
     response: *abi.SharedMemoryCreateResponse,
 ) syscall_surface.DispatchResult {
-    const request = component_port.SharedMemoryCreateRequest{
+    const request = abi.SharedMemoryCreateWireRequest{
         .header = component_port.makeHeader(.shared_memory_create, caller_task_id),
         .authority_capability_id = authority_capability_id,
         .owner_task_id = owner_task_id,
@@ -406,7 +414,7 @@ pub fn sharedMemoryMapResultInto(
     tick: u64,
     response: *abi.SharedMemoryDescriptor,
 ) syscall_surface.DispatchResult {
-    const request = component_port.SharedMemoryMapRequest{
+    const request = abi.SharedMemoryMapWireRequest{
         .header = component_port.makeHeader(.shared_memory_map, caller_task_id),
         .shared_memory_capability_id = shared_memory_capability_id,
         .task_id = task_id,
@@ -421,7 +429,7 @@ pub fn expectSharedMemoryRevoke(
     tick: u64,
 ) !abi.SharedMemoryDescriptor {
     var response = std.mem.zeroes(abi.SharedMemoryDescriptor);
-    const request = component_port.SharedMemoryRevokeRequest{
+    const request = abi.SharedMemoryRevokeWireRequest{
         .header = component_port.makeHeader(.shared_memory_revoke, caller_task_id),
         .shared_memory_capability_id = shared_memory_capability_id,
     };
@@ -459,7 +467,7 @@ pub fn deviceDescribeResultInto(
     tick: u64,
     response: *abi.DeviceDescriptor,
 ) syscall_surface.DispatchResult {
-    const request = component_port.DeviceDescribeRequest{
+    const request = abi.DeviceDescribeWireRequest{
         .header = component_port.makeHeader(.device_describe, caller_task_id),
         .device_capability_id = device_capability_id,
     };

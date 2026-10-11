@@ -1,14 +1,17 @@
 // Exercise the same capture instructions as fred64.S without privileged entry
 // or return instructions. The synthetic frame remains on the caller's stack.
 #include "../../kernel/interrupts/fred_frame64.inc"
+#include "../../kernel/interrupts/idt_return64.inc"
 #if defined(__APPLE__)
 #define PROBE_SYMBOL _zigos_fred_capture_probe
 #define RETURN_PROBE_SYMBOL _zigos_fred_return_probe
+#define IDT_RETURN_PROBE_SYMBOL _zigos_idt_return_probe
 #define HOST_TEXT_START ___kernel_start
 #define HOST_TEXT_END ___kernel_end
 #else
 #define PROBE_SYMBOL zigos_fred_capture_probe
 #define RETURN_PROBE_SYMBOL zigos_fred_return_probe
+#define IDT_RETURN_PROBE_SYMBOL zigos_idt_return_probe
 #define HOST_TEXT_START __kernel_start
 #define HOST_TEXT_END __kernel_end
 #endif
@@ -99,6 +102,20 @@ RETURN_PROBE_SYMBOL:
     rep movsq
     addq $264, %rsp
     popq %rbx
+    ret
+
+// Execute production IDT return admission without GS/IRET or a host-dependent
+// GDT lookup. The production caller performs its descriptor checks between
+// these same two macros. SS normalization remains visible to the host test.
+.globl IDT_RETURN_PROBE_SYMBOL
+IDT_RETURN_PROBE_SYMBOL:
+    ZIGOS_IDT_VALIDATE_RETURN_PREFIX %rdi, .Lidt_probe_invalid, .Lidt_probe_common
+.Lidt_probe_common:
+    ZIGOS_IDT_VALIDATE_RETURN_RIP_FLAGS %rdi, .Lidt_probe_invalid
+    movl $1, %eax
+    ret
+.Lidt_probe_invalid:
+    xorl %eax, %eax
     ret
 .globl HOST_TEXT_END
 HOST_TEXT_END:

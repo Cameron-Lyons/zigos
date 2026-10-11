@@ -4,7 +4,10 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const capability = @import("../kernel_api/capability.zig");
+const component_port = @import("../kernel_api/component_port.zig");
+const syscall_broker = @import("../kernel_api/syscall_broker.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");
+const dispatch_ownership = @import("dispatch_ownership.zig");
 const ids = @import("../core/ids.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
@@ -16,6 +19,105 @@ const smp = @import("../../kernel/smp.zig");
 const generated_image_fixtures = if (builtin.is_test) @import("generated_image_fixtures.zig") else struct {};
 const table_backing = @import("../core/table_backing.zig");
 const root = @import("root");
+const architecture_proof_enabled = if (@hasDecl(root, "ARCHITECTURE_SMP_PROOF")) root.ARCHITECTURE_SMP_PROOF else false;
+
+// The isolated CPL0 guest binds the production mapping domain and callbacks
+// without installing native userspace entry or changing dispatch admission.
+pub const ArchitectureProof = if (architecture_proof_enabled) struct {
+    pub fn bindDomain(scheduler: *Scheduler, runtime: *task_runtime.Runtime) bool {
+        if (!smp.isRuntimeOwner() or scheduler.initialized or scheduler.runtime_ptr != null or scheduler.executor_binding_claimed or
+            scheduler.active_dispatch_task_id != 0 or scheduler.active_dispatch_lease != null) return false;
+        if (!scheduler.claimRuntimeOwnership(runtime, true)) return false;
+        scheduler.runtime_ptr = runtime;
+        scheduler.initialized = true;
+        return true;
+    }
+} else struct {};
+
+// These are exactly the diagnostics already retained in the native image.
+// One immutable blob and independently stored offsets avoid one object per
+// message; the cold selector keeps invariant reporting off the service path.
+const SchedulerInvariant = enum(u8) {
+    scheduler_deinitialization_follows_active_dispatch_handoff,
+    scheduler_deinitialization_follows_every_runtime_execution_lease,
+    userspace_runtime_retirement_ownership_changed_while_bound,
+    userspace_executor_ownership_has_no_runtime,
+    userspace_executor_ownership_changed_while_bound,
+    userspace_executor_or_runtime_already_has_an_owner,
+    dispatch_accounting_storage_is_available,
+    dispatch_accounting_is_allocated_with_its_scheduler_slot,
+    syscall_service_claims_only_exact_running_remote_requests,
+    syscall_service_retains_its_exact_processing_request,
+    syscall_completion_targets_an_admitted_remote_owner,
+    scheduler_dispatch_is_owned_by_one_active_task,
+    scheduler_dispatch_retains_its_execution_lease,
+    scheduler_finishes_its_exact_active_dispatch,
+    scheduler_cancels_only_its_unstarted_reservation,
+    scheduler_collects_its_exact_quiescent_execution,
+    faulted_userspace_dispatch_has_no_exception_record,
+    faulted_userspace_task_was_already_terminated,
+    accelerator_claim_task_index_points_outside_claim_slots,
+    accelerator_claim_task_index_points_at_a_free_slot,
+    accelerator_claim_task_index_points_at_the_wrong_task,
+    userspace_scheduler_mutation_belongs_to_the_runtime_owner_cpu,
+    execution_stop_ipi_target_is_not_an_admitted_remote_cpu,
+};
+
+const scheduler_invariant_messages = [_][]const u8{
+    "scheduler deinitialization follows active dispatch handoff",
+    "scheduler deinitialization follows every runtime execution lease",
+    "userspace runtime retirement ownership changed while bound",
+    "userspace executor ownership has no runtime",
+    "userspace executor ownership changed while bound",
+    "userspace executor or runtime already has an owner",
+    "dispatch accounting storage is available",
+    "dispatch accounting is allocated with its scheduler slot",
+    "syscall service claims only exact running remote requests",
+    "syscall service retains its exact processing request",
+    "syscall completion targets an admitted remote owner",
+    "scheduler dispatch is owned by one active task",
+    "scheduler dispatch retains its execution lease",
+    "scheduler finishes its exact active dispatch",
+    "scheduler cancels only its unstarted reservation",
+    "scheduler collects its exact quiescent execution",
+    "faulted userspace dispatch has no exception record",
+    "faulted userspace task was already terminated",
+    "accelerator claim task index points outside claim slots",
+    "accelerator claim task index points at a free slot",
+    "accelerator claim task index points at the wrong task",
+    "userspace scheduler mutation belongs to the runtime owner CPU",
+    "execution-stop IPI target is not an admitted remote CPU",
+};
+
+const scheduler_invariant_message_bytes: []const u8 = blk: {
+    if (scheduler_invariant_messages.len != @typeInfo(SchedulerInvariant).@"enum".field_names.len)
+        @compileError("scheduler invariant messages must cover every selector");
+    var bytes: []const u8 = "";
+    for (scheduler_invariant_messages) |message| bytes = bytes ++ message;
+    if (bytes.len > std.math.maxInt(u16)) @compileError("scheduler invariant message offsets must fit u16");
+    break :blk bytes;
+};
+
+const scheduler_invariant_message_offsets = blk: {
+    var offsets: [scheduler_invariant_messages.len + 1]u16 = undefined;
+    var cursor: usize = 0;
+    for (scheduler_invariant_messages, 0..) |message, index| {
+        offsets[index] = @intCast(cursor);
+        cursor += message.len;
+    }
+    offsets[scheduler_invariant_messages.len] = @intCast(cursor);
+    break :blk offsets;
+};
+
+fn schedulerInvariantFailure(selector: SchedulerInvariant) noreturn {
+    @branchHint(.cold);
+    const index: usize = @backingInt(selector);
+    native_util.impossibleByInvariant(scheduler_invariant_message_bytes[scheduler_invariant_message_offsets[index]..scheduler_invariant_message_offsets[index + 1]]);
+}
+
+// Shared service mutation remains one nonreentrant BSP operation. Interrupt
+// handlers only nudge; this guard also excludes synchronous callback reentry.
+var syscall_service_active = false;
 
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
@@ -237,7 +339,7 @@ pub const SCHEDULER_SLOT_SIZE_CEILING_BYTES: usize = 176;
 pub const DISPATCH_ACCOUNTING_IS_COLD = true;
 pub const ACCELERATOR_CLAIM_SLOT_SIZE_CEILING_BYTES: usize = 56;
 pub const ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES: usize = 15_888;
-pub const SCHEDULER_SIZE_CEILING_BYTES: usize = if (heap_backed_accelerator_claims) 30_704 else 46_584;
+pub const SCHEDULER_SIZE_CEILING_BYTES: usize = (if (heap_backed_accelerator_claims) @as(usize, 30_704) else 46_584) + @sizeOf(?dispatch_ownership.Ticket);
 
 pub const AcceleratorClaimBacking = struct {
     claims: AcceleratorClaimArena = AcceleratorClaimArena.init(),
@@ -294,6 +396,7 @@ pub const Scheduler = struct {
     resource_hardware_evidence_complete: bool = false,
     last_dispatch_tick: u64 = 0,
     active_dispatch_task_id: u64 = 0,
+    active_dispatch_lease: ?dispatch_ownership.Ticket = null,
     cold_note: ColdDispatchNote = .{},
     ready_marker_printed: bool = false,
     active_marker_printed: bool = false,
@@ -361,26 +464,46 @@ pub const Scheduler = struct {
 
     pub fn deinit(self: *Scheduler) void {
         requireRuntimeOwner();
-        if (self.active_dispatch_task_id != 0)
-            native_util.impossibleByInvariant("scheduler deinitialization follows active dispatch handoff");
+        const x86 = @import("../../arch/x86.zig");
+        const restore_if = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_if) x86.sti();
+        };
+        if (self.active_dispatch_task_id != 0 or self.active_dispatch_lease != null)
+            @call(.never_inline, schedulerInvariantFailure, .{.scheduler_deinitialization_follows_active_dispatch_handoff});
+        if (self.runtime_ptr) |runtime| {
+            if (runtime.execution.hasLeases())
+                @call(.never_inline, schedulerInvariantFailure, .{.scheduler_deinitialization_follows_every_runtime_execution_lease});
+            if (runtime.lifecycle_transition_active)
+                @call(.never_inline, schedulerInvariantFailure, .{.userspace_runtime_retirement_ownership_changed_while_bound});
+        }
+        const runtime = self.runtime_ptr;
+        if (self.executor_binding_claimed) {
+            const bound_runtime = runtime orelse
+                @call(.never_inline, schedulerInvariantFailure, .{.userspace_executor_ownership_has_no_runtime});
+            if (self.executor.binding_owner != @as(*const anyopaque, self) or self.executor.bound_runtime != bound_runtime)
+                @call(.never_inline, schedulerInvariantFailure, .{.userspace_executor_ownership_changed_while_bound});
+            // All mappings and their shared registrations must drain while the
+            // exact domain callback context is still bound. Remote cleanup does
+            // not reset another CPU's native entry or registration selection.
+            if (!userspace_executor.releaseRegisteredDomain(self, bound_runtime))
+                @call(.never_inline, schedulerInvariantFailure, .{.userspace_runtime_retirement_ownership_changed_while_bound});
+            if (builtin.target.os.tag == .freestanding or self.ownsRuntimeSinks(bound_runtime)) {
+                if (!self.unbindRuntimeSinks(bound_runtime))
+                    @call(.never_inline, schedulerInvariantFailure, .{.userspace_runtime_retirement_ownership_changed_while_bound});
+            }
+        }
         if (bound_preempt_scheduler == self) {
             bound_preempt_scheduler = null;
             userspace_executor.setPreemptCheck(null);
         }
-        const runtime = self.runtime_ptr;
-        if (builtin.target.os.tag == .freestanding) {
-            if (runtime) |bound_runtime| {
-                if (!bound_runtime.unbindAddressSpaceRetirementSink(self.executor.retirementSink())) {
-                    native_util.impossibleByInvariant("userspace runtime retirement ownership changed while bound");
-                }
-            }
-        }
         if (self.executor_binding_claimed) {
             self.executor.deinit();
             const bound_runtime = runtime orelse
-                native_util.impossibleByInvariant("userspace executor ownership has no runtime");
+                @call(.never_inline, schedulerInvariantFailure, .{.userspace_executor_ownership_has_no_runtime});
             if (!self.executor.releaseRuntimeBinding(self, bound_runtime)) {
-                native_util.impossibleByInvariant("userspace executor ownership changed while bound");
+                @call(.never_inline, schedulerInvariantFailure, .{.userspace_executor_ownership_changed_while_bound});
             }
         }
         self.executor_binding_claimed = false;
@@ -407,17 +530,8 @@ pub const Scheduler = struct {
     ) void {
         requireRuntimeOwner();
         if (self.initialized or self.runtime_ptr != null) self.reset();
-        if (!self.executor.claimRuntimeBinding(self, runtime)) {
-            native_util.impossibleByInvariant("userspace executor already has an owner");
-        }
-        self.executor_binding_claimed = true;
-        if (builtin.target.os.tag == .freestanding) {
-            if (!runtime.bindAddressSpaceRetirementSink(self.executor.retirementSink())) {
-                _ = self.executor.releaseRuntimeBinding(self, runtime);
-                self.executor_binding_claimed = false;
-                native_util.impossibleByInvariant("userspace runtime already has an address-space owner");
-            }
-        }
+        if (!self.claimRuntimeOwnership(runtime, builtin.target.os.tag == .freestanding))
+            @call(.never_inline, schedulerInvariantFailure, .{.userspace_executor_or_runtime_already_has_an_owner});
         self.catalog_ptr = catalog;
         self.runtime_ptr = runtime;
         self.capability_table_ptr = capability_table;
@@ -430,6 +544,92 @@ pub const Scheduler = struct {
             common.printBootMarker(boot_markers.userspace_scheduler_ready);
             self.ready_marker_printed = true;
         }
+    }
+
+    fn executionStopSink(self: *Scheduler) task_runtime.ExecutionStopSink {
+        return .{ .context = self, .notify = notifyExecutionStop };
+    }
+
+    fn addressSpaceRetirementSink(self: *Scheduler) task_runtime.AddressSpaceRetirementSink {
+        return task_runtime.AddressSpaceRetirementSink.init(Scheduler, self);
+    }
+
+    pub fn retireAddressSpace(self: *Scheduler, event: task_runtime.AddressSpaceRetirementEvent) void {
+        requireRuntimeOwner();
+        const x86 = @import("../../arch/x86.zig");
+        const restore_if = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_if) x86.sti();
+        };
+        const runtime = self.executor.bound_runtime orelse
+            @call(.never_inline, schedulerInvariantFailure, .{.userspace_executor_ownership_has_no_runtime});
+        if (self.executor.binding_owner != @as(*const anyopaque, self) or (self.runtime_ptr != null and self.runtime_ptr != runtime) or
+            !userspace_executor.retireRegisteredAddressSpace(self, runtime, event))
+            @call(.never_inline, schedulerInvariantFailure, .{.userspace_runtime_retirement_ownership_changed_while_bound});
+    }
+
+    fn ownsRuntimeSinks(self: *Scheduler, runtime: *task_runtime.Runtime) bool {
+        const sink = runtime.address_space_retirement_sink orelse return false;
+        return sink.eql(self.addressSpaceRetirementSink());
+    }
+
+    fn claimRuntimeOwnership(self: *Scheduler, runtime: *task_runtime.Runtime, comptime bind_sinks: bool) bool {
+        const x86 = @import("../../arch/x86.zig");
+        const restore_if = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_if) x86.sti();
+        };
+        if (!self.executor.claimRuntimeBinding(self, runtime)) return false;
+        if (bind_sinks and !self.executor.claimMappingRegistration(0, self, runtime)) {
+            if (!self.executor.releaseRuntimeBinding(self, runtime))
+                @call(.never_inline, schedulerInvariantFailure, .{.userspace_executor_ownership_changed_while_bound});
+            return false;
+        }
+        if (bind_sinks and !self.bindRuntimeSinks(runtime)) {
+            if (!self.executor.releaseMappingRegistration(0, self, runtime) or
+                !self.executor.releaseRuntimeBinding(self, runtime))
+                @call(.never_inline, schedulerInvariantFailure, .{.userspace_executor_ownership_changed_while_bound});
+            return false;
+        }
+        self.executor_binding_claimed = true;
+        return true;
+    }
+
+    fn bindRuntimeSinks(self: *Scheduler, runtime: *task_runtime.Runtime) bool {
+        // Rollback is safe only before any owner can start or retain callbacks.
+        if (runtime.execution.hasLeases()) return false;
+        if (!runtime.bindAddressSpaceRetirementSink(self.addressSpaceRetirementSink())) return false;
+        if (!runtime.bindExecutionStopSink(self.executionStopSink())) {
+            if (!runtime.unbindAddressSpaceRetirementSink(self.addressSpaceRetirementSink()))
+                @call(.never_inline, schedulerInvariantFailure, .{.userspace_runtime_retirement_ownership_changed_while_bound});
+            return false;
+        }
+        if (self.executor.bindMappedObjectLifetime()) return true;
+        if (!runtime.unbindExecutionStopSink(self.executionStopSink()) or
+            !runtime.unbindAddressSpaceRetirementSink(self.addressSpaceRetirementSink()))
+            @call(.never_inline, schedulerInvariantFailure, .{.userspace_runtime_retirement_ownership_changed_while_bound});
+        return false;
+    }
+
+    fn unbindRuntimeSinks(self: *Scheduler, runtime: *task_runtime.Runtime) bool {
+        const x86 = @import("../../arch/x86.zig");
+        const restore_if = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_if) x86.sti();
+        };
+        if (self.executor.binding_owner != @as(*const anyopaque, self) or self.executor.bound_runtime != runtime or
+            runtime.execution.hasLeases() or runtime.lifecycle_transition_active) return false;
+        const address_sink = runtime.address_space_retirement_sink orelse return false;
+        const stop_sink = runtime.execution_stop_sink orelse return false;
+        if (!address_sink.eql(self.addressSpaceRetirementSink()) or !stop_sink.eql(self.executionStopSink()) or
+            !self.executor.mappedObjectLifetimeIsBound()) return false;
+        // Refuse outstanding Table tokens before removing either Runtime sink.
+        if (!self.executor.unbindMappedObjectLifetime()) return false;
+        if (!runtime.unbindExecutionStopSink(self.executionStopSink())) return false;
+        return runtime.unbindAddressSpaceRetirementSink(self.addressSpaceRetirementSink());
     }
 
     pub fn configureResourceState(self: *Scheduler, state: accelerator_scheduler.SystemState) void {
@@ -473,7 +673,7 @@ pub const Scheduler = struct {
     pub fn registerTaskAt(self: *Scheduler, task_id: u64, now_ticks: u64) bool {
         if (!smp.isRuntimeOwner()) return false;
         if (!self.initialized) return false;
-        if (task_id == self.active_dispatch_task_id) return false;
+        if (self.taskHasExecutionLease(task_id)) return false;
         const runtime = self.runtime_ptr orelse return false;
         const task = runtime.find(task_id) orelse return false;
         if (task.state == .terminated) return false;
@@ -522,7 +722,7 @@ pub const Scheduler = struct {
 
     pub fn unregisterTask(self: *Scheduler, task_id: u64) bool {
         if (!smp.isRuntimeOwner()) return false;
-        if (task_id == self.active_dispatch_task_id) return false;
+        if (self.taskHasExecutionLease(task_id)) return false;
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
         return self.unregisterSlotIndex(slot_index);
     }
@@ -555,11 +755,17 @@ pub const Scheduler = struct {
         if (!smp.isRuntimeOwner()) return false;
         if (!self.initialized) return false;
         const runtime = self.runtime_ptr orelse return false;
-        const task = runtime.find(task_id) orelse return false;
-        if (task.state != .active) return false;
-        const task_handle = runtime.taskHandleForResolved(task);
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
         const slot = &self.slots.slots[slot_index];
+        var task_handle = slot.task_handle;
+        // Registered wakes reuse their checked incarnation. Restore can retire
+        // that handle while keeping the task ID, so refresh only on a miss.
+        const task = runtime.findByHandle(task_handle, task_id) orelse refresh: {
+            const resolved = runtime.find(task_id) orelse return false;
+            task_handle = runtime.taskHandleForResolved(resolved);
+            break :refresh resolved;
+        };
+        if (task.state != .active) return false;
         const already_ready = slot.queued_ready;
         if (slot.queued_ready and slot.resource_class != task.resourceClass()) {
             self.unlinkReadyIndex(slot_index);
@@ -614,6 +820,7 @@ pub const Scheduler = struct {
     }
 
     pub fn taskDispatchStats(self: *const Scheduler, task_id: u64) ?TaskDispatchStats {
+        if (!smp.isRuntimeOwner()) return null;
         const slot = self.slots.getConst(task_id) orelse return null;
         const accounting = self.accountingForSlotConst(slot);
         return .{
@@ -642,7 +849,7 @@ pub const Scheduler = struct {
     fn accountingStorage(self: *Scheduler) *DispatchAccountingStorage {
         if (self.dispatch_accounting) |storage| return storage;
         const storage = table_backing.alloc(DispatchAccountingStorage) orelse
-            native_util.impossibleByInvariant("dispatch accounting storage is available");
+            @call(.never_inline, schedulerInvariantFailure, .{.dispatch_accounting_storage_is_available});
         self.dispatch_accounting = storage;
         return storage;
     }
@@ -655,19 +862,22 @@ pub const Scheduler = struct {
     }
 
     pub fn accountingForSlot(self: *Scheduler, slot: *const Slot) *DispatchAccounting {
+        requireRuntimeOwner();
         self.publishColdNote();
         return &self.accountingStorage()[self.accountingIndex(slot)];
     }
 
     fn accountingForSlotConst(self: *const Scheduler, slot: *const Slot) *const DispatchAccounting {
+        requireRuntimeOwner();
         const scheduler = @constCast(self);
         scheduler.publishColdNote();
         const storage = scheduler.dispatch_accounting orelse
-            native_util.impossibleByInvariant("dispatch accounting is allocated with its scheduler slot");
+            @call(.never_inline, schedulerInvariantFailure, .{.dispatch_accounting_is_allocated_with_its_scheduler_slot});
         return &storage[self.accountingIndex(slot)];
     }
 
     pub fn taskDispatchAccounting(self: *const Scheduler, task_id: u64) ?*const DispatchAccounting {
+        if (!smp.isRuntimeOwner()) return null;
         const slot = self.slots.getConst(task_id) orelse return null;
         return self.accountingForSlotConst(slot);
     }
@@ -743,7 +953,7 @@ pub const Scheduler = struct {
                 }
                 const task = runtime.findByHandle(slot.task_handle, record.task_id);
                 if (task == null or task.?.state == .terminated) {
-                    if (record.task_id != self.active_dispatch_task_id)
+                    if (!self.taskHasExecutionLease(record.task_id))
                         _ = self.unregisterSlotIndex(self.slots.slotIndexOf(record.task_id).?);
                     continue;
                 }
@@ -762,39 +972,78 @@ pub const Scheduler = struct {
     }
 
     pub fn engineDispatchCount(self: *const Scheduler, engine: accelerator_scheduler.Engine) u64 {
+        if (!smp.isRuntimeOwner()) return 0;
         const scheduler = @constCast(self);
         scheduler.publishColdNote();
         return scheduler.engine_dispatch_counts[engineIndex(engine)];
     }
 
     pub fn engineDenialCount(self: *const Scheduler, engine: accelerator_scheduler.Engine) u64 {
+        if (!smp.isRuntimeOwner()) return 0;
         const scheduler = @constCast(self);
         scheduler.publishColdNote();
         return scheduler.engine_denial_counts[engineIndex(engine)];
     }
 
     pub fn executeTask(self: *Scheduler, task_id: u64, now_ticks: u64) userspace_executor.ExecutionOutcome {
-        return self.executeTaskWithDispatch(task_id, now_ticks, self);
+        return self.executeTaskWithDispatch(task_id, now_ticks, self).outcome;
     }
 
-    fn executeTaskWithDispatch(self: *Scheduler, task_id: u64, now_ticks: u64, dispatcher: anytype) userspace_executor.ExecutionOutcome {
-        if (!smp.isRuntimeOwner()) return .unavailable;
-        if (!self.initialized or self.active_dispatch_task_id != 0) return .unavailable;
-        const runtime = self.runtime_ptr orelse return .unavailable;
-        const task = runtime.find(task_id) orelse return .unavailable;
-        var borrow = self.beginTaskDispatch(runtime, task);
-        defer self.finishTaskDispatch(&borrow);
+    pub fn servicePendingSyscalls(self: *Scheduler, port: *const component_port.KernelPort, now_ticks: u64) u8 {
+        if (!smp.isRuntimeOwner() or !self.initialized or syscall_service_active) return 0;
+        const runtime = self.runtime_ptr orelse return 0;
+        if (port.kernel.runtime != runtime or self.executor.bound_runtime != runtime or self.executor.binding_owner != @as(*const anyopaque, self)) return 0;
+        const x86 = @import("../../arch/x86.zig");
+        const restore_if = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_if) x86.sti();
+        };
+        syscall_service_active = true;
+        defer syscall_service_active = false;
+        var serviced: u8 = 0;
+        for (1..dispatch_ownership.CAPACITY) |index| {
+            var claim: dispatch_ownership.ClaimedSyscall = undefined;
+            runtime.execution.claimSyscallInto(@intCast(index), &claim) catch |err| switch (err) {
+                error.NoRequest, error.WrongPhase, error.StopRequested => continue,
+                else => @call(.never_inline, schedulerInvariantFailure, .{.syscall_service_claims_only_exact_running_remote_requests}),
+            };
+            var bound: dispatch_ownership.BoundIdentity = undefined;
+            var stopped: bool = undefined;
+            runtime.execution.validateClaimInto(&claim, &bound, &stopped) catch
+                @call(.never_inline, schedulerInvariantFailure, .{.syscall_service_retains_its_exact_processing_request});
+            var copy: syscall_broker.CopySession = undefined;
+            if (!stopped and self.executor.prepareSyscallCopySession(&claim, &copy)) {
+                syscall_broker.serviceClaim(port, &claim, &copy, now_ticks) catch
+                    @call(.never_inline, schedulerInvariantFailure, .{.syscall_service_retains_its_exact_processing_request});
+            } else {
+                runtime.execution.completeSyscall(claim.key, .{ .status = @intCast(@backingInt(@import("../core/abi.zig").SyscallStatus.unavailable)), .denial_reason = 0, .bytes_written = 0 }) catch
+                    @call(.never_inline, schedulerInvariantFailure, .{.syscall_service_retains_its_exact_processing_request});
+            }
+            if (comptime builtin.target.os.tag == .freestanding) {
+                if (!smp.notifySyscallCompletion(@intCast(index)))
+                    @call(.never_inline, schedulerInvariantFailure, .{.syscall_completion_targets_an_admitted_remote_owner});
+            }
+            serviced += 1;
+        }
+        return serviced;
+    }
+
+    fn executeTaskWithDispatch(self: *Scheduler, task_id: u64, now_ticks: u64, dispatcher: anytype) dispatch_ownership.ReturnRecord {
+        if (!smp.isRuntimeOwner()) return .{};
+        if (!self.initialized or self.active_dispatch_task_id != 0) return .{};
+        const runtime = self.runtime_ptr orelse return .{};
+        const task = runtime.find(task_id) orelse return .{};
+        const ticket = self.beginTaskDispatch(runtime, task, smp.currentCpuIndex()) orelse return .{};
+        defer self.finishTaskDispatch(runtime, ticket);
         var uncached_mapping_handle = userspace_executor.MappingHandle{};
         const mapping_handle = if (self.slots.get(task_id)) |slot|
             &slot.mapping_handle
         else
             &uncached_mapping_handle;
-        const outcome = dispatcher.executePreparedTask(task, mapping_handle, now_ticks);
-        if (outcome == .faulted) self.containUserException(runtime, task, now_ticks);
-        if (task.state == .terminated) {
-            if (self.slots.slotIndexOf(task_id)) |index| _ = self.unregisterSlotIndex(index);
-        }
-        return outcome;
+        const record = dispatcher.executePreparedTask(task, mapping_handle, now_ticks);
+        if (record.outcome == .faulted) self.containUserException(runtime, task, now_ticks, &record);
+        return record;
     }
 
     fn executePreparedTask(
@@ -802,12 +1051,13 @@ pub const Scheduler = struct {
         task: *const task_runtime.TaskRecord,
         mapping_handle: *userspace_executor.MappingHandle,
         now_ticks: u64,
-    ) userspace_executor.ExecutionOutcome {
-        if (!self.initialized) return .unavailable;
-        const catalog = self.catalog_ptr orelse return .unavailable;
-        const runtime = self.runtime_ptr orelse return .unavailable;
-        const capability_table = self.capability_table_ptr orelse return .unavailable;
-        return self.executor.executeTask(catalog, runtime, capability_table, task, mapping_handle, now_ticks);
+    ) dispatch_ownership.ReturnRecord {
+        if (!self.initialized) return .{};
+        const catalog = self.catalog_ptr orelse return .{};
+        const runtime = self.runtime_ptr orelse return .{};
+        const capability_table = self.capability_table_ptr orelse return .{};
+        const ticket = self.active_dispatch_lease orelse return .{};
+        return self.executor.executeTask(catalog, runtime, capability_table, task, mapping_handle, now_ticks, ticket);
     }
 
     pub fn runNext(self: *Scheduler, now_ticks: u64) bool {
@@ -829,19 +1079,21 @@ pub const Scheduler = struct {
             };
             const index = candidate.slot_index;
             const slot = &self.slots.slots[index];
-            self.unlinkReadyIndex(index);
             if (!slot.in_use) continue;
 
             const task_id = slot.task_id;
             const task = candidate.task orelse {
+                self.unlinkReadyIndex(index);
                 _ = self.unregisterSlotIndex(index);
                 continue;
             };
             if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) {
+                self.unlinkReadyIndex(index);
                 if (task.state == .terminated) _ = self.unregisterSlotIndex(index);
                 continue;
             }
             if (!hasDispatchBudget(slot, task)) {
+                self.unlinkReadyIndex(index);
                 self.noteDenied(slot, .cpu_budget, .cpu, .cpu, false);
                 continue;
             }
@@ -849,6 +1101,7 @@ pub const Scheduler = struct {
             const dispatch_request = candidate.request;
             const decision = candidate.decision.?;
             if (self.dispatchRequiresUnavailableAccelerator(slot, decision)) {
+                self.unlinkReadyIndex(index);
                 const requested_engine = requestedAcceleratorEngine(dispatch_request);
                 self.noteAcceleratorDenied(slot, decision, requested_engine);
                 self.queuePendingAcceleratorWake(
@@ -861,14 +1114,17 @@ pub const Scheduler = struct {
                 return false;
             }
 
+            // A rejected reservation preserves this activation's exact queue
+            // position, accounting and credits for its eventual owner.
+            const ticket = self.beginTaskDispatch(runtime, task, smp.currentCpuIndex()) orelse return false;
+            defer self.finishTaskDispatch(runtime, ticket);
+            self.unlinkReadyIndex(index);
             if (slot.pending_accelerator_claim_id == 0) slot.pending_accelerator_engine = .cpu;
-
-            var borrow = self.beginTaskDispatch(runtime, task);
-            defer self.finishTaskDispatch(&borrow);
 
             const dispatch_memory_bandwidth_units = memoryBandwidthUnitsFor(task);
             const missed_deadline = slot.deadline_tick != 0 and now_ticks > slot.deadline_tick;
-            const outcome = dispatcher.executePreparedTask(task, &slot.mapping_handle, now_ticks);
+            const record = dispatcher.executePreparedTask(task, &slot.mapping_handle, now_ticks);
+            const outcome = record.outcome;
             const yielded = outcome.handedOff();
             self.last_dispatch_tick = now_ticks;
             slot.dispatch_count += 1;
@@ -876,7 +1132,7 @@ pub const Scheduler = struct {
                 common.printBootMarker(boot_markers.userspace_scheduler_event_wait_ready);
                 self.event_wait_marker_printed = true;
             }
-            const ui_revision = self.executor.lastYieldUiRevision();
+            const ui_revision = record.ui_revision;
             if (outcome.handedOff() and
                 slot.owns_ui_surface and
                 ui_revision > self.observedUiRevision(slot) and
@@ -899,7 +1155,7 @@ pub const Scheduler = struct {
                 dispatch_memory_bandwidth_units,
             );
             if (outcome == .faulted) {
-                self.containUserException(runtime, task, now_ticks);
+                self.containUserException(runtime, task, now_ticks, &record);
                 return true;
             }
             if (builtin.target.os.tag == .freestanding and yielded and !self.active_marker_printed) {
@@ -908,7 +1164,6 @@ pub const Scheduler = struct {
             }
             if (runtime.findByHandle(slot.task_handle, task_id)) |updated_task| {
                 if (updated_task.state == .terminated) {
-                    _ = self.unregisterSlotIndex(index);
                     return yielded;
                 }
                 if (!taskEligibleForPostDispatchRequeue(task_id, updated_task, slot)) return yielded;
@@ -930,21 +1185,69 @@ pub const Scheduler = struct {
         return false;
     }
 
-    fn beginTaskDispatch(self: *Scheduler, runtime: *task_runtime.Runtime, task: *const task_runtime.TaskRecord) task_runtime.TaskBorrow {
-        if (self.active_dispatch_task_id != 0)
-            native_util.impossibleByInvariant("scheduler dispatch is owned by one active task");
-        const borrow = runtime.borrowResolvedTask(task);
-        // The task pin and this identity jointly protect the TaskRecord, Slot,
-        // mapping handle, and accounting through the complete handoff path.
+    fn beginTaskDispatch(self: *Scheduler, runtime: *task_runtime.Runtime, task: *const task_runtime.TaskRecord, cpu: u8) ?dispatch_ownership.Ticket {
+        if (self.active_dispatch_task_id != 0 or self.active_dispatch_lease != null)
+            @call(.never_inline, schedulerInvariantFailure, .{.scheduler_dispatch_is_owned_by_one_active_task});
+        var ticket: dispatch_ownership.Ticket = undefined;
+        runtime.reserveExecutionInto(task, cpu, &ticket) catch return null;
+        // Runtime retains the task pin and exact execution identity through
+        // handoff, scheduler accounting and synchronous retirement callbacks.
         self.active_dispatch_task_id = task.id;
-        return borrow;
+        self.active_dispatch_lease = ticket;
+        return ticket;
     }
 
-    fn finishTaskDispatch(self: *Scheduler, borrow: *task_runtime.TaskBorrow) void {
-        if (self.active_dispatch_task_id != borrow.task_id)
-            native_util.impossibleByInvariant("scheduler finishes its exact active dispatch");
+    fn finishTaskDispatch(self: *Scheduler, runtime: *task_runtime.Runtime, ticket: dispatch_ownership.Ticket) void {
+        const x86 = @import("../../arch/x86.zig");
+        const restore_if = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_if) x86.sti();
+        };
+        const active = self.active_dispatch_lease orelse
+            @call(.never_inline, schedulerInvariantFailure, .{.scheduler_dispatch_retains_its_execution_lease});
+        if (active.issuer != ticket.issuer or active.cpu != ticket.cpu or active.epoch != ticket.epoch or self.active_dispatch_task_id == 0)
+            @call(.never_inline, schedulerInvariantFailure, .{.scheduler_finishes_its_exact_active_dispatch});
+        const task_id = self.active_dispatch_task_id;
+        // Model callbacks and failed preparation never start execution. An
+        // actual entry may only be collected after its quiescent return ack.
+        if (runtime.cancelUnstartedExecution(ticket)) |_| {
+            // A canceled prepared command publishes a canonical unavailable
+            // receipt. Consume it before collection just like an owner return;
+            // a reservation canceled before binding has no prepared receipt.
+            var canceled: dispatch_ownership.ReturnRecord = undefined;
+            runtime.execution.consumePreparedReturnInto(ticket, &canceled) catch |err| switch (err) {
+                error.WrongPurpose => {},
+                else => @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation}),
+            };
+        } else |err| switch (err) {
+            error.WrongPhase => switch (runtime.execution.phase(ticket) catch
+                @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation})) {
+                .returned, .return_consumed => {},
+                else => @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation}),
+            },
+            else => @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation}),
+        }
+        // Runtime collection may restore its caller's interrupt state. Keep
+        // the BSP transaction held until every registered mapping is drained.
+        runtime.collectExecution(ticket) catch
+            @call(.never_inline, schedulerInvariantFailure, .{.scheduler_collects_its_exact_quiescent_execution});
+        if (!userspace_executor.collectRegisteredRetiredMappings(self, runtime))
+            @call(.never_inline, schedulerInvariantFailure, .{.userspace_runtime_retirement_ownership_changed_while_bound});
+        self.active_dispatch_lease = null;
         self.active_dispatch_task_id = 0;
-        borrow.release();
+        // Collection can run reentrant lifetime callbacks. Do not dereference
+        // the old TaskRecord or Slot after releasing their execution pin.
+        const task = runtime.find(task_id);
+        if (task == null or task.?.state == .terminated) {
+            if (self.slots.slotIndexOf(task_id)) |index| _ = self.unregisterSlotIndex(index);
+        }
+    }
+
+    inline fn taskHasExecutionLease(self: *const Scheduler, task_id: u64) bool {
+        if (task_id == self.active_dispatch_task_id) return true;
+        const runtime = self.runtime_ptr orelse return false;
+        return runtime.execution.hasLeaseForTask(task_id);
     }
 
     fn containUserException(
@@ -952,10 +1255,17 @@ pub const Scheduler = struct {
         runtime: *task_runtime.Runtime,
         task: *task_runtime.TaskRecord,
         now_ticks: u64,
+        record: *const dispatch_ownership.ReturnRecord,
     ) void {
-        const task_id = task.id;
-        const exception = self.executor.lastUserException() orelse
-            native_util.impossibleByInvariant("faulted userspace dispatch has no exception record");
+        _ = self;
+        if (record.outcome != .faulted)
+            @call(.never_inline, schedulerInvariantFailure, .{.faulted_userspace_dispatch_has_no_exception_record});
+        const exception = userspace_executor.UserException{
+            .vector = record.fault_vector,
+            .error_code = record.fault_error_code,
+            .instruction_pointer = record.fault_instruction_pointer,
+            .fault_address = record.fault_address,
+        };
         runtime.recordCrashReportForResolved(
             task,
             USER_EXCEPTION_CRASH_SERVICE_ID,
@@ -966,12 +1276,9 @@ pub const Scheduler = struct {
             true,
         );
         const terminated = runtime.terminateResolvedTask(task, now_ticks);
-        if (!terminated) native_util.impossibleByInvariant("faulted userspace task was already terminated");
-        if (self.slots.slotIndexOf(task_id)) |slot_index| {
-            if (!self.unregisterSlotIndex(slot_index)) {
-                native_util.impossibleByInvariant("faulted userspace task disappeared from the scheduler");
-            }
-        }
+        if (!terminated) @call(.never_inline, schedulerInvariantFailure, .{.faulted_userspace_task_was_already_terminated});
+        // The execution lease retains this slot until finishTaskDispatch has
+        // collected deferred retirement and returned every lifetime callback.
     }
 
     fn enqueueReadyIndex(
@@ -1067,6 +1374,7 @@ pub const Scheduler = struct {
         var index = self.ready_heads[resourceClassIndex(class)];
         while (index != QUEUE_NO_INDEX) : (index = self.slots.slots[index].next_ready_index) {
             const slot = &self.slots.slots[index];
+            if (self.taskHasExecutionLease(slot.task_id)) continue;
             const task = runtime.findByHandle(slot.task_handle, slot.task_id) orelse
                 return .{ .slot_index = index };
             if (task.state != .active or !task.runsAsUserspaceProcess() or
@@ -1086,6 +1394,7 @@ pub const Scheduler = struct {
     }
 
     pub fn hasReadyLatencySensitiveWork(self: *const Scheduler) bool {
+        if (!smp.isRuntimeOwner()) return false;
         for (resource_priority_order) |class| {
             if (!latencySensitiveClass(class)) continue;
             if (!self.resourceClassDispatchable(class)) continue;
@@ -1095,6 +1404,7 @@ pub const Scheduler = struct {
     }
 
     pub fn shouldPreemptTask(self: *const Scheduler, task_id: u64) bool {
+        if (!smp.isRuntimeOwner()) return false;
         const slot = self.slots.getConst(task_id) orelse return false;
         if (latencySensitiveClass(slot.resource_class)) return false;
         return self.hasReadyLatencySensitiveWork();
@@ -1119,6 +1429,7 @@ pub const Scheduler = struct {
 
             const slot = &self.slots.slots[slot_index];
             if (!slot.in_use) continue;
+            if (self.taskHasExecutionLease(slot.task_id)) continue;
             const decision = if (!self.resourceClassDispatchable(class))
                 self.blockedResourceDecision(class)
             else decision: {
@@ -1472,6 +1783,7 @@ pub const Scheduler = struct {
         const slot = &self.slots.slots[slot_index];
         if (!slot.in_use) return false;
         const task_id = slot.task_id;
+        if (self.taskHasExecutionLease(task_id)) return false;
         self.unlinkReadyIndex(slot_index);
         self.removeAcceleratorClaimsForTask(task_id, slot);
         if (self.cold_note.active and self.cold_note.slot_index == slot_index) {
@@ -1487,7 +1799,7 @@ pub const Scheduler = struct {
         // Parked tasks are absent from ready queues; registration pressure must
         // also reclaim their terminal slots and any queued accelerator claims.
         for (&self.slots.slots, 0..) |*slot, index| {
-            if (!slot.in_use or slot.task_id == self.active_dispatch_task_id) continue;
+            if (!slot.in_use or runtime.execution.hasLeaseForTask(slot.task_id) or slot.task_id == self.active_dispatch_task_id) continue;
             const task = runtime.findByHandle(slot.task_handle, slot.task_id);
             if (task == null or task.?.state == .terminated) _ = self.unregisterSlotIndex(index);
         }
@@ -1712,13 +2024,13 @@ pub const Scheduler = struct {
         var current = backing.task_index.head(task_key);
         while (current != arena_no_index) {
             if (current >= backing.claims.slots.len) {
-                native_util.impossibleByInvariant("accelerator claim task index points outside claim slots");
+                @call(.never_inline, schedulerInvariantFailure, .{.accelerator_claim_task_index_points_outside_claim_slots});
             }
             const next = backing.task_index.next(current);
             const claim_slot = &backing.claims.slots[current];
-            if (!claim_slot.in_use) native_util.impossibleByInvariant("accelerator claim task index points at a free slot");
+            if (!claim_slot.in_use) @call(.never_inline, schedulerInvariantFailure, .{.accelerator_claim_task_index_points_at_a_free_slot});
             if (claim_slot.record.task_id != task_id) {
-                native_util.impossibleByInvariant("accelerator claim task index points at the wrong task");
+                @call(.never_inline, schedulerInvariantFailure, .{.accelerator_claim_task_index_points_at_the_wrong_task});
             }
             const record = claim_slot.record;
             self.unlinkAcceleratorClaimIndex(backing, record.engine, current);
@@ -1741,12 +2053,12 @@ pub const Scheduler = struct {
         var current = backing.task_index.head(task_key);
         while (current != arena_no_index) : (current = backing.task_index.next(current)) {
             if (current >= backing.claims.slots.len) {
-                native_util.impossibleByInvariant("accelerator claim task index points outside claim slots");
+                @call(.never_inline, schedulerInvariantFailure, .{.accelerator_claim_task_index_points_outside_claim_slots});
             }
             const slot = &backing.claims.slots[current];
-            if (!slot.in_use) native_util.impossibleByInvariant("accelerator claim task index points at a free slot");
+            if (!slot.in_use) @call(.never_inline, schedulerInvariantFailure, .{.accelerator_claim_task_index_points_at_a_free_slot});
             const record = slot.record;
-            if (record.task_id != task_id) native_util.impossibleByInvariant("accelerator claim task index points at the wrong task");
+            if (record.task_id != task_id) @call(.never_inline, schedulerInvariantFailure, .{.accelerator_claim_task_index_points_at_the_wrong_task});
             if (record.task_id == task_id and record.engine == engine) return record.id;
         }
         return null;
@@ -1762,7 +2074,7 @@ pub const Scheduler = struct {
 
 fn requireRuntimeOwner() void {
     if (!smp.isRuntimeOwner()) {
-        native_util.impossibleByInvariant("userspace scheduler mutation belongs to the runtime owner CPU");
+        @call(.never_inline, schedulerInvariantFailure, .{.userspace_scheduler_mutation_belongs_to_the_runtime_owner_cpu});
     }
 }
 
@@ -1894,6 +2206,14 @@ fn latencySensitiveClass(class: accelerator_scheduler.ResourceClass) bool {
 fn preemptCheck(task_id: u64) bool {
     const scheduler = bound_preempt_scheduler orelse return false;
     return scheduler.shouldPreemptTask(task_id);
+}
+
+fn notifyExecutionStop(context: *anyopaque, ticket: dispatch_ownership.Ticket) void {
+    const scheduler: *Scheduler = @ptrCast(@alignCast(context));
+    const runtime = scheduler.runtime_ptr orelse
+        @call(.never_inline, schedulerInvariantFailure, .{.userspace_executor_ownership_has_no_runtime});
+    if (ticket.issuer != &runtime.execution or !smp.notifyExecutionStop(ticket.cpu))
+        @call(.never_inline, schedulerInvariantFailure, .{.execution_stop_ipi_target_is_not_an_admitted_remote_cpu});
 }
 
 fn engineIndex(engine: accelerator_scheduler.Engine) usize {
@@ -2291,6 +2611,31 @@ test "userspace scheduler refreshes task handles after runtime restore" {
     try std.testing.expect(slot.mapping_handle.isZero());
 }
 
+test "userspace scheduler wake checks the task identity of a live cached handle" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+
+    const task = try createRunnableSchedulerTask(&runtime, 72, .foreground_interactive, "wake-owner", "app.wake-owner", null);
+    const other = try createRunnableSchedulerTask(&runtime, 73, .foreground_interactive, "other-wake-owner", "app.other-wake-owner", null);
+    try std.testing.expect(scheduler.registerTask(task.id));
+    try std.testing.expect(scheduler.registerTask(other.id));
+    const slot = scheduler.slots.get(task.id).?;
+    const original_handle = slot.task_handle;
+    slot.task_handle = runtime.taskHandleForResolved(other);
+    slot.mapping_handle = userspace_executor.MappingHandle.fromParts(3, 9);
+    const other_wakes = scheduler.taskDispatchStats(other.id).?.wake_event_count;
+
+    try std.testing.expect(scheduler.wakeTask(task.id, .external_event, 10, 20));
+    try std.testing.expect(slot.task_handle.eql(original_handle));
+    try std.testing.expect(slot.mapping_handle.isZero());
+    try std.testing.expectEqual(@as(u64, 2), scheduler.taskDispatchStats(task.id).?.wake_event_count);
+    try std.testing.expectEqual(other_wakes, scheduler.taskDispatchStats(other.id).?.wake_event_count);
+}
+
 test "userspace scheduler rejects retired task handles after runtime reset" {
     var executor = userspace_executor.Executor{};
     var scheduler = Scheduler.init(&executor);
@@ -2409,6 +2754,305 @@ test "userspace scheduler parks only explicit event-wait yields" {
     try std.testing.expect(executionRemainsReady(.yielded));
     try std.testing.expect(!executionRemainsReady(.wait_for_event));
     try std.testing.expect(!executionRemainsReady(.faulted));
+}
+
+// Hosted dispatch supplies the outcome in place of native entry. The retained
+// task, mapping handle, running lease and returned acknowledgement are real.
+const EventYieldTestDispatcher = if (builtin.is_test) struct {
+    scheduler: *Scheduler,
+    runtime: *task_runtime.Runtime,
+    action: enum { none, wake, ipc, work } = .none,
+    wake_count: usize = 1,
+    endpoints: ?*endpoint.Table = null,
+    sender_endpoint: ?ids.EndpointId = null,
+    sender_task_id: u64 = 0,
+    outcome: userspace_executor.ExecutionOutcome = .wait_for_event,
+    pending_work: bool = false,
+    processed_work: usize = 0,
+    calls: usize = 0,
+
+    fn executePreparedTask(self: *@This(), task: *const task_runtime.TaskRecord, mapping: *userspace_executor.MappingHandle, now: u64) dispatch_ownership.ReturnRecord {
+        self.execute(task, mapping, now) catch @panic("event yield fixture must preserve exact dispatch ownership");
+        return .{ .outcome = self.outcome };
+    }
+
+    fn execute(self: *@This(), task: *const task_runtime.TaskRecord, mapping: *userspace_executor.MappingHandle, now: u64) !void {
+        const ticket = self.scheduler.active_dispatch_lease.?;
+        const slot = self.scheduler.slots.get(task.id).?;
+        try std.testing.expectEqual(task.id, self.scheduler.active_dispatch_task_id);
+        try std.testing.expectEqual(dispatch_ownership.Phase.reserved, try self.runtime.execution.phase(ticket));
+        try std.testing.expectEqual(@as(u8, 1), self.runtime.task_borrow_counts[task.arena_slot_index]);
+        try std.testing.expect(self.runtime.findByHandle(slot.task_handle, task.id).? == task);
+        try std.testing.expect(mapping == &slot.mapping_handle);
+        try std.testing.expect(mapping.eql(self.scheduler.executor.mappingHandle(task.address_space_id).?));
+        try std.testing.expect(!slot.queued_ready);
+        try self.runtime.execution.bindOwnedRoot(ticket, mapping.value, 0x1000);
+        const bound = try self.runtime.execution.start(ticket);
+        try std.testing.expectEqual(task.id, bound.identity.task_id);
+        try std.testing.expectEqual(mapping.value, bound.mapping_handle);
+        try std.testing.expectError(error.WrongPhase, self.runtime.collectExecution(ticket));
+        switch (self.action) {
+            .none => {},
+            .wake => {
+                for (0..self.wake_count) |_| {
+                    try std.testing.expect(self.scheduler.wakeTask(task.id, .external_event, now, 0));
+                    try std.testing.expect(slot.queued_ready);
+                    try std.testing.expectEqual(@as(usize, 1), self.scheduler.readyQueueDepth(slot.resource_class));
+                }
+            },
+            .ipc => {
+                const table = self.endpoints.?;
+                try std.testing.expect(!table.hasPendingForTask(ids.task(task.id)));
+                const destination = try table.send(self.sender_endpoint.?, ids.task(self.sender_task_id), 91, "after drain", null, false);
+                try std.testing.expectEqual(task.id, destination.raw());
+                try std.testing.expect(table.hasPendingForTask(ids.task(task.id)));
+                // No wake callback exists in this fixture. The final pending
+                // IPC check must recover the arrival after the last drain.
+                try std.testing.expect(!slot.queued_ready);
+            },
+            .work => {
+                try std.testing.expect(self.pending_work);
+                self.pending_work = false;
+                self.processed_work += 1;
+            },
+        }
+        try std.testing.expectEqual(dispatch_ownership.Phase.running, try self.runtime.execution.phase(ticket));
+        try std.testing.expect(self.scheduler.active_dispatch_lease.?.issuer == ticket.issuer);
+        try self.runtime.execution.acknowledgeOwnedRootReturn(ticket);
+        try std.testing.expectEqual(dispatch_ownership.Phase.returned, try self.runtime.execution.phase(ticket));
+        try std.testing.expectEqual(@as(u8, 1), self.runtime.task_borrow_counts[task.arena_slot_index]);
+        self.calls += 1;
+    }
+} else struct {};
+
+fn installEventYieldTestMapping(scheduler: *Scheduler, task: *const task_runtime.TaskRecord) !userspace_executor.MappingHandle {
+    if (!builtin.is_test) @compileError("event yield mappings are test-only");
+    const mappings = &scheduler.executor.mappings;
+    const index = mappings.reserveIndex(task.address_space_id) orelse return error.UnavailableMappingSlot;
+    mappings.slotAt(index).mapping = .{
+        .state = .live,
+        .address_space_id = task.address_space_id,
+        .dispatch_metadata = .{ .owner_task_id = task.id },
+        .resume_valid = true,
+        .user_context64 = .{ .instruction_pointer = 0x1234, .stack_pointer = 0x5678 },
+    };
+    const handle = mappings.handleForIndex(index).?;
+    scheduler.slots.get(task.id).?.mapping_handle = handle;
+    return handle;
+}
+
+test "voluntary event yield parks without a wait syscall and retains task and cached mapping" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    defer runtime.reset();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    defer scheduler.deinit();
+    const task = try createRunnableSchedulerTaskWithBudget(&runtime, 701, .foreground_interactive, "event", "app.event", null, DISPATCH_CPU_TICK_COST * 4);
+    const unrelated = try createRunnableSchedulerTask(&runtime, 702, .background_light, "other", "app.other", null);
+    try runtime.grantCapability(task.id, 77);
+    try std.testing.expect(scheduler.registerTask(task.id));
+    try std.testing.expect(scheduler.registerTask(unrelated.id));
+    try std.testing.expect(scheduler.parkTaskUntilEvent(unrelated.id));
+    const slot = scheduler.slots.get(task.id).?;
+    const task_handle = slot.task_handle;
+    const mapping_handle = try installEventYieldTestMapping(&scheduler, task);
+    const mapping_before = executor.mappings.getByHandle(mapping_handle).?.mapping;
+    const address_space = runtime.findAddressSpaceConst(task.address_space_id).?;
+    const task_generation = task.capabilityGeneration();
+    const capability_generation = capabilities.mutationGeneration();
+    const unrelated_slot = scheduler.slots.get(unrelated.id).?.*;
+    const unrelated_accounting = scheduler.taskDispatchAccounting(unrelated.id).?.*;
+    var dispatcher = EventYieldTestDispatcher{ .scheduler = &scheduler, .runtime = &runtime };
+    try std.testing.expect(scheduler.runNextWithDispatch(10, &dispatcher));
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.calls);
+    try std.testing.expect(!scheduler.hasReadyTasks());
+    try std.testing.expect(!runtime.execution.hasLeases());
+    try std.testing.expect(scheduler.active_dispatch_lease == null);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.active_dispatch_task_id);
+    try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
+    try std.testing.expectEqual(task_runtime.TaskState.active, task.state);
+    try std.testing.expect(runtime.findByHandle(task_handle, task.id).? == task);
+    try std.testing.expect(runtime.findAddressSpaceConst(task.address_space_id).? == address_space);
+    try std.testing.expect(slot.mapping_handle.eql(mapping_handle));
+    try std.testing.expectEqualDeep(mapping_before, executor.mappings.getByHandle(mapping_handle).?.mapping);
+    try std.testing.expectEqual(@as(usize, 1), executor.materializedCount());
+    try std.testing.expectEqual(@as(u16, 1), task.capability_count);
+    try std.testing.expectEqual(@as(u64, 77), task.capabilityIds()[0]);
+    try std.testing.expectEqual(task_generation, task.capabilityGeneration());
+    try std.testing.expectEqual(capability_generation, capabilities.mutationGeneration());
+    try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchAccounting(task.id).?.event_wait_count);
+    try std.testing.expectEqual(DISPATCH_CPU_TICK_COST * 3, slot.cpu_budget_remaining_ticks);
+
+    // A later activation restores its configured budget exactly once; further
+    // wakes coalesce even after that activation has consumed some credit.
+    for (0..8) |_| try std.testing.expect(scheduler.wakeTask(task.id, .external_event, 11, 0));
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.foreground_interactive));
+    try std.testing.expectEqual(DISPATCH_CPU_TICK_COST * 4, slot.cpu_budget_remaining_ticks);
+    slot.cpu_budget_remaining_ticks = DISPATCH_CPU_TICK_COST * 2;
+    for (0..8) |_| try std.testing.expect(scheduler.wakeTask(task.id, .external_event, 12, 0));
+    try std.testing.expectEqual(DISPATCH_CPU_TICK_COST * 2, slot.cpu_budget_remaining_ticks);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.foreground_interactive));
+    try std.testing.expect(scheduler.runNextWithDispatch(13, &dispatcher));
+    try std.testing.expect(!scheduler.hasReadyTasks());
+    try std.testing.expectEqual(DISPATCH_CPU_TICK_COST, slot.cpu_budget_remaining_ticks);
+    try std.testing.expectEqual(@as(u64, 2), scheduler.taskDispatchAccounting(task.id).?.event_wait_count);
+    try std.testing.expectEqualDeep(unrelated_slot, scheduler.slots.get(unrelated.id).?.*);
+    try std.testing.expectEqualDeep(unrelated_accounting, scheduler.taskDispatchAccounting(unrelated.id).?.*);
+    try std.testing.expectEqualDeep(mapping_before, executor.mappings.getByHandle(mapping_handle).?.mapping);
+}
+
+test "voluntary event yield preserves wakes during exact leased dispatch without duplicate budget" {
+    for ([_]usize{ 1, 8 }) |wake_count| {
+        var executor = userspace_executor.Executor{};
+        var scheduler = Scheduler.init(&executor);
+        var catalog = userspace_loader.Catalog.init();
+        var runtime = task_runtime.Runtime.init();
+        var capabilities = capability.CapabilityTable.init();
+        defer runtime.reset();
+        scheduler.bind(&catalog, &runtime, &capabilities);
+        defer scheduler.deinit();
+        const task = try createRunnableSchedulerTaskWithBudget(&runtime, 703, .foreground_interactive, "woken", "app.woken", null, DISPATCH_CPU_TICK_COST * 4);
+        const unrelated = try createRunnableSchedulerTask(&runtime, 704, .batch_compute, "other", "app.other", null);
+        try std.testing.expect(scheduler.registerTask(task.id));
+        try std.testing.expect(scheduler.registerTask(unrelated.id));
+        try std.testing.expect(scheduler.parkTaskUntilEvent(unrelated.id));
+        const unrelated_slot = scheduler.slots.get(unrelated.id).?.*;
+        const unrelated_accounting = scheduler.taskDispatchAccounting(unrelated.id).?.*;
+        const slot = scheduler.slots.get(task.id).?;
+        const task_handle = slot.task_handle;
+        const mapping_handle = try installEventYieldTestMapping(&scheduler, task);
+        const initial_wakes = scheduler.taskDispatchAccounting(task.id).?.wake_event_count;
+        slot.cpu_budget_remaining_ticks = DISPATCH_CPU_TICK_COST * 2;
+        var dispatcher = EventYieldTestDispatcher{ .scheduler = &scheduler, .runtime = &runtime, .action = .wake, .wake_count = wake_count };
+        try std.testing.expect(scheduler.runNextWithDispatch(20, &dispatcher));
+        try std.testing.expectEqual(@as(usize, 1), dispatcher.calls);
+        try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.foreground_interactive));
+        try std.testing.expect(slot.queued_ready and slot.task_handle.eql(task_handle) and slot.mapping_handle.eql(mapping_handle));
+        try std.testing.expectEqual(DISPATCH_CPU_TICK_COST * 3, slot.cpu_budget_remaining_ticks);
+        try std.testing.expectEqual(initial_wakes + wake_count, scheduler.taskDispatchAccounting(task.id).?.wake_event_count);
+        try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchAccounting(task.id).?.event_wait_count);
+        try std.testing.expect(!runtime.execution.hasLeases());
+        try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
+        dispatcher.action = .none;
+        try std.testing.expect(scheduler.runNextWithDispatch(21, &dispatcher));
+        try std.testing.expect(!scheduler.hasReadyTasks());
+        try std.testing.expectEqual(DISPATCH_CPU_TICK_COST * 2, slot.cpu_budget_remaining_ticks);
+        try std.testing.expectEqual(@as(u64, 2), slot.dispatch_count);
+        try std.testing.expectEqualDeep(unrelated_slot, scheduler.slots.get(unrelated.id).?.*);
+        try std.testing.expectEqualDeep(unrelated_accounting, scheduler.taskDispatchAccounting(unrelated.id).?.*);
+    }
+}
+
+test "voluntary event yield requeues actual IPC arriving after drain without a wake callback" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    var endpoints = endpoint.Table.init();
+    defer endpoints.deinit();
+    defer runtime.reset();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    defer scheduler.deinit();
+    scheduler.bindEndpointTable(&endpoints);
+    const receiver = try createRunnableSchedulerTaskWithBudget(&runtime, 705, .foreground_interactive, "receiver", "app.receiver", null, DISPATCH_CPU_TICK_COST * 4);
+    const sender = try createRunnableSchedulerTask(&runtime, 706, .background_light, "sender", "app.sender", null);
+    const receiver_endpoint = try endpoints.create(ids.task(receiver.id), "receiver", .{ .local_only = true });
+    const sender_endpoint = try endpoints.create(ids.task(sender.id), "sender", .{ .local_only = true });
+    try endpoints.connect(sender_endpoint.id, receiver_endpoint.id);
+    try std.testing.expect(scheduler.registerTask(receiver.id));
+    const mapping_handle = try installEventYieldTestMapping(&scheduler, receiver);
+    const capability_generation = capabilities.mutationGeneration();
+    const initial_wakes = scheduler.taskDispatchAccounting(receiver.id).?.wake_event_count;
+    var dispatcher = EventYieldTestDispatcher{
+        .scheduler = &scheduler,
+        .runtime = &runtime,
+        .action = .ipc,
+        .endpoints = &endpoints,
+        .sender_endpoint = sender_endpoint.id,
+        .sender_task_id = sender.id,
+    };
+    try std.testing.expect(scheduler.runNextWithDispatch(30, &dispatcher));
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.foreground_interactive));
+    try std.testing.expect(endpoints.hasPendingForTask(ids.task(receiver.id)));
+    try std.testing.expectEqual(initial_wakes, scheduler.taskDispatchAccounting(receiver.id).?.wake_event_count);
+    try std.testing.expect(!runtime.execution.hasLeases());
+    dispatcher.action = .none;
+    try std.testing.expect(scheduler.runNextWithDispatch(31, &dispatcher));
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.foreground_interactive));
+    var payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try endpoints.recvInto(receiver_endpoint.id, &payload)).?;
+    try std.testing.expectEqual(@as(u64, 91), received.correlation_id);
+    try std.testing.expectEqualStrings("after drain", payload[0..received.len]);
+    try std.testing.expect(!endpoints.hasPendingForTask(ids.task(receiver.id)));
+    try std.testing.expect(scheduler.runNextWithDispatch(32, &dispatcher));
+    try std.testing.expect(!scheduler.hasReadyTasks());
+    try std.testing.expectEqual(@as(usize, 3), dispatcher.calls);
+    try std.testing.expectEqual(@as(u64, 3), scheduler.taskDispatchAccounting(receiver.id).?.event_wait_count);
+    try std.testing.expectEqual(initial_wakes, scheduler.taskDispatchAccounting(receiver.id).?.wake_event_count);
+    try std.testing.expectEqual(capability_generation, capabilities.mutationGeneration());
+    try std.testing.expect(scheduler.slots.get(receiver.id).?.mapping_handle.eql(mapping_handle));
+    try std.testing.expect(!runtime.execution.hasLeases());
+    try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[receiver.arena_slot_index]);
+}
+
+test "voluntary event yield preserves interrupted continuation work within one activation credit" {
+    for ([_]usize{ 1, 8 }) |wake_count| {
+        var executor = userspace_executor.Executor{};
+        var scheduler = Scheduler.init(&executor);
+        var catalog = userspace_loader.Catalog.init();
+        var runtime = task_runtime.Runtime.init();
+        var capabilities = capability.CapabilityTable.init();
+        defer runtime.reset();
+        scheduler.bind(&catalog, &runtime, &capabilities);
+        defer scheduler.deinit();
+        const task = try createRunnableSchedulerTask(&runtime, 707, .foreground_interactive, "interrupted", "app.interrupted", null);
+        const unrelated = try createRunnableSchedulerTask(&runtime, 708, .background_light, "other", "app.other", null);
+        try std.testing.expect(scheduler.registerTask(task.id));
+        try std.testing.expect(scheduler.registerTask(unrelated.id));
+        try std.testing.expect(scheduler.parkTaskUntilEvent(unrelated.id));
+        const unrelated_slot = scheduler.slots.get(unrelated.id).?.*;
+        const unrelated_accounting = scheduler.taskDispatchAccounting(unrelated.id).?.*;
+        const slot = scheduler.slots.get(task.id).?;
+        const task_handle = slot.task_handle;
+        const mapping_handle = try installEventYieldTestMapping(&scheduler, task);
+        const mapping_before = executor.mappings.getByHandle(mapping_handle).?.mapping;
+        const initial_wakes = scheduler.taskDispatchAccounting(task.id).?.wake_event_count;
+        // Executor's actual IRQ/yield tests verify the stale wait returns to the
+        // fresh user loop in place, within the same quantum and running lease.
+        // This companion supplies only the final outcomes and a work callback;
+        // it exercises real Scheduler queues, credits and Runtime collection.
+        var dispatcher = EventYieldTestDispatcher{ .scheduler = &scheduler, .runtime = &runtime, .outcome = .yielded };
+        try std.testing.expect(scheduler.runNextWithDispatch(40, &dispatcher));
+        try std.testing.expect(!runtime.execution.hasLeases());
+        try std.testing.expect(!scheduler.hasReadyTasks());
+        try std.testing.expectEqual(@as(u64, 0), slot.cpu_budget_remaining_ticks);
+        dispatcher.pending_work = true;
+        for (0..wake_count) |_| try std.testing.expect(scheduler.wakeTask(task.id, .external_event, 41, 0));
+        try std.testing.expectEqual(DISPATCH_CPU_TICK_COST, slot.cpu_budget_remaining_ticks);
+        try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.foreground_interactive));
+        try std.testing.expectEqual(@as(u64, 0), scheduler.taskDispatchAccounting(task.id).?.event_wait_count);
+        dispatcher.action = .work;
+        dispatcher.outcome = .wait_for_event;
+        try std.testing.expect(scheduler.runNextWithDispatch(42, &dispatcher));
+        try std.testing.expect(!dispatcher.pending_work);
+        try std.testing.expectEqual(@as(usize, 1), dispatcher.processed_work);
+        try std.testing.expect(!scheduler.hasReadyTasks());
+        try std.testing.expectEqual(@as(usize, 2), dispatcher.calls);
+        try std.testing.expectEqual(@as(u64, 2), slot.dispatch_count);
+        try std.testing.expectEqual(@as(u64, 0), slot.cpu_budget_remaining_ticks);
+        try std.testing.expectEqual(initial_wakes + wake_count, scheduler.taskDispatchAccounting(task.id).?.wake_event_count);
+        try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchAccounting(task.id).?.event_wait_count);
+        try std.testing.expect(!runtime.execution.hasLeases());
+        try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
+        try std.testing.expect(slot.task_handle.eql(task_handle) and slot.mapping_handle.eql(mapping_handle));
+        try std.testing.expectEqualDeep(mapping_before, executor.mappings.getByHandle(mapping_handle).?.mapping);
+        try std.testing.expectEqualDeep(unrelated_slot, scheduler.slots.get(unrelated.id).?.*);
+        try std.testing.expectEqualDeep(unrelated_accounting, scheduler.taskDispatchAccounting(unrelated.id).?.*);
+    }
 }
 
 test "userspace scheduler dispatches resource ready queues by priority" {
@@ -4135,7 +4779,7 @@ test "task reclamation scheduler dispatch callbacks preserve slot through reentr
         task_ids: *const [task_runtime.MAX_TASKS]u64,
         calls: usize = 0,
 
-        fn executePreparedTask(self: *@This(), task: *const task_runtime.TaskRecord, mapping_handle: *userspace_executor.MappingHandle, _: u64) userspace_executor.ExecutionOutcome {
+        fn executePreparedTask(self: *@This(), task: *const task_runtime.TaskRecord, mapping_handle: *userspace_executor.MappingHandle, _: u64) dispatch_ownership.ReturnRecord {
             const task_id = task.id;
             const task_handle = self.runtime.taskHandleForResolved(task);
             const slot = self.scheduler.slots.get(task_id).?;
@@ -4156,7 +4800,7 @@ test "task reclamation scheduler dispatch callbacks preserve slot through reentr
                 if (!(self.runtime.findByHandle(task_handle, task_id).? == task)) @panic("task reclamation fixture invariant failed");
             }
             self.calls += 1;
-            return .yielded;
+            return .{ .outcome = .yielded };
         }
     };
     for ([_]bool{ false, true }) |direct| {
@@ -4178,7 +4822,7 @@ test "task reclamation scheduler dispatch callbacks preserve slot through reentr
         const handle = runtime.taskHandleForResolved(task);
         var dispatcher = Dispatcher{ .scheduler = &scheduler, .runtime = &runtime, .task_ids = &task_ids };
         if (direct) {
-            try std.testing.expectEqual(userspace_executor.ExecutionOutcome.yielded, scheduler.executeTaskWithDispatch(task_ids[0], 1, &dispatcher));
+            try std.testing.expectEqual(userspace_executor.ExecutionOutcome.yielded, scheduler.executeTaskWithDispatch(task_ids[0], 1, &dispatcher).outcome);
         } else {
             try std.testing.expect(scheduler.runNextWithDispatch(1, &dispatcher));
         }
@@ -4194,7 +4838,7 @@ test "userspace quantum bounds every class and direct unregistered dispatch thro
     const Dispatcher = struct {
         scheduler: *Scheduler,
         calls: usize = 0,
-        fn executePreparedTask(self: *@This(), task: *const task_runtime.TaskRecord, _: *userspace_executor.MappingHandle, now: u64) userspace_executor.ExecutionOutcome {
+        fn executePreparedTask(self: *@This(), task: *const task_runtime.TaskRecord, _: *userspace_executor.MappingHandle, now: u64) dispatch_ownership.ReturnRecord {
             const quantum = userspace_executor.DispatchQuantum.begin(task.id, now);
             if (quantum.expired(task.id, now + userspace_executor.DISPATCH_QUANTUM_TICKS - 1))
                 @panic("dispatch quantum must preserve its bounded interval");
@@ -4203,7 +4847,7 @@ test "userspace quantum bounds every class and direct unregistered dispatch thro
             if (self.scheduler.shouldPreemptTask(task.id))
                 @panic("a solitary task has no earlier priority preemption");
             self.calls += 1;
-            return .yielded;
+            return .{ .outcome = .yielded };
         }
     };
     for (resource_priority_order) |class| {
@@ -4219,7 +4863,7 @@ test "userspace quantum bounds every class and direct unregistered dispatch thro
             const task = try createRunnableSchedulerTask(&runtime, 1, class, "bounded", "app.bounded", null);
             var dispatcher = Dispatcher{ .scheduler = &scheduler };
             if (direct) {
-                try std.testing.expectEqual(userspace_executor.ExecutionOutcome.yielded, scheduler.executeTaskWithDispatch(task.id, 100, &dispatcher));
+                try std.testing.expectEqual(userspace_executor.ExecutionOutcome.yielded, scheduler.executeTaskWithDispatch(task.id, 100, &dispatcher).outcome);
                 try std.testing.expect(scheduler.slots.get(task.id) == null);
             } else {
                 try std.testing.expect(scheduler.registerTask(task.id));
@@ -4229,4 +4873,638 @@ test "userspace quantum bounds every class and direct unregistered dispatch thro
             try std.testing.expectEqual(@as(u64, 0), scheduler.active_dispatch_task_id);
         }
     }
+}
+
+test "scheduler production runtime sink binding rolls back exact ownership before publication" {
+    const cpu_identity = @import("../../kernel/cpu_identity.zig");
+    const shared_memory = @import("../kernel_api/shared_memory.zig");
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    const runtime = try std.testing.allocator.create(task_runtime.Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.* = .{};
+    var executor = userspace_executor.Executor{};
+    var foreign_executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var foreign = Scheduler.init(&foreign_executor);
+    const ForeignLifetime = struct {
+        fn register(_: *anyopaque, _: *shared_memory.Table, _: shared_memory.FreestandingMappingDescriptor, _: bool, _: bool) ?u64 {
+            return null;
+        }
+        fn unregister(_: *anyopaque, _: *shared_memory.Table, _: u64, _: shared_memory.FreestandingMappingDescriptor) bool {
+            return false;
+        }
+    };
+    const foreign_lifetime = shared_memory.MappingLifetime{ .context = &foreign, .register = ForeignLifetime.register, .unregister = ForeignLifetime.unregister };
+    try std.testing.expect(shared_memory.bindMappedObjectLifetime(foreign_lifetime));
+    try std.testing.expect(!scheduler.claimRuntimeOwnership(runtime, true));
+    try std.testing.expect(executor.binding_owner == null and executor.bound_runtime == null and executor.registration_cpu == null);
+    try std.testing.expect(runtime.address_space_retirement_sink == null and runtime.execution_stop_sink == null);
+    try std.testing.expect(shared_memory.mappedObjectLifetimeIsBound(foreign_lifetime));
+    try std.testing.expect(shared_memory.unbindMappedObjectLifetime(foreign_lifetime));
+    try std.testing.expect(runtime.bindExecutionStopSink(foreign.executionStopSink()));
+    // The same production claim path releases only the ownership it acquired;
+    // an existing unrelated stop sink survives the failed address-sink claim.
+    try std.testing.expect(!scheduler.claimRuntimeOwnership(runtime, true));
+    try std.testing.expect(executor.binding_owner == null and executor.bound_runtime == null);
+    try std.testing.expect(!scheduler.executor_binding_claimed and !scheduler.initialized);
+    try std.testing.expect(runtime.address_space_retirement_sink == null);
+    try std.testing.expect(runtime.execution_stop_sink.?.eql(foreign.executionStopSink()));
+    try std.testing.expect(runtime.unbindExecutionStopSink(foreign.executionStopSink()));
+    try std.testing.expect(scheduler.claimRuntimeOwnership(runtime, true));
+    const address_sink = runtime.address_space_retirement_sink.?;
+    const stop_sink = runtime.execution_stop_sink.?;
+    try std.testing.expect(address_sink.eql(scheduler.addressSpaceRetirementSink()));
+    try std.testing.expect(address_sink.context == @as(*anyopaque, &scheduler));
+    try std.testing.expect(executor.mappedObjectLifetimeIsBound());
+    try std.testing.expect(!foreign.unbindRuntimeSinks(runtime));
+    try std.testing.expect(!scheduler.claimRuntimeOwnership(runtime, true));
+    try std.testing.expect(runtime.address_space_retirement_sink.?.eql(address_sink));
+    try std.testing.expect(runtime.execution_stop_sink.?.eql(stop_sink));
+    try std.testing.expect(executor.binding_owner == @as(*const anyopaque, &scheduler) and executor.bound_runtime == runtime);
+    executor.binding_owner = &foreign;
+    try std.testing.expect(!scheduler.unbindRuntimeSinks(runtime));
+    try std.testing.expect(executor.mappedObjectLifetimeIsBound());
+    try std.testing.expect(runtime.address_space_retirement_sink.?.eql(address_sink));
+    try std.testing.expect(runtime.execution_stop_sink.?.eql(stop_sink));
+    executor.binding_owner = &scheduler;
+    executor.bound_runtime = null;
+    try std.testing.expect(!scheduler.unbindRuntimeSinks(runtime));
+    try std.testing.expect(executor.mappedObjectLifetimeIsBound());
+    executor.bound_runtime = runtime;
+    const ticket = try runtime.execution.prepare(1, .{ .task_handle = 1, .task_id = 7, .process_generation = 1, .address_space_id = 42 });
+    try std.testing.expect(!scheduler.unbindRuntimeSinks(runtime));
+    try std.testing.expect(!foreign.claimRuntimeOwnership(runtime, true));
+    try std.testing.expect(foreign_executor.binding_owner == null and foreign_executor.bound_runtime == null);
+    try std.testing.expect(runtime.address_space_retirement_sink.?.eql(address_sink));
+    try std.testing.expect(runtime.execution_stop_sink.?.eql(stop_sink));
+    try runtime.execution.cancelUnstarted(ticket);
+    _ = try runtime.execution.beginCollect(ticket);
+    try runtime.execution.finishCollect(ticket);
+    runtime.lifecycle_transition_active = true;
+    try std.testing.expect(!scheduler.unbindRuntimeSinks(runtime));
+    try std.testing.expect(runtime.address_space_retirement_sink.?.eql(address_sink));
+    try std.testing.expect(runtime.execution_stop_sink.?.eql(stop_sink));
+    runtime.lifecycle_transition_active = false;
+    try std.testing.expect(scheduler.unbindRuntimeSinks(runtime));
+    try std.testing.expect(runtime.address_space_retirement_sink == null and runtime.execution_stop_sink == null);
+    try std.testing.expect(!executor.mappedObjectLifetimeIsBound());
+    try std.testing.expect(executor.releaseMappingRegistration(0, &scheduler, runtime));
+    try std.testing.expect(executor.releaseRuntimeBinding(&scheduler, runtime));
+    scheduler.executor_binding_claimed = false;
+}
+
+test "scheduler retirement domain isolates all CPU arenas and preflights complete teardown" {
+    const cpu_identity = @import("../../kernel/cpu_identity.zig");
+    const native_entry = @import("../../arch/x86_64/native_entry_state.zig");
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    const runtime = try std.testing.allocator.create(task_runtime.Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.* = .{};
+    const foreign_runtime = try std.testing.allocator.create(task_runtime.Runtime);
+    defer std.testing.allocator.destroy(foreign_runtime);
+    foreign_runtime.* = .{};
+    const executors = try std.testing.allocator.alloc(userspace_executor.Executor, cpu_identity.MAX_CPUS);
+    defer std.testing.allocator.free(executors);
+    for (executors) |*executor| executor.* = .{};
+    var scheduler = Scheduler.init(&executors[0]);
+    var foreign = Scheduler.init(&executors[14]);
+    try std.testing.expect(scheduler.claimRuntimeOwnership(runtime, true));
+    scheduler.runtime_ptr = runtime;
+    scheduler.initialized = true;
+    var domain_active = true;
+    defer if (domain_active) scheduler.deinit();
+    for (1..executors.len) |index| {
+        const owner: *const anyopaque = if (index == 14) &foreign else &scheduler;
+        const selected_runtime = if (index == 15) foreign_runtime else runtime;
+        try std.testing.expect(executors[index].claimRuntimeBinding(owner, selected_runtime));
+        try std.testing.expect(executors[index].claimMappingRegistration(@intCast(index), owner, selected_runtime));
+    }
+    defer {
+        if (!userspace_executor.releaseRegisteredDomain(&foreign, runtime) or
+            !userspace_executor.releaseRegisteredDomain(&scheduler, foreign_runtime)) @panic("foreign test domains release their own backing");
+    }
+    const MappingFixture = struct {
+        fn install(executor: *userspace_executor.Executor, address_space_id: u64) !void {
+            const index = executor.mappings.reserveIndexAt(address_space_id, 0) orelse return error.UnavailableMappingSlot;
+            executor.mappings.slotAt(index).mapping = .{
+                .state = .live,
+                .address_space_id = address_space_id,
+                .dispatch_metadata = .{ .owner_task_id = address_space_id + 1 },
+            };
+        }
+    };
+    for (executors) |*executor| try MappingFixture.install(executor, 777);
+    var previous_states: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+    var canaries: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+    for (&previous_states, &canaries, 0..) |*previous, *canary, index| {
+        const state = native_entry.stateForCpu(@intCast(index));
+        previous.* = state.*;
+        state.userspace_xstate = 0x1000 + index;
+        state.kernel_xstate = 0x2000 + index;
+        state.resume_rsp = 0x3000 + index;
+        state.resume_rip = 0x4000 + index;
+        state.resume_requested = @intCast(index + 1);
+        canary.* = state.*;
+    }
+    defer {
+        for (previous_states, 0..) |state, index| native_entry.stateForCpu(@intCast(index)).* = state;
+    }
+    const ticket = try runtime.execution.prepare(13, .{ .task_handle = 1, .task_id = 2, .process_generation = 1, .address_space_id = 777 });
+    try std.testing.expect(!userspace_executor.releaseRegisteredDomain(&scheduler, runtime));
+    for (executors) |*executor| try std.testing.expectEqual(@as(usize, 1), executor.materializedCount());
+    try std.testing.expect(executors[0].mappedObjectLifetimeIsBound());
+    try runtime.execution.cancelUnstarted(ticket);
+    _ = try runtime.execution.beginCollect(ticket);
+    try runtime.execution.finishCollect(ticket);
+    // Equal ASIDs and slot handles in unrelated bindings are intentional. Only
+    // the exact Scheduler and Runtime pair may receive this callback.
+    scheduler.addressSpaceRetirementSink().notify(.{ .address_space_id = 777, .reason = .terminate });
+    for (executors, 0..) |*executor, index| {
+        try std.testing.expectEqual(@as(usize, if (index < 14) 0 else 1), executor.materializedCount());
+        try std.testing.expectEqualDeep(canaries[index], native_entry.stateForCpu(@intCast(index)).*);
+    }
+    try MappingFixture.install(&executors[13], 888);
+    scheduler.deinit();
+    domain_active = false;
+    try std.testing.expect(runtime.address_space_retirement_sink == null and runtime.execution_stop_sink == null);
+    for (executors, 0..) |*executor, index| {
+        if (index < 14) {
+            try std.testing.expectEqual(@as(usize, 0), executor.materializedCount());
+            try std.testing.expect(executor.registration_cpu == null and executor.binding_owner == null and executor.bound_runtime == null);
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), executor.materializedCount());
+            try std.testing.expectEqual(@as(u8, @intCast(index)), executor.registration_cpu.?);
+        }
+        if (index != 0) try std.testing.expectEqualDeep(canaries[index], native_entry.stateForCpu(@intCast(index)).*);
+    }
+}
+
+test "scheduler execution leases protect all CPU task slots across scheduler owners" {
+    const Dispatcher = struct {
+        calls: usize = 0,
+        fn executePreparedTask(self: *@This(), _: *const task_runtime.TaskRecord, _: *userspace_executor.MappingHandle, _: u64) dispatch_ownership.ReturnRecord {
+            self.calls += 1;
+            return .{ .outcome = .yielded };
+        }
+    };
+    const previous_cpu = smp.currentCpuIndex();
+    defer smp.setCurrentCpuIndexForTest(previous_cpu);
+    smp.setCurrentCpuIndexForTest(0);
+    var executor = userspace_executor.Executor{};
+    var peer_executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var peer = Scheduler.init(&peer_executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    defer runtime.reset();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    defer scheduler.deinit();
+    peer.bind(&catalog, &runtime, &capabilities);
+    defer peer.deinit();
+    var tickets: [dispatch_ownership.CAPACITY]dispatch_ownership.Ticket = undefined;
+    var reserved_count: usize = 0;
+    defer for (tickets[0..reserved_count]) |ticket| {
+        if ((runtime.execution.phase(ticket) catch continue) != .idle) {
+            runtime.cancelUnstartedExecution(ticket) catch {};
+            runtime.collectExecution(ticket) catch {};
+        }
+    };
+    var task_ids: [dispatch_ownership.CAPACITY]u64 = undefined;
+    var before_slots: [dispatch_ownership.CAPACITY]Slot = undefined;
+    var before_accounting: [dispatch_ownership.CAPACITY]DispatchAccounting = undefined;
+    for (&tickets, &task_ids, 0..) |*ticket, *task_id, index| {
+        const task = try createRunnableSchedulerTask(&runtime, index + 1, .background_light, "leased", "app.leased", null);
+        task_id.* = task.id;
+        try std.testing.expect(scheduler.registerTask(task.id));
+        try std.testing.expect(peer.registerTask(task.id));
+        ticket.* = try runtime.reserveExecution(task, @intCast(index));
+        reserved_count += 1;
+    }
+    for (task_ids, &before_slots, &before_accounting) |task_id, *slot_snapshot, *accounting_snapshot| {
+        slot_snapshot.* = scheduler.slots.get(task_id).?.*;
+        accounting_snapshot.* = scheduler.taskDispatchAccounting(task_id).?.*;
+    }
+    // A policy-blocked class must not flush a note or remove a remotely leased
+    // activation merely because selection cannot dispatch it.
+    scheduler.configureResourceState(.{ .thermal_pressure = .critical });
+    const resource_before = scheduler.resource_state;
+    var dispatcher = Dispatcher{};
+    try std.testing.expect(!scheduler.runNextWithDispatch(10, &dispatcher));
+    try std.testing.expect(!peer.runNextWithDispatch(10, &dispatcher));
+    for (tickets, task_ids, before_slots, before_accounting) |ticket, task_id, slot_snapshot, accounting_snapshot| {
+        const task = runtime.find(task_id).?;
+        try std.testing.expect(!scheduler.registerTask(task_id));
+        try std.testing.expect(!peer.registerTask(task_id));
+        try std.testing.expect(!scheduler.unregisterTask(task_id));
+        try std.testing.expect(!peer.unregisterTask(task_id));
+        try std.testing.expect(!scheduler.unregisterSlotIndex(scheduler.slots.slotIndexOf(task_id).?));
+        try std.testing.expect(!peer.unregisterSlotIndex(peer.slots.slotIndexOf(task_id).?));
+        try std.testing.expectEqual(userspace_executor.ExecutionOutcome.unavailable, scheduler.executeTaskWithDispatch(task_id, 11, &dispatcher).outcome);
+        try std.testing.expectEqual(userspace_executor.ExecutionOutcome.unavailable, peer.executeTaskWithDispatch(task_id, 11, &dispatcher).outcome);
+        try std.testing.expectEqual(@as(u8, 1), runtime.task_borrow_counts[task.arena_slot_index]);
+        try std.testing.expectEqualDeep(slot_snapshot, scheduler.slots.get(task_id).?.*);
+        try std.testing.expectEqualDeep(accounting_snapshot, scheduler.taskDispatchAccounting(task_id).?.*);
+        try std.testing.expectEqual(ticket.epoch, runtime.execution.taskTicket(task_id).?.epoch);
+    }
+    try std.testing.expectEqual(@as(usize, 0), dispatcher.calls);
+    try std.testing.expectEqualDeep(resource_before, scheduler.resource_state);
+    try std.testing.expectEqual(@as(usize, dispatch_ownership.CAPACITY), scheduler.readyQueueDepth(.background_light));
+    for (tickets) |ticket| {
+        try runtime.cancelUnstartedExecution(ticket);
+        try runtime.collectExecution(ticket);
+    }
+    scheduler.configureResourceState(.{});
+    try std.testing.expect(scheduler.runNextWithDispatch(12, &dispatcher));
+    try std.testing.expectEqual(@as(usize, 1), dispatcher.calls);
+    try std.testing.expect(!runtime.execution.hasLeases());
+    try std.testing.expect(scheduler.active_dispatch_lease == null);
+}
+
+test "scheduler execution reservation failure preserves exact ready queue and accounting" {
+    const Dispatcher = struct {
+        fn executePreparedTask(_: @This(), _: *const task_runtime.TaskRecord, _: *userspace_executor.MappingHandle, _: u64) dispatch_ownership.ReturnRecord {
+            @panic("a busy execution CPU must not reach dispatch");
+        }
+    };
+    const previous_cpu = smp.currentCpuIndex();
+    defer smp.setCurrentCpuIndexForTest(previous_cpu);
+    smp.setCurrentCpuIndexForTest(0);
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    defer runtime.reset();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    defer scheduler.deinit();
+    const first = try createRunnableSchedulerTask(&runtime, 1, .foreground_interactive, "first", "app.first", null);
+    const second = try createRunnableSchedulerTask(&runtime, 2, .foreground_interactive, "second", "app.second", null);
+    const occupied = try createRunnableSchedulerTask(&runtime, 3, .background_light, "occupied", "app.occupied", null);
+    try std.testing.expect(scheduler.registerTask(first.id));
+    try std.testing.expect(scheduler.registerTask(second.id));
+    const ticket = try runtime.reserveExecution(occupied, 0);
+    defer if (runtime.execution.hasLeases()) {
+        runtime.cancelUnstartedExecution(ticket) catch {};
+        runtime.collectExecution(ticket) catch {};
+    };
+    const slots_before = scheduler.slots.slots;
+    const accounting_before = scheduler.accountingStorage().*;
+    const heads_before = scheduler.ready_heads;
+    const tails_before = scheduler.ready_tails;
+    const counts_before = scheduler.ready_counts;
+    const resource_before = scheduler.resource_state;
+    const note_before = scheduler.cold_note;
+    try std.testing.expect(!scheduler.runNextWithDispatch(20, Dispatcher{}));
+    try std.testing.expectEqual(userspace_executor.ExecutionOutcome.unavailable, scheduler.executeTaskWithDispatch(first.id, 20, Dispatcher{}).outcome);
+    try std.testing.expectEqualDeep(slots_before, scheduler.slots.slots);
+    try std.testing.expectEqualDeep(accounting_before, scheduler.accountingStorage().*);
+    try std.testing.expectEqual(heads_before, scheduler.ready_heads);
+    try std.testing.expectEqual(tails_before, scheduler.ready_tails);
+    try std.testing.expectEqual(counts_before, scheduler.ready_counts);
+    try std.testing.expectEqualDeep(resource_before, scheduler.resource_state);
+    try std.testing.expectEqualDeep(note_before, scheduler.cold_note);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.last_dispatch_tick);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.active_dispatch_task_id);
+    try std.testing.expect(scheduler.active_dispatch_lease == null);
+    try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[first.arena_slot_index]);
+    try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[second.arena_slot_index]);
+    try std.testing.expectEqual(@as(u8, 1), runtime.task_borrow_counts[occupied.arena_slot_index]);
+    try runtime.cancelUnstartedExecution(ticket);
+    try runtime.collectExecution(ticket);
+}
+
+// Entry is replaced by a supplied record, but preparation, owner start,
+// publication, once-only BSP consumption and Runtime pin collection are real.
+const PreparedReturnTestDispatcher = if (builtin.is_test) struct {
+    scheduler: *Scheduler,
+    runtime: *task_runtime.Runtime,
+    record: dispatch_ownership.ReturnRecord,
+    calls: usize = 0,
+
+    fn executePreparedTask(self: *@This(), task: *const task_runtime.TaskRecord, _: *userspace_executor.MappingHandle, _: u64) dispatch_ownership.ReturnRecord {
+        return self.execute(task) catch @panic("prepared return fixture retains exact dispatch ownership");
+    }
+
+    fn execute(self: *@This(), task: *const task_runtime.TaskRecord) !dispatch_ownership.ReturnRecord {
+        const ticket = self.scheduler.active_dispatch_lease.?;
+        try self.runtime.execution.bindPrepared(ticket, 1, 0x1000);
+        var bound: dispatch_ownership.BoundIdentity = undefined;
+        try self.runtime.execution.startPreparedInto(ticket, &bound);
+        try std.testing.expectEqual(task.id, bound.identity.task_id);
+        try std.testing.expectEqual(@as(u8, 1), self.runtime.task_borrow_counts[task.arena_slot_index]);
+        try self.runtime.execution.ackPreparedReturn(ticket, self.record);
+        try std.testing.expectError(error.WrongPhase, self.runtime.collectExecution(ticket));
+        var consumed: dispatch_ownership.ReturnRecord = undefined;
+        try self.runtime.execution.consumePreparedReturnInto(ticket, &consumed);
+        try std.testing.expectEqualDeep(self.record, consumed);
+        try std.testing.expectError(error.WrongPhase, self.runtime.execution.consumePreparedReturnInto(ticket, &consumed));
+        try std.testing.expectEqualDeep(self.record, consumed);
+        try std.testing.expect(!self.scheduler.unregisterTask(task.id));
+        self.calls += 1;
+        return consumed;
+    }
+} else struct {};
+
+test "scheduler prepared return drives UI accounting instead of anchor observations" {
+    const previous_cpu = smp.currentCpuIndex();
+    defer smp.setCurrentCpuIndexForTest(previous_cpu);
+    smp.setCurrentCpuIndexForTest(0);
+    for ([_]dispatch_ownership.Outcome{ .yielded, .wait_for_event }) |outcome| {
+        var executor = userspace_executor.Executor{};
+        var scheduler = Scheduler.init(&executor);
+        var catalog = userspace_loader.Catalog.init();
+        var runtime = task_runtime.Runtime.init();
+        var capabilities = capability.CapabilityTable.init();
+        defer runtime.reset();
+        scheduler.bind(&catalog, &runtime, &capabilities);
+        defer scheduler.deinit();
+        const task = try createRunnableSchedulerTask(&runtime, 41, .foreground_interactive, "return-ui", "app.return-ui", 41);
+        try std.testing.expect(scheduler.registerTask(task.id));
+        executor.last_yield_ui_revision = 999;
+        var dispatcher = PreparedReturnTestDispatcher{
+            .scheduler = &scheduler,
+            .runtime = &runtime,
+            .record = .{ .outcome = outcome, .ui_revision = 17 },
+        };
+        try std.testing.expect(scheduler.runNextWithDispatch(50, &dispatcher));
+        const accounting = scheduler.taskDispatchAccounting(task.id).?;
+        try std.testing.expectEqual(@as(u64, 17), accounting.last_ui_state_revision);
+        try std.testing.expectEqual(@as(u64, @intFromBool(outcome == .wait_for_event)), accounting.event_wait_count);
+        try std.testing.expectEqual(DISPATCH_CPU_TICK_COST, accounting.cpu_ticks_consumed);
+        try std.testing.expectEqual(@as(usize, 1), dispatcher.calls);
+        try std.testing.expectEqual(@as(u64, 999), executor.last_yield_ui_revision);
+        try std.testing.expect(!runtime.execution.hasLeases());
+        try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
+    }
+}
+
+test "scheduler prepared return contains the exact fault receipt before collection" {
+    const previous_cpu = smp.currentCpuIndex();
+    defer smp.setCurrentCpuIndexForTest(previous_cpu);
+    smp.setCurrentCpuIndexForTest(0);
+    for ([_]bool{ false, true }) |direct| {
+        var executor = userspace_executor.Executor{};
+        var scheduler = Scheduler.init(&executor);
+        var catalog = userspace_loader.Catalog.init();
+        var runtime = task_runtime.Runtime.init();
+        var capabilities = capability.CapabilityTable.init();
+        defer runtime.reset();
+        scheduler.bind(&catalog, &runtime, &capabilities);
+        defer scheduler.deinit();
+        const task = try createRunnableSchedulerTask(&runtime, 42, .background_light, "return-fault", "app.return-fault", null);
+        const task_id = task.id;
+        try std.testing.expect(scheduler.registerTask(task_id));
+        const anchor_exception = userspace_executor.UserException{ .vector = 6, .error_code = 0, .instruction_pointer = 0x5000 };
+        executor.last_user_exception = anchor_exception;
+        const exception = userspace_executor.UserException{
+            .vector = 14,
+            .error_code = 0x15,
+            .instruction_pointer = 0x4000_100a,
+            .fault_address = 0x4000_3000,
+        };
+        var dispatcher = PreparedReturnTestDispatcher{
+            .scheduler = &scheduler,
+            .runtime = &runtime,
+            .record = .{
+                .outcome = .faulted,
+                .fault_vector = exception.vector,
+                .fault_error_code = exception.error_code,
+                .fault_instruction_pointer = exception.instruction_pointer,
+                .fault_address = exception.fault_address,
+            },
+        };
+        if (direct) {
+            const record = scheduler.executeTaskWithDispatch(task_id, 51, &dispatcher);
+            try std.testing.expectEqualDeep(dispatcher.record, record);
+        } else {
+            try std.testing.expect(scheduler.runNextWithDispatch(51, &dispatcher));
+        }
+        const terminal = runtime.find(task_id).?;
+        try std.testing.expectEqual(task_runtime.TaskState.terminated, terminal.state);
+        const provenance = terminal.latestProvenanceEvent().?;
+        try std.testing.expectEqual(@as(u64, 51), provenance.tick);
+        var expected: [64]u8 = undefined;
+        const fingerprint = try std.fmt.bufPrint(&expected, "reason_fingerprint=0x{x}", .{exception.reasonFingerprint()});
+        try std.testing.expect(std.mem.indexOf(u8, provenance.detailSlice(), fingerprint) != null);
+        try std.testing.expectEqualDeep(anchor_exception, executor.last_user_exception.?);
+        try std.testing.expectEqual(@as(usize, 1), dispatcher.calls);
+        try std.testing.expect(scheduler.slots.get(task_id) == null);
+        try std.testing.expect(!runtime.execution.hasLeases());
+    }
+}
+
+test "scheduler selected prepared owners retain pins until receipt consumption and collect cancellations" {
+    const previous_cpu = smp.currentCpuIndex();
+    defer smp.setCurrentCpuIndexForTest(previous_cpu);
+    smp.setCurrentCpuIndexForTest(0);
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    defer runtime.reset();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    defer scheduler.deinit();
+    const task = try createRunnableSchedulerTask(&runtime, 43, .foreground_interactive, "selected", "app.selected", null);
+    const neighbor = try createRunnableSchedulerTask(&runtime, 44, .background_light, "neighbor", "app.neighbor", null);
+    try std.testing.expect(scheduler.registerTask(task.id));
+    try std.testing.expect(scheduler.registerTask(neighbor.id));
+    const slot_before = scheduler.slots.get(task.id).?.*;
+    const accounting_before = scheduler.taskDispatchAccounting(task.id).?.*;
+    const resources_before = scheduler.resource_state;
+    var foreign: dispatch_ownership.Coordinator = .{};
+    for (0..dispatch_ownership.CAPACITY) |index| {
+        const cpu: u8 = @intCast(index);
+        const neighbor_ticket = try runtime.reserveExecution(neighbor, @intCast((index + 1) % dispatch_ownership.CAPACITY));
+        const ticket = scheduler.beginTaskDispatch(&runtime, task, cpu).?;
+        try runtime.execution.bindPrepared(ticket, 1, 0x1000);
+        smp.setCurrentCpuIndexForTest(neighbor_ticket.cpu);
+        var bound: dispatch_ownership.BoundIdentity = undefined;
+        try std.testing.expectError(error.WrongCpu, runtime.execution.startPreparedInto(ticket, &bound));
+        smp.setCurrentCpuIndexForTest(cpu);
+        try runtime.execution.startPreparedInto(ticket, &bound);
+        try std.testing.expectEqual(task.id, bound.identity.task_id);
+        const record = dispatch_ownership.ReturnRecord{ .outcome = .wait_for_event, .ui_revision = 100 + index };
+        var wrong_issuer = ticket;
+        wrong_issuer.issuer = &foreign;
+        try std.testing.expectError(error.WrongCoordinator, runtime.execution.ackPreparedReturn(wrong_issuer, record));
+        try runtime.execution.ackPreparedReturn(ticket, record);
+        smp.setCurrentCpuIndexForTest(0);
+        try std.testing.expectError(error.WrongPhase, runtime.collectExecution(ticket));
+        try std.testing.expectEqual(@as(u8, 1), runtime.task_borrow_counts[task.arena_slot_index]);
+        var consumed = dispatch_ownership.ReturnRecord{ .ui_revision = 999 };
+        const canary = consumed;
+        var stale = ticket;
+        stale.epoch += 1;
+        try std.testing.expectError(error.StaleTicket, runtime.execution.consumePreparedReturnInto(stale, &consumed));
+        try std.testing.expectEqualDeep(canary, consumed);
+        try runtime.execution.consumePreparedReturnInto(ticket, &consumed);
+        try std.testing.expectEqualDeep(record, consumed);
+        scheduler.finishTaskDispatch(&runtime, ticket);
+        try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
+        try std.testing.expectEqual(@as(u8, 1), runtime.task_borrow_counts[neighbor.arena_slot_index]);
+        try std.testing.expectEqual(neighbor_ticket.epoch, runtime.execution.taskTicket(neighbor.id).?.epoch);
+        // The same Scheduler finish path handles both unpublished reservations
+        // and ready commands canceled before any owner starts. No AP entry runs.
+        for ([_]bool{ false, true }) |prepared| {
+            const canceled = scheduler.beginTaskDispatch(&runtime, task, cpu).?;
+            if (prepared) try runtime.execution.bindPrepared(canceled, 1, 0x1000);
+            scheduler.finishTaskDispatch(&runtime, canceled);
+            try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
+            try std.testing.expectEqual(@as(u8, 1), runtime.task_borrow_counts[neighbor.arena_slot_index]);
+        }
+        try runtime.cancelUnstartedExecution(neighbor_ticket);
+        try runtime.collectExecution(neighbor_ticket);
+        try std.testing.expect(!runtime.execution.hasLeases());
+        try std.testing.expectEqualDeep(slot_before, scheduler.slots.get(task.id).?.*);
+        try std.testing.expectEqualDeep(accounting_before, scheduler.taskDispatchAccounting(task.id).?.*);
+        try std.testing.expectEqualDeep(resources_before, scheduler.resource_state);
+    }
+}
+
+test "scheduler execution collection retains active identity through lifetime callbacks" {
+    const Callback = struct {
+        scheduler: *Scheduler,
+        peer: *Scheduler,
+        runtime: *task_runtime.Runtime,
+        task: *task_runtime.TaskRecord,
+        task_id: u64,
+        address_space_id: u64,
+        slot: *Slot,
+        notifications: usize = 0,
+
+        fn check(self: *@This()) void {
+            const ticket = self.scheduler.active_dispatch_lease orelse @panic("collecting scheduler retains lease");
+            std.testing.expectEqual(self.task_id, self.scheduler.active_dispatch_task_id) catch @panic("collecting scheduler retains active task");
+            std.testing.expectEqual(dispatch_ownership.Phase.collecting, self.runtime.execution.phase(ticket) catch @panic("collecting ticket remains valid")) catch @panic("callbacks run while collecting");
+            std.testing.expectEqual(@as(u8, 1), self.runtime.task_borrow_counts[self.task.arena_slot_index]) catch @panic("callbacks retain task pin");
+            if (self.scheduler.slots.get(self.task_id).? != self.slot) @panic("callbacks retain scheduling slot");
+            if (self.scheduler.registerTask(self.task_id) or self.peer.registerTask(self.task_id) or
+                self.scheduler.unregisterTask(self.task_id) or self.peer.unregisterTask(self.task_id)) @panic("callbacks cannot replace leased slots");
+            self.scheduler.pruneRetiredSlots(self.runtime);
+            self.peer.pruneRetiredSlots(self.runtime);
+            if (self.scheduler.slots.get(self.task_id).? != self.slot) @panic("pruning preserves collecting slot");
+            if (self.scheduler.executeTask(self.task_id, 100) != .unavailable or
+                self.peer.executeTask(self.task_id, 100) != .unavailable) @panic("callbacks cannot dispatch collecting incarnation");
+            self.notifications += 1;
+        }
+
+        fn retire(context: *anyopaque, event: task_runtime.TaskRetirement) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event.task_id != self.task_id) return;
+            if (event.capability_ids.len != 1 or event.capability_ids[0] != 77 or event.now_ticks != 29) @panic("retirement retains exact deferred resources");
+            self.check();
+            if (event.capability_ids[0] != 77) @panic("callback retains attachment slice");
+        }
+
+        pub fn retireAddressSpace(self: *@This(), event: task_runtime.AddressSpaceRetirementEvent) void {
+            if (event.address_space_id != self.address_space_id) return;
+            if (self.runtime.findAddressSpaceConst(self.address_space_id) != null) @panic("address metadata detached before notification");
+            self.check();
+        }
+    };
+    const Dispatcher = struct {
+        callback: *Callback,
+        fn executePreparedTask(self: @This(), task: *const task_runtime.TaskRecord, _: *userspace_executor.MappingHandle, _: u64) dispatch_ownership.ReturnRecord {
+            const callback = self.callback;
+            const ticket = callback.scheduler.active_dispatch_lease.?;
+            callback.runtime.execution.bindPrepared(ticket, 1, 0x1000) catch @panic("model binds exact execution");
+            var bound: dispatch_ownership.BoundIdentity = undefined;
+            callback.runtime.execution.startPreparedInto(ticket, &bound) catch @panic("model starts exact execution");
+            if (bound.identity.task_id != task.id) @panic("model consumes exact task identity");
+            if (!callback.runtime.terminateResolvedTask(callback.task, 29)) @panic("model requests deferred termination");
+            if (task.capability_count != 1 or callback.runtime.findAddressSpaceConst(callback.address_space_id) == null or callback.notifications != 0) @panic("running termination retains resources");
+            std.testing.expectError(error.WrongPhase, callback.runtime.collectExecution(ticket)) catch @panic("running lease cannot be collected");
+            _ = callback.runtime.execution.requestStop(ticket) catch @panic("model requests generation-bound stop");
+            if (!callback.runtime.execution.stopRequested(ticket)) @panic("owner observes matching stop");
+            callback.runtime.execution.ackPreparedReturn(ticket, .{ .outcome = .yielded }) catch @panic("model publishes completed return");
+            if (callback.notifications != 0 or callback.scheduler.unregisterTask(task.id)) @panic("return ack retains scheduler lifetime until collection");
+            std.testing.expectError(error.WrongPhase, callback.runtime.collectExecution(ticket)) catch @panic("prepared return requires consumption before collection");
+            var record: dispatch_ownership.ReturnRecord = undefined;
+            callback.runtime.execution.consumePreparedReturnInto(ticket, &record) catch @panic("model consumes its exact prepared return");
+            return record;
+        }
+    };
+    const previous_cpu = smp.currentCpuIndex();
+    defer smp.setCurrentCpuIndexForTest(previous_cpu);
+    smp.setCurrentCpuIndexForTest(0);
+    var executor = userspace_executor.Executor{};
+    var peer_executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var peer = Scheduler.init(&peer_executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    defer runtime.reset();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    defer scheduler.deinit();
+    peer.bind(&catalog, &runtime, &capabilities);
+    defer peer.deinit();
+    const task = try createRunnableSchedulerTask(&runtime, 1, .background_light, "collect", "app.collect", null);
+    const task_id = task.id;
+    try runtime.grantCapability(task.id, 77);
+    try std.testing.expect(scheduler.registerTask(task.id));
+    try std.testing.expect(peer.registerTask(task.id));
+    var callback = Callback{ .scheduler = &scheduler, .peer = &peer, .runtime = &runtime, .task = task, .task_id = task.id, .address_space_id = task.address_space_id, .slot = scheduler.slots.get(task.id).? };
+    const task_sink = task_runtime.TaskRetirementSink{ .context = &callback, .retire = Callback.retire };
+    const address_sink = task_runtime.AddressSpaceRetirementSink.init(Callback, &callback);
+    try std.testing.expect(runtime.bindTaskRetirementSink(task_sink));
+    try std.testing.expect(runtime.bindAddressSpaceRetirementSink(address_sink));
+    try std.testing.expect(scheduler.runNextWithDispatch(1, Dispatcher{ .callback = &callback }));
+    try std.testing.expectEqual(@as(usize, 2), callback.notifications);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.active_dispatch_task_id);
+    try std.testing.expect(scheduler.active_dispatch_lease == null);
+    try std.testing.expect(!runtime.execution.hasLeases());
+    try std.testing.expectEqual(@as(u16, 0), task.capability_count);
+    try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
+    try std.testing.expect(scheduler.slots.get(task_id) == null);
+    try std.testing.expect(peer.unregisterTask(task_id));
+    try std.testing.expect(runtime.unbindTaskRetirementSink(task_sink));
+    try std.testing.expect(runtime.unbindAddressSpaceRetirementSink(address_sink));
+}
+
+test "scheduler foreign readers preserve pending accounting and avoid runtime priority scans" {
+    const previous_cpu = smp.currentCpuIndex();
+    defer smp.setCurrentCpuIndexForTest(previous_cpu);
+    smp.setCurrentCpuIndexForTest(0);
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    defer runtime.reset();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    defer scheduler.deinit();
+    const batch = try createRunnableSchedulerTask(&runtime, 1, .batch_compute, "batch", "app.batch", null);
+    const foreground = try createRunnableSchedulerTask(&runtime, 2, .foreground_interactive, "foreground", "app.foreground", null);
+    try std.testing.expect(scheduler.registerTask(batch.id));
+    try std.testing.expect(scheduler.registerTask(foreground.id));
+    scheduler.noteDenied(scheduler.slots.get(batch.id).?, .cpu_budget, .cpu, .cpu, false);
+    const note = scheduler.cold_note;
+    const accounting = scheduler.accountingStorage().*;
+    const dispatched = scheduler.engine_dispatch_counts;
+    const denied = scheduler.engine_denial_counts;
+    for (1..dispatch_ownership.CAPACITY) |cpu| {
+        smp.setCurrentCpuIndexForTest(@intCast(cpu));
+        defer smp.setCurrentCpuIndexForTest(0);
+        try std.testing.expect(scheduler.taskDispatchStats(batch.id) == null);
+        try std.testing.expect(scheduler.taskDispatchAccounting(batch.id) == null);
+        try std.testing.expectEqual(@as(u64, 0), scheduler.engineDispatchCount(.cpu));
+        try std.testing.expectEqual(@as(u64, 0), scheduler.engineDenialCount(.cpu));
+        try std.testing.expect(!scheduler.hasReadyLatencySensitiveWork());
+        try std.testing.expect(!scheduler.shouldPreemptTask(batch.id));
+        try std.testing.expectEqualDeep(note, scheduler.cold_note);
+        try std.testing.expectEqualDeep(accounting, scheduler.dispatch_accounting.?.*);
+        try std.testing.expectEqual(dispatched, scheduler.engine_dispatch_counts);
+        try std.testing.expectEqual(denied, scheduler.engine_denial_counts);
+    }
+    smp.setCurrentCpuIndexForTest(0);
+    try std.testing.expect(scheduler.shouldPreemptTask(batch.id));
+    try std.testing.expectEqual(@as(u64, 1), scheduler.engineDenialCount(.cpu));
+    try std.testing.expect(!scheduler.cold_note.active);
 }

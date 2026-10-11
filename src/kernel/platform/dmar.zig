@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const acpi = @import("acpi.zig");
 const checksum = @import("../utils/checksum.zig");
 const endian = @import("../utils/endian.zig");
@@ -155,7 +156,42 @@ const ScopePolicy = enum {
     pci_sub_hierarchy_only,
 };
 
+pub const ScopedError = Error || error{RequesterNotCovered};
+
+/// Publish a complete summary only after the table has passed every check.
+pub inline fn parseDmarInto(table: []const u8, out: *Summary) Error!void {
+    parseValidatedDmarInto(table, null, out) catch |err| {
+        // Requester admission is only evaluated when a requester slice exists.
+        if (err == error.RequesterNotCovered) unreachable;
+        return @errorCast(err);
+    };
+}
+
+/// Accept an explicitly scoped, single segment-zero unit only when every DMA
+/// requester is an exact single-hop PCI endpoint in its firmware scope. Bridge
+/// scopes need topology resolution and are deliberately not inferred here.
+/// A rejected requester leaves the caller's summary unchanged.
+pub inline fn scopedEnforcementSummaryInto(table: []const u8, requesters: []const u16, out: *Summary) ScopedError!void {
+    return parseValidatedDmarInto(table, requesters, out);
+}
+
+// Keep aggregate-return convenience confined to pure tests. Production owns its
+// output storage and receives only an error code on rejection.
 pub fn parseDmar(table: []const u8) Error!Summary {
+    if (comptime !builtin.is_test) @compileError("use parseDmarInto for production DMAR parsing");
+    var summary: Summary = undefined;
+    try parseDmarInto(table, &summary);
+    return summary;
+}
+
+pub fn scopedEnforcementSummary(table: []const u8, requesters: []const u16) ScopedError!Summary {
+    if (comptime !builtin.is_test) @compileError("use scopedEnforcementSummaryInto for production DMAR parsing");
+    var summary: Summary = undefined;
+    try scopedEnforcementSummaryInto(table, requesters, &summary);
+    return summary;
+}
+
+fn parseValidatedDmarInto(table: []const u8, requesters: ?[]const u16, out: *Summary) ScopedError!void {
     if (table.len < DMAR_HEADER_LENGTH) return error.TooSmall;
     if (!std.mem.eql(u8, table[0..DMAR_SIGNATURE.len], DMAR_SIGNATURE)) return error.BadSignature;
 
@@ -243,20 +279,17 @@ pub fn parseDmar(table: []const u8) Error!Summary {
         offset += structure_length;
     }
     if (summary.remapping_unit_count == 0) return error.MissingRemappingUnit;
-    return summary;
+    if (requesters) |required| try validateScopedRequesters(table, &summary, required);
+    out.* = summary;
 }
 
-/// Accept an explicitly scoped, single segment-zero unit only when every DMA
-/// requester is an exact single-hop PCI endpoint in its firmware scope. Bridge
-/// scopes need topology resolution and are deliberately not inferred here.
-pub fn scopedEnforcementSummary(table: []const u8, requesters: []const u16) (Error || error{RequesterNotCovered})!Summary {
-    const summary = try parseDmar(table);
+fn validateScopedRequesters(table: []const u8, summary: *const Summary, requesters: []const u16) error{RequesterNotCovered}!void {
     if (requesters.len == 0 or summary.remapping_unit_count != 1 or
         summary.units()[0].segment != 0 or
         summary.host_address_width < MIN_PRODUCTION_HOST_ADDRESS_WIDTH or
         !summary.interrupt_remapping or summary.x2apic_opt_out or summary.dma_remapping_opt_out or
         summary.reserved_memory_with_non_pci_scope_count != 0) return error.RequesterNotCovered;
-    if (summary.units()[0].include_pci_all) return summary;
+    if (summary.units()[0].include_pci_all) return;
     const table_length = endian.readU32Le(table[4..8]);
     for (requesters) |requester| {
         var matches: usize = 0;
@@ -279,7 +312,6 @@ pub fn scopedEnforcementSummary(table: []const u8, requesters: []const u16) (Err
         }
         if (matches != 1) return error.RequesterNotCovered;
     }
-    return summary;
 }
 
 fn parseRemappingUnit(structure: []const u8, host_address_width: u8) Error!RemappingUnit {
@@ -463,6 +495,69 @@ test "DMAR summary uses capacity-sized discovery counts" {
     try std.testing.expectEqual(u32, @FieldType(Summary, "reserved_memory_with_non_pci_scope_count"));
     try std.testing.expectEqual(u32, @FieldType(Summary, "ats_capability_count"));
     try std.testing.expectEqual(@as(usize, SUMMARY_SIZE_CEILING_BYTES), @sizeOf(Summary));
+}
+
+test "DMAR caller-owned output is unchanged on early and late parse rejection" {
+    var output: Summary = undefined;
+    @memset(std.mem.asBytes(&output), 0);
+    output.host_address_width = 61;
+    output.remapping_unit_count = 1;
+    output.remapping_units[0].register_base_address = 0x1234_5000;
+    output.remapping_units[0].register_page_count = 3;
+    output.remapping_units[MAX_REMAPPING_UNITS - 1].register_base_address = 0x8765_4000;
+    output.reserved_memory_region_count = 17;
+    output.ats_capability_count = 9;
+    const before = std.mem.asBytes(&output).*;
+
+    var corrupt = validDmar();
+    corrupt[corrupt.len - 1] +%= 1;
+    try std.testing.expectError(error.BadChecksum, parseDmarInto(&corrupt, &output));
+    try std.testing.expectEqualSlices(u8, &before, std.mem.asBytes(&output));
+
+    // Both units have already passed validation when the RMRR's segment fails.
+    var late_rejection = validDmar();
+    endian.writeU16Le(late_rejection[94..96], 1);
+    checksum.finishSum8Prefix(&late_rejection, 9, late_rejection.len);
+    try std.testing.expectError(error.InvalidReservedMemoryRegion, parseDmarInto(&late_rejection, &output));
+    try std.testing.expectEqualSlices(u8, &before, std.mem.asBytes(&output));
+
+    const valid = validDmar();
+    try parseDmarInto(&valid, &output);
+    try std.testing.expectEqual(@as(u8, 2), output.remapping_unit_count);
+    try std.testing.expectEqual(@as(u64, 0xFED9_0000), output.units()[0].register_base_address);
+    try std.testing.expectEqual(@as(u64, 0xFED9_1000), output.units()[1].register_base_address);
+    try std.testing.expectEqual(@as(u32, 1), output.reserved_memory_region_count);
+    try std.testing.expectEqual(@as(u32, 0), output.ats_capability_count);
+    try std.testing.expectEqual(@as(u64, 0), output.remapping_units[MAX_REMAPPING_UNITS - 1].register_base_address);
+}
+
+test "DMAR requester admission is atomic and follows complete table validation" {
+    var output: Summary = undefined;
+    @memset(std.mem.asBytes(&output), 0);
+    output.host_address_width = 52;
+    output.remapping_unit_count = 1;
+    output.remapping_units[0].register_base_address = 0xABCD_0000;
+    output.remapping_units[MAX_REMAPPING_UNITS - 1].register_page_count = 8;
+    const before = std.mem.asBytes(&output).*;
+
+    var table = validDmar();
+    endian.writeU32Le(table[4..8], 72);
+    checksum.finishSum8Prefix(&table, 9, 72);
+    try std.testing.expectError(error.RequesterNotCovered, scopedEnforcementSummaryInto(&table, &.{0x0018}, &output));
+    try std.testing.expectEqualSlices(u8, &before, std.mem.asBytes(&output));
+
+    table[70] = 32;
+    checksum.finishSum8Prefix(&table, 9, 72);
+    try std.testing.expectError(error.InvalidDeviceScope, scopedEnforcementSummaryInto(&table, &.{0x0018}, &output));
+    try std.testing.expectEqualSlices(u8, &before, std.mem.asBytes(&output));
+
+    table[70] = 2;
+    checksum.finishSum8Prefix(&table, 9, 72);
+    try scopedEnforcementSummaryInto(&table, &.{0x0010}, &output);
+    try std.testing.expectEqual(@as(u8, 1), output.remapping_unit_count);
+    try std.testing.expectEqual(@as(u64, 0xFED9_0000), output.units()[0].register_base_address);
+    try std.testing.expectEqual(@as(u32, 0), output.remapping_units[MAX_REMAPPING_UNITS - 1].register_page_count);
+    try std.testing.expect(!output.productionEnforcementReady());
 }
 
 test "DMAR explicit scopes cover exact requesters without asserting catch-all policy" {

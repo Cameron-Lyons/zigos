@@ -2,7 +2,9 @@ const std = @import("std");
 
 pub const block_alignment: usize = 16;
 pub const size_classes = [_]usize{ 32, 64, 128, 256, 512, 1024, 2048, 4096 };
-pub const free_list_class_count: usize = size_classes.len + 1;
+// Span lengths are u32. Large free spans use floor-log2 bins so a request
+// searches its own possibly undersized bin, then only larger size ranges.
+pub const free_list_class_count: usize = size_classes.len + @bitSizeOf(u32) - 12;
 
 pub const AlignedRange = struct {
     start: usize,
@@ -13,9 +15,10 @@ pub const granule: usize = 32;
 pub const payload_has_no_header = true;
 pub const minimum_free_data_size: usize = granule;
 
-pub fn freeListIndex(size: usize, large_block_threshold: usize) usize {
-    if (size > large_block_threshold) return size_classes.len;
-    return sizeClassIndex(size);
+pub fn freeListIndex(size: usize) usize {
+    if (size <= size_classes[size_classes.len - 1]) return sizeClassIndex(size);
+    const exponent = @min(std.math.log2_int(usize, size), @bitSizeOf(u32) - 1);
+    return size_classes.len + exponent - 12;
 }
 
 pub fn sizeClassIndex(size: usize) usize {
@@ -147,18 +150,35 @@ test "heap allocation markers accept only aligned arena addresses" {
 test "heap free-list classes round small blocks onto exact size classes" {
     const page_size: usize = 4096;
 
-    try std.testing.expectEqual(@as(usize, 0), freeListIndex(16, page_size));
-    try std.testing.expectEqual(@as(usize, 0), freeListIndex(32, page_size));
-    try std.testing.expectEqual(@as(usize, 1), freeListIndex(33, page_size));
-    try std.testing.expectEqual(@as(usize, 7), freeListIndex(page_size, page_size));
-    try std.testing.expectEqual(@as(usize, size_classes.len), freeListIndex(page_size + 1, page_size));
-    try std.testing.expectEqual(@as(usize, size_classes.len), freeListIndex(128, 64));
+    try std.testing.expectEqual(@as(usize, 0), freeListIndex(16));
+    try std.testing.expectEqual(@as(usize, 0), freeListIndex(32));
+    try std.testing.expectEqual(@as(usize, 1), freeListIndex(33));
+    try std.testing.expectEqual(@as(usize, 7), freeListIndex(page_size));
+    try std.testing.expectEqual(@as(usize, size_classes.len), freeListIndex(page_size + 1));
     try std.testing.expectEqual(@as(?usize, 32), sizeClassBytes(0));
     try std.testing.expectEqual(@as(?usize, null), sizeClassBytes(size_classes.len));
-    try std.testing.expectEqual(size_classes.len + 1, free_list_class_count);
+    try std.testing.expectEqual(@as(usize, 28), free_list_class_count);
     try std.testing.expectEqual(@as(?usize, 32), reusableMagazineBytes(0, 32));
     try std.testing.expectEqual(@as(?usize, 4096), reusableMagazineBytes(size_classes.len - 1, 4096));
     try std.testing.expectEqual(@as(?usize, null), reusableMagazineBytes(size_classes.len - 1, 8192));
     try std.testing.expectEqual(@as(?usize, null), reusableMagazineBytes(size_classes.len, 8192));
     try std.testing.expectEqual(@as(?usize, null), reusableMagazineBytes(size_classes.len, 16384));
+}
+
+test "heap large free bins cover every u32 power boundary without rounding allocations" {
+    try std.testing.expectEqual(@as(usize, 8), freeListIndex(4097));
+    try std.testing.expectEqual(@as(usize, 8), freeListIndex(8191));
+    for (13..32) |exponent| {
+        const boundary = @as(usize, 1) << @intCast(exponent);
+        const index = exponent - 12 + size_classes.len;
+        try std.testing.expectEqual(index - 1, freeListIndex(boundary - 1));
+        try std.testing.expectEqual(index, freeListIndex(boundary));
+        try std.testing.expectEqual(index, freeListIndex(boundary + 1));
+    }
+    try std.testing.expectEqual(free_list_class_count - 1, freeListIndex(std.math.maxInt(u32)));
+    try std.testing.expectEqual(free_list_class_count - 1, freeListIndex(std.math.maxInt(usize)));
+    for (size_classes.len..free_list_class_count) |index| {
+        try std.testing.expect(sizeClassBytes(index) == null);
+        try std.testing.expect(reusableMagazineBytes(index, 8192) == null);
+    }
 }

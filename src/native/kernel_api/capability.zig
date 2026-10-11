@@ -83,24 +83,32 @@ pub const GrantPlanEntry = struct {
     request: MintRequest,
 };
 
-pub const GrantPlan = struct {
-    entry_count: u8 = 0,
-    entries: [MAX_GRANT_PLAN_ENTRIES]GrantPlanEntry = @as([MAX_GRANT_PLAN_ENTRIES]GrantPlanEntry, @splat(emptyGrantPlanEntry())),
+pub fn GrantPlanFor(comptime capacity: usize) type {
+    if (capacity == 0 or capacity > MAX_GRANT_PLAN_ENTRIES) @compileError("capability grant plan capacity must fit the bounded transaction");
+    return struct {
+        const Self = @This();
 
-    pub fn addMint(self: *GrantPlan, task_id: u64, request: MintRequest) Error!void {
-        const entry_index: usize = self.entry_count;
-        if (entry_index >= self.entries.len) return error.GrantPlanFull;
-        self.entries[entry_index] = .{
-            .task_id = task_id,
-            .request = request,
-        };
-        self.entry_count += 1;
-    }
+        entry_count: u8 = 0,
+        entries: [capacity]GrantPlanEntry = @as([capacity]GrantPlanEntry, @splat(emptyGrantPlanEntry())),
 
-    pub fn slice(self: *const GrantPlan) []const GrantPlanEntry {
-        return self.entries[0..@as(usize, self.entry_count)];
-    }
-};
+        pub fn addMint(self: *Self, task_id: u64, request: MintRequest) Error!void {
+            const entry_index: usize = self.entry_count;
+            if (entry_index >= self.entries.len) return error.GrantPlanFull;
+            self.entries[entry_index] = .{
+                .task_id = task_id,
+                .request = request,
+            };
+            self.entry_count += 1;
+        }
+
+        pub fn slice(self: *const Self) []const GrantPlanEntry {
+            return self.entries[0..@as(usize, self.entry_count)];
+        }
+    };
+}
+
+pub const GrantPlan = GrantPlanFor(MAX_GRANT_PLAN_ENTRIES);
+pub const SingleGrantPlan = GrantPlanFor(1);
 
 pub const DeriveRequest = struct {
     parent_capability_id: u64,
@@ -159,13 +167,18 @@ pub const RetiredAuthority = struct {
 };
 
 pub fn GrantReservationFor(comptime max_capabilities: usize) type {
+    return GrantReservationSizedFor(max_capabilities, MAX_GRANT_PLAN_ENTRIES);
+}
+
+fn GrantReservationSizedFor(comptime max_capabilities: usize, comptime capacity: usize) type {
+    if (capacity == 0 or capacity > MAX_GRANT_PLAN_ENTRIES) @compileError("capability grant reservation capacity must fit the bounded transaction");
     const SlotIndex = indexed_arena.ReusableIndex(max_capabilities);
     return struct {
-        slot_indexes: [MAX_GRANT_PLAN_ENTRIES]SlotIndex = @as([MAX_GRANT_PLAN_ENTRIES]SlotIndex, @splat(0)),
-        target_generation_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = @as([MAX_GRANT_PLAN_ENTRIES]u8, @splat(0)),
+        slot_indexes: [capacity]SlotIndex = @as([capacity]SlotIndex, @splat(0)),
+        target_generation_indexes: [capacity]u8 = @as([capacity]u8, @splat(0)),
         new_target_count: u8 = 0,
-        new_target_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = @as([MAX_GRANT_PLAN_ENTRIES]u8, @splat(0)),
-        new_targets: [MAX_GRANT_PLAN_ENTRIES]CapabilityTarget = @as([MAX_GRANT_PLAN_ENTRIES]CapabilityTarget, @splat(.{ .kind = .task, .id = 0 })),
+        new_target_indexes: [capacity]u8 = @as([capacity]u8, @splat(0)),
+        new_targets: [capacity]CapabilityTarget = @as([capacity]CapabilityTarget, @splat(.{ .kind = .task, .id = 0 })),
 
         comptime {
             if (max_capabilities == MAX_CAPABILITIES and @sizeOf(@This()) > GRANT_RESERVATION_SIZE_CEILING_BYTES) {
@@ -196,6 +209,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         const table_capability_no_index = indexed_arena.reusableNoIndex(MAX_TABLE_CAPABILITIES);
         const CapabilitySlot = struct {
             in_use: bool = false,
+            queued_move: bool = false,
             capability: Capability = zeroCapability(),
             target_generation_index: u8 = 0,
             target_previous: TableCapabilitySlotIndex = table_capability_no_index,
@@ -204,6 +218,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         const TargetGeneration = struct {
             in_use: bool = false,
             target: CapabilityTarget = .{ .kind = .task, .id = 0 },
+            // Zero remains exhausted until every stored record is unlinked.
             generation: u32 = 1,
             capability_head: TableCapabilitySlotIndex = table_capability_no_index,
             capability_tail: TableCapabilitySlotIndex = table_capability_no_index,
@@ -217,16 +232,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         const CapabilityArena = indexed_arena.GenerationalArena("CapabilityId", CapabilitySlot, MAX_TABLE_CAPABILITIES);
         const CapabilityHandle = CapabilityArena.Handle;
         const TargetGenerationArena = indexed_arena.IndexedArenaWithKey(u64, TargetGeneration, MAX_TABLE_TARGET_GENERATIONS, TABLE_TARGET_GENERATION_INDEX_CAPACITY, TargetGenerationKey.key);
-        const TableGrantReservation = GrantReservationFor(MAX_TABLE_CAPABILITIES);
         const InsertedCapabilitySlot = struct {
             slot_index: usize,
-        };
-        const SlotReservationContext = struct {
-            reservation: *const TableGrantReservation,
-            used_count: usize,
-        };
-        const TargetGenerationReservationContext = struct {
-            reservation: *const TableGrantReservation,
         };
 
         slots: CapabilityArena = CapabilityArena.init(),
@@ -263,7 +270,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return self.mintSingleRequest(request);
         }
 
-        pub fn applyGrantPlan(self: *Self, plan: *const GrantPlan, output: []Capability) Error![]Capability {
+        pub fn applyGrantPlan(self: *Self, plan: anytype, output: []Capability) Error![]Capability {
             const entry_count: usize = plan.entry_count;
             if (output.len < entry_count) return error.TableFull;
             const reservation = try self.reserveGrantPlan(plan);
@@ -302,13 +309,26 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         fn mintSingleRequest(self: *Self, request: MintRequest) Error!Capability {
             if (!rightsAreValidForTarget(request.target, request.rights)) return error.InvalidCapabilityRights;
             if (request.audit.delegation_depth > request.audit.max_delegation_depth) return error.DelegationDepthExceeded;
+            const key = targetKey(request.target);
+            const existing_target_index = if (self.cached_target_key == key) cached: {
+                const index = self.cached_target_generation_index;
+                const entry = self.targetGenerationAt(index);
+                if (!entry.in_use or !entry.target.eql(request.target)) {
+                    native_util.impossibleByInvariant("cached target generation matches its target");
+                }
+                break :cached @as(?u8, index);
+            } else self.findTargetGenerationIndex(request.target);
+            if (existing_target_index) |index| {
+                // Reject exhausted authority before touching handles or cache.
+                if (self.targetGenerationAt(index).generation == 0) return error.CapabilityRevoked;
+            }
             // Reserve the grant first: a full grant table must not consume a
             // target-generation entry for authority that was never published.
             const handle = self.slots.reserveHandleForOverwrite() orelse return error.TableFull;
             errdefer if (!self.slots.removeHandle(handle)) {
                 native_util.impossibleByInvariant("failed mint releases its reserved capability handle");
             };
-            const target_generation_index = try self.ensureTargetGenerationIndex(request.target);
+            const target_generation_index = try self.ensureTargetGenerationIndex(request.target, existing_target_index);
             const record = Capability{
                 .id = 0,
                 .holder = request.holder,
@@ -325,15 +345,15 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return inserted.*;
         }
 
-        pub fn derive(self: *Self, request: DeriveRequest) Error!Capability {
+        pub fn derive(self: *Self, request: DeriveRequest, now_ticks: u64) Error!Capability {
             const parent = self.resolve(request.parent_capability_id) orelse return error.CapabilityNotFound;
-            return self.deriveResolved(request, parent);
+            return self.deriveResolved(request, parent, now_ticks);
         }
 
-        pub fn deriveResolved(self: *Self, request: DeriveRequest, resolved_parent: ResolvedCapability) Error!Capability {
+        pub fn deriveResolved(self: *Self, request: DeriveRequest, resolved_parent: ResolvedCapability, now_ticks: u64) Error!Capability {
             const parent_slot = self.resolvedSlot(resolved_parent, request.parent_capability_id) orelse return error.CapabilityNotFound;
             const parent = &parent_slot.capability;
-            if (!self.isUsableSlot(parent_slot, request.lease.issued_at_ticks)) return error.CapabilityRevoked;
+            if (!self.isUsableSlot(parent_slot, now_ticks)) return error.CapabilityRevoked;
             if (!parent.rights.has(.capability_derive)) return error.RightsEscalation;
             if (!parent.rights.containsAll(request.rights)) return error.RightsEscalation;
             if (!rightsAreValidForTarget(parent.target, request.rights)) return error.InvalidCapabilityRights;
@@ -362,9 +382,43 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn passResolved(self: *Self, request: PassRequest, source: ResolvedCapability) Error!Capability {
+            return self.passWithOwnership(request, source, false);
+        }
+
+        // The sender validated this exact grant before the callback-free ring
+        // enqueue. Publish queue ownership before detaching holders or waking.
+        pub fn commitQueuedMoveResolved(self: *Self, resolved: ResolvedCapability, capability_id: u64) void {
+            const slot = self.resolvedSlot(resolved, capability_id) orelse
+                native_util.impossibleByInvariant("freshly resolved capability remains in its slot");
+            if (slot.queued_move) {
+                native_util.impossibleByInvariant("freshly resolved capability remains in its slot");
+            }
+            self.slots.slots[resolved.slot_index].queued_move = true;
+            self.advanceMutationGeneration();
+        }
+
+        pub fn passQueuedMove(self: *Self, request: PassRequest) Error!Capability {
+            const source = self.resolve(request.capability_id) orelse return error.CapabilityNotFound;
+            return self.passWithOwnership(request, source, true);
+        }
+
+        // Explicit cancellation may already have removed the queued ID. A
+        // repeated/stale disposal must never destroy an ordinary copy grant.
+        pub fn disposeQueuedMove(self: *Self, capability_id: u64) bool {
+            const source = self.resolve(capability_id) orelse return false;
+            if (!self.slots.slots[source.slot_index].queued_move) return false;
+            self.removeSlot(source.slot_index);
+            return true;
+        }
+
+        fn passWithOwnership(self: *Self, request: PassRequest, source: ResolvedCapability, queued_move: bool) Error!Capability {
             const original_slot = self.resolvedSlot(source, request.capability_id) orelse return error.CapabilityNotFound;
             const original = &original_slot.capability;
-            if (!self.isUsableSlot(original_slot, request.now_ticks)) return error.CapabilityRevoked;
+            if (queued_move) {
+                if (!original_slot.queued_move) return error.CapabilityNotFound;
+                if (!request.revoke_source) return error.RightsEscalation;
+            } else if (original_slot.queued_move) return error.CapabilityRevoked;
+            if (!self.isLiveSlot(original_slot, request.now_ticks)) return error.CapabilityRevoked;
             if (!original.rights.has(.capability_pass)) return error.RightsEscalation;
             const next_scope = request.scope orelse original.scope;
             if (!scopeIsPassCompatible(next_scope, original.scope, request.allow_task_retarget)) return error.ScopeEscalation;
@@ -406,7 +460,12 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             const target_generation = self.targetGenerationAtMut(target_generation_index);
             // Keep the epoch while any sibling grant (including a revoked
             // grant) survives. Removing the last grant releases this entry.
-            if (target_generation.capability_count > 1) target_generation.generation += 1;
+            if (target_generation.capability_count > 1 and target_generation.generation != 0) {
+                target_generation.generation = if (target_generation.generation == std.math.maxInt(u32))
+                    0
+                else
+                    target_generation.generation + 1;
+            }
             self.removeSlot(resolved.slot_index);
         }
 
@@ -554,27 +613,24 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         fn resolvedSlot(self: *const Self, resolved: ResolvedCapability, capability_id: u64) ?*const CapabilitySlot {
             if (resolved.slot_index >= self.slots.slots.len) return null;
             const slot = &self.slots.slots[resolved.slot_index];
-            if (!slot.in_use or slot.capability.id != capability_id) return null;
+            if (!slot.in_use or slot.capability.id != capability_id or resolved.capability != &slot.capability) return null;
             return slot;
         }
 
-        fn isUsableSlot(self: *const Self, slot: *const CapabilitySlot, now_ticks: u64) bool {
-            return slot.capability.lease.isActive(now_ticks) and
-                self.targetGenerationAt(slot.target_generation_index).generation == slot.capability.revocation_generation;
+        inline fn isUsableSlot(self: *const Self, slot: *const CapabilitySlot, now_ticks: u64) bool {
+            return !slot.queued_move and self.isLiveSlot(slot, now_ticks);
         }
 
-        fn ensureTargetGenerationIndex(self: *Self, target: CapabilityTarget) Error!u8 {
+        inline fn isLiveSlot(self: *const Self, slot: *const CapabilitySlot, now_ticks: u64) bool {
+            const generation = self.targetGenerationAt(slot.target_generation_index).generation;
+            return generation != 0 and slot.capability.lease.isActive(now_ticks) and
+                generation == slot.capability.revocation_generation;
+        }
+
+        fn ensureTargetGenerationIndex(self: *Self, target: CapabilityTarget, existing_index: ?u8) Error!u8 {
             const key = targetKey(target);
-            if (self.cached_target_key == key) {
-                const index = self.cached_target_generation_index;
-                const entry = self.targetGenerationAt(index);
-                if (!entry.in_use or !entry.target.eql(target)) {
-                    native_util.impossibleByInvariant("cached target generation matches its target");
-                }
-                return index;
-            }
-            if (self.findTargetGenerationIndex(target)) |index| {
-                self.cacheTargetGeneration(key, index);
+            if (existing_index) |index| {
+                if (self.cached_target_key != key) self.cacheTargetGeneration(key, index);
                 return index;
             }
 
@@ -600,8 +656,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return &self.target_generations.slots[target_generation_index];
         }
 
-        fn reserveGrantPlan(self: *const Self, plan: *const GrantPlan) Error!TableGrantReservation {
-            var reservation = TableGrantReservation{};
+        fn reserveGrantPlan(self: *const Self, plan: anytype) Error!GrantReservationSizedFor(MAX_TABLE_CAPABILITIES, @typeInfo(@TypeOf(plan.entries)).array.len) {
+            var reservation = GrantReservationSizedFor(MAX_TABLE_CAPABILITIES, @typeInfo(@TypeOf(plan.entries)).array.len){};
             for (plan.slice(), 0..) |entry, index| {
                 if (!rightsAreValidForTarget(entry.request.target, entry.request.rights)) return error.InvalidCapabilityRights;
                 reservation.slot_indexes[index] = try self.reserveCapabilitySlot(&reservation, index);
@@ -612,8 +668,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         fn commitGrantPlan(
             self: *Self,
-            plan: *const GrantPlan,
-            reservation: TableGrantReservation,
+            plan: anytype,
+            reservation: anytype,
             output: []Capability,
         ) void {
             var new_target_index: usize = 0;
@@ -653,16 +709,19 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             }
         }
 
-        fn reserveCapabilitySlot(self: *const Self, reservation: *const TableGrantReservation, used_count: usize) Error!TableCapabilitySlotIndex {
+        fn reserveCapabilitySlot(self: *const Self, reservation: anytype, used_count: usize) Error!TableCapabilitySlotIndex {
             const slot_index = self.slots.availableIndexExcluding(
-                SlotReservationContext{ .reservation = reservation, .used_count = used_count },
+                .{ .reservation = reservation, .used_count = used_count },
                 reservationExcludesSlot,
             ) orelse return error.TableFull;
             return @intCast(slot_index);
         }
 
-        fn reserveTargetGeneration(self: *const Self, target: CapabilityTarget, reservation: *TableGrantReservation) Error!u8 {
-            if (self.findTargetGenerationIndex(target)) |index| return index;
+        fn reserveTargetGeneration(self: *const Self, target: CapabilityTarget, reservation: anytype) Error!u8 {
+            if (self.findTargetGenerationIndex(target)) |index| {
+                if (self.targetGenerationAt(index).generation == 0) return error.CapabilityRevoked;
+                return index;
+            }
 
             var reserved_index: usize = 0;
             while (reserved_index < @as(usize, reservation.new_target_count)) : (reserved_index += 1) {
@@ -672,7 +731,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             }
 
             const slot_index = self.target_generations.availableIndexExcluding(
-                TargetGenerationReservationContext{ .reservation = reservation },
+                .{ .reservation = reservation },
                 reservationExcludesTargetGeneration,
             ) orelse return error.TargetTableFull;
             const new_target_count: usize = reservation.new_target_count;
@@ -684,7 +743,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return target_generation_index;
         }
 
-        fn reservationContainsSlot(reservation: *const TableGrantReservation, used_count: usize, slot_index: usize) bool {
+        fn reservationContainsSlot(reservation: anytype, used_count: usize, slot_index: usize) bool {
             var index: usize = 0;
             while (index < used_count) : (index += 1) {
                 if (@as(usize, reservation.slot_indexes[index]) == slot_index) return true;
@@ -692,11 +751,11 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return false;
         }
 
-        fn reservationExcludesSlot(context: SlotReservationContext, slot_index: usize) bool {
+        fn reservationExcludesSlot(context: anytype, slot_index: usize) bool {
             return reservationContainsSlot(context.reservation, context.used_count, slot_index);
         }
 
-        fn reservationContainsTargetGeneration(reservation: *const TableGrantReservation, target_generation_index: u8) bool {
+        fn reservationContainsTargetGeneration(reservation: anytype, target_generation_index: u8) bool {
             var index: usize = 0;
             while (index < @as(usize, reservation.new_target_count)) : (index += 1) {
                 if (reservation.new_target_indexes[index] == target_generation_index) return true;
@@ -704,7 +763,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return false;
         }
 
-        fn reservationExcludesTargetGeneration(context: TargetGenerationReservationContext, slot_index: usize) bool {
+        fn reservationExcludesTargetGeneration(context: anytype, slot_index: usize) bool {
             return reservationContainsTargetGeneration(context.reservation, @intCast(slot_index));
         }
 
@@ -959,6 +1018,147 @@ test "capability grant metadata retains full atomic plan capacity" {
     try std.testing.expectEqual(@as(usize, MAX_GRANT_PLAN_ENTRIES), table.activeCount());
 }
 
+test "single-entry grant plans retain bounded admission without changing batch geometry" {
+    try std.testing.expect(@FieldType(SingleGrantPlan, "entry_count") == u8);
+    try std.testing.expectEqual(@as(usize, 1), (SingleGrantPlan{}).entries.len);
+    try std.testing.expectEqual(@as(usize, MAX_GRANT_PLAN_ENTRIES), (GrantPlan{}).entries.len);
+    try std.testing.expectEqual(@as(usize, GRANT_RESERVATION_SIZE_CEILING_BYTES), @sizeOf(GrantReservation));
+    try std.testing.expect(@sizeOf(GrantReservationSizedFor(MAX_CAPABILITIES, 1)) < @sizeOf(GrantReservation));
+
+    var plan = SingleGrantPlan{};
+    const request = emptyGrantPlanEntry().request;
+    try plan.addMint(7, request);
+    const before = plan;
+    try std.testing.expectError(error.GrantPlanFull, plan.addMint(8, request));
+    try std.testing.expectEqualDeep(before, plan);
+}
+
+const SinglePlanTransactionCase = enum {
+    empty,
+    fresh_target,
+    existing_target,
+    reused_slot,
+    exhausted_slot,
+    exhausted_target,
+    full_grants,
+    full_targets,
+    full_grants_exhausted_target,
+    invalid_rights,
+    invalid_rights_full_grants,
+    short_output_invalid_rights,
+    audit_over_depth,
+};
+
+fn expectSinglePlanMatchesBatch(scenario: SinglePlanTransactionCase) !void {
+    const SmallTable = CapabilityTableWith(.{ .max_capabilities = 4, .max_target_generations = 2, .target_generation_index_capacity = 4 });
+    var initial = SmallTable.init();
+    var request = emptyGrantPlanEntry().request;
+    request.target.id = 42;
+    request.rights = .{ .service = .{ .time_query = true } };
+    request.lease.expires_at_ticks = std.math.maxInt(u64);
+    var stale_id: ?u64 = null;
+
+    switch (scenario) {
+        .existing_target => _ = try initial.mintSingle(request),
+        .reused_slot => {
+            const removed = try initial.mintSingle(request);
+            _ = try initial.mintSingle(request);
+            try initial.revokeGrant(removed.id);
+            stale_id = removed.id;
+        },
+        .exhausted_slot => initial.slots.slot_generations[0] = indexed_arena.EXHAUSTED_HANDLE_GENERATION,
+        .exhausted_target, .full_grants_exhausted_target => {
+            const retained = try initial.mintSingle(request);
+            seedTargetEpochForTest(&initial, retained.id, std.math.maxInt(u32));
+            const terminal = try initial.mintSingle(request);
+            try initial.revokeTargetAuthority(terminal.id);
+            if (scenario == .full_grants_exhausted_target) {
+                var other_request = request;
+                other_request.target.id += 1;
+                for (0..3) |_| _ = try initial.mintSingle(other_request);
+            }
+        },
+        .full_grants, .invalid_rights_full_grants => {
+            for (0..4) |_| _ = try initial.mintSingle(request);
+        },
+        .full_targets => {
+            _ = try initial.mintSingle(request);
+            request.target.id += 1;
+            _ = try initial.mintSingle(request);
+            request.target.id += 1;
+        },
+        else => {},
+    }
+    switch (scenario) {
+        .invalid_rights, .invalid_rights_full_grants, .short_output_invalid_rights => request.rights = CapabilityRights.emptyForTarget(.task),
+        .audit_over_depth => {
+            // Grant-plan minting forwards this policy metadata unchanged.
+            // Capacity specialization must not silently adopt mintSingle's
+            // additional delegation-depth validation.
+            request.audit.delegation_depth = 1;
+            request.audit.max_delegation_depth = 0;
+        },
+        else => {},
+    }
+
+    var batch_plan = GrantPlan{};
+    var single_plan = SingleGrantPlan{};
+    if (scenario != .empty) {
+        try batch_plan.addMint(7, request);
+        try single_plan.addMint(7, request);
+    }
+    var batch_table = initial;
+    var single_table = initial;
+    var canary = zeroCapability();
+    canary.id = 0xfedcba9876543210;
+    const output_before = @as([2]Capability, @splat(canary));
+    var batch_output = output_before;
+    var single_output = output_before;
+    const output_length: usize = if (scenario == .short_output_invalid_rights) 0 else 1;
+    const expected_failure: ?Error = switch (scenario) {
+        .exhausted_target => error.CapabilityRevoked,
+        .full_grants, .full_grants_exhausted_target, .short_output_invalid_rights => error.TableFull,
+        .full_targets => error.TargetTableFull,
+        .invalid_rights, .invalid_rights_full_grants => error.InvalidCapabilityRights,
+        else => null,
+    };
+    if (expected_failure) |failure| {
+        try std.testing.expectError(failure, batch_table.applyGrantPlan(&batch_plan, batch_output[0..output_length]));
+        try std.testing.expectError(failure, single_table.applyGrantPlan(&single_plan, single_output[0..output_length]));
+        try std.testing.expectEqualDeep(initial, batch_table);
+        try std.testing.expectEqualDeep(initial, single_table);
+        try std.testing.expectEqualDeep(output_before, batch_output);
+        try std.testing.expectEqualDeep(output_before, single_output);
+    } else {
+        const batch_granted = try batch_table.applyGrantPlan(&batch_plan, batch_output[0..output_length]);
+        const single_granted = try single_table.applyGrantPlan(&single_plan, single_output[0..output_length]);
+        try std.testing.expectEqual(@as(usize, batch_plan.entry_count), batch_granted.len);
+        try std.testing.expectEqualDeep(batch_granted, single_granted);
+        try std.testing.expectEqual(initial.activeCount() + batch_granted.len, batch_table.activeCount());
+        if (scenario == .empty) {
+            try std.testing.expectEqualDeep(initial, batch_table);
+            try std.testing.expectEqualDeep(output_before, batch_output);
+        } else {
+            try std.testing.expectEqualDeep(request.audit, batch_granted[0].audit);
+            if (scenario == .exhausted_slot) try std.testing.expectEqual(@as(usize, 1), batch_table.findSlotIndex(batch_granted[0].id).?);
+        }
+    }
+    // Compare all allocator generations, target/cache/index state, intrusive
+    // links, publication counters and untouched trailing output fields.
+    try std.testing.expectEqualDeep(batch_table, single_table);
+    try std.testing.expectEqualDeep(batch_output, single_output);
+    try std.testing.expectEqualDeep(canary, batch_output[1]);
+    try std.testing.expectEqualDeep(canary, single_output[1]);
+    if (stale_id) |id| {
+        try std.testing.expect(batch_table.query(id) == null);
+        try std.testing.expect(single_table.query(id) == null);
+    }
+}
+
+test "single-entry grant transactions match batch publication and failure atomicity" {
+    for (std.enums.values(SinglePlanTransactionCase)) |scenario| try expectSinglePlanMatchesBatch(scenario);
+}
+
 test "single grants avoid batch plans and retain transactional rollback" {
     try std.testing.expect(SINGLE_GRANT_AVOIDS_BATCH_PLAN);
 
@@ -1108,6 +1308,360 @@ test "capability table omits redundant holder index state" {
     try std.testing.expectEqual(CAPABILITY_TABLE_SIZE_CEILING_BYTES, @sizeOf(CapabilityTable));
 }
 
+test "queued capability ownership occupies existing slot padding" {
+    const Slot = @typeInfo(@FieldType(@FieldType(CapabilityTable, "slots"), "slots")).array.child;
+    const PreviousSlot = struct {
+        in_use: bool = false,
+        capability: Capability = zeroCapability(),
+        target_generation_index: u8 = 0,
+        target_previous: CapabilitySlotIndex = 0,
+        target_next: CapabilitySlotIndex = 0,
+    };
+    try std.testing.expectEqual(@sizeOf(PreviousSlot), @sizeOf(Slot));
+    try std.testing.expectEqual(@alignOf(PreviousSlot), @alignOf(Slot));
+    try std.testing.expectEqual(@as(usize, 31_784), @sizeOf(CapabilityTable));
+}
+
+fn queuedMoveTestRequest() MintRequest {
+    return .{
+        .holder = .{ .kind = .service, .serial = 2 },
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .service, .id = 42 },
+        .rights = fullSessionRights(),
+        .scope = .{ .local_only = true },
+        .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 50 },
+    };
+}
+
+fn seedTargetEpochForTest(table: anytype, capability_id: u64, generation: u32) void {
+    const resolved = table.resolve(capability_id).?;
+    const index = table.slots.slots[resolved.slot_index].target_generation_index;
+    // Fast-forward only the counter; records, handles and index links remain
+    // those produced by public operations. This is seeded boundary evidence.
+    table.target_generations.slots[index].generation = generation;
+}
+
+test "target epoch exhaustion terminates at the last valid generations" {
+    const SmallTable = CapabilityTableWith(.{ .max_capabilities = 8, .max_target_generations = 4, .target_generation_index_capacity = 8 });
+    var table = SmallTable.init();
+    const request = queuedMoveTestRequest();
+    const retained = try table.mintSingle(request);
+    const retained_view = try table.resolveUsable(retained.id, 20);
+    seedTargetEpochForTest(&table, retained.id, std.math.maxInt(u32) - 1);
+    const near_limit = try table.mintSingle(request);
+    try std.testing.expectEqual(std.math.maxInt(u32) - 1, near_limit.revocation_generation);
+    _ = try table.requireUsable(near_limit.id, 20);
+    try table.revokeTargetAuthority(near_limit.id);
+    const at_limit = try table.mintSingle(request);
+    const at_limit_view = try table.resolveUsable(at_limit.id, 20);
+    try std.testing.expectEqual(std.math.maxInt(u32), at_limit.revocation_generation);
+    const generation_before = table.mutationGeneration();
+    try table.revokeTargetAuthorityResolved(at_limit.id, at_limit_view);
+    try std.testing.expectEqual(generation_before + 1, table.mutationGeneration());
+    try std.testing.expect(table.query(at_limit.id) == null);
+    const target_index = table.slots.slots[retained_view.slot_index].target_generation_index;
+    try std.testing.expectEqual(@as(u32, 0), table.target_generations.slots[target_index].generation);
+    try std.testing.expectEqualDeep(retained, table.query(retained.id).?);
+    try std.testing.expect(!table.inspect(retained.id, 20).?.usable);
+    const exhausted = table;
+    try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(retained.id, 20));
+    try std.testing.expectError(error.CapabilityRevoked, table.resolveUsable(retained.id, 20));
+    const derive_request = DeriveRequest{
+        .parent_capability_id = retained.id,
+        .holder = .{ .kind = .app, .serial = 3 },
+        .rights = .{ .service = .{ .time_query = true } },
+        .scope = retained.scope,
+        .lease = retained.lease,
+    };
+    try std.testing.expectError(error.CapabilityRevoked, table.derive(derive_request, 20));
+    try std.testing.expectError(error.CapabilityRevoked, table.deriveResolved(derive_request, retained_view, 20));
+    const pass_request = PassRequest{ .capability_id = retained.id, .new_holder = derive_request.holder, .now_ticks = 20 };
+    try std.testing.expectError(error.CapabilityRevoked, table.pass(pass_request));
+    try std.testing.expectError(error.CapabilityRevoked, table.passResolved(pass_request, retained_view));
+    try std.testing.expectError(error.CapabilityNotFound, table.revokeTargetAuthorityResolved(at_limit.id, at_limit_view));
+    try std.testing.expectEqualDeep(exhausted, table);
+    // A final exact cancellation reclaims the target, including at exhaustion.
+    try table.revokeTargetAuthority(retained.id);
+    const reopened = try table.mintSingle(request);
+    try std.testing.expectEqual(@as(u32, 1), reopened.revocation_generation);
+    try std.testing.expect(reopened.id != retained.id and reopened.id != at_limit.id);
+    try std.testing.expectError(error.CapabilityNotFound, table.passResolved(pass_request, retained_view));
+    _ = try table.requireUsable(reopened.id, 20);
+    // With no siblings, the last grant at max removes its entry directly.
+    try table.revokeGrant(reopened.id);
+    const seed = try table.mintSingle(request);
+    seedTargetEpochForTest(&table, seed.id, std.math.maxInt(u32));
+    const last = try table.mintSingle(request);
+    try table.revokeGrant(seed.id);
+    try table.revokeTargetAuthority(last.id);
+    try std.testing.expectEqual(@as(usize, 0), table.activeCount());
+    const after_last = try table.mintSingle(request);
+    try std.testing.expectEqual(@as(u32, 1), after_last.revocation_generation);
+}
+
+test "target epoch exhaustion rejects single and mixed grants without mutation" {
+    const SmallTable = CapabilityTableWith(.{ .max_capabilities = 8, .max_target_generations = 4, .target_generation_index_capacity = 8 });
+    var table = SmallTable.init();
+    const request = queuedMoveTestRequest();
+    const retained = try table.mintSingle(request);
+    seedTargetEpochForTest(&table, retained.id, std.math.maxInt(u32));
+    const last = try table.mintSingle(request);
+    try table.revokeTargetAuthority(last.id);
+    // First the recent-target hit, then a cold indexed lookup. Neither denied
+    // insertion may change the cache, allocator generations or table links.
+    for ([_]bool{ false, true }) |cold| {
+        if (cold) {
+            var other_request = request;
+            other_request.target.id += 1;
+            _ = try table.mintSingle(other_request);
+        }
+        const before = table;
+        try std.testing.expectError(error.CapabilityRevoked, table.mintSingle(request));
+        try std.testing.expectEqualDeep(before, table);
+        try std.testing.expectError(error.CapabilityRevoked, table.mintBootRoot(request));
+        try std.testing.expectEqualDeep(before, table);
+        for ([_]bool{ false, true }) |exhausted_first| {
+            var plan = GrantPlan{};
+            var fresh_request = request;
+            fresh_request.target.id += 2;
+            try plan.addMint(7, if (exhausted_first) request else fresh_request);
+            try plan.addMint(7, if (exhausted_first) fresh_request else request);
+            var output: [MAX_GRANT_PLAN_ENTRIES]Capability = @splat(retained);
+            const output_before = output;
+            try std.testing.expectError(error.CapabilityRevoked, table.applyGrantPlan(&plan, &output));
+            try std.testing.expectEqualDeep(before, table);
+            try std.testing.expectEqualDeep(output_before, output);
+        }
+        var duplicates = GrantPlan{};
+        try duplicates.addMint(7, request);
+        try duplicates.addMint(7, request);
+        var output: [2]Capability = @splat(retained);
+        const output_before = output;
+        try std.testing.expectError(error.CapabilityRevoked, table.applyGrantPlan(&duplicates, &output));
+        try std.testing.expectEqualDeep(before, table);
+        try std.testing.expectEqualDeep(output_before, output);
+    }
+    var unrelated_request = request;
+    unrelated_request.target.id += 3;
+    const unrelated = try table.mintSingle(unrelated_request);
+    _ = try table.requireUsable(unrelated.id, 20);
+
+    const FullTable = CapabilityTableWith(.{ .max_capabilities = 2, .max_target_generations = 2, .target_generation_index_capacity = 4 });
+    var full = FullTable.init();
+    const tombstone = try full.mintSingle(request);
+    seedTargetEpochForTest(&full, tombstone.id, std.math.maxInt(u32));
+    const terminal = try full.mintSingle(request);
+    try full.revokeTargetAuthority(terminal.id);
+    _ = try full.mintSingle(unrelated_request);
+    const full_before = full;
+    try std.testing.expectError(error.CapabilityRevoked, full.mintSingle(request));
+    try std.testing.expectEqualDeep(full_before, full);
+    var plan = GrantPlan{};
+    try plan.addMint(7, request);
+    var output = [_]Capability{tombstone};
+    // Batch capacity admission precedes its epoch check, and remains read-only.
+    try std.testing.expectError(error.TableFull, full.applyGrantPlan(&plan, &output));
+    try std.testing.expectEqualDeep(full_before, full);
+    try std.testing.expectEqualDeep(tombstone, output[0]);
+}
+
+test "target epoch exhaustion disposes queued grants before safe reopening" {
+    const SmallTable = CapabilityTableWith(.{ .max_capabilities = 8, .max_target_generations = 4, .target_generation_index_capacity = 8 });
+    var table = SmallTable.init();
+    const request = queuedMoveTestRequest();
+    const retained = try table.mintSingle(request);
+    const sibling = try table.mintSingle(request);
+    seedTargetEpochForTest(&table, retained.id, std.math.maxInt(u32));
+    const gift = try table.mintSingle(request);
+    const revoker = try table.mintSingle(request);
+    var other_request = request;
+    other_request.target.id += 1;
+    const other = try table.mintSingle(other_request);
+    const gift_view = try table.resolveUsable(gift.id, 20);
+    table.commitQueuedMoveResolved(gift_view, gift.id);
+    try table.revokeTargetAuthority(revoker.id);
+    const target_index = table.slots.slots[gift_view.slot_index].target_generation_index;
+    try std.testing.expectEqual(@as(u32, 0), table.target_generations.slots[target_index].generation);
+    const exhausted = table;
+    const pass_request = PassRequest{ .capability_id = gift.id, .new_holder = .{ .kind = .app, .serial = 3 }, .now_ticks = 20, .revoke_source = true };
+    try std.testing.expectError(error.CapabilityRevoked, table.passQueuedMove(pass_request));
+    try std.testing.expectError(error.CapabilityRevoked, table.passResolved(pass_request, gift_view));
+    try std.testing.expectEqualDeep(exhausted, table);
+    _ = try table.requireUsable(other.id, 20);
+    var retiring = table;
+    try std.testing.expectEqual(@as(usize, 3), retiring.retireTargetAuthority(request.target));
+    try std.testing.expectEqualDeep(other, retiring.query(other.id).?);
+    const retired_reopen = try retiring.mintSingle(request);
+    try std.testing.expectEqual(@as(u32, 1), retired_reopen.revocation_generation);
+    try std.testing.expect(table.disposeQueuedMove(gift.id));
+    const disposed = table;
+    try std.testing.expect(!table.disposeQueuedMove(gift.id));
+    try std.testing.expectEqualDeep(disposed, table);
+    // Two ordinary tombstones remain: raw revocation must keep zero while
+    // another record survives, rather than turning it back into epoch one.
+    try table.revokeTargetAuthority(retained.id);
+    try std.testing.expectEqual(@as(u32, 0), table.target_generations.slots[target_index].generation);
+    try std.testing.expectEqualDeep(sibling, table.query(sibling.id).?);
+    try std.testing.expect(!table.inspect(sibling.id, 20).?.usable);
+    table.rollbackSingleGrant(sibling.id);
+    const reopened = try table.mintSingle(request);
+    try std.testing.expectEqual(@as(u32, 1), reopened.revocation_generation);
+    try std.testing.expect(reopened.id != gift.id and reopened.id != retained.id and reopened.id != sibling.id);
+    _ = try table.requireUsable(reopened.id, 20);
+    try std.testing.expectEqualDeep(other, table.query(other.id).?);
+    const after_reopen = table;
+    try std.testing.expect(!table.disposeQueuedMove(gift.id));
+    try std.testing.expectError(error.CapabilityNotFound, table.passQueuedMove(pass_request));
+    try std.testing.expectError(error.CapabilityNotFound, table.passResolved(pass_request, gift_view));
+    try std.testing.expectEqualDeep(after_reopen, table);
+}
+
+test "queued capability ownership rejects ordinary and stale resolved authority without mutation" {
+    var table = CapabilityTable.init();
+    const gift = try table.mintBootRoot(queuedMoveTestRequest());
+    const view = try table.resolveUsable(gift.id, 20);
+    const generation = table.mutationGeneration();
+    table.commitQueuedMoveResolved(view, gift.id);
+    try std.testing.expectEqual(generation + 1, table.mutationGeneration());
+    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+    try std.testing.expectEqualDeep(gift, table.query(gift.id).?);
+    try std.testing.expectEqualDeep(gift, table.resolve(gift.id).?.capability.*);
+    try std.testing.expect(!table.inspect(gift.id, 20).?.usable);
+    const before = table;
+    try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(gift.id, 20));
+    try std.testing.expectError(error.CapabilityRevoked, table.resolveUsable(gift.id, 20));
+    const derive_request = DeriveRequest{
+        .parent_capability_id = gift.id,
+        .holder = .{ .kind = .app, .serial = 3 },
+        .rights = .{ .service = .{ .time_query = true } },
+        .scope = gift.scope,
+        .lease = gift.lease,
+    };
+    try std.testing.expectError(error.CapabilityRevoked, table.derive(derive_request, 20));
+    try std.testing.expectError(error.CapabilityRevoked, table.deriveResolved(derive_request, view, 20));
+    for ([_]bool{ false, true }) |move| {
+        const pass_request = PassRequest{ .capability_id = gift.id, .new_holder = .{ .kind = .app, .serial = 3 }, .now_ticks = 20, .revoke_source = move };
+        try std.testing.expectError(error.CapabilityRevoked, table.pass(pass_request));
+        try std.testing.expectError(error.CapabilityRevoked, table.passResolved(pass_request, view));
+    }
+    try std.testing.expectEqualDeep(before, table);
+}
+
+test "queued capability ownership transfers once and disposal never removes an ordinary copy" {
+    var table = CapabilityTable.init();
+    const gift = try table.mintBootRoot(queuedMoveTestRequest());
+    const pass_request = PassRequest{ .capability_id = gift.id, .new_holder = .{ .kind = .app, .serial = 3 }, .now_ticks = 20, .revoke_source = true };
+    const ordinary = table;
+    try std.testing.expect(!table.disposeQueuedMove(gift.id));
+    try std.testing.expectError(error.CapabilityNotFound, table.passQueuedMove(pass_request));
+    try std.testing.expectEqualDeep(ordinary, table);
+    const view = try table.resolveUsable(gift.id, 20);
+    table.commitQueuedMoveResolved(view, gift.id);
+    const queued = table;
+    var invalid = pass_request;
+    invalid.revoke_source = false;
+    try std.testing.expectError(error.RightsEscalation, table.passQueuedMove(invalid));
+    try std.testing.expectEqualDeep(queued, table);
+    const generation = table.mutationGeneration();
+    const received = try table.passQueuedMove(pass_request);
+    try std.testing.expect(received.id != gift.id);
+    try std.testing.expect(received.holder.eql(pass_request.new_holder));
+    try std.testing.expectEqualDeep(gift.target, received.target);
+    try std.testing.expectEqualDeep(gift.rights, received.rights);
+    try std.testing.expectEqualDeep(gift.scope, received.scope);
+    try std.testing.expectEqualDeep(gift.lease, received.lease);
+    try std.testing.expectEqual(gift.audit.delegation_depth + 1, received.audit.delegation_depth);
+    try std.testing.expectEqual(generation + 2, table.mutationGeneration());
+    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+    try std.testing.expect(table.query(gift.id) == null);
+    _ = try table.requireUsable(received.id, 20);
+    const returned = table;
+    try std.testing.expectError(error.CapabilityNotFound, table.passQueuedMove(pass_request));
+    try std.testing.expect(!table.disposeQueuedMove(gift.id));
+    try std.testing.expect(!table.disposeQueuedMove(received.id));
+    try std.testing.expectEqualDeep(returned, table);
+}
+
+test "queued capability ownership preserves rejected transfers and disposes expired revoked or depth-limited grants" {
+    const SmallTable = CapabilityTableWith(.{ .max_capabilities = 2, .max_target_generations = 2, .target_generation_index_capacity = 4 });
+    var table = SmallTable.init();
+    const gift = try table.mintBootRoot(queuedMoveTestRequest());
+    const sibling = try table.mintBootRoot(queuedMoveTestRequest());
+    table.commitQueuedMoveResolved(try table.resolveUsable(gift.id, 20), gift.id);
+    const pass_request = PassRequest{ .capability_id = gift.id, .new_holder = .{ .kind = .app, .serial = 3 }, .now_ticks = 20, .revoke_source = true };
+    const full = table;
+    try std.testing.expectError(error.TableFull, table.passQueuedMove(pass_request));
+    try std.testing.expectEqualDeep(full, table);
+    var invalid = pass_request;
+    invalid.scope = .{ .local_only = false };
+    try std.testing.expectError(error.ScopeEscalation, table.passQueuedMove(invalid));
+    try std.testing.expectEqualDeep(full, table);
+    invalid = pass_request;
+    invalid.now_ticks = 51;
+    try std.testing.expectError(error.CapabilityRevoked, table.passQueuedMove(invalid));
+    try std.testing.expectEqualDeep(full, table);
+    try table.revokeTargetAuthority(sibling.id);
+    const revoked = table;
+    try std.testing.expectError(error.CapabilityRevoked, table.passQueuedMove(pass_request));
+    try std.testing.expectEqualDeep(revoked, table);
+    const generation = table.mutationGeneration();
+    try std.testing.expect(table.disposeQueuedMove(gift.id));
+    try std.testing.expectEqual(generation + 1, table.mutationGeneration());
+    try std.testing.expectEqual(@as(usize, 0), table.activeCount());
+    const disposed = table;
+    try std.testing.expect(!table.disposeQueuedMove(gift.id));
+    try std.testing.expectEqualDeep(disposed, table);
+
+    var limited = queuedMoveTestRequest();
+    limited.audit.delegation_depth = limited.audit.max_delegation_depth;
+    const depth_limited = try table.mintBootRoot(limited);
+    table.commitQueuedMoveResolved(try table.resolveUsable(depth_limited.id, 20), depth_limited.id);
+    const before_depth = table;
+    var depth_request = pass_request;
+    depth_request.capability_id = depth_limited.id;
+    try std.testing.expectError(error.DelegationDepthExceeded, table.passQueuedMove(depth_request));
+    try std.testing.expectEqualDeep(before_depth, table);
+    try std.testing.expect(table.disposeQueuedMove(depth_limited.id));
+}
+
+test "queued capability ownership cancellation preserves siblings and rejects foreign or reused receipts" {
+    var table = CapabilityTable.init();
+    var foreign = CapabilityTable.init();
+    const gift = try table.mintBootRoot(queuedMoveTestRequest());
+    const foreign_gift = try foreign.mintBootRoot(queuedMoveTestRequest());
+    try std.testing.expectEqual(gift.id, foreign_gift.id);
+    const view = try table.resolveUsable(gift.id, 20);
+    const foreign_before = foreign;
+    const pass_request = PassRequest{ .capability_id = gift.id, .new_holder = .{ .kind = .app, .serial = 3 }, .now_ticks = 20, .revoke_source = true };
+    try std.testing.expectError(error.CapabilityNotFound, foreign.passResolved(pass_request, view));
+    try std.testing.expectError(error.CapabilityNotFound, foreign.deriveResolved(.{
+        .parent_capability_id = gift.id,
+        .holder = pass_request.new_holder,
+        .rights = .{ .service = .{ .time_query = true } },
+        .scope = gift.scope,
+        .lease = gift.lease,
+    }, view, 20));
+    try std.testing.expectError(error.CapabilityNotFound, foreign.revokeTargetAuthorityResolved(gift.id, view));
+    try std.testing.expectEqualDeep(foreign_before, foreign);
+
+    const sibling = try table.mintBootRoot(queuedMoveTestRequest());
+    table.commitQueuedMoveResolved(view, gift.id);
+    // Explicit grant cancellation is allowed even while the ring owns the ID.
+    try table.revokeGrant(gift.id);
+    try std.testing.expectEqualDeep(sibling, table.query(sibling.id).?);
+    _ = try table.requireUsable(sibling.id, 20);
+    const replacement = try table.mintBootRoot(queuedMoveTestRequest());
+    try std.testing.expectEqual(@as(u32, @truncate(gift.id)), @as(u32, @truncate(replacement.id)));
+    try std.testing.expect(replacement.id != gift.id);
+    const replaced = table;
+    try std.testing.expectError(error.CapabilityNotFound, table.passResolved(pass_request, view));
+    try std.testing.expectError(error.CapabilityNotFound, table.passQueuedMove(pass_request));
+    try std.testing.expect(!table.disposeQueuedMove(gift.id));
+    try std.testing.expect(!table.disposeQueuedMove(replacement.id));
+    try std.testing.expectEqualDeep(replaced, table);
+    _ = try table.requireUsable(replacement.id, 20);
+}
+
 test "allocated capability table initialization preserves empty table invariants" {
     var table: CapabilityTable = undefined;
     table.initializeAllocated();
@@ -1153,6 +1707,40 @@ test "capability table mutation generation tracks insert removal and wrap" {
     try std.testing.expectEqual(@as(u64, 2), table.mutationGeneration());
 }
 
+test "capability derive authenticates parent at trusted operation time without mutation" {
+    var table = CapabilityTable.init();
+    const parent = try table.mintBootRoot(.{
+        .holder = .{ .kind = .app, .serial = 1 },
+        .issuer = .{ .kind = .policy_authority, .serial = 2 },
+        .target = .{ .kind = .object, .id = 3 },
+        .rights = .{ .object = .{ .capability_derive = true, .object_read = true } },
+        .scope = .{ .local_only = true },
+        .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 50 },
+    });
+    var request = DeriveRequest{
+        .parent_capability_id = parent.id,
+        .holder = .{ .kind = .app, .serial = 4 },
+        .rights = .{ .object = .{ .object_read = true } },
+        .scope = parent.scope,
+        .lease = .{ .issued_at_ticks = 10, .expires_at_ticks = 40 },
+    };
+    const resolved = table.resolve(parent.id).?;
+    const before = table;
+    for ([_]u64{ 9, 51, 100 }) |now_ticks| {
+        try std.testing.expectError(error.CapabilityRevoked, table.derive(request, now_ticks));
+        try std.testing.expectEqualDeep(before, table);
+        try std.testing.expectError(error.CapabilityRevoked, table.deriveResolved(request, resolved, now_ticks));
+        try std.testing.expectEqualDeep(before, table);
+    }
+    request.lease = .{ .issued_at_ticks = 30, .expires_at_ticks = 40 };
+    // An admitted parent may create a future child; the parent must be active
+    // now even when the requested child's interval starts later.
+    const derived = try table.derive(request, 20);
+    try std.testing.expect(!derived.lease.isActive(20));
+    try std.testing.expect(derived.lease.isActive(30));
+    try std.testing.expectEqual(@as(usize, 2), table.activeCount());
+}
+
 test "capabilities derive narrower rights and grant revocation leaves sibling authority usable" {
     var table = CapabilityTable.init();
     const policy = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
@@ -1181,7 +1769,7 @@ test "capabilities derive narrower rights and grant revocation leaves sibling au
         .scope = .{ .task_id = 100, .local_only = true, .broker_only = true },
         .lease = .{ .issued_at_ticks = 5, .expires_at_ticks = 500, .renewable = false },
         .audit = .{ .policy_generation = 1, .source_task_id = 100, .broker_service_id = 42 },
-    });
+    }, 5);
 
     _ = try table.requireUsable(parent.id, 10);
     const stored_derived = try table.requireUsable(derived.id, 10);
@@ -1217,7 +1805,7 @@ test "task authority retirement removes bound and targeting grants but preserves
         .rights = .{ .service = .{ .capability_query = true } },
         .scope = .{ .task_id = 100, .local_only = true },
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 90 },
-    });
+    }, 1);
     const transferred = try table.pass(.{
         .capability_id = parent.id,
         .new_holder = receiver_holder,
@@ -1362,7 +1950,7 @@ test "capability delegation depth budget stops transitive derive and pass chains
         } },
         .scope = .{ .task_id = 200, .local_only = true, .broker_only = true },
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 900, .renewable = false },
-    });
+    }, 1);
     try std.testing.expectEqual(@as(u8, 1), first.audit.delegation_depth);
     try std.testing.expectEqual(@as(u8, 1), first.audit.max_delegation_depth);
     try std.testing.expectEqual(parent.traceId(), first.audit.parent_trace_id);
@@ -1373,7 +1961,7 @@ test "capability delegation depth budget stops transitive derive and pass chains
         .rights = .{ .service = .{ .capability_query = true } },
         .scope = .{ .task_id = 200, .local_only = true, .broker_only = true },
         .lease = .{ .issued_at_ticks = 2, .expires_at_ticks = 800, .renewable = false },
-    }));
+    }, 2));
     try std.testing.expectError(error.DelegationDepthExceeded, table.pass(.{
         .capability_id = first.id,
         .new_holder = second_holder,
@@ -1427,7 +2015,7 @@ test "target authority revocation invalidates sibling and derived capabilities" 
         .scope = .{ .task_id = 100, .local_only = true, .broker_only = true },
         .lease = .{ .issued_at_ticks = 5, .expires_at_ticks = 500, .renewable = false },
         .audit = .{ .policy_generation = 1, .source_task_id = 100, .broker_service_id = 42 },
-    });
+    }, 5);
 
     try table.revokeTargetAuthority(parent.id);
     try std.testing.expect(table.inspect(parent.id, 10) == null);
@@ -1467,7 +2055,7 @@ test "derive rejects rights and scope escalation" {
         } },
         .scope = .{ .workspace_id = 3, .local_only = true },
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 10, .renewable = false },
-    }));
+    }, 1));
 
     try std.testing.expectError(error.ScopeEscalation, table.derive(.{
         .parent_capability_id = parent.id,
@@ -1477,7 +2065,7 @@ test "derive rejects rights and scope escalation" {
         } },
         .scope = .{ .workspace_id = 3, .local_only = false },
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 10, .renewable = false },
-    }));
+    }, 1));
 }
 
 test "mint rejects rights that do not match concrete target kind" {
@@ -1727,7 +2315,7 @@ test "derived capability views are copied before revoked slots are reused" {
         .rights = .{ .service = .{ .capability_query = true } },
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
-    });
+    }, 0);
     const derived_slot_index = table.findSlotIndex(derived.id).?;
 
     try table.revokeGrant(derived.id);

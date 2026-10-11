@@ -15,13 +15,13 @@ SYMBOL(zigos_xstate_host_supported):
     pushq %rbx
     movl $1, %eax
     cpuid
-    andl $0x0c000000, %ecx
-    cmpl $0x0c000000, %ecx
+    andl $0x1c000000, %ecx
+    cmpl $0x1c000000, %ecx
     jne .unsupported
     xorl %ecx, %ecx
     xgetbv
-    andl $3, %eax
-    cmpl $3, %eax
+    andl $XSTATE_MASK, %eax
+    cmpl $XSTATE_MASK, %eax
     jne .unsupported
     movl $1, %eax
     popq %rbx
@@ -53,26 +53,26 @@ SYMBOL(zigos_xstate_host_roundtrip):
     XRSTOR_FULL_STATE %r13
     movq %r14, %r13
     XSAVE_FULL_STATE %r13
-    leaq 640(%r12), %r13
+    leaq XSTATE_ALIGNED_BYTES(%r12), %r13
     XRSTOR_STATE %r13
-    leaq 640(%r14), %r13
+    leaq XSTATE_ALIGNED_BYTES(%r14), %r13
     XSAVE_STATE %r13
-    leaq 1280(%r12), %r13
+    leaq (2 * XSTATE_ALIGNED_BYTES)(%r12), %r13
     XRSTOR_STATE %r13
-    leaq 1280(%r14), %r13
+    leaq (2 * XSTATE_ALIGNED_BYTES)(%r14), %r13
     XSAVE_STATE %r13
 
     // No compiler-generated code executes between owner changes. Saving to
-    // each persistent image must retain its x87, MXCSR and all sixteen XMMs.
+    // each persistent image must retain x87, MXCSR and all sixteen full YMMs.
     movl $128, %r15d
 .roundtrip:
     movq %r14, %r13
     XRSTOR_FULL_STATE %r13, 1
     XSAVE_FULL_STATE %r13
-    leaq 640(%r14), %r13
+    leaq XSTATE_ALIGNED_BYTES(%r14), %r13
     XRSTOR_STATE %r13, 0, 1
     XSAVE_STATE %r13, 0, 1
-    leaq 1280(%r14), %r13
+    leaq (2 * XSTATE_ALIGNED_BYTES)(%r14), %r13
     XRSTOR_STATE %r13, 0, 1
     XSAVE_STATE %r13, 0, 1
     decl %r15d

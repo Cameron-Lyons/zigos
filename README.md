@@ -17,6 +17,313 @@ requests.
 
 ## Current State
 
+The kernel now links at `0xffffffff82000000` while retaining a physical load
+address of 32 MiB. Three load segments preserve contiguous RX text, RO immutable
+data and RW mutable data. EFI enables NXE and CR0.WP before installing the split
+upper-half image and physical-memory aliases; the kernel replaces them with its
+own page tables, keeps heap pointers in the upper half, and gives task roots
+only the supervisor half.
+The production entry has no protected-mode Multiboot path. These addresses match
+the supervisor partition required by LASS
+([Intel SDM, section 4.3.2](https://cdrdv2-public.intel.com/843836/325384-sdm-vol-3abcd-dec-24.pdf)).
+
+`zig build high-half-entry-check` verifies the production EFI transition,
+compiled entry and data pointers, stack, direct alias, physical CR3 and initial
+FP controls under QEMU. The probe also checks SMAP activation and clears a
+deliberately set AC flag through the kernel user-access helper. It runs the
+actual kernel paging and heap code, checks final image/alias W^X and stack
+guards, and switches into and reclaims a task root with inherited upper-half
+mappings. The 192 MiB fixture records two 31-page EFI arena allocations and
+31 final table pages, reducing initial table storage to 248 KiB and retaining
+124 KiB after retirement. A 128 MiB attempt still fails EFI heap reservation
+before arena allocation. Immediately after the final CR3 check, it verifies exact boot-arena
+reclamation accounting, rejects allocation inside the live table prefix,
+allocates the complete returned transition run and any nonempty final tail,
+writes their endpoint canaries and
+releases them. The live prefix fingerprint, CR3, image leaves and frame counts
+must remain intact. A shared-frame phase uses the actual object table and pager
+to check zeroed owned RAM, writable cached aliases for a sealed ring, independent
+private COW snapshots, and complete reclamation after both task mappings retire.
+Checked supervisor copies materialize initially absent pages, read and write
+across a page boundary, and observe peer writes. Live task/token authority and
+exact logical registration reject padding, foreign tasks and tokens, revoked
+mappings and a forged late physical leaf before payload modification. A separate
+claimed executor fixture owns two real runtime tasks and a stable kernel, invokes
+the freestanding dispatcher copy helpers and endpoint send/receive handlers, and
+checks the full declared response span. Rejected receive outputs preserve the
+queued payload, moved grant, task attachments and complete backing bytes. A valid
+cross-page receive consumes the queued snapshot once and retargets its grant;
+failed transfers after dequeue dispose undelivered moves. Revocation rejects
+fresh response writes and stale send requests before queue publication. These
+copies use checked supervisor WB aliases with BSP ownership and interrupts
+disabled; they never open SMAP access. The phase runs at CPL0; native user faults,
+syscall opcode/trap entry and accelerator DMA completion need separate validation.
+A resident private-root fixture warms actual read-only translations and prepares
+two COW pages with one context barrier before a hardware store. A later-page
+rejection still finishes one barrier for earlier promotions before returning;
+unchanged retries send none, and the single-page promotion primitive remains
+immediate. Its synchronous remote callback observes publication and untouched
+payloads before AP startup; it does not execute a remote user-context shootdown
+or PCID/INVPCID instructions.
+With an explicit sixteen-core QEMU topology, it starts fifteen APs
+through the production SIPI bridge and shared checked patching code, verifies
+their minimal entry controls, high stacks, physical CR3, RDPID identity and
+distinct loaded GDT/TSS state. The actual timer API adopts one BSP clock and
+initializes every AP with a masked, stopped local timer. Under the explicit
+2.4 GHz emulator clock, staggered APs synchronize their own tick caches and
+independently re-read them after every peer has initialized. The BSP cache stays
+unchanged; raw LVT and count readbacks remain disarmed on all sixteen CPUs.
+This phase does not execute native deadline interrupts or AP userspace.
+Before AP startup, the BSP provisions sixteen
+trap-stack allocations through the production API. The probe checks every guard,
+all 144 distinct usable physical pages, supervisor RW/NX permissions, full initial
+paint and independent canaries. Each CPU reads its own published stack top through
+RDPID selection; this phase keeps execution on the existing kernel stacks.
+It also binds real GS bases to sixteen separate
+128-byte native-entry records, checks their fields through GS operands, and
+clears each CPU's dormant continuation while preserving every neighbor and its
+stack, port, task and mode fields. This phase leaves native-entry modes disabled.
+All fifteen APs then start real Runtime execution leases and hold distinct empty
+task roots at CPL0 while the BSP keeps its kernel root. Logical termination
+requests an atomic stop while retaining capabilities, components and address-space
+records. Collection rejects missing acknowledgements, and root retirement rejects
+active AP roots before changing frames. Each AP receives three real fixed stop
+interrupts through an isolated standard-XSAVE gate: one unrequested prompt,
+termination through the Runtime's bound stop sink, and repeated STOP delivery.
+The owner-local check observes only its exact lease; every IRET preserves GPRs,
+x87, all XMM/YMM registers, FP controls, DF, AC, CR3 and dormant GS state.
+The BSP verifies that interrupt return leaves each execution running and its
+resources pinned. In reverse CPU order, each AP switches to
+the kernel root, clears its continuation and acknowledges its exact lease. BSP
+collection then retires only that task's resources and root through the actual
+Runtime callbacks, preserving every pending neighbor and exact frame accounting.
+This phase leaves native-entry modes disabled and does not run AP user processes.
+The same Runtime then issues a second wave of fifteen leases. Each AP switches
+to its verified kernel root before publishing a fixed syscall envelope and
+nudging the BSP. The BSP first stages each ABI 23 endpoint send: a 64-byte scalar
+wire request and up to 88 payload bytes, each crossing actual private pages.
+One stable BSP copy session resolves each request through its lease's exact CPU,
+Scheduler and Runtime registration. All sixteen real Executor arenas deliberately
+reuse the same numeric mapping handle; a BSP sentinel owns different bytes at
+the same addresses. Allocated root backing, writable WB aliases and physical
+CR3 agreement are checked again for every copy.
+The real Kernel authorizes and queues the copied data. Overwriting both original
+spans afterward leaves the received bytes, sender and correlation unchanged.
+The same leases then receive both copied and moved capabilities through the
+scalar 56-byte receive request. Payload, capability and response destinations
+cross three separate page boundaries in four private leaves. The production
+copy adapter validates the complete declared output spans, prepares bounded
+prefixes and resolves every physical destination before writing any output.
+Virtual and physical output overlap rejects; exact claim and STOP checks bracket
+every callback and precede the final copy. The BSP verifies message bytes,
+deterministic descriptor padding, exact grant ownership and unchanged sentinel
+outputs. A consumed message is never retried after an output failure.
+Reply consumption leaves each task active under the same execution lease; every
+new request uses a strictly newer mailbox sequence. Those same leases then close
+their ordinary peer channels through fixed 24-byte scalar requests. Real cleanup
+drains unread copies and moves, disposes only moved grants, retires exact endpoint
+authority and wakes each surviving terminal peer once. Close writes no result
+buffer; AP and BSP output canaries remain intact. Task roots and the other grants
+stay pinned. The BSP then copies a
+cross-page termination request, authenticates its exact lease and retained task,
+and invokes the real Kernel. Interruptible standard-XSAVE parking allows a
+synchronous kernel TLB barrier to complete while IPC requests remain pending.
+Completed termination replies remain
+unread while capabilities, components and roots are checked for retention.
+Reply consumption still leaves execution running; subsequent reverse-order
+owner returns and acknowledgements permit exact Kernel cleanup and complete
+private-hierarchy frame recovery, eight frames per four-page root. The BSP wait
+uses a bounded interruptible poll so its deadline progresses without a doorbell;
+AP waits preserve interruptible parking. This CPL0 broker phase preserves dormant GS,
+GPR, xstate, DF and AC and leaves native AP user entry disabled.
+The Scheduler's retirement sink routes cleanup through the same domain, and
+teardown drains every arena before releasing registrations or callbacks. Shared
+mapping tokens encode the CPU namespace and complete generation in the existing
+64 bits. Hosted regressions cover colliding handles, foreign domains, live-lease
+teardown refusal, task-scoped token retirement and stable callback ownership.
+A compile-guarded fixture then runs the actual prepared owner body on CPU 1.
+Two exact lease epochs return yielded UI and page-fault scalars through the
+mandatory receipt; a stale command cannot change a replacement reservation.
+The bridge uses real interrupt masking, private CR3 activation and kernel-root
+restoration. Its CPL0 callback checks the cached context and aligned initialized
+private xstate image, then supplies synthetic user frames to the actual yield
+and AP-local fault helpers. Static commands and independent completion storage
+remain retained until the BSP consumes each receipt and collects its pin.
+The callback stays on the ordinary AP stack with native-entry modes zero. This
+fixture does not execute the prepared trap stack, CPL3, native xstate save or
+restore, FRED, CET, or deadline interrupt delivery; native AP user entry remains gated.
+A further CPU 1 phase uses the actual durable queue and the same owner body.
+Sixteen image-owned, 64-byte cache-isolated channels retain nonwrapping sequence
+history in a 1,024-byte pool. Pending withdrawal races owner claim on one atomic
+control word. After execution ACK, the owner restores retained GS state and
+publishes completion using only its captured key and independent static control.
+The BSP can consume the prepared receipt while this completion is withheld,
+but Runtime collection and domain teardown retain every pin and root. The guest
+checks pending withdrawal, STOP before claim, cancellation after claim, yielded
+and faulted returns, and stale keys against a replacement reservation. Once
+completion is acquired, guarded collection holds the channel through callbacks,
+borrow release and Coordinator collection, then permits exact root reclamation.
+This is a transport and lifetime foundation; production AP user entry stays
+BSP-gated and the callback retains the same CPL0 limits as the direct proof.
+The next CPU 1 phase uses a real fixed-vector 0x74 doorbell. Its immutable ISR
+acknowledges once and records one owner-local coalesced hint; it never claims a
+command or touches Runtime or Executor state. The owner consumes the hint only
+after interrupt return with interrupts masked, then authenticates the current
+queued epoch through the same runner. A pending command without a hint stays
+unclaimed. Duplicate and empty doorbells have no authority, and a delayed idle
+hint cannot alter a newer reserved replacement. The guest exercises delivery
+both before and during a finite interrupt window, while held yielded/faulted
+returns still prevent collection until independent completion. This supplies
+CPL0 interrupt-driven queue evidence with the same callback-only limits; native
+AP user entry remains gated.
+CPU 1 also exercises the production cold stack binding before dormant
+continuation canaries are published. An independent SGDT/STR oracle decodes the
+actual selected busy TSS and checks the guarded top, GS state and all controls,
+then restores the ordinary top. Complete neighboring GS records, emergency
+state and trap-stack paint remain unchanged. The BSP acquires this receipt before
+the existing descriptor marker. This proves CPL0 TSS/GS metadata ownership with
+FRED disabled; automatic TSS or FRED stack selection still needs separate evidence.
+A separate guarded-stack phase temporarily installs the unchanged production
+ISR 116 gate after all sixteen CPUs acknowledge IF=0 quiescence. CPU 1 manually
+switches CPL0 RSP into its actual supervisor RW/NX/WB 4 KiB stack backing for a
+finite interrupt window, then restores its ordinary stack before compiler code.
+The window directly verifies CR4.OSXSAVE, FRED disabled and XCR0 exactly 7
+before state instructions, then rechecks unchanged CR4 and the exact mask after
+return. The actual common kernel ISR saves and restores standard xstate, calls
+the real ISR dispatcher and validates the upper-half return before `IRETQ`. A no-IPI
+baseline distinguishes helper usage from interrupt depth. The measured helper
+and interrupt peaks are 1,032 and 2,224 bytes, leaving 34,576 untouched bytes
+below the deepest write. Guard absence, complete neighboring paint, the upper
+64 bytes and lower canary remain checked. The BSP restores the complete saved
+16-byte IDT entry only after the AP's acquired CLI return witness; the owner then
+uses the actual ISR prompt for queued dispatch after interrupt return. Its
+receipt still cannot release the root before independent static completion.
+The harness phase proves manual CPL0 RSP use and the production standard-state
+kernel return path. It does not prove TSS RSP0, IST/FRED stack selection, CPL3,
+compacted user-state handling, native AP entry or deadline interrupt delivery.
+The probe then retires the temporary low leaf. Every ordinary
+AP stack has a guard page and 16 KiB of supervisor RW/NX usable space; all sixteen
+emergency stack guards are also checked. Startup observations run with interrupts
+disabled. A subsequent isolated interrupt phase remaps a global kernel alias
+twice through the production pager and TLB coordinator. All fifteen APs receive
+the real IPIs, observe each replacement page, and preserve GPR, x87, all sixteen
+XMM/YMM registers, FP controls, DF and AC across a dedicated standard XSAVE gate.
+That gate runs the production-shared IDT kernel-return admission against the
+actual upper-half RIP and hardware flags before `IRETQ`. Hosted regressions also
+reject noncanonical addresses, upper-half user addresses, invalid selectors and
+unsafe flags; production user descriptor checks need separate privileged evidence.
+A final cache phase compares BSP/AP PAT, CR0 and complete MTRR state, then uses
+the production mapper to publish fresh strict-UC device leaves across 1 GiB
+and 2 MiB boundaries. It verifies those pages initially have no WB direct
+aliases, explicitly runs the real held-CPU cache rendezvous after the fresh
+publication, then replaces present UC leaves through the real global shootdown.
+It preserves adjacent mappings or absence and verifies two more IPI returns
+on every AP. Hosted regressions cover retirement of former WB direct aliases;
+this sparse guest does not exercise that transition. The reserved physical
+gaps are never accessed as invented devices.
+The harness requires thirty-seven ordered markers. Production AP admission, XSAVES,
+FRED/native interrupt entry and enabled LASS require separate evidence.
+This guest exercises global invalidation through PGE toggling with PCIDE off;
+the production INVPCID type 2 path has compile coverage and needs runtime evidence.
+
+`zig build smp-cache-enabled-match-check` runs one offline AP through a dedicated
+paging-off bridge. It calls the same actual MTRR bootstrap macro twice without
+INIT or another MTRR writer between calls. An independent first control record
+requires the expected enabled policy before the second call. Afterward, raw
+CPUID/RDMSR capture checks physical width, capabilities, default policy, all
+supported fixed registers and every implemented variable pair, including disabled
+pairs. Both records require IF/PG/CD/NW clear and the admitted unchanged PAT.
+The emitted enabled-match branch carries read-only mode through both register
+loops and skips their WRMSR instructions. The two-core, 192 MiB guest requires
+exact `FIRST_ENABLED` and `SMP_CACHE_ENABLED_MATCH` records.
+
+`zig build ap-cache-rejection-check` boots an uncorrupted control and three
+separate malformed-snapshot images through the unchanged 3,968-byte production
+SIPI bridge. The faults change the snapshot version, a reserved default-policy
+bit or a reserved variable-mask bit, then republish the full SIPI page. Each
+fault requires its case-specific armed record followed by the production AP's
+reason-five rejection and permanent CLI/HLT park. The high callback publishes
+an entry sentinel before diagnostics; the BSP independently observes it and
+fails on entry. The uncorrupted control must reach that real callback. These
+192 MiB, two-core fixtures retain the page, stack and root through emulator
+termination. Their harness rejects missing, duplicate, reordered and foreign
+proof records, concurrent failure, unexpected high entry and online publication.
+These proofs cover the enabled exact-match path and three bounded malformed
+inputs. Physical-target validation, enabled mismatches, other malformed policies
+and production native AP security/runtime admission remain separate evidence.
+Production BSP and AP admission now share one immutable CPU, clock and cache policy.
+EFI and assembly entry require the complete PAT table `0x0007040600070406`
+and enabled CR0 caching. The BSP validates bounded fixed/variable MTRR state.
+Before paging, an AP compares every implemented register against a bounded copy
+of that immutable snapshot. After patching, the BSP flushes the complete SIPI
+page across the cache coherence domain using an admitted CLFLUSH line size.
+This includes temporary-stack lines retained by a timed-out AP across INIT.
+Each successful AP writes back its own transition stores before the high-entry
+jump. Sequential startup leaves the page untouched until high-entry
+acknowledgement or INIT quiescence. An enabled mismatch rejects without MTRR writes;
+an uninitialized, disabled policy receives complete programming and readback
+while caching is disabled. APs compare the snapshot again before online
+publication. PAT remains unchanged. Strict-UC mappings
+select PAT index three, retire conflicting direct aliases and hold all online
+CPUs through cache and global translation invalidation before publication.
+Firmware RAM aliases require effective write-back coverage. Native image and RAM
+aliases in EFI and final roots map only positively classified RAM with complete
+effective-WB coverage. The transition root retains other firmware slots until
+the final-root switch. A bounded
+planner follows RAM, MTRR and permission boundaries, using 1 GiB or 2 MiB leaves
+only for complete uniform spans and 4 KiB leaves at edges and stack guards.
+Direct aliases are supervisor NX and preserve immutable image permissions.
+Unknown ranges, MMIO, holes and non-WB RAM stay absent. Two disjoint EFI arenas
+bound table construction outside the kernel heap. Each allocation records its
+own count of 3 to 4,096 pages, with the existing 16 MiB ceiling. After all other
+loader allocations, at most eight sizing passes count both transition and final
+hierarchies, allocate only the required capacity and refresh the map after any
+growth. Exit retries reuse those allocations and reject newly insufficient
+capacity before table writes. Both allocations stay reserved through the
+final-root switch. After checked physical CR3 readback and global translation
+retirement, the kernel returns the complete transition arena and unused final
+tail before sealing reservations or allocating frames. Only the exact final
+table prefix remains reserved. Retirement preflights original EFI loader-data
+provenance, complete WB coverage and live ownership for both count-derived
+ranges before changing either. Original allocation extents remain receipts and
+conservative device-mapping exclusions. Count and authority checks precede all
+table writes, including the pre-exit build and reused retry.
+The handoff retains original EFI types and attributes alongside reservations.
+Its native v3, 48-byte paging tag preserves GOP's full advertised allocation even
+when the renderer rejects its pixel format. Both roots exclude every touched
+framebuffer page from RAM aliases, and the full rounded span stays reserved.
+Loader write guards and kernel ownership checks reject overlap with that span;
+the visible rendering window may map only a bounded strict-UC subset.
+Before its first heap claim, the kernel rejects overlapping or non-WB image,
+heap, arenas and live boot data. The physical allocator opens only complete
+available WB pages, while nonusable descriptors retain priority. At the start
+of early hardware-evidence capture, SMBIOS follows only the EFI SMBIOS 3
+configuration-table graph through positively described WB RAM and present
+supervisor NX/WB aliases. Parent cache bits and table links are checked before
+dereference; only the frozen target result survives boot-services frame reuse.
+Dedicated guests exercise the enabled-match branch and three malformed AP
+snapshot rejections. Physical target validation remains open.
+Every AP verifies the mandatory feature floor and the selected TSC frequency
+before publishing identity or activating privileged controls. The explicit
+emulator request remains the only authority for modeled controls; APs cannot
+weaken hardware modes selected by the BSP. SIPI starts with minimal paging/FP
+controls, and accepted APs enable their own PCID, protection and xstate controls.
+Timer initialization publishes one immutable BSP mode, exact frequency and
+epoch before AP startup. Each CPU owns a separate cache line for cached ticks
+and deadline rearming. State and timer-register transactions preserve the
+caller's interrupt mask; reading cached ticks is one atomic scalar load.
+AP setup validates the clock before register writes and leaves its timer
+disarmed. Timer interrupts acknowledge and update the selected CPU, while only
+the BSP publishes service-loop wake notifications. The explicit emulator
+countdown stays periodic on the BSP and does not schedule APs. Shared service
+ownership, task migration and physical cross-CPU clock validation remain open.
+The native CPU/crypto probe remains a separate isolated image. Its low entry
+uses inherited firmware leaves; strict ELF permission admission does not prove
+W^X on those executed low leaves. The high-half guest checks effective image
+and direct-alias W^X in the final production root. Full kernel and
+physical-target boot evidence are still required: local TCG lacks XSAVES, and
+the first-target readiness track remains blocked on real hardware validation.
+
 - `build.zig` exposes native kernel, userspace image, QEMU run, smoke,
   recovery, benchmark, ISO, lint, host-test, spec-test, and readiness gates.
 - Kernel profiles are built from `src/main.zig` with boot profile options for
@@ -40,6 +347,24 @@ requests.
   errors when no reusable slot remains. The media/print completion queue preserves order
   while skipping exhausted jobs. Pasteboard revocation checks both the source
   task and principal. These guarantees apply within each table or arena's lifetime.
+- Shared objects reserve real physical frames and zero every rounded page before
+  publication. Sealing freezes membership while rings retain writable shared RAM.
+  Supervisor syscall copies authenticate the current executor's live task and
+  generational mapping token against the Table's logical span, then match the
+  exact demand registration and actual borrowed WB/NX leaves. The complete copy
+  range is checked before materialization or payload access; generic borrowed
+  leaves remain rejected. Each checked alias is consumed immediately under BSP
+  ownership with interrupts disabled, without carrying authority across a yield
+  or callback. Response admission includes the full declared output span and
+  is repeated after the operation.
+  Revocation retires CPU mappings first; accelerator pins retain the original
+  object slot and backing until matching completion permits release. Pending
+  pins consume the existing 24-object capacity, and session reset requires them
+  to drain before dropping owners. Scheduler claims bind the exact table, object,
+  broker and queue generation; cancellation keeps incomplete work owned. Media
+  jobs publish completion only after claim release and retry notice publication
+  without releasing twice. Full notification tables reject submissions before
+  reserving an accelerator claim.
 - The first daily-driver slice is Notes/docs: signed native package install,
   workspace and document open, local permission review, object-scoped sharing,
   local-first sync, update rollback, recovery, and package removal are exercised
@@ -504,7 +829,7 @@ requests.
   dispatch, policy updates and recovery-secret custody remain
   open, along with physical TPM and input validation. Linking the shipped account
   path adds about 240 KiB to the production payload; the ReleaseFast symbol budget
-  is 3,500, with identity proof modules explicitly excluded.
+  is 3,607, with identity proof modules explicitly excluded.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).
@@ -519,8 +844,21 @@ requests.
   borrows cover dispatch, launch, retirement, and presentation callbacks;
   wholesale runtime replacement refuses an outstanding borrow. The scheduler
   prunes retired registrations and claims while preserving its active dispatch.
+  CPU execution leases retain one exact task incarnation, exclude duplicate task
+  dispatch before queue removal, and reject occupied roots before preparation.
+  Termination removes live authority immediately and requests an atomic stop;
+  capabilities, components, endpoints, queued moves, shared backing and roots
+  remain retained until the selected CPU acknowledges its checked kernel-root
+  return. Collection keeps the task pinned through all retirement callbacks.
+  The atomic STOP result selects running owners for a bounded asynchronous IPI.
+  A dedicated immutable vector acknowledges once and checks the current owner's
+  exact lease before requesting user handoff; stale prompts and kernel-origin
+  interrupts have no handoff authority. The stop callback stays bound throughout
+  execution, rejects lifecycle reentry and never waits or collects resources.
+  Empty dispatches avoid scanning the mapping arena for pending retirement.
   Host tests exercise repeated launches and prepared-document cancellation beyond
-  table capacity, including reentrant termination during callbacks.
+  table capacity, including reentrant termination during callbacks, stale and
+  cross-owner execution tickets, and cancellation racing actual owner startup.
 - Diagnostic ledger format v4 writes its header once and reconstructs sequence
   numbers from retained events, avoiding a second immutable version per append.
   Older diagnostic ledger formats are rejected.
@@ -688,21 +1026,126 @@ also hand an interrupted user back to the runtime owner, so its deferred
 network and input work can run before that quantum expires. Native storage
 workers yield after a bounded NVMe completion inspection and resume through
 the owner loop. Kernel-origin work remains uninterrupted. Both paths preserve the complete user context and keep
-the finite watchdog. Each materialized mapping owns an aligned x87/SSE image and
+the finite watchdog. Each materialized mapping owns an aligned x87/SSE/YMM image and
 PKRU state; allocation rollback, retirement, and reset erase and release it.
 Assembly preserves the kernel continuation and captures user state before
-entering compiled handlers. The current enabled state is XCR0=x87|SSE and
-IA32_XSS=0. Hosted alignment and dispatch regressions pass; the full assembly
-roundtrip explicitly skips hosts without OSXSAVE.
+entering compiled handlers. Each logical CPU now owns its two xstate pointers,
+saved return stack and instruction pointer, and handoff flag in one aligned
+128-byte GS record. C handlers select that same record through bounded RDPID
+identity; assembly offsets and all sixteen independent slots are tested. Entry
+return clears only its CPU continuation before releasing task state. Page-root
+tracking and executor registration also belong to each CPU. Root switches publish
+only after hardware CR3 readback; retirement rejects roots still recorded active
+on any CPU. Executor reset requires its exact registration owner and preserves
+unrelated continuations. The BSP explicitly provisions trap stacks with 36 KiB
+usable space and a checked 4 KiB lower guard; other CPUs consume backing only when
+requested. Stack preparation reads published storage without allocating or
+repainting it. Shared scheduler and service ownership still constrain dispatch
+to the BSP. Remote syscall plumbing now uses one lease-bound mailbox per CPU;
+pending, claimed and unread results block execution return and resource reuse.
+BSP preparation finishes mapping, mailbox and context work before publishing a
+prepared lease. Its 32-byte command carries only the ticket and stack top;
+context stays in the leased mapping. The owner claims that lease and checks its
+exact runtime coordinator before resolving the private mapping and xstate, then returns a 32-byte scalar outcome, UI revision and fault
+receipt after clearing its continuation under the kernel root. BSP consumes that
+receipt once before accounting or collection. The existing 192-byte per-CPU slot
+and 3,080-byte Coordinator retain their size and cache isolation. Hosted tests
+exercise this boundary on all sixteen identities. The isolated CPU 1 callback
+reuses the real owner run/return body with privileged root transitions and scalar
+receipt collection; native entry remains BSP-only. Durable queued commands use
+one image-owned 64-byte channel per CPU, with exact pool/CPU/sequence keys and
+nonwrapping history. The 1,024-byte static pool adds no Coordinator fields.
+Owner ACK ends domain access; a separate control-only completion permits BSP
+collection. Runtime reset/restore, Session reset and Executor domain/binding
+teardown reject outstanding channels, including collecting callbacks. The
+privileged CPU 1 queue proof exercises those holds and once-only reclamation
+without admitting native AP user entry. An owner-local prompt uses one byte
+of existing channel padding, preserving the 1,024-byte pool. Production queued
+runs require that hint after interrupt return; the old isolated polled route
+remains a separate proof. The cold stack ownership milestone measures 3,611 ReleaseFast resident
+symbols under the 3,612 ceiling, retaining one symbol of headroom. Its five
+additional named functions add one 4 KiB rounded text/load page over the
+preceding doorbell milestone: production file and memory loads are 6,377,472
+and 7,294,976 bytes. Anonymous symbols, read-only data, writable data and BSS
+remain unchanged. Verification workloads remain
+excluded from the production role.
+Remote user page faults contain locally before any BSP demand/COW or NX recovery.
+An AP parks under the kernel root with architecture interrupts serviceable,
+while the BSP drains copied requests through its deferred service loop. The
+broker supports scalar endpoint send, receive and close plus fixed task
+termination. It stages bounded inputs under the authenticated lease, commits
+receive outputs together and preserves completed close after a wake requests
+STOP. Other operations and native AP user dispatch
+remain prerequisites for parallel application execution. The current enabled state is XCR0=x87|SSE|YMM and
+IA32_XSS=0. Kernel and userspace code generation share the
+[x86-64-v3 instruction floor](https://gitlab.com/x86-psABIs/x86-64-ABI/-/blob/master/x86-64-ABI/low-level-sys-info.tex)
+plus AES-NI, PCLMULQDQ, and SHA extensions. This selects the pinned compiler's
+hardware crypto implementations and permits AVX2 while each task owns all sixteen
+YMM registers within a fixed 832-byte save image. The baseline-compiled UEFI stub
+checks real CPUID features and the exact YMM save geometry before entering native
+code. Every bootstrap and secondary CPU entry repeats admission, establishes
+XCR0 and resets x87/MXCSR controls before its first compiled instruction; explicit emulator boots retain these
+gates. Build configuration accepts exactly
+`-Dcpu=x86_64_v3+aes+pclmul+sha`. AVX-512 and AMX require a larger task-state
+contract before generated code can use them. Hosted alignment and
+dispatch regressions pass; the full assembly
+roundtrip explicitly skips hosts without OSXSAVE or enabled YMM state.
+`zig build -Doptimize=fast native-crypto-check` executes AVX2 arithmetic, AES,
+SHA-256, GHASH and storage XXH64 known answers and 128 complete x87/XMM/YMM owner roundtrips
+in QEMU, including recovery of default floating-point controls after hostile
+firmware state. Its checker requires every proof once, as an exact ordered line. This isolated
+probe uses standard XSAVE/XRSTOR; production compacted saves, PKRU and FRED
+transitions still require separate hardware validation.
+`zig build mapping-xstate-proof-image` builds a separate fixed sixteen-CPU CPL0
+artifact for two real Mapping-owned compacted images. On an admitted target,
+four A-B-A-B prepared leases use the unchanged generic XSAVES/XRSTORS macros,
+poison live registers and capture an independent standard XSAVE readback before
+returning to compiled code. The oracle checks initial controls and zero vectors
+while allowing any initial XSTATE_BV subset of mask 7, then exact noninitial
+x87, MXCSR and all sixteen full YMM values, compacted headers and canaries.
+Mapping backing remains pinned through owner ACK and independent transport
+completion before once-only receipt collection and root retirement.
+`zig build mapping-xstate-proof-check` requires all eight Mapping markers and
+the existing thirty-seven base markers, with a successful terminal exit;
+`verify` retains this strict positive dependency. Current local TCG cannot expose
+XSAVES. `zig build mapping-xstate-unsupported-check` separately requires one
+allowlisted unsupported record and its distinct terminal status, with no base
+or PASS records; rejection supplies no compacted-state execution evidence.
+Native entry modes stay zero and production AP user admission remains disabled.
+This artifact does not validate READY publication, FRED/CET, CPL3, native trap
+return, physical target topology or parallel userspace scheduling.
 FRED uses the architectural eight-qword frame, preserves every general register
 and augmented return field, and publishes handler edits back before ERETS or
 ERETU. Entry geometry, STAR selectors, GS ownership, 64-byte stack alignment,
 and AP initialization match that path; double faults retain the existing guarded
-emergency stack. Unsupported user software events cannot impersonate physical
+emergency stack. Stack rebinding is a cold owner transaction: saved IF is masked,
+the exact selected loaded GDTR/TR and busy TSS, GS owner, dormant continuation
+and high aligned top are admitted before any write. READY clears before TSS and
+normal FRED levels 0, 1 and 2 change; the retained emergency level 3 and all
+configuration fields are read back before GS top and the saved mode byte publish.
+Non-FRED binding touches no FRED MSRs. Preflight rejection restores prior IF
+without mutation; a failed committed readback leaves IF masked and READY clear
+and halts. BSP bootstrap authenticates RDPID and the actual APIC BSP bit before
+replacing inherited TSC_AUX or indexing native state. Executor initialization and
+the syscall benchmark fixture bind once; prepared entry and measured loops add
+no repeated control-register or MSR readback. Hosted tests drive the same cold
+transaction across all sixteen identities and hostile loaded descriptors and
+readback failures. The readiness tool checks eight actual source scopes with 85
+hostile mutations; its complete 50-test suite passes in Debug and ReleaseFast,
+preserving prior prepared, lifetime/IPI and guarded-stack gates. Unsupported user software events cannot impersonate physical
 device interrupts. Oversized yield arguments and unknown yield dispositions
-stop the offending task through ordinary exception containment. Unexpected #NM
-exceptions follow the registered handler rather than the retired lazy-state
-shortcut. Native hardware execution still needs validation.
+stop the offending task through ordinary exception containment. A fresh user
+IRQ handoff marks only its mapping's interrupted continuation. After that
+continuation resumes, the first valid voluntary frame consumes the mark. An
+event-wait frame returns in place through SYSRET or ERETU for another user-loop
+pass in the same quantum, before context capture, kernel handoff or a root
+switch. A runnable yield follows the ordinary handoff; malformed frames retain
+the mark and fault, and an earlier handoff is preserved before frame validation.
+Hosted tests drive the actual ISR and shared yield body. Separate Scheduler
+companions supply synthetic outcomes to test real ready queues, pending IPC,
+coalesced wakes and activation credits; they do not execute privileged returns.
+Native AP user entry remains disabled. Unexpected #NM exceptions follow normal
+registered containment; native hardware execution still needs validation.
 Production clock frequency requires the complete architectural CPUID `0x15`
 ratio and crystal frequency. Advertised processor MHz is not a timer rate;
 Intel documents that distinction in its
@@ -737,6 +1180,15 @@ actual event time through the same external-wake helper.
 Application processors are online for TLB maintenance and otherwise sleep.
 Concurrent userspace dispatch requires independent executor state and service
 ownership before it can use those processors.
+Remote invalidation captures the online participant mask once and binds each
+CPU's cache-line-isolated acknowledgement to a nonwrapping request generation.
+Duplicate, delayed and nonparticipant acknowledgements cannot complete a later
+request. Kernel-global remaps flush global translations on every participant;
+an identical leaf or a fresh global mapping avoids that remote work. Completed
+worker stacks retire all thirty-two pages behind one remote barrier before
+returning their backing frames. Address-space teardown detaches private root
+links, completes local and remote invalidation, then reclaims frames, tables and
+the process identifier. These retirement paths require all users to be stopped.
 
 CPU identity comes from RDPID reading the kernel-owned IA32_TSC_AUX value.
 Each processor publishes and verifies its bounded logical number before native
@@ -757,6 +1209,10 @@ hardware protection faults retain their access restrictions.
 The 2 MiB image-page path requests physically aligned runs independently of the
 ordinary frame cursor. Fragmentation that leaves only unaligned runs falls back
 to 4 KiB leaves, preserving the mapping without encoding an invalid huge page.
+Single-page allocation keeps per-CPU reuse local while backing memory remains
+available, then borrows cached pages from other CPUs under pressure. Reclaiming
+cached high-memory pages restores the high-zone availability hint before a
+contiguous allocation retries, so cached pages cannot cause false exhaustion.
 
 Native ID indexes mix all 64 bits, including handle generations, and close
 probe chains after deletion. Zero marks an empty bucket, removing tombstones,
@@ -770,6 +1226,18 @@ committed set is reconstructed from the selected root's version watermark;
 failed barriers retain dirty state, and retries or cold replay require no
 separate durability cache. Workspace-only and clean saves avoid reconstructing
 that set.
+Volume root format 6 uses seed-zero XXH64 for root and log corruption checksums.
+Earlier root formats are rejected on load and save without rewriting the image;
+there is no automatic migration. SHA-256 content addresses and signed metadata
+remain the authentication boundary. `zig build storage-checksum-benchmark`
+compares the checksum algorithms in one host build.
+Object hashing and blob replay initialize each live chunk reference and Merkle
+node before use, avoiding redundant clears of their local scratch arrays.
+Stored record tails retain canonical zeros; content addresses and signatures
+retain their exact bytes.
+Quota collection counts persistable workspaces and snapshots while finding their
+maximum entry count in one pass over each bounded arena. Attached byte transfers
+reject overflowing or out-of-image ranges before calling the device backend.
 Workspace path and object indexes close affected probe chains after deletion,
 so repeated directory edits leave no tombstones. Object sync positions a
 verified chunk cursor at each transport range rather than visiting every
@@ -791,6 +1259,12 @@ full redraws, single-cell edits, and pool reordering on host memory.
 The compositor locates the caret and retains visible rows in one layout pass
 using a caller-owned row ring. Scrolling preserves grapheme boundaries and
 wrap affinity without a persistent layout cache.
+Notes vertical movement reuses that layout iterator and its preferred column,
+avoiding repeated Unicode classification and row scans for downward movement.
+Horizontal movement and edit-boundary repair use bounded endpoint and adjacent
+ASCII checks before scanning the prefix. CRLF and Unicode joining context retain
+the full iterator fallback. Corpus byte-offset comparisons, all ASCII pairs and
+malformed-input references verify these shortcuts without retaining a cache.
 Canonical surface ingress validates UTF-8 and both selection boundaries in one
 traversal at each trust boundary. Presentation revisions belong to individual
 surfaces; switching surfaces can submit a lower revision, and the display
@@ -806,6 +1280,24 @@ paths. `zig build frame-allocator-benchmark` measures these paths on
 the host, including failed allocations in an exhausted physical range. These
 microbenchmarks supplement the QEMU kernel benchmarks and hardware proof runs.
 
+New owned user pages and page-table children finish initialization before their
+present entries are published with release stores. A backed COW fault copies
+the complete source page directly into its private frame, avoiding a redundant
+4 KiB clear and later page-table lookup. Repeated faults preserve task edits.
+Range mapping preflights every destination before allocating pages, then relies
+on the initializer's private-hierarchy and absent-leaf checks without repeating
+the slot walk. Huge-page fallback and allocation-failure behavior remain covered.
+Supervisor write preparation batches existing private COW permission changes
+into one acknowledged local/remote context barrier, including when a later page
+fails validation or allocation. Single-page fault promotion remains immediate.
+Preparation requires BSP ownership with interrupts disabled and checks allocated
+private parent tables and the complete owned leaf extent. Malformed or retired
+backing is rejected separately from a genuinely absent page, preventing fallback
+into the mapper; existing parent permissions are never widened. The frame checks
+add allocator-lock work. Preparation checks each admitted huge extent once and
+advances to its verified boundary. Tests and the guest establish barrier counts
+and ordering; overall preparation latency still needs hardware measurement.
+
 The kernel heap uses per-CPU magazines for power-of-two size classes from
 32 bytes through 4 KiB, with eight cached spans per class. A locked span table
 handles cache misses, larger allocations, splitting, and adjacent-span
@@ -816,7 +1308,8 @@ CPU locks protect cached spans and recent allocation identities; the shared
 allocator lock always precedes a CPU lock on the slow path. Payloads have no
 in-band header; a bounded address index validates
 allocation starts and rejects invalid or duplicate frees. Compact 16-bit span
-links keep allocator arrays at 100,370 bytes. Free spans have doubly linked
+links keep allocator arrays at 102,418 bytes for sixteen CPUs, below the existing
+101 KiB ceiling. Free spans have doubly linked
 class lists for constant-time removal during coalescing; the address index
 hashes aligned span numbers across its full table and closes probe chains
 with bounded backward shifts after deletion. Host tests exercise this same
@@ -848,8 +1341,10 @@ concurrent cached reuse while another CPU requests large spans.
   for surviving tasks; exhausted event numbers stop delivery without wrapping.
   The focused-input benchmark generates a new key transition on every iteration
   and verifies delivery before counting the operation.
-  Once the queue is empty, the process yields with an event-wait disposition and
-  stays off the ready queue until focused work wakes it. Each UI process keeps an
+  Once the queue is empty, the current process voluntarily yields with an
+  event-wait disposition, without a resource capability or preparatory wait
+  syscall. It parks only when no readiness or pending IPC remains; wakes during
+  dispatch stay queued and repeated wakes coalesce. Each UI process keeps an
   allocation-free model for editable text, focus, activation, recovery, and
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.
@@ -868,6 +1363,10 @@ concurrent cached reuse while another CPU requests large spans.
   outputs. Ring replacement rejects overlapping live storage. The host
   `ipc-ring-benchmark` target compares this receive path with separate peek/pop
   calls and measures full-queue backpressure.
+  Response preflight validates the complete declared output span once, then
+  prepares its required prefix under the current task's mapping ownership.
+  Final publication repeats admission after the operation. The
+  `response-preflight-benchmark` target measures the hosted validation work.
   The `endpoint_close` operation requires its own right, releases one channel
   and all authority to it, and wakes surviving peers. Clients drain queued
   replies before receiving `peer_closed`; closed connections cannot be rebound.
@@ -880,19 +1379,48 @@ concurrent cached reuse while another CPU requests large spans.
   moved grants before freeing endpoint queues; failed receipt attachment also
   releases a consumed move while leaving copied grants with their sender.
   Endpoint and shared-memory creation unwind unpublished objects if ownership
-  grants fail, restoring owner budgets and frame reservations. Failed single
-  grants preserve capacity for future capability targets. Removing the last
-  grant to a target also releases its metadata; revoked sibling grants retain
+  grants fail, restoring owner budgets and frame reservations.
+  Shared-memory page rounding handles the full size domain without overflow;
+  physical reservations validate their complete extent before advancing the
+  frame cursor, so oversized creation leaves live mappings and capacity intact.
+  Failed single grants preserve capacity for future capability targets. Removing
+  the last grant to a target also releases its metadata; revoked sibling grants retain
   their epoch until they are removed.
   Services retire both temporary endpoints after their startup IPC check,
   including cleanup when a later startup step fails.
-  Native ABI 19 validates and prepares fixed request and result storage before
-  resource creation, input consumption, or wait changes. Result validation
+  Native ABI 23 defines scalar wire requests for all 23 operations with unchanged opcodes `0x100` through
+  `0x116`. Removed opcode `0x117` returns unsupported before request or result
+  storage is accessed. Voluntary yield surrenders only the current task's CPU;
+  endpoint, input, time and resource operations keep their capability checks.
+  RequestHeader includes an explicit reserved-zero word; every request field
+  has fixed integer width and every padding byte belongs to the schema. A
+  recursive compile-time gate rejects raw copying of internal pointers, slices,
+  optionals, enums, tagged unions or compiler-layout structs. Total decoders
+  construct typed capability and task values only after tag, flag, rights and
+  length validation. Capability derivation checks parent usability against the
+  trusted syscall clock rather than the proposed child issue time. The header
+  has no ABI version stamp; archive ELF/hash admission does not universally
+  reject old binaries using a retained layout.
+  Fixed request and result storage is validated and prepared before resource
+  creation or input consumption. Result validation
   covers the complete declared span; page preparation touches only copied
   bytes. Freestanding copies use private user pages through kernel physical
   aliases, including demand preparation for untouched stack pages. Endpoint
   payloads and attached capabilities pass through bounded kernel scratch;
   receive outputs must be disjoint before a queued message can be consumed.
+  Endpoint send uses one fixed 64-byte scalar wire request. Its address/count,
+  attachment ID and move flag are validated before constructing trusted slices,
+  optional IDs or booleans; reserved bits and malformed encodings reject before
+  payload reads. Every syscall producer uses this format, with no legacy layout
+  fallback. Receive uses one fixed 56-byte scalar wire request with validated
+  receiver identity, bounded capacity and aligned capability destination. Explicit
+  descriptor padding stays zero. BSP brokerage stages bounded inputs before
+  normal Kernel authorization, and receive preflights all output aliases before
+  a single bounded commit. Empty receives preserve payload and capability bytes.
+  Every ordinary generated syscall and direct port request rejects nonzero
+  reserved header flags from its copied snapshot. Endpoint close stages a fixed
+  24-byte record and reports status without reading or writing result storage;
+  a wake-triggered STOP preserves its committed cleanup and success reply.
   Syscall buffers require authorized image or stack regions. Shared-object
   apertures retain their separate object-mapping contract.
   Task termination acknowledges through syscall status without a result copy,
@@ -901,6 +1429,10 @@ concurrent cached reuse while another CPU requests large spans.
   demand regions before mapping identities can be reused; failed registration
   rolls back the unpublished mapping. A user mapping requires a materialized
   target address space; unavailable targets fail before publication.
+  Unmap fills an internal task-mapping hole from the last entry, reindexing at
+  most one survivor, and removes the already-resolved MMU registration without
+  repeating its bounded lookup. Peer mappings and demand-region lifetimes remain
+  covered by first, middle, and last removal regressions.
   Idle services park instead of generating
   heartbeat work; a task with queued endpoint messages stays runnable. Production
   smoke tests require the scheduler to reach idle and stop its periodic tick.
@@ -1018,8 +1550,9 @@ Use the pinned toolchain and repo entrypoints:
   experimental EtherType; service and sync traffic resolves a fixed peer-device
   directory to directed unicast frames, while scoped discovery alone uses
   broadcast. Receive polling accepts only directed or broadcast frames for that
-  EtherType. NVMe, PCIe ECAM, I225-LM, xHCI, ACPI, and VT-d cache-disabled mappings are assigned by one
-  page-aligned, capacity-checked kernel MMIO layout whose pairwise non-overlap is
+  EtherType. NVMe, PCIe ECAM, I225-LM, xHCI and VT-d strict-UC device mappings, plus
+  separate RO/NX write-back ACPI mappings, are assigned by one
+  page-aligned, capacity-checked kernel layout whose pairwise non-overlap is
   enforced at compile time. Before
   normal storage attach, the controller must trigger a primary VT-d
   record by attempting
@@ -1030,7 +1563,7 @@ Use the pinned toolchain and repo entrypoints:
   The xHCI input lifecycle assigns device slots in constant time, recycles them
   after disconnects, and clears queued keyboard reports before a reclaimed slot
   can be assigned to another port. PCI inventory accepts an xHCI controller only
-  after a shared typed BAR decoder maps one dedicated read-only cache-disabled
+  after a shared typed BAR decoder maps one dedicated read-only strict-UC
   page and the live capability block reports xHCI 1.1+, nonzero slots, ports,
   and interrupters, plus aligned doorbell and runtime offsets. Capability parsing
   masks the architectural 11-bit interrupter field, requires 64-bit DMA addressing,
@@ -1166,10 +1699,19 @@ Each native EFI executable embeds its kernel ELF and command line. The loader
 never reads a replacement kernel or options from the boot volume or firmware
 load options. It validates the ELF layout, reserves every destination page,
 and passes SHA-256 measurements of the exact embedded payload to the kernel.
-The kernel loads at 32 MiB, above the low firmware allocations observed in OVMF.
-EFI allocates the 32 MiB early heap separately below the identity-map limit;
+The kernel loads physically at 32 MiB and executes at `0xffffffff82000000`.
+EFI allocates the 32 MiB early heap separately below the 1 GiB bootstrap limit;
 the frame allocator preserves both exact ranges and keeps free gaps available.
 It no longer assumes that memory following the kernel is safe to overwrite.
+The loader reserves its transition page tables before firmware exit, maps the
+image and physical-memory window in separate supervisor upper-half slots, and
+passes physical addresses only on the wire. Final kernel tables remove firmware
+aliases, including cached global translations. The native v3 paging tag retains
+the complete GOP allocation independently of visible framebuffer acceptance;
+both roots exclude its touched pages, and reservations and write guards cover
+the full extent. SMBIOS identity is captured before early evidence consumes it
+and before firmware boot-services pages can be reclaimed; retained TPM bytes
+are read through checked supervisor aliases.
 Recovery and benchmark VMs share the default 256 MiB QEMU memory setting so
 firmware has room for the explicitly reserved heap.
 Firmware authentication is recorded separately: SecureBoot must be one and
@@ -1304,7 +1846,8 @@ complete report, checksums, summaries, and quality gates, but report cycle
 ceilings as not enforced because those measurements are not hardware-comparable.
 Native storage boots attach the store through NVMe rather than an emulated
 legacy IDE controller, matching the first hardware target and production policy.
-After validating the required CPU baseline, the kernel enables EFER.NXE and
+After validating the required CPU baseline, EFI enables EFER.NXE and CR0.WP
+before entering the split high root or activating kernel CET. The kernel
 maps only its linker-bounded text executable; kernel rodata, embedded images,
 mutable state, stacks, heap, physical aliases, and MMIO are NX. Kernel text is
 read-only, immutable data is read-only/NX, and mutable memory is writable/NX.
@@ -1704,6 +2247,7 @@ GitHub Actions run these primary jobs:
 - spec conformance
 - host tests
 - native smoke
+- native CPU and crypto proofs
 - native benchmarks
 - ISO build
 

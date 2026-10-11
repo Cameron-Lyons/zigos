@@ -123,6 +123,10 @@ pub fn runUserspaceScheduler(now_ticks: u64) bool {
     return default_manager.runUserspaceScheduler(now_ticks);
 }
 
+pub fn servicePendingSyscalls(now_ticks: u64) usize {
+    return default_manager.servicePendingSyscalls(now_ticks);
+}
+
 pub fn userspaceSchedulerHasReadyTasks() bool {
     return default_manager.userspaceSchedulerHasReadyTasks();
 }

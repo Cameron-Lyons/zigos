@@ -607,7 +607,7 @@ pub const Feature = enum(u16) {
     context_wire_validation,
     personal_context_catalog_binding,
     kernel_tcb_forbids_product_imports,
-    wait_plus_sealed_rings,
+    yield_plus_sealed_rings,
     userspace_nvme_dataplane,
     userspace_i225_dataplane,
     userspace_xhci_dataplane,
@@ -3027,7 +3027,7 @@ fn securePasteboardContractEvidence() PasteboardContractEvidence {
         .expected_purpose = "paste into contract note",
         .detail = "contract private pasteboard payload",
     }, buffer[0..], &ledger) catch return evidence;
-    if (!std.mem.eql(u8, pasted, "contract private pasteboard payload")) return evidence;
+    if (!std.mem.eql(u8, buffer[0..pasted], "contract private pasteboard payload")) return evidence;
     if (service.read(.{
         .subject = destination,
         .destination_task_id = 2051,
@@ -6437,7 +6437,7 @@ fn fillTwentyFifthContract(features: *[feature_count]bool) void {
 
 fn fill2026Floor(features: *[feature_count]bool) void {
     features[@backingInt(Feature.kernel_tcb_forbids_product_imports)] = kernel_tcb.FORBIDS_PRODUCT_IMPORTS;
-    features[@backingInt(Feature.wait_plus_sealed_rings)] = contract_2026.floor.wait_plus_rings and contract_2026.floor.rings_only_ipc;
+    features[@backingInt(Feature.yield_plus_sealed_rings)] = contract_2026.floor.yield_plus_rings and contract_2026.floor.rings_only_ipc;
     features[@backingInt(Feature.userspace_nvme_dataplane)] = contract_2026.floor.userspace_nvme_dataplane;
     features[@backingInt(Feature.userspace_i225_dataplane)] = contract_2026.floor.userspace_i225_dataplane;
     features[@backingInt(Feature.userspace_xhci_dataplane)] = contract_2026.floor.userspace_xhci_dataplane;
@@ -7621,7 +7621,7 @@ test "OS contract exposes one u16-wide unified checklist" {
 test "OS contract keeps the 2026 floor satisfied" {
     const checklist = currentRepositoryContract();
     try std.testing.expect(checklist.satisfied(.kernel_tcb_forbids_product_imports));
-    try std.testing.expect(checklist.satisfied(.wait_plus_sealed_rings));
+    try std.testing.expect(checklist.satisfied(.yield_plus_sealed_rings));
     try std.testing.expect(checklist.satisfied(.userspace_nvme_dataplane));
     try std.testing.expect(checklist.satisfied(.userspace_i225_dataplane));
     try std.testing.expect(checklist.satisfied(.userspace_xhci_dataplane));

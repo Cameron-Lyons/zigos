@@ -93,7 +93,7 @@ pub fn revokedCapabilitiesFailDuringIpc() !void {
         .rights = .{ .object = .{ .capability_pass = true, .object_read = true } },
         .scope = transferable.scope,
         .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 90, .renewable = false },
-    });
+    }, 1);
     try runtime.grantCapability(sender.id, stale_transfer.id);
     try capabilities.revokeTargetAuthority(transferable.id);
 

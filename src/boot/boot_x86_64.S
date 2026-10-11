@@ -1,74 +1,4 @@
-.section .multiboot2,"a",@progbits
-.align 8
-.equ MULTIBOOT2_HEADER_MAGIC, 0xe85250d6
-.equ MULTIBOOT2_ARCH_I386, 0
-.equ MULTIBOOT2_HEADER_TAG_INFORMATION_REQUEST, 1
-.equ MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS, 3
-.equ MULTIBOOT2_HEADER_TAG_FRAMEBUFFER, 5
-.equ MULTIBOOT2_INFO_TAG_COMMAND_LINE, 1
-.equ MULTIBOOT2_INFO_TAG_BASIC_MEMORY, 4
-.equ MULTIBOOT2_INFO_TAG_MEMORY_MAP, 6
-.equ MULTIBOOT2_INFO_TAG_FRAMEBUFFER, 8
-.equ MULTIBOOT2_INFO_TAG_EFI64_SYSTEM_TABLE, 12
-.equ MULTIBOOT2_INFO_TAG_ACPI_NEW, 15
-multiboot2_header_start:
-    .long MULTIBOOT2_HEADER_MAGIC
-    .long MULTIBOOT2_ARCH_I386
-    .long multiboot2_header_end - multiboot2_header_start
-    .long -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT2_ARCH_I386 + (multiboot2_header_end - multiboot2_header_start))
-
-    .short MULTIBOOT2_HEADER_TAG_INFORMATION_REQUEST
-    .short 0
-    .long 32
-    .long MULTIBOOT2_INFO_TAG_COMMAND_LINE
-    .long MULTIBOOT2_INFO_TAG_BASIC_MEMORY
-    .long MULTIBOOT2_INFO_TAG_MEMORY_MAP
-    .long MULTIBOOT2_INFO_TAG_FRAMEBUFFER
-    .long MULTIBOOT2_INFO_TAG_EFI64_SYSTEM_TABLE
-    .long MULTIBOOT2_INFO_TAG_ACPI_NEW
-    .align 8
-
-    .short MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS
-    .short 0
-    .long 12
-    .long _start
-    .align 8
-
-    # Request a linear graphics mode; accept the firmware's actual dimensions.
-    .short MULTIBOOT2_HEADER_TAG_FRAMEBUFFER
-    .short 0
-    .long 20
-    .long 1280
-    .long 800
-    .long 32
-    .align 8
-
-    .short 0
-    .short 0
-    .long 8
-multiboot2_header_end:
-
-.section .rodata.boot,"a",@progbits
-.align 8
-boot_gdt:
-    .quad 0x0000000000000000
-    .quad 0x00af9a000000ffff
-    .quad 0x00cf92000000ffff
-boot_gdt_end:
-
-boot_gdt_pointer:
-    .word boot_gdt_end - boot_gdt - 1
-    .long boot_gdt
-
-.section .bss
-.align 4096
-boot_pml4:
-    .skip 4096
-boot_pdpt:
-    .skip 4096
-boot_page_directory:
-    .skip 4096
-
+.section .bss,"aw",@nobits
 .align 4096
 # Native smoke tests require at least 25% unused watermark headroom.
 .equ BOOT_STACK_SIZE, 708 * 1024
@@ -79,109 +9,36 @@ stack_bottom:
 stack_top:
 
 .section .text.boot,"ax",@progbits
-.code32
-.global _start
-.type _start, @function
-.extern kernel_main
-.extern zigos_multiboot_magic
-.extern zigos_multiboot_info_addr
-
-.equ CR0_EM, (1 << 2)
-.equ CR0_MP, (1 << 1)
-.equ CR0_PG, (1 << 31)
-.equ CR4_PAE, (1 << 5)
-.equ CR4_OSFXSR, (1 << 9)
-.equ CR4_OSXMMEXCPT, (1 << 10)
-.equ EFER_MSR, 0xc0000080
-.equ EFER_LME, (1 << 8)
-.equ PAGE_PRESENT_WRITABLE, 0x3
-.equ LARGE_PAGE_PRESENT_WRITABLE, 0x83
-.equ IDENTITY_LARGE_PAGE_COUNT, 64
-.equ LONG_MODE_CODE_SELECTOR, 0x08
-.equ LONG_MODE_DATA_SELECTOR, 0x10
-
-_start:
-    cli
-    movl %eax, zigos_multiboot_magic
-    movl %ebx, zigos_multiboot_info_addr
-    movl $stack_top, %esp
-    xorl %ebp, %ebp
-
-    cld
-    xorl %eax, %eax
-    movl $boot_pml4, %edi
-    movl $((4096 * 3) / 4), %ecx
-    rep stosl
-
-    movl $boot_pdpt, %eax
-    orl $PAGE_PRESENT_WRITABLE, %eax
-    movl %eax, boot_pml4
-
-    movl $boot_page_directory, %eax
-    orl $PAGE_PRESENT_WRITABLE, %eax
-    movl %eax, boot_pdpt
-
-    movl $boot_page_directory, %edi
-    movl $LARGE_PAGE_PRESENT_WRITABLE, %eax
-    xorl %edx, %edx
-    movl $IDENTITY_LARGE_PAGE_COUNT, %ecx
-.map_identity_page:
-    movl %eax, (%edi)
-    movl %edx, 4(%edi)
-    addl $0x00200000, %eax
-    addl $8, %edi
-    loop .map_identity_page
-
-    movl $boot_pml4, %eax
-    movl %eax, %cr3
-
-    movl %cr4, %eax
-    orl $(CR4_PAE | CR4_OSFXSR | CR4_OSXMMEXCPT), %eax
-    movl %eax, %cr4
-
-    movl %cr0, %eax
-    andl $~CR0_EM, %eax
-    orl $CR0_MP, %eax
-    movl %eax, %cr0
-    fninit
-
-    movl $EFER_MSR, %ecx
-    rdmsr
-    orl $EFER_LME, %eax
-    wrmsr
-
-    lgdt boot_gdt_pointer
-    movl %cr0, %eax
-    orl $CR0_PG, %eax
-    movl %eax, %cr0
-    ljmp $LONG_MODE_CODE_SELECTOR, $long_mode_start
-
+#include "../arch/x86_64/codegen_preflight.inc"
 .code64
 .global zigos_efi_entry
 .type zigos_efi_entry, @function
+.extern kernel_main
+.extern zigos_multiboot_magic
+.extern zigos_multiboot_info_addr
 zigos_efi_entry:
     endbr64
-    movl %edi, zigos_multiboot_info_addr
-    movl $0x36D76289, zigos_multiboot_magic
-    movq $stack_top, %rsp
+    cli
+    cld
+    # Firmware has already mapped the upper-half image and physical window.
+    # The tagged handoff still carries physical addresses on the wire.
+    movl %edi, zigos_multiboot_info_addr(%rip)
+    movl $0x36D76289, zigos_multiboot_magic(%rip)
+    leaq stack_top(%rip), %rsp
     xorq %rbp, %rbp
+    ZIGOS_REQUIRE_BOOTSTRAP_CACHE .Lcache_bsp_rejected, 64
+    ZIGOS_REQUIRE_NATIVE .halt
+    ZIGOS_ENABLE_NATIVE_XSTATE
     call kernel_main
-    jmp .halt
-
-long_mode_start:
-    movw $LONG_MODE_DATA_SELECTOR, %ax
-    movw %ax, %ds
-    movw %ax, %es
-    movw %ax, %fs
-    movw %ax, %gs
-    movw %ax, %ss
-    movq $stack_top, %rsp
-    xorq %rbp, %rbp
-    call kernel_main
-
 .halt:
     cli
     hlt
     jmp .halt
+.Lcache_bsp_rejected:
+    leaq .Lcache_bsp_prefix(%rip), %rsi
+    ZIGOS_HALT_BOOTSTRAP_CACHE 64
+.Lcache_bsp_prefix:
+    .asciz "ZIGOS:BOOT:CACHE:BSP:REJECT:"
+.size zigos_efi_entry, .-zigos_efi_entry
 
 .section .note.GNU-stack,"",@progbits

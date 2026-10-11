@@ -12,6 +12,7 @@ pub const Error = policy_mediation.Error || error{
     SubjectTaskMismatch,
     UnexpectedOperation,
     UnsupportedAbiVersion,
+    InvalidRequestFlags,
 };
 
 pub const AuthorizeRequest = struct {

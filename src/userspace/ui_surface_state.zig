@@ -336,9 +336,9 @@ pub const State = struct {
 
     fn moveVertical(self: *State, down: bool, count: usize, extend: bool) bool {
         if (self.model != .notes) return false;
-        const text_layout = self.textLayout();
-        if (self.vertical_column == NO_VERTICAL_COLUMN) self.vertical_column = @intCast(text_layout.locate(self.caret()).column);
-        return self.moveCaret(text_layout.vertical(self.caret(), self.vertical_column, down, count), true, extend);
+        const movement = self.textLayout().moveVertical(self.caret(), if (self.vertical_column == NO_VERTICAL_COLUMN) null else self.vertical_column, down, count);
+        self.vertical_column = @intCast(movement.column);
+        return self.moveCaret(movement.caret, true, extend);
     }
 
     fn commit(self: *State) bool {
@@ -498,6 +498,40 @@ test "Notes pages by the visible viewport and resets the preferred column on res
     const previous = state;
     try std.testing.expectEqual(ApplyResult.rejected, navigationEvent(&state, abi.InputByte.page_up, false, .{ .columns = 3 }));
     try std.testing.expectEqualDeep(previous, state);
+    try std.testing.expect(!state.flags.dirty);
+}
+
+test "Notes vertical navigation keeps Unicode columns through selections and uses edited text" {
+    var state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument("Ae\u{301}界Z\nx\n\n\t猫\nAe\u{301}界Z"));
+    _ = navigationEvent(&state, abi.InputByte.document_start, false, .{});
+    _ = navigationEvent(&state, abi.InputByte.cursor_right, false, .{});
+    _ = navigationEvent(&state, abi.InputByte.cursor_right, false, .{});
+    try std.testing.expectEqual(@as(u16, 4), state.cursor);
+    for ([_]u16{ 10, 11, 12, 21 }) |offset| {
+        _ = navigationEvent(&state, abi.InputByte.cursor_down, true, .{});
+        try std.testing.expectEqual(offset, state.cursor);
+        try std.testing.expectEqual(@as(u16, 4), state.selection_anchor);
+        try std.testing.expectEqual(@as(u16, 2), state.vertical_column);
+        try std.testing.expect(state.presentationText().isCanonical());
+    }
+    _ = navigationEvent(&state, abi.InputByte.cursor_up, false, .{});
+    try std.testing.expectEqual(@as(u16, 12), state.cursor);
+    try std.testing.expectEqual(state.cursor, state.selection_anchor);
+    try std.testing.expect(!state.flags.dirty);
+
+    try std.testing.expect(state.replaceSelection("界"));
+    try std.testing.expectEqual(NO_VERTICAL_COLUMN, state.vertical_column);
+    _ = navigationEvent(&state, abi.InputByte.cursor_down, true, .{});
+    try std.testing.expectEqual(@as(u16, 24), state.cursor);
+    try std.testing.expectEqual(@as(u16, 15), state.selection_anchor);
+    try std.testing.expectEqual(@as(u16, 2), state.vertical_column);
+    _ = navigationEvent(&state, abi.InputByte.undo, false, .{});
+    try std.testing.expectEqual(@as(u16, 12), state.cursor);
+    try std.testing.expectEqual(NO_VERTICAL_COLUMN, state.vertical_column);
+    _ = navigationEvent(&state, abi.InputByte.cursor_down, false, .{});
+    try std.testing.expectEqual(@as(u16, 17), state.cursor);
+    try std.testing.expect(state.presentationText().isCanonical());
     try std.testing.expect(!state.flags.dirty);
 }
 
@@ -1011,4 +1045,53 @@ test "Notes repairs caret boundaries when insertion or deletion joins adjacent g
     try std.testing.expect(!state.replaceSelection("é"));
     try std.testing.expectEqual(@as(u16, 511), state.text_length);
     try std.testing.expect(!state.flags.dirty);
+}
+
+test "Notes selection and undo preserve mixed Prepend CRLF and Unicode clusters" {
+    var state = State.init("app.notes");
+    const original = "ab\u{600}cd\r\ne\u{301}👩‍💻Z";
+    try std.testing.expect(state.loadDocument(original));
+    try std.testing.expectEqual(ApplyResult.mutated, navigationEvent(&state, abi.InputByte.document_start, false, .{}));
+    // Literal byte positions follow a, b, Prepend+c, d, then the whole CRLF.
+    for ([_]u16{ 1, 2, 5, 6, 8 }) |cursor| {
+        try std.testing.expectEqual(ApplyResult.mutated, navigationEvent(&state, abi.InputByte.cursor_right, false, .{}));
+        try std.testing.expectEqual(cursor, state.cursor);
+        try std.testing.expectEqual(cursor, state.selection_anchor);
+    }
+    for ([_]u16{ 6, 5, 2 }) |cursor| {
+        try std.testing.expectEqual(ApplyResult.mutated, navigationEvent(&state, abi.InputByte.cursor_left, true, .{}));
+        try std.testing.expectEqual(cursor, state.cursor);
+        try std.testing.expectEqual(@as(u16, 8), state.selection_anchor);
+    }
+    try std.testing.expectEqualStrings("\u{600}cd\r\n", state.selectionSlice());
+    try std.testing.expectEqual(ApplyResult.mutated, navigationEvent(&state, abi.InputByte.delete_forward, false, .{}));
+    try std.testing.expectEqualStrings("abe\u{301}👩‍💻Z", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 2), state.cursor);
+    try std.testing.expectEqual(state.cursor, state.selection_anchor);
+    try std.testing.expect(state.flags.dirty);
+
+    try std.testing.expectEqual(ApplyResult.mutated, navigationEvent(&state, abi.InputByte.undo, false, .{}));
+    try std.testing.expectEqualStrings(original, state.textSlice());
+    try std.testing.expectEqual(@as(u16, 2), state.cursor);
+    try std.testing.expectEqual(@as(u16, 8), state.selection_anchor);
+    try std.testing.expect(!state.flags.dirty);
+    var snapshot = state.presentationText();
+    try std.testing.expect(snapshot.isCanonical());
+
+    // Collapse the restored reverse selection, then remove both CRLF bytes.
+    try std.testing.expectEqual(ApplyResult.mutated, navigationEvent(&state, abi.InputByte.cursor_right, false, .{}));
+    try std.testing.expectEqual(@as(u16, 8), state.cursor);
+    try std.testing.expectEqual(state.cursor, state.selection_anchor);
+    try std.testing.expectEqual(ApplyResult.mutated, navigationEvent(&state, abi.InputByte.backspace, false, .{}));
+    try std.testing.expectEqualStrings("ab\u{600}cde\u{301}👩‍💻Z", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 6), state.cursor);
+    try std.testing.expectEqual(state.cursor, state.selection_anchor);
+    try std.testing.expect(state.flags.dirty);
+    try std.testing.expectEqual(ApplyResult.mutated, navigationEvent(&state, abi.InputByte.undo, false, .{}));
+    try std.testing.expectEqualStrings(original, state.textSlice());
+    try std.testing.expectEqual(@as(u16, 8), state.cursor);
+    try std.testing.expectEqual(state.cursor, state.selection_anchor);
+    try std.testing.expect(!state.flags.dirty);
+    snapshot = state.presentationText();
+    try std.testing.expect(snapshot.isCanonical());
 }

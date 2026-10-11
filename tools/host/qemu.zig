@@ -122,6 +122,9 @@ const Harness = struct {
     cpu_override: ?[]const u8 = null,
     cache_override: ?[]const u8 = null,
     write_cache_override: ?[]const u8 = null,
+    // Only the full kernel entry smoke treats baseline rejection as an early
+    // unsupported target. Deliberate negative CPU proofs keep their own markers.
+    reject_cpu_baseline: bool = false,
 
     fn binary(self: Harness) []const u8 {
         return env(self.ctx, "QEMU_BIN", "qemu-system-x86_64");
@@ -254,7 +257,15 @@ const Harness = struct {
         while (try child.poll()) {
             const bytes = try readOptional(ctx, path);
             defer ctx.allocator.free(bytes);
-            if (log.contains(bytes, marker) or (if (failure_marker) |failure| log.contains(bytes, failure) else false)) {
+            // Serial emits the marker and feature name in separate writes.
+            // Once rejection arrives, do not accept another marker or stop the
+            // child until its complete reason is available (or it exits/times out).
+            const cpu_rejection = if (self.reject_cpu_baseline) entryCpuRejection(bytes) else null;
+            if (cpu_rejection) |reason| if (reason.len != 0) {
+                child.stop(ctx, process.grace(ctx));
+                return reportEntryCpuRejection(ctx, bytes, reason, path);
+            };
+            if (cpu_rejection == null and (log.contains(bytes, marker) or (if (failure_marker) |failure| log.contains(bytes, failure) else false))) {
                 if (store != null) {
                     const seconds = std.fmt.parseFloat(f64, env(ctx, "QEMU_MARKER_STOP_DELAY", "1")) catch return error.InvalidArguments;
                     if (!std.math.isFinite(seconds) or seconds < 0 or seconds > 86400) return error.InvalidArguments;
@@ -270,6 +281,10 @@ const Harness = struct {
             try process.pause(ctx, 1000);
         }
         const bytes = try readOptional(ctx, path);
+        if (self.reject_cpu_baseline) {
+            if (entryCpuRejection(bytes)) |reason|
+                return reportEntryCpuRejection(ctx, bytes, reason, path);
+        }
         if (bytes.len == 0 or !log.contains(bytes, marker)) {
             dump(ctx, bytes);
             dump(ctx, try readOptional(ctx, qemu_log));
@@ -322,6 +337,11 @@ pub fn run(ctx: *common.Context, command: []const u8, input: []const []const u8)
     }
     if (std.mem.eql(u8, command, "run-uefi-boot-test")) return uefiBoot(harness, args);
     if (std.mem.eql(u8, command, "run-long-mode-entry-smoke")) return entrySmoke(harness, args, true);
+    if (std.mem.eql(u8, command, "run-native-crypto-smoke")) return nativeCryptoSmoke(harness, args);
+    if (std.mem.eql(u8, command, "run-high-half-smoke")) return highHalfSmoke(harness, args);
+    if (std.mem.eql(u8, command, "run-mapping-xstate-smoke")) return mappingXstateSmoke(harness, args);
+    if (std.mem.eql(u8, command, "run-ap-cache-rejection-smoke")) return apCacheRejectionSmoke(harness, args);
+    if (std.mem.eql(u8, command, "run-smp-cache-enabled-match-smoke")) return smpCacheEnabledMatchSmoke(harness, args);
     if (std.mem.eql(u8, command, "run-x86-64-kernel-smoke")) return entrySmoke(harness, args, false);
     if (std.mem.eql(u8, command, "capture-kernel-benchmark")) return benchmark(harness, args);
     if (std.mem.eql(u8, command, "run-kernel-recovery")) return recovery(harness, args);
@@ -365,11 +385,40 @@ fn uefiBoot(h: Harness, args: []const []const u8) !void {
     try h.ctx.print("UEFI boot test passed. Log: {s}\n", .{args[1]});
 }
 
+// null means no complete rejection marker; an empty reason means the marker
+// arrived but the separately written diagnostic line has not completed yet.
+fn entryCpuRejection(bytes: []const u8) ?[]const u8 {
+    const rejected = "ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED";
+    const reason_prefix = "Unsupported CPU: missing ";
+    var remaining = bytes;
+    var observed = false;
+    while (std.mem.indexOfScalar(u8, remaining, '\n')) |end| {
+        const raw = remaining[0..end];
+        const line = if (std.mem.endsWith(u8, raw, "\r")) raw[0 .. raw.len - 1] else raw;
+        if (std.mem.eql(u8, line, rejected)) observed = true;
+        if (observed and std.mem.startsWith(u8, line, reason_prefix) and line.len > reason_prefix.len)
+            return line;
+        remaining = remaining[end + 1 ..];
+    }
+    return if (observed) "" else null;
+}
+
+fn reportEntryCpuRejection(ctx: *common.Context, bytes: []const u8, reason: []const u8, path: []const u8) anyerror {
+    dump(ctx, bytes);
+    if (reason.len != 0) {
+        ctx.warn("QEMU target unsupported: {s}. Log: {s}\n", .{ reason, path }) catch {};
+    } else {
+        ctx.warn("QEMU target unsupported: CPU baseline rejected without a complete feature diagnostic. Log: {s}\n", .{path}) catch {};
+    }
+    return error.UnsupportedCpuTarget;
+}
+
 fn entrySmoke(h: Harness, args: []const []const u8, long_mode: bool) !void {
     try require(args, 2);
     const ready = if (long_mode) "ZIGOS:ARCH:X86_64:LONG_MODE_ENTRY:READY" else "ZIGOS:USERSPACE:RESUME:OK";
     var configured = h;
     configured.boot_iso = args[0];
+    configured.reject_cpu_baseline = !long_mode;
     try configured.until(null, args[1], ready, if (long_mode) "ZIGOS:ARCH:X86_64:LONG_MODE_ENTRY:FAIL" else null, try process.seconds(h.ctx, if (long_mode) "ZIGOS_LONG_MODE_ENTRY_SECONDS" else "ZIGOS_X86_64_KERNEL_SECONDS", "30"), if (long_mode) "128M" else h.memory(), &.{});
     const bytes = try h.ctx.read(args[1]);
     if (long_mode) {
@@ -378,6 +427,232 @@ fn entrySmoke(h: Harness, args: []const []const u8, long_mode: bool) !void {
         try checkGroup(h.ctx, bytes, &.{ "BOOT:START", "BOOT:PROFILE:zigos_native", "BOOT:ROLE:production", "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY", "ZIGOS:CPU:NX:ENABLED", "ZIGOS:CPU:PGE:ENABLED", "ZIGOS:CPU:SYSCALL:ENABLED", "ZIGOS:CPU:PCID:READY", "ZIGOS:ARCH:X86_64:PAGING:READY", "ZIGOS:KERNEL:W_X:ENFORCED", "BOOT:CORE_READY", "ZIGOS:USERSPACE:ARTIFACTS:READY", "ZIGOS:USERSPACE:EXEC_PROBE:OK" });
     }
     try h.ctx.print("{s} smoke test passed. Log: {s}\n", .{ if (long_mode) "Long-mode entry" else "x86-64 kernel and userspace launch", args[1] });
+}
+
+const native_crypto_proofs = [_][]const u8{
+    "ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:INITIAL_FP_CONTROLS:PASS",
+    "ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:AVX2:PASS",
+    "ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:AES128:PASS",
+    "ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:SHA256:PASS",
+    "ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:GHASH:PASS",
+    "ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:CHECKSUM_XXH64:PASS",
+    "ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:XSTATE_X87_XMM_YMM_128:PASS",
+    "ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:PASS",
+};
+
+fn nativeCryptoSmoke(h: Harness, args: []const []const u8) !void {
+    try require(args, 2);
+    var configured = h;
+    configured.boot_iso = args[0];
+    try configured.until(null, args[1], native_crypto_proofs[native_crypto_proofs.len - 1], "ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:FAIL", try process.seconds(h.ctx, "ZIGOS_NATIVE_CRYPTO_SECONDS", "30"), "256M", &.{});
+    const bytes = try h.ctx.read(args[1]);
+    try healthy(h.ctx, bytes, "FAIL");
+    log.exactOrdered(bytes, &native_crypto_proofs) catch |err| {
+        dump(h.ctx, bytes);
+        return err;
+    };
+    try h.ctx.print("Native AVX2, crypto and xstate smoke test passed. Log: {s}\n", .{args[1]});
+}
+
+const high_half_proofs = [_][]const u8{
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:ENTRY:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:STACK:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:IMAGE_LMA:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:DIRECT_MAP:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:CR3:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:BOOT_ARENA_SIZING:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:FP_CONTROLS:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMAP_AC:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:DESCRIPTORS:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:FINAL_CR3:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:BOOT_ARENA_RECLAIM:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:W_X:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:HEAP_GUARD:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:USER_ROOT:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SHARED_FRAMES:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_ENTRY:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_CONTROLS:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_CACHE_POLICY:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_IDENTITY:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_TIMERS:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_DESCRIPTORS:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_TRAP_STACKS:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_CONTINUATION:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_STOP:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_ROOTS:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_DISPATCH:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_IPC:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_16_BROKER:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_AP_PREPARED:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_AP_TRANSPORT:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_AP_TRANSPORT_IPI:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_AP_TRAP_STACK:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_LOW_RETIRED:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_IPI_STATE:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_GLOBAL_TLB:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:SMP_DEVICE_CACHE:PASS",
+    "ZIGOS:ARCH:X86_64:HIGH_HALF:PASS",
+};
+
+fn highHalfSmoke(h: Harness, args: []const []const u8) !void {
+    try require(args, 2);
+    var configured = h;
+    configured.boot_iso = args[0];
+    configured.cpu_override = try fmt(h.ctx, "{s},tsc-frequency=2400000000", .{try h.cpu()});
+    // Count-sized arenas exercise the full sixteen-core architecture fixture
+    // at 192MiB, including its unchanged 32MiB heap and firmware overhead.
+    try configured.until(null, args[1], high_half_proofs[high_half_proofs.len - 1], "ZIGOS:ARCH:X86_64:HIGH_HALF:FAIL", try process.seconds(h.ctx, "ZIGOS_HIGH_HALF_SECONDS", "30"), "192M", &.{ "-smp", "cpus=16,sockets=1,cores=16,threads=1" });
+    const bytes = try h.ctx.read(args[1]);
+    try healthy(h.ctx, bytes, "FAIL");
+    log.exactOrdered(bytes, &high_half_proofs) catch |err| {
+        dump(h.ctx, bytes);
+        return err;
+    };
+    try h.ctx.print("Isolated 16-CPU upper-half entry/SIPI, timer and execution ownership, remote stop, copied IPC and syscall broker delivery, acknowledged retirement, descriptors, SMAP, paging, shared frames and global-TLB proof passed. Log: {s}\n", .{args[1]});
+}
+
+const MappingXstateMode = enum { positive, unsupported };
+const mapping_xstate_namespace = "ZIGOS:ARCH:X86_64:MAPPING_XSTATE:";
+const mapping_xstate_proofs = [_][]const u8{
+    mapping_xstate_namespace ++ "BSP_ADMISSION:PASS",
+    mapping_xstate_namespace ++ "MAPPING_A_SEED:PASS",
+    mapping_xstate_namespace ++ "MAPPING_B_SEED:PASS",
+    mapping_xstate_namespace ++ "MAPPING_A_RESTORE:PASS",
+    mapping_xstate_namespace ++ "MAPPING_B_UPDATE:PASS",
+    mapping_xstate_namespace ++ "OWNERSHIP:PASS",
+    mapping_xstate_namespace ++ "RETIREMENT:PASS",
+    mapping_xstate_namespace ++ "PASS",
+};
+
+// Serial evidence and the actual debug-exit status form one contract. The
+// unsupported mode verifies early admission failure, never compacted execution.
+fn validateMappingXstateResult(status: u32, mode: MappingXstateMode, bytes: []const u8) !void {
+    if (status != (if (mode == .positive) @as(u32, success_exit) else 37))
+        return error.UnexpectedMappingXstateExit;
+    if (!log.healthy(bytes, "FAIL")) return error.UnhealthyMappingXstateEvidence;
+    switch (mode) {
+        .positive => {
+            if (log.contains(bytes, "UNSUPPORTED")) return error.UnsupportedCpuTarget;
+            if (!std.mem.endsWith(u8, bytes, "\n")) return error.IncompleteMappingXstateEvidence;
+            if (log.countContaining(bytes, mapping_xstate_namespace) != mapping_xstate_proofs.len or
+                log.countContaining(bytes, "ZIGOS:ARCH:X86_64:HIGH_HALF:") != high_half_proofs.len or
+                log.countContaining(bytes, "ZIGOS:ARCH:X86_64:") != mapping_xstate_proofs.len + high_half_proofs.len)
+                return error.UnexpectedMappingXstateEvidence;
+            try log.exactOrdered(bytes, &mapping_xstate_proofs);
+            try log.exactOrdered(bytes, &high_half_proofs);
+            try log.ordered(bytes, &.{ mapping_xstate_proofs[0], high_half_proofs[0] });
+            try log.ordered(bytes, &.{ mapping_xstate_proofs[mapping_xstate_proofs.len - 1], high_half_proofs[high_half_proofs.len - 1] });
+        },
+        .unsupported => {
+            const prefix = mapping_xstate_namespace ++ "UNSUPPORTED:";
+            if (log.countContaining(bytes, mapping_xstate_namespace) != 1 or
+                log.countContaining(bytes, "ZIGOS:") != 1 or log.contains(bytes, ":PASS") or
+                log.contains(bytes, "AP:ONLINE") or log.contains(bytes, "AP_HIGH_ENTRY"))
+                return error.UnexpectedMappingXstateEvidence;
+            inline for (.{ "CPUID", "XSAVE", "AVX", "XSAVES", "YMM_LAYOUT" }) |reason| {
+                if (log.exact(bytes, prefix ++ reason) and std.mem.endsWith(u8, bytes, "\n")) return;
+            }
+            return error.InvalidMappingXstateUnsupportedReason;
+        },
+    }
+}
+
+fn mappingXstateSmoke(h: Harness, args: []const []const u8) !void {
+    if (args.len != 3) return error.InvalidArguments;
+    const mode = std.meta.stringToEnum(MappingXstateMode, args[2]) orelse return error.InvalidArguments;
+    const ctx = h.ctx;
+    const path = args[1];
+    try ctx.mkdir(std.fs.path.dirname(path) orelse ".");
+    try remove(ctx, path);
+    const status_path = try fmt(ctx, "{s}.qemu-status", .{stem(path)});
+    try remove(ctx, status_path);
+    var command = try h.build(args[0], "192M", try fmt(ctx, "file:{s}", .{path}), true, false);
+    try command.appendSlice(ctx.allocator, &.{ "-smp", "cpus=16,sockets=1,cores=16,threads=1" });
+    const qemu_log = try fmt(ctx, "{s}.qemu.log", .{stem(path)});
+    const status = try process.timed(ctx, command.items, qemu_log, try process.seconds(ctx, "ZIGOS_MAPPING_XSTATE_SECONDS", "30"));
+    try ctx.write(status_path, try fmt(ctx, "{d}\n", .{status}));
+    const bytes = try readOptional(ctx, path);
+    validateMappingXstateResult(status, mode, bytes) catch |err| {
+        dump(ctx, bytes);
+        dump(ctx, try readOptional(ctx, qemu_log));
+        ctx.warn("Mapping xstate {s} evidence rejected: QEMU exit {d}. Log: {s}\n", .{ @tagName(mode), status, path }) catch {};
+        return err;
+    };
+    // Subprocess fixtures run this same path under Zig's test server, which
+    // reserves stdout for its framed protocol.
+    try ctx.warn("Mapping xstate {s} evidence validated with QEMU exit {d}. Log: {s}\n", .{ @tagName(mode), status, path });
+}
+
+const ApCacheCase = enum { none, version, default_reserved, mask_reserved, enabled };
+
+fn apCacheFirst(case: ApCacheCase) []const u8 {
+    return switch (case) {
+        .none => "ZIGOS:ARCH:X86_64:AP_CACHE:CONTROL:ARMED",
+        .version => "ZIGOS:ARCH:X86_64:AP_CACHE:VERSION:ARMED",
+        .default_reserved => "ZIGOS:ARCH:X86_64:AP_CACHE:DEFAULT_RESERVED:ARMED",
+        .mask_reserved => "ZIGOS:ARCH:X86_64:AP_CACHE:MASK_RESERVED:ARMED",
+        .enabled => "ZIGOS:ARCH:X86_64:AP_CACHE:FIRST_ENABLED:PASS",
+    };
+}
+
+fn apCacheLast(case: ApCacheCase) []const u8 {
+    return switch (case) {
+        .none => "ZIGOS:ARCH:X86_64:AP_CACHE:CONTROL_HIGH_ENTRY:PASS",
+        .enabled => "ZIGOS:ARCH:X86_64:AP_CACHE:SMP_CACHE_ENABLED_MATCH:PASS",
+        else => "ZIGOS:BOOT:CACHE:AP:REJECT:5",
+    };
+}
+
+// Accept exactly the two executed records. Only the AP's single CRLF suffix
+// is normalized; prefixes, appended text and duplicate/foreign proofs fail.
+fn validateApCacheEvidence(bytes: []const u8, case: ApCacheCase) !void {
+    if (!log.healthy(bytes, "FAIL")) return error.UnhealthyApCacheEvidence;
+    var observed: usize = 0;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    while (lines.next()) |raw| {
+        const line = if (std.mem.endsWith(u8, raw, "\r")) raw[0 .. raw.len - 1] else raw;
+        if (!log.contains(line, "ZIGOS:ARCH:X86_64:AP_CACHE:") and
+            !log.contains(line, "ZIGOS:BOOT:CACHE:") and
+            !log.contains(line, ":PASS") and !log.contains(line, "HIGH_ENTRY") and
+            !log.contains(line, "AP:ONLINE")) continue;
+        if (observed >= 2 or !std.mem.eql(u8, line, if (observed == 0) apCacheFirst(case) else apCacheLast(case)))
+            return error.UnexpectedApCacheEvidence;
+        observed += 1;
+    }
+    if (observed != 2) return error.MissingApCacheEvidence;
+}
+
+fn apCacheHarness(h: Harness, iso: []const u8) !Harness {
+    var configured = h;
+    configured.boot_iso = iso;
+    configured.cpu_override = try fmt(h.ctx, "{s},tsc-frequency=2400000000", .{try h.cpu()});
+    return configured;
+}
+
+fn apCacheRejectionSmoke(h: Harness, args: []const []const u8) !void {
+    try require(args, 3);
+    const case = std.meta.stringToEnum(ApCacheCase, args[2]) orelse return error.InvalidArguments;
+    if (case == .enabled) return error.InvalidArguments;
+    const configured = try apCacheHarness(h, args[0]);
+    try configured.until(null, args[1], apCacheLast(case), "FAIL", try process.seconds(h.ctx, "ZIGOS_AP_CACHE_SECONDS", "30"), "192M", &.{ "-smp", "cpus=2,sockets=1,cores=2,threads=1" });
+    const bytes = try h.ctx.read(args[1]);
+    validateApCacheEvidence(bytes, case) catch |err| {
+        dump(h.ctx, bytes);
+        return err;
+    };
+    try h.ctx.print("AP cache {s} control/rejection evidence passed. Log: {s}\n", .{ args[2], args[1] });
+}
+
+fn smpCacheEnabledMatchSmoke(h: Harness, args: []const []const u8) !void {
+    try require(args, 2);
+    const configured = try apCacheHarness(h, args[0]);
+    try configured.until(null, args[1], apCacheLast(.enabled), "FAIL", try process.seconds(h.ctx, "ZIGOS_AP_CACHE_SECONDS", "30"), "192M", &.{ "-smp", "cpus=2,sockets=1,cores=2,threads=1" });
+    const bytes = try h.ctx.read(args[1]);
+    validateApCacheEvidence(bytes, .enabled) catch |err| {
+        dump(h.ctx, bytes);
+        return err;
+    };
+    try h.ctx.print("Paging-off AP enabled-MTRR match and independent register readback passed. Log: {s}\n", .{args[1]});
 }
 
 fn captureKernel(h: Harness, path: []const u8, limit: u32) ![]const u8 {
@@ -1016,9 +1291,232 @@ fn unifiedEfi(initial: Harness, args: []const []const u8) !void {
     try ctx.print("Unified EFI authentication, TPM measurement, payload tampering, and external override checks passed. Logs: {s}\n", .{directory});
 }
 
+fn mappingXstateEvidenceFixture(allocator: std.mem.Allocator) ![]const u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    try bytes.appendSlice(allocator, "firmware output\n");
+    try bytes.appendSlice(allocator, mapping_xstate_proofs[0] ++ "\n");
+    for (high_half_proofs[0 .. high_half_proofs.len - 1]) |marker| {
+        try bytes.appendSlice(allocator, marker);
+        try bytes.append(allocator, '\n');
+    }
+    for (mapping_xstate_proofs[1..]) |marker| {
+        try bytes.appendSlice(allocator, marker);
+        try bytes.append(allocator, '\n');
+    }
+    try bytes.appendSlice(allocator, high_half_proofs[high_half_proofs.len - 1] ++ "\n");
+    return bytes.toOwnedSlice(allocator);
+}
+
+test "Mapping xstate evidence binds all ordered proofs to the actual positive exit" {
+    const allocator = std.testing.allocator;
+    const valid = try mappingXstateEvidenceFixture(allocator);
+    defer allocator.free(valid);
+    try validateMappingXstateResult(33, .positive, valid);
+    for ([_]u32{ 0, 1, 35, 37, 124, 137, 143, 255 }) |status|
+        try std.testing.expectError(error.UnexpectedMappingXstateExit, validateMappingXstateResult(status, .positive, valid));
+    try std.testing.expectError(error.UnexpectedMappingXstateEvidence, validateMappingXstateResult(37, .unsupported, valid));
+    inline for (.{
+        mapping_xstate_namespace ++ "UNKNOWN:PASS\n",
+        "prefix " ++ mapping_xstate_namespace ++ "UNKNOWN:PASS\n",
+        mapping_xstate_proofs[1] ++ "\n",
+        "ZIGOS:ARCH:X86_64:HIGH_HALF:UNKNOWN:PASS\n",
+        "ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:PASS\n",
+    }) |extra| {
+        const bytes = try std.mem.concat(allocator, u8, &.{ valid, extra });
+        defer allocator.free(bytes);
+        try std.testing.expectError(error.UnexpectedMappingXstateEvidence, validateMappingXstateResult(33, .positive, bytes));
+    }
+    const failed = try std.mem.concat(allocator, u8, &.{ valid, "panic\n" });
+    defer allocator.free(failed);
+    try std.testing.expectError(error.UnhealthyMappingXstateEvidence, validateMappingXstateResult(33, .positive, failed));
+    const forged = try std.mem.replaceOwned(u8, allocator, valid, mapping_xstate_proofs[2], mapping_xstate_proofs[2] ++ " forged");
+    defer allocator.free(forged);
+    try std.testing.expectError(error.MissingMarker, validateMappingXstateResult(33, .positive, forged));
+    const reversed = try std.mem.replaceOwned(u8, allocator, valid, mapping_xstate_proofs[2] ++ "\n" ++ mapping_xstate_proofs[3], mapping_xstate_proofs[3] ++ "\n" ++ mapping_xstate_proofs[2]);
+    defer allocator.free(reversed);
+    try std.testing.expectError(error.MarkersOutOfOrder, validateMappingXstateResult(33, .positive, reversed));
+    try std.testing.expectError(error.UnhealthyMappingXstateEvidence, validateMappingXstateResult(33, .positive, ""));
+    try std.testing.expectError(error.IncompleteMappingXstateEvidence, validateMappingXstateResult(33, .positive, valid[0 .. valid.len - 1]));
+}
+
+test "Mapping xstate unsupported evidence requires one complete allowlisted rejection and exit 37" {
+    const prefix = mapping_xstate_namespace ++ "UNSUPPORTED:";
+    inline for (.{ "CPUID", "XSAVE", "AVX", "XSAVES", "YMM_LAYOUT" }) |reason| {
+        const valid = "firmware output\n" ++ prefix ++ reason ++ "\n";
+        try validateMappingXstateResult(37, .unsupported, valid);
+        try std.testing.expectError(error.UnexpectedMappingXstateExit, validateMappingXstateResult(37, .positive, valid));
+        try std.testing.expectError(error.UnsupportedCpuTarget, validateMappingXstateResult(33, .positive, valid));
+        for ([_]u32{ 0, 1, 33, 35, 124, 137 }) |status|
+            try std.testing.expectError(error.UnexpectedMappingXstateExit, validateMappingXstateResult(status, .unsupported, valid));
+        try std.testing.expectError(error.UnexpectedMappingXstateEvidence, validateMappingXstateResult(37, .unsupported, valid ++ prefix ++ reason ++ "\n"));
+        try std.testing.expectError(error.UnexpectedMappingXstateEvidence, validateMappingXstateResult(37, .unsupported, valid ++ "ZIGOS:ARCH:X86_64:HIGH_HALF:ENTRY:PASS\n"));
+        try std.testing.expectError(error.UnexpectedMappingXstateEvidence, validateMappingXstateResult(37, .unsupported, valid ++ "AP:ONLINE\n"));
+        try std.testing.expectError(error.InvalidMappingXstateUnsupportedReason, validateMappingXstateResult(37, .unsupported, "prefix " ++ prefix ++ reason ++ "\n"));
+        try std.testing.expectError(error.InvalidMappingXstateUnsupportedReason, validateMappingXstateResult(37, .unsupported, prefix ++ reason ++ " forged\n"));
+        try std.testing.expectError(error.InvalidMappingXstateUnsupportedReason, validateMappingXstateResult(37, .unsupported, prefix ++ reason));
+    }
+    try std.testing.expectError(error.InvalidMappingXstateUnsupportedReason, validateMappingXstateResult(37, .unsupported, prefix ++ "UNKNOWN\n"));
+    try std.testing.expectError(error.UnhealthyMappingXstateEvidence, validateMappingXstateResult(37, .unsupported, prefix ++ "XSAVES\npanic\n"));
+}
+
+test "Mapping xstate smoke waits for subprocess exit and rejects proof-only timeout" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var environment = std.process.Environ.Map.init(arena.allocator());
+    var ctx: common.Context = .{ .allocator = arena.allocator(), .io = std.testing.io, .environ = &environment };
+    const temporary = try ctx.tempDir("zigos-mapping-xstate-test");
+    defer ctx.removeTree(temporary) catch {};
+    const binary = try fmt(&ctx, "{s}/qemu", .{temporary});
+    const firmware = try fmt(&ctx, "{s}/firmware", .{temporary});
+    const serial = try fmt(&ctx, "{s}/serial.log", .{temporary});
+    const evidence = try fmt(&ctx, "{s}/evidence.log", .{temporary});
+    try ctx.write(firmware, "fixture");
+    try ctx.write(evidence, try mappingXstateEvidenceFixture(ctx.allocator));
+    try ctx.write(binary,
+        \\#!/bin/sh
+        \\while [ "$#" -gt 0 ]; do
+        \\    if [ "$1" = "-serial" ]; then shift; serial=${1#file:}; break; fi
+        \\    shift
+        \\done
+        \\/bin/cat "$MAPPING_XSTATE_FIXTURE" > "$serial"
+        \\if [ "$MAPPING_XSTATE_STATUS" = "wait" ]; then exec /bin/sleep 30; fi
+        \\exit "$MAPPING_XSTATE_STATUS"
+        \\
+    );
+    const executable = try std.Io.Dir.cwd().openFile(ctx.io, binary, .{});
+    defer executable.close(ctx.io);
+    try executable.setPermissions(ctx.io, .fromMode(0o700));
+    try environment.put("QEMU_BIN", binary);
+    try environment.put("QEMU_STOP_GRACE_SECONDS", "1");
+    try environment.put("ZIGOS_MAPPING_XSTATE_SECONDS", "1");
+    try environment.put("MAPPING_XSTATE_FIXTURE", evidence);
+    const harness: Harness = .{ .ctx = &ctx, .boot_iso = null, .code_override = firmware, .vars_override = firmware, .cpu_override = "fixture" };
+    try environment.put("MAPPING_XSTATE_STATUS", "33");
+    try mappingXstateSmoke(harness, &.{ "fixture.iso", serial, "positive" });
+    try std.testing.expectEqualStrings("33\n", try ctx.read(try fmt(&ctx, "{s}.qemu-status", .{stem(serial)})));
+    for ([_][]const u8{ "0", "35", "wait" }) |status| {
+        try environment.put("MAPPING_XSTATE_STATUS", status);
+        try std.testing.expectError(error.UnexpectedMappingXstateExit, mappingXstateSmoke(harness, &.{ "fixture.iso", serial, "positive" }));
+        try std.testing.expectEqualStrings(if (std.mem.eql(u8, status, "wait")) "124\n" else try fmt(&ctx, "{s}\n", .{status}), try ctx.read(try fmt(&ctx, "{s}.qemu-status", .{stem(serial)})));
+    }
+    try ctx.write(evidence, mapping_xstate_namespace ++ "UNSUPPORTED:XSAVES\n");
+    try environment.put("MAPPING_XSTATE_STATUS", "37");
+    try mappingXstateSmoke(harness, &.{ "fixture.iso", serial, "unsupported" });
+    try std.testing.expectError(error.InvalidArguments, mappingXstateSmoke(harness, &.{ "fixture.iso", serial, "unknown" }));
+}
+
+test "entry smoke CPU rejection preserves complete exact feature diagnostics" {
+    const marker = "ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED";
+    try std.testing.expectEqualStrings("Unsupported CPU: missing xsaves", entryCpuRejection("BOOT:START\n" ++ marker ++ "\nUnsupported CPU: missing xsaves\n").?);
+    try std.testing.expectEqualStrings("Unsupported CPU: missing fred", entryCpuRejection(marker ++ "\r\nUnsupported CPU: missing fred\r\n").?);
+    try std.testing.expectEqualStrings("", entryCpuRejection(marker ++ "\nUnsupported CPU: missing xsa").?);
+    try std.testing.expectEqualStrings("Unsupported CPU: missing xsaves", entryCpuRejection(marker ++ "\nUnsupported CPU: missing xsaves\nZIGOS:USERSPACE:RESUME:OK\n").?);
+    try std.testing.expectEqualStrings("", entryCpuRejection(marker ++ "\n").?);
+    for ([_][]const u8{
+        marker,
+        "prefix " ++ marker ++ "\nUnsupported CPU: missing xsaves\n",
+        marker ++ " forged\nUnsupported CPU: missing xsaves\n",
+        "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY\nUnsupported CPU: missing xsaves\n",
+        "Unsupported CPU: missing xsaves\n",
+        "ZIGOS:USERSPACE:RESUME:OK\n",
+    }) |bytes| try std.testing.expect(entryCpuRejection(bytes) == null);
+}
+
+test "entry smoke waits for exact reason stops unsupported target before deadline and reaps child" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var environment = std.process.Environ.Map.init(arena.allocator());
+    var ctx: common.Context = .{ .allocator = arena.allocator(), .io = std.testing.io, .environ = &environment };
+    const temporary = try ctx.tempDir("zigos-entry-smoke-test");
+    defer ctx.removeTree(temporary) catch {};
+    const binary = try fmt(&ctx, "{s}/qemu", .{temporary});
+    const firmware = try fmt(&ctx, "{s}/firmware", .{temporary});
+    const serial = try fmt(&ctx, "{s}/serial.log", .{temporary});
+    try ctx.write(firmware, "fixture");
+    try ctx.write(binary,
+        \\#!/bin/sh
+        \\while [ "$#" -gt 0 ]; do
+        \\    if [ "$1" = "-serial" ]; then shift; serial=${1#file:}; break; fi
+        \\    shift
+        \\done
+        \\printf '%s\n' "$$"
+        \\printf '%s\n' 'BOOT:START' 'ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED' 'ZIGOS:USERSPACE:RESUME:OK' > "$serial"
+        \\/bin/sleep 1
+        \\printf '%s\n' 'Unsupported CPU: missing xsaves' >> "$serial"
+        \\exec /bin/sleep 30
+        \\
+    );
+    const executable = try std.Io.Dir.cwd().openFile(ctx.io, binary, .{});
+    defer executable.close(ctx.io);
+    try executable.setPermissions(ctx.io, .fromMode(0o700));
+    try environment.put("QEMU_BIN", binary);
+    try environment.put("QEMU_STOP_GRACE_SECONDS", "1");
+    try environment.put("ZIGOS_X86_64_KERNEL_SECONDS", "20");
+    const harness: Harness = .{ .ctx = &ctx, .boot_iso = null, .code_override = firmware, .vars_override = firmware, .cpu_override = "fixture" };
+    const start = std.Io.Timestamp.now(ctx.io, .awake);
+    try std.testing.expectError(error.UnsupportedCpuTarget, entrySmoke(harness, &.{ "fixture.iso", serial }, false));
+    const elapsed = process.elapsed(&ctx, start);
+    try std.testing.expect(elapsed >= 1000 and elapsed < 5000);
+    const bytes = try ctx.read(serial);
+    try std.testing.expect(log.exact(bytes, "Unsupported CPU: missing xsaves"));
+    try std.testing.expect(log.exact(bytes, "ZIGOS:USERSPACE:RESUME:OK"));
+    const pid_text = std.mem.trim(u8, try ctx.read(try fmt(&ctx, "{s}.qemu.log", .{stem(serial)})), "\r\n");
+    const pid = try std.fmt.parseInt(std.posix.pid_t, pid_text, 10);
+    const group_result = std.c.kill(-pid, @fromBackingInt(@intCast(0)));
+    const group_error = std.posix.errno(group_result);
+    try std.testing.expect(group_result < 0);
+    try std.testing.expectEqual(std.posix.E.SRCH, group_error);
+}
+
 test {
     std.testing.refAllDecls(log);
     std.testing.refAllDecls(process);
+}
+
+test "AP cache evidence requires actual ordered unique control rejection and enabled records" {
+    inline for (.{ ApCacheCase.none, ApCacheCase.version, ApCacheCase.default_reserved, ApCacheCase.mask_reserved, ApCacheCase.enabled }) |case| {
+        const allocator = std.testing.allocator;
+        const valid = try std.fmt.allocPrint(allocator, "firmware output\n{s}\n{s}\r\n", .{ apCacheFirst(case), apCacheLast(case) });
+        defer allocator.free(valid);
+        try validateApCacheEvidence(valid, case);
+        const missing = try std.fmt.allocPrint(allocator, "{s}\n", .{apCacheFirst(case)});
+        defer allocator.free(missing);
+        try std.testing.expectError(error.MissingApCacheEvidence, validateApCacheEvidence(missing, case));
+        const reversed = try std.fmt.allocPrint(allocator, "{s}\n{s}\n", .{ apCacheLast(case), apCacheFirst(case) });
+        defer allocator.free(reversed);
+        try std.testing.expectError(error.UnexpectedApCacheEvidence, validateApCacheEvidence(reversed, case));
+        const duplicate = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ valid, apCacheLast(case) });
+        defer allocator.free(duplicate);
+        try std.testing.expectError(error.UnexpectedApCacheEvidence, validateApCacheEvidence(duplicate, case));
+        const prefixed = try std.fmt.allocPrint(allocator, "prefix {s}\n{s}\n", .{ apCacheFirst(case), apCacheLast(case) });
+        defer allocator.free(prefixed);
+        try std.testing.expectError(error.UnexpectedApCacheEvidence, validateApCacheEvidence(prefixed, case));
+        const suffixed = try std.fmt.allocPrint(allocator, "{s}\n{s} forged\n", .{ apCacheFirst(case), apCacheLast(case) });
+        defer allocator.free(suffixed);
+        try std.testing.expectError(error.UnexpectedApCacheEvidence, validateApCacheEvidence(suffixed, case));
+        const double_cr = try std.fmt.allocPrint(allocator, "{s}\n{s}\r\r\n", .{ apCacheFirst(case), apCacheLast(case) });
+        defer allocator.free(double_cr);
+        try std.testing.expectError(error.UnexpectedApCacheEvidence, validateApCacheEvidence(double_cr, case));
+    }
+}
+
+test "AP cache evidence rejects concurrent failure high entry foreign success and wrong rejection" {
+    const allocator = std.testing.allocator;
+    const valid = "ZIGOS:ARCH:X86_64:AP_CACHE:VERSION:ARMED\nZIGOS:BOOT:CACHE:AP:REJECT:5\r\n";
+    inline for (.{ "ZIGOS:ARCH:X86_64:AP_CACHE:FAIL:UNEXPECTED_HIGH_ENTRY\n", "panic\n" }) |failure| {
+        const bytes = try std.fmt.allocPrint(allocator, "{s}{s}", .{ valid, failure });
+        defer allocator.free(bytes);
+        try std.testing.expectError(error.UnhealthyApCacheEvidence, validateApCacheEvidence(bytes, .version));
+    }
+    inline for (.{ "AP_HIGH_ENTRY\n", "ZIGOS:ARCH:X86_64:HIGH_HALF:PASS\n", "ZIGOS:BOOT:CACHE:AP:ONLINE\n", "ZIGOS:BOOT:CACHE:AP:REJECT:4\n" }) |foreign| {
+        const bytes = try std.fmt.allocPrint(allocator, "{s}{s}", .{ valid, foreign });
+        defer allocator.free(bytes);
+        try std.testing.expectError(error.UnexpectedApCacheEvidence, validateApCacheEvidence(bytes, .version));
+    }
+    try std.testing.expectError(error.UnexpectedApCacheEvidence, validateApCacheEvidence(valid, .default_reserved));
+    try std.testing.expectError(error.UnexpectedApCacheEvidence, validateApCacheEvidence("ZIGOS:ARCH:X86_64:AP_CACHE:VERSION:ARMED ZIGOS:BOOT:CACHE:AP:REJECT:5\n", .version));
+    try std.testing.expectError(error.UnexpectedApCacheEvidence, validateApCacheEvidence("ZIGOS:ARCH:X86_64:AP_CACHE:VERSION:ARMED\nZIGOS:BOOT:CACHE:AP:REJECT:4\n", .version));
 }
 
 test "TPM control sockets use short private directories despite a long TMPDIR" {

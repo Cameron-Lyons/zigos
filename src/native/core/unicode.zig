@@ -155,18 +155,31 @@ fn control(kind: Break) bool {
     return kind == .cr or kind == .lf or kind == .control;
 }
 
+// ASCII has no joining properties except the CR/LF pair. A boundary between
+// two ASCII bytes is independent of any preceding Unicode cluster state.
+inline fn asciiBreak(left: u8, right: u8) bool {
+    return left < 0x80 and right < 0x80 and !(left == '\r' and right == '\n');
+}
+
 pub fn nextBoundary(text: []const u8, offset: usize) usize {
+    if (offset >= text.len) return text.len;
+    if (offset == text.len - 1 or asciiBreak(text[offset], text[offset + 1])) return offset + 1;
     var it = Iterator{ .text = text };
     while (it.next()) |cluster| if (cluster.end > offset) return cluster.end;
     return text.len;
 }
 pub fn previousBoundary(text: []const u8, offset: usize) usize {
+    if (offset > text.len) return text.len;
+    if (offset <= 1) return 0;
+    if (asciiBreak(text[offset - 2], text[offset - 1])) return offset - 1;
     var it = Iterator{ .text = text };
     while (it.next()) |cluster| if (cluster.end >= offset) return cluster.start;
     return text.len;
 }
 pub fn ceilBoundary(text: []const u8, offset: usize) usize {
     if (offset == 0) return 0;
+    if (offset >= text.len) return text.len;
+    if (asciiBreak(text[offset - 1], text[offset])) return offset;
     var it = Iterator{ .text = text };
     while (it.next()) |cluster| if (cluster.end >= offset) return cluster.end;
     return text.len;
@@ -190,6 +203,34 @@ pub fn invisible(point: u21) bool {
 }
 
 test "Unicode 18 extended grapheme boundaries match the official conformance corpus" {
+    const Expected = struct {
+        fn check(text: []const u8, boundaries: []const usize, offset: usize) !void {
+            var next_end = text.len;
+            for (boundaries[1..]) |end| {
+                if (end > offset) {
+                    next_end = end;
+                    break;
+                }
+            }
+            var previous_start = text.len;
+            for (boundaries[1..], boundaries[0 .. boundaries.len - 1]) |end, start| {
+                if (end >= offset) {
+                    previous_start = start;
+                    break;
+                }
+            }
+            var ceiling = text.len;
+            for (boundaries) |boundary| {
+                if (boundary >= offset) {
+                    ceiling = boundary;
+                    break;
+                }
+            }
+            try std.testing.expectEqual(next_end, nextBoundary(text, offset));
+            try std.testing.expectEqual(previous_start, previousBoundary(text, offset));
+            try std.testing.expectEqual(ceiling, ceilBoundary(text, offset));
+        }
+    };
     const corpus = @embedFile("unicode_data/GraphemeBreakTest.txt");
     var lines = std.mem.splitScalar(u8, corpus, '\n');
     var cases: usize = 0;
@@ -211,12 +252,18 @@ test "Unicode 18 extended grapheme boundaries match the official conformance cor
         }
         if (count == 0) continue;
         cases += 1;
+        try std.testing.expectEqual(@as(usize, 0), boundaries[0]);
+        try std.testing.expectEqual(length, boundaries[count - 1]);
         var iterator = Iterator{ .text = bytes[0..length] };
         for (boundaries[1..count]) |end| {
             const cluster = iterator.next() orelse return error.MissingCluster;
             try std.testing.expectEqual(end, cluster.end);
         }
         try std.testing.expect(iterator.next() == null);
+        // Navigation accepts arbitrary byte offsets and controls, including
+        // offsets inside UTF-8 scalars or CRLF and beyond the document end.
+        for (0..length + 3) |offset| try Expected.check(bytes[0..length], boundaries[0..count], offset);
+        try Expected.check(bytes[0..length], boundaries[0..count], std.math.maxInt(usize));
         if (validText(bytes[0..length])) {
             for (0..length + 2) |offset| {
                 const expected = std.mem.indexOfScalar(usize, boundaries[0..count], offset) != null;
@@ -226,6 +273,75 @@ test "Unicode 18 extended grapheme boundaries match the official conformance cor
         }
     }
     try std.testing.expect(cases > 700);
+}
+
+fn expectIteratorBoundaries(text: []const u8) !void {
+    const Reference = struct {
+        // Preserve the original iterator-only navigation as a differential
+        // oracle; it must not call the optimized helpers or isBoundary.
+        fn check(bytes: []const u8, offset: usize) !void {
+            var next_end = bytes.len;
+            var next = Iterator{ .text = bytes };
+            while (next.next()) |cluster| {
+                if (cluster.end > offset) {
+                    next_end = cluster.end;
+                    break;
+                }
+            }
+            var previous_start = bytes.len;
+            var previous = Iterator{ .text = bytes };
+            while (previous.next()) |cluster| {
+                if (cluster.end >= offset) {
+                    previous_start = cluster.start;
+                    break;
+                }
+            }
+            var ceiling: usize = 0;
+            if (offset != 0) {
+                ceiling = bytes.len;
+                var ceil = Iterator{ .text = bytes };
+                while (ceil.next()) |cluster| {
+                    if (cluster.end >= offset) {
+                        ceiling = cluster.end;
+                        break;
+                    }
+                }
+            }
+            try std.testing.expectEqual(next_end, nextBoundary(bytes, offset));
+            try std.testing.expectEqual(previous_start, previousBoundary(bytes, offset));
+            try std.testing.expectEqual(ceiling, ceilBoundary(bytes, offset));
+        }
+    };
+    for (0..text.len + 3) |offset| try Reference.check(text, offset);
+    try Reference.check(text, std.math.maxInt(usize));
+}
+
+test "Unicode boundary navigation preserves every ASCII pair including CRLF and controls" {
+    var bytes: [2]u8 = undefined;
+    for (0..128) |left| {
+        for (0..128) |right| {
+            bytes = .{ @intCast(left), @intCast(right) };
+            try expectIteratorBoundaries(&bytes);
+        }
+    }
+}
+
+test "Unicode boundary navigation preserves malformed bytes and surrounding grapheme context" {
+    for ([_][]const u8{
+        "",                           "a",                   "ab",          "\r",                 "\r\n",              "a\r\nb",         "\r\r\n\n\t\x00ab",
+        "\u{600}ab",                  "\u{600}\u{600}ab",    "a\u{600}bc",  "a\u{301}b",          "a\u{301}\u{308}bc", "a\u{200d}bc",    "\u{200d}ab",
+        "a\u{903}bc",                 "1\u{fe0f}\u{20e3}ab", "e\u{fe0e}ab", "e\u{fe0f}ab",
+        "👩‍💻ab",
+        "a👩‍💻b",
+        "🇺🇸🇨🇦🇬ab",
+        "a🇺🇸b",
+        "क्‍षab",
+        "aक्‍षb",
+        "\u{1100}\u{1161}\u{11a8}ab",
+        "a각b",
+        "\x80ab",                     "a\x80bc",             "ab\x80",      "\xc0\xafab",         "a\xc0\xafb",        "\xed\xa0\x80ab", "a\xf4\x90\x80\x80b",
+        "a\xe2\x82",                  "\xe2ab",              "\xf0\x9fab",  "a\xe2\x82b\u{301}c", "\u{600}a\x80bc",
+    }) |text| try expectIteratorBoundaries(text);
 }
 
 test "Unicode rejects malformed UTF-8 and device controls without normalizing text" {

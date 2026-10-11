@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const endian = @import("../utils/endian.zig");
 const spin = @import("../utils/spin.zig");
 
@@ -2472,7 +2473,8 @@ pub fn enumerateBootKeyboard(device_id: u64, configuration_descriptor: []const u
     return error.MissingBootKeyboardInterface;
 }
 
-pub fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
+// Keep caller-owned output unchanged until every capability is admitted.
+pub fn parseCapabilityRegistersInto(out: *CapabilityRegisters, mmio: []const u8) Error!void {
     if (mmio.len < CAPABILITY_REGISTERS_BYTES) return error.TooSmall;
     const capability_length = mmio[CAPABILITY_LENGTH_OFFSET];
     if (capability_length < MIN_CAPABILITY_LENGTH or
@@ -2526,7 +2528,7 @@ pub fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
         return error.InvalidRuntimeRegisterOffset;
     }
 
-    return .{
+    out.* = .{
         .capability_length = capability_length,
         .interface_version = interface_version,
         .max_device_slots = max_device_slots,
@@ -2540,6 +2542,13 @@ pub fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
         .doorbell_offset = doorbell_offset,
         .runtime_register_offset = runtime_register_offset,
     };
+}
+
+pub inline fn parseCapabilityRegisters(mmio: []const u8) Error!CapabilityRegisters {
+    if (comptime !builtin.is_test) @compileError("production xHCI capability parsing requires caller-owned output");
+    var out: CapabilityRegisters = undefined;
+    try parseCapabilityRegistersInto(&out, mmio);
+    return out;
 }
 
 pub fn findLegacySupport(first_offset: u32, reader: anytype) Error!?LegacySupport {
@@ -2573,17 +2582,21 @@ pub fn findLegacySupport(first_offset: u32, reader: anytype) Error!?LegacySuppor
     return error.ExtendedCapabilityTraversalLimit;
 }
 
-pub fn parseSupportedProtocols(
+// Parse directly into unpublished storage. Clear failures so an admitted
+// prefix of a malformed capability chain can never become a usable result.
+pub fn parseSupportedProtocolsInto(
+    protocols: *SupportedProtocols,
     capabilities: CapabilityRegisters,
     first_offset: u32,
     reader: anytype,
-) Error!SupportedProtocols {
+) Error!void {
+    @memset(std.mem.asBytes(protocols), 0);
+    errdefer @memset(std.mem.asBytes(protocols), 0);
     if (first_offset == 0) return error.MissingSupportedProtocols;
     if ((first_offset & (@sizeOf(u32) - 1)) != 0 or first_offset > MAX_EXTENDED_CAPABILITY_OFFSET) {
         return error.ExtendedCapabilityOutOfRange;
     }
 
-    var protocols = SupportedProtocols{};
     var terminal = false;
     var offset = first_offset;
     var visited: usize = 0;
@@ -2755,7 +2768,17 @@ pub fn parseSupportedProtocols(
     }
     if (!terminal) return error.ExtendedCapabilityTraversalLimit;
     if (protocols.range_count == 0) return error.MissingSupportedProtocols;
-    return protocols;
+}
+
+pub inline fn parseSupportedProtocols(
+    capabilities: CapabilityRegisters,
+    first_offset: u32,
+    reader: anytype,
+) Error!SupportedProtocols {
+    if (comptime !builtin.is_test) @compileError("production xHCI protocol parsing requires caller-owned output");
+    var out: SupportedProtocols = undefined;
+    try parseSupportedProtocolsInto(&out, capabilities, first_offset, reader);
+    return out;
 }
 
 pub fn inspectLegacyOwnership(first_offset: u32, reader: anytype) Error!LegacyOwnership {
@@ -3631,6 +3654,22 @@ fn validCapabilityRegisters() [CAPABILITY_REGISTERS_BYTES]u8 {
     return mmio;
 }
 
+test "xHCI in-place capability parsing preserves output until full admission" {
+    var out = defaultCapabilityRegisters();
+    out.max_ports = 42;
+    const original = out;
+    var mmio = validCapabilityRegisters();
+    try std.testing.expectError(error.TooSmall, parseCapabilityRegistersInto(&out, mmio[0..1]));
+    try std.testing.expectEqualDeep(original, out);
+    writeU32Le(mmio[RUNTIME_REGISTER_OFFSET_OFFSET..][0..4], TEST_RUNTIME_REGISTER_OFFSET | 1);
+    try std.testing.expectError(error.InvalidRuntimeRegisterOffset, parseCapabilityRegistersInto(&out, &mmio));
+    try std.testing.expectEqualDeep(original, out);
+    mmio = validCapabilityRegisters();
+    try parseCapabilityRegistersInto(&out, &mmio);
+    try std.testing.expectEqual(TEST_MAX_PORTS, out.max_ports);
+    try std.testing.expectEqual(TEST_RUNTIME_REGISTER_OFFSET, out.runtime_register_offset);
+}
+
 test "xHCI capability parser extracts controller limits" {
     const mmio = validCapabilityRegisters();
     const caps = try parseCapabilityRegisters(mmio[0..]);
@@ -3766,10 +3805,23 @@ test "xHCI supported protocols accept sparse nonoverlapping USB port ranges" {
         error.OverlappingSupportedProtocolPorts,
         parseSupportedProtocols(capabilities, 0x40, reader),
     );
+    var in_place = protocols;
+    try std.testing.expectError(
+        error.OverlappingSupportedProtocolPorts,
+        parseSupportedProtocolsInto(&in_place, capabilities, 0x40, reader),
+    );
+    try std.testing.expectEqual(@as(u8, 0), in_place.range_count);
+    try std.testing.expect(in_place.forPort(1) == null);
+    try std.testing.expect(in_place.forPort(6) == null);
+    for (std.mem.asBytes(&in_place)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
     writeU32Le(registers[0x58..0x5C], 8 | (@as(u32, 5) << 8));
     const sparse = try parseSupportedProtocols(capabilities, 0x40, reader);
     try std.testing.expect(sparse.forPort(7) == null);
     try std.testing.expectEqual(ProtocolKind.usb3, sparse.forPort(8).?.kind);
+    try parseSupportedProtocolsInto(&in_place, capabilities, 0x40, reader);
+    try std.testing.expectEqualDeep(sparse, in_place);
+    try std.testing.expectError(error.MissingSupportedProtocols, parseSupportedProtocolsInto(&in_place, capabilities, 0, reader));
+    try std.testing.expect(in_place.forPort(8) == null);
 
     writeU32Le(registers[0x44..0x48], 0);
     try std.testing.expectError(

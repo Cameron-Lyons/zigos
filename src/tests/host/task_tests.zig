@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const accelerator_scheduler = @import("../../native/task/accelerator_scheduler.zig");
+const accelerator_retirement_test = @import("accelerator_retirement_test.zig");
 const background_dispatch = @import("../../native/task/background_dispatch.zig");
 const process_isolation = @import("../../native/task/process_isolation.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
@@ -20,6 +21,7 @@ test "task host tests import native task modules" {
     std.testing.refAllDecls(@import("../../native/task/cooperative_worker.zig"));
     std.testing.refAllDecls(@import("../../native/task/guarded_worker_stack.zig"));
     std.testing.refAllDecls(accelerator_scheduler);
+    std.testing.refAllDecls(accelerator_retirement_test);
     std.testing.refAllDecls(background_dispatch);
     std.testing.refAllDecls(process_isolation);
     std.testing.refAllDecls(task_runtime);

@@ -16,6 +16,12 @@ pub fn addTestArtifacts(
 ) TestArtifacts {
     // These roots exercise AMD64 worker assembly even on a different host CPU.
     const test_target = nativeTestTarget(b);
+    // An empty entitlement set requests Zig's ad-hoc Mach-O signature without
+    // granting permissions. Rosetta can stall before starting unsigned tests.
+    const test_entitlements = if (test_target.result.os.tag == .macos)
+        b.addWriteFiles().add("native-test-entitlements.plist", "<plist version=\"1.0\"><dict/></plist>\n")
+    else
+        null;
     const wire_modules = native_modules.addTargetWireModules(b, test_target, optimize);
     const test_modules = native_modules.addUserspaceRuntimeHostTestModules(b, optimize);
     const kernel_options = b.addOptions();
@@ -33,9 +39,11 @@ pub fn addTestArtifacts(
     host_tests_module.addAssemblyFile(b.path("src/tests/host/xstate_roundtrip64.S"));
     host_tests_module.addOptions("build_options", kernel_options);
     addNativeTestImports(host_tests_module, wire_modules, userspace_images);
-    const host_tests = b.addTest(.{
+    const host_tests = std.Build.Step.Compile.create(b, .{
         .name = "native-host-tests",
+        .kind = .@"test",
         .root_module = host_tests_module,
+        .entitlements = test_entitlements,
     });
 
     const spec_tests_module = b.createModule(.{
@@ -48,9 +56,11 @@ pub fn addTestArtifacts(
     spec_tests_module.addAssemblyFile(b.path("src/tests/host/xstate_roundtrip64.S"));
     spec_tests_module.addOptions("build_options", kernel_options);
     addNativeTestImports(spec_tests_module, wire_modules, userspace_images);
-    const spec_tests = b.addTest(.{
+    const spec_tests = std.Build.Step.Compile.create(b, .{
         .name = "zigos-spec-tests",
+        .kind = .@"test",
         .root_module = spec_tests_module,
+        .entitlements = test_entitlements,
     });
 
     const userspace_runtime_tests = b.addTest(.{

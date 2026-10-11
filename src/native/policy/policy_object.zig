@@ -80,7 +80,8 @@ pub const Directory = struct {
         signer: signing.SignerIdentity,
     ) (Error || anyerror)!*PolicyObject {
         if (self.policies.countInUse() >= MAX_POLICIES) return error.PolicyTableFull;
-        var policy = try policyFromRequest(request);
+        var policy: PolicyObject = undefined;
+        try policyFromRequestInto(&policy, request);
         policy.signature = try signing.sign(signer, &policyDigest(&policy));
         return self.insert(policy);
     }
@@ -91,8 +92,10 @@ pub const Directory = struct {
     // are not authenticated and are never retained from a borrowed caller buffer.
     pub fn attachInitialAuthenticated(self: *Directory, request: CreateRequest, signature: manifest.Signature, issuer_key: signing.PublicKey) !*PolicyObject {
         if (self.policies.countInUse() != 0) return error.PolicyAlreadyAttached;
-        var policy = try policyFromRequest(request);
-        try verifyRequest(request, signature, issuer_key);
+        var policy: PolicyObject = undefined;
+        try policyFromRequestInto(&policy, request);
+        if (!std.mem.eql(u8, signature.publicKeySlice(), &issuer_key) or
+            !signing.verify(signature, &policyDigest(&policy))) return error.UntrustedPolicy;
         policy.signature = signature;
         policy.signature.signer = "";
         return self.insert(policy);
@@ -859,7 +862,8 @@ fn permissionKindDenialReason(kind: manifest.PermissionKind) DecisionReason {
 // Local IDs, generations and revocation state belong to the directory. Detached
 // signatures cover the complete canonical request, shared with native creation.
 pub fn requestDigest(request: CreateRequest) !crypto_hash.Digest {
-    const candidate = try policyFromRequest(request);
+    var candidate: PolicyObject = undefined;
+    try policyFromRequestInto(&candidate, request);
     return policyDigest(&candidate);
 }
 
@@ -868,12 +872,14 @@ pub fn verifyRequest(request: CreateRequest, signature: manifest.Signature, issu
         !signing.verify(signature, &(try requestDigest(request)))) return error.UntrustedPolicy;
 }
 
-fn policyFromRequest(request: CreateRequest) Error!PolicyObject {
+// Only a successful construction may be consumed or published. The caller
+// owns this private candidate, including partial state on validation failure.
+fn policyFromRequestInto(policy: *PolicyObject, request: CreateRequest) Error!void {
     if (request.allowed_install_sources.len > MAX_ALLOW_LIST) return error.TooManyInstallSources;
     if (request.allowed_network_destinations.len > MAX_ALLOW_LIST) return error.TooManyNetworkDestinations;
     if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
 
-    var policy = zeroPolicy();
+    policy.* = zeroPolicy();
     policy.scope = request.scope;
     policy.subject_id = request.subject_id;
     policy.issuer = request.issuer;
@@ -980,8 +986,6 @@ fn policyFromRequest(request: CreateRequest) Error!PolicyObject {
         policy.allowed_sync_destination_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_sync_destinations[index], destination) catch return error.SyncDestinationTooLong);
         policy.allowed_sync_destination_count += 1;
     }
-
-    return policy;
 }
 
 fn zeroPolicy() PolicyObject {
@@ -2267,6 +2271,64 @@ test "compact policy metadata preserves exact label and allow-list capacities" {
     try std.testing.expect(policy.allowsNetworkDestination(&full_label));
     try std.testing.expect(policy.allowsSyncDestination(&full_label));
     try std.testing.expect(directory.verify(policy.id));
+}
+
+test "authenticated policy attachment validates the complete candidate before publication" {
+    const signer = signing.SignerIdentity{
+        .label = "detached-policy-issuer",
+        .seed = signing.seedFromByte(0x69),
+    };
+    const issuer_key = try signing.publicKey(signer);
+    const request = CreateRequest{
+        .scope = .organization,
+        .subject_id = 77,
+        .issuer = .{ .kind = .policy_authority, .serial = 88 },
+        .label = "authenticated-policy",
+        .install_source_mode = .trusted_sources,
+        .allowed_install_sources = &.{ "store:zigos", "store:organization" },
+        .network_egress_mode = .allow_list,
+        .allowed_network_destinations = &.{ "local:organization", "lan.example" },
+        .allowed_sync_destinations = &.{"local:archive"},
+        .max_remote_private_egress_bytes = 1024,
+        .require_hardware_backed_session = true,
+    };
+    const signature = try signing.sign(signer, &(try requestDigest(request)));
+    try verifyRequest(request, signature, issuer_key);
+    var directory = Directory.init();
+
+    try std.testing.expectError(error.UntrustedPolicy, directory.attachInitialAuthenticated(request, signature, @splat(0)));
+    var bad_signature = signature;
+    bad_signature.value[0] ^= 1;
+    try std.testing.expectError(error.UntrustedPolicy, directory.attachInitialAuthenticated(request, bad_signature, issuer_key));
+    for (0..4) |field| {
+        var changed = request;
+        switch (field) {
+            0 => changed.allowed_install_sources = &.{"store:other"},
+            1 => changed.allowed_network_destinations = &.{"local:other"},
+            2 => changed.allowed_sync_destinations = &.{"local:other"},
+            3 => changed.max_remote_private_egress_bytes += 1,
+            else => unreachable,
+        }
+        try std.testing.expectError(error.UntrustedPolicy, directory.attachInitialAuthenticated(changed, signature, issuer_key));
+    }
+    const too_long: [MAX_LABEL_BYTES + 1]u8 = @splat('s');
+    var malformed = request;
+    malformed.allowed_sync_destinations = &.{ "local:archive", &too_long };
+    try std.testing.expectError(error.SyncDestinationTooLong, directory.attachInitialAuthenticated(malformed, signature, issuer_key));
+    try std.testing.expectEqual(@as(usize, 0), directory.policies.countInUse());
+    try std.testing.expect(directory.activeForScope(request.scope, request.subject_id) == null);
+
+    const policy = try directory.attachInitialAuthenticated(request, signature, issuer_key);
+    try std.testing.expectEqual(@as(u64, 1), policy.id);
+    try std.testing.expectEqual(@as(u32, 1), policy.generation);
+    try std.testing.expectEqualStrings(request.label, policy.labelSlice());
+    try std.testing.expectEqualStrings("", policy.signature.signer);
+    try std.testing.expect(policy.allowsInstallSource("store:organization"));
+    try std.testing.expect(policy.allowsNetworkDestination("lan.example"));
+    try std.testing.expect(policy.allowsSyncDestination("local:archive"));
+    try std.testing.expect(directory.verify(policy.id));
+    try std.testing.expectError(error.PolicyAlreadyAttached, directory.attachInitialAuthenticated(request, signature, issuer_key));
+    try std.testing.expectEqual(@as(usize, 1), directory.policies.countInUse());
 }
 
 test "policy directory indexes policy slots by id and scope through a full table" {

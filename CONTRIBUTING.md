@@ -12,6 +12,8 @@ Use the pinned toolchain and repo entrypoints:
 - Native and spec tests target x86-64 on the host OS because they exercise the
   cooperative worker assembly. Apple Silicon hosts need Rosetta to run them;
   `-Dhost-test-target=<triple>` selects another hosted x86-64 target.
+  macOS test binaries receive Zig's ad-hoc signature with an empty entitlement
+  dictionary, preventing an observed startup stall with unsigned executables.
 - `zlint` and `actionlint` are optional for local focused runs, but CI requires
   both through `ZIGOS_REQUIRE_ZLINT=1` and `ZIGOS_REQUIRE_ACTIONLINT=1`.
 - EFI ISO generation normalizes FAT identity and all media timestamps in UTC.
@@ -44,11 +46,13 @@ Use the pinned toolchain and repo entrypoints:
 | `zig build kernel-recovery` | You need the freestanding recovery kernel profile. |
 | `zig build kernel-benchmark` | You need the benchmark kernel profile. |
 | `zig build host-tests` | You need host coverage; this includes the root host suite, userspace runtime tests, native host-tool tests, authenticated release-tool fixtures, and test-root reachability. |
+| `zig build -Doptimize=fast native-crypto-check` | Execute AVX2 arithmetic, hardware AES, SHA-256, GHASH and storage XXH64 known answers plus firmware floating-point control reset and 128 x87/XMM/YMM owner roundtrips in QEMU. Requires exact ordered evidence for every primitive. This isolated standard-XSAVE proof runs on TCG; production XSAVES, PKRU, FRED and physical preemption still require their own hardware evidence. |
 | `zig build host-tool-tests` | You changed native file/media, QEMU process/log, release, or hardware utilities. |
 | `zig build release-tool-fixture-test` | You changed release generation/publication or signer arguments and need the real independent verifier with disposable fixture keys. |
 | `zig build tool -- COMMAND [ARGUMENTS]` | Run one of the native utilities; use `--help` to list commands. |
 | `zig build spec-tests` | You need spec coverage and native spec tests without QEMU. |
-| `zig build prod-readiness` | You need production-readiness and secure-by-design release-gate checks without changing spec conformance status. |
+| `zig build prod-readiness` | You need production-readiness, checker regression tests and secure-by-design release-gate checks without changing spec conformance status. |
+| `zig build production-readiness-tests` | You want focused readiness checker tests, including source-gate mutation regressions; these also run with `host-tests` and `prod-readiness`. |
 | `zig build release-security-check` | You touched parser, ABI, diagnostics, release-security policy, unsafe Zig, or disclosure gate inputs and need the fast release-security gate. |
 | `zig build release-security-preflight` | You need every mutable public-release audit, fixture, build, smoke, fault, recovery, sync, and UEFI-QEMU gate before freezing a candidate. |
 | `zig build -Dhardware-proof-dir=build/hardware-proofs/<fresh-name> -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-security-gate` | You set the external hardware-proof environment and need to reverify and seal an already frozen candidate without regenerating or signing artifacts. |
@@ -59,17 +63,22 @@ Use the pinned toolchain and repo entrypoints:
 | `zig build recovery-qemu-test` | You touched recovery-mode boot, repair, or break-glass flows. |
 | `zig build uefi-qemu-test` | You touched the production ISO, GRUB, or UEFI handoff. |
 | `zig build uefi-verification-qemu-test` | You touched the verification ISO or first-hardware-target proof media. |
+| `zig build high-half-entry-check` | You touched high entry, AP ownership, lease mailboxes, copied syscall brokerage, trap provisioning or remote TLB/cache maintenance. Requires 32 exact ordered records from the isolated 16-CPU CPL0 guest. |
 | `zig build benchmark` | You touched performance-sensitive kernel or native-service paths. |
 | `zig build frame-allocator-benchmark` | Measure physical-page allocator reuse, sparse-memory searches, contiguous runs, and bounded exhaustion on the host without QEMU. Uses `fast` and reports the median of five samples. |
 | `zig build heap-allocator-benchmark` | Measure heap reuse, successful or failed allocation across 1024 separated free blocks, and 512 page-sized allocations freed in permuted order. Reports allocator array bytes and the median of five `fast` samples. |
-| `zig build ipc-ring-benchmark` | Measure host IPC send/receive with full inline payloads and full-queue backpressure. Compares one receive snapshot with separate peek/pop calls in the same `fast` build; reports the median of five samples. |
+| `zig build ipc-ring-benchmark` | Compare single/split receive, full-queue backpressure, and staged-record/direct-payload enqueue for 0, 1, 17, and 88-byte messages in the same `fast` build. Uses the hosted x86-64-v3+AES/PCLMUL/SHA native CPU floor and the median of five samples; Apple Silicon needs Rosetta. |
+| `zig build response-preflight-benchmark` | Compare repeated and single declared-span response validation over one, four, or eight memory regions and a terminal stack. Uses the hosted native x86-64 floor; physical page preparation is excluded equally. Checks statuses and checksums in seven alternating-order samples. |
 | `zig build text-scanout-benchmark` | Measure host text rasterization, single-cell edits, and Unicode pool reordering with framebuffer damage counters. Uses `fast` and reports the median of five samples. |
 | `zig build id-index-benchmark` | Measure ID hits, misses, generation reuse, empty-table lookups after deletion, and steady churn. Reports table bytes and the median of five `fast` samples. |
 | `zig build endpoint-readiness-benchmark` | Compare owner scans and maintained readiness counts for 1–63 endpoints, including send/drain accounting. Checks results in the same `fast` build. |
-| `zig build text-layout-benchmark` | Compare repeated layout and one-pass visible windows for ASCII and Unicode documents. Checks exact row/caret equivalence before timing. |
+| `zig build text-layout-benchmark` | Compare repeated layout, one-pass visible windows, and iterator-based vertical navigation for ASCII and Unicode documents. Checks exact rows, caret offsets, wrap affinity, and preferred columns before timing. |
 | `zig build workspace-index-benchmark` | Measure path/object hits, empty misses after churn, and steady directory mutation using 192 path and 96 object buckets. Checks lookup results and replacement consistency. |
-| `zig build object-chunks-benchmark` | Compare prefix scans and positioned cursors for forward, reverse, and retransmitted object ranges. Checks reconstructed payload bytes and reports page visits. |
+| `zig build object-chunks-benchmark` | Compare scratch preparation for complete immutable hashes, then prefix scans and positioned cursors for forward, reverse, and retransmitted object ranges. Checks exact digests and reconstructed bytes; reports alternating hash samples and cursor page visits. |
 | `zig build surface-text-benchmark` | Compare repeated and combined canonical text validation for 512-byte ASCII and Unicode documents, with collapsed and selected cursors. Checks acceptance parity. |
+| `zig build scheduler-wake-benchmark` | Measure coalesced and reactivated wakes for one task and a full native task table. Checks queue, incarnation, budget, deadline, and wake accounting; reports the median of nine `fast` samples. Targets hosted x86-64; Apple Silicon needs Rosetta. |
+| `zig build storage-checksum-benchmark` | Compare prior FNV-1a and root-v6 XXH64 on 128-byte, 4 KiB, and checkpoint-sized buffers in the same native host `fast` build. Checks exact repeated hashes and reports the median of five samples. |
+| `zig build storage-quota-benchmark` | Compare repeated and single-pass quota collection across empty, sparse, full, and malformed workspace/snapshot arenas. Checks exact usage and reports seven alternating-order native host `fast` samples. |
 
 ## Build And Cleanup Commands
 

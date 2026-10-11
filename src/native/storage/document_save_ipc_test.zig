@@ -192,11 +192,13 @@ const Fixture = struct {
     }
 
     fn send(self: *Fixture, bytes: []const u8, request_id: u64) !void {
-        const request = component_port.EndpointSendRequest{
+        try std.testing.expect(bytes.len <= abi.ENDPOINT_INLINE_BYTES);
+        const request = abi.EndpointSendWireRequest{
             .header = component_port.makeHeader(.endpoint_send, self.app_task_id),
             .correlation_id = request_id,
             .endpoint_capability_id = self.app_endpoint_capability,
-            .payload = bytes,
+            .payload_address = if (bytes.len == 0) 0 else @intFromPtr(bytes.ptr),
+            .payload_bytes = @intCast(bytes.len),
         };
         const result = syscall_surface.dispatch(&self.port, self.app_task_id, 10, request.header.operation, @intFromPtr(&request), 0, 0);
         try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
@@ -234,12 +236,13 @@ const Fixture = struct {
     fn receive(self: *Fixture, deliver: bool) !abi.EndpointRecvResult {
         var out = std.mem.zeroes(abi.EndpointRecvResult);
         var response: abi.EndpointRecvResponse = undefined;
-        const request = component_port.EndpointRecvRequest{
+        const request = abi.EndpointRecvWireRequest{
             .header = component_port.makeHeader(.endpoint_recv, self.app_task_id),
             .endpoint_capability_id = self.app_endpoint_capability,
             .receiver_task_id = self.app_task_id,
-            .payload_out = &out.payload,
-            .attached_capability_out = &out.attached_capability,
+            .payload_address = @intFromPtr(&out.payload),
+            .payload_capacity = out.payload.len,
+            .attached_capability_address = @intFromPtr(&out.attached_capability),
         };
         try std.testing.expectEqual(abi.SyscallStatus.success, syscall_surface.dispatch(&self.port, self.app_task_id, 10, request.header.operation, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.EndpointRecvResponse)).status);
         out.present = response.present;

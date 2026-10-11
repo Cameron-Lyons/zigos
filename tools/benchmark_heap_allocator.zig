@@ -2,14 +2,23 @@ const std = @import("std");
 const heap = @import("heap_allocator").heap;
 
 var arena: [16 * 1024 * 1024]u8 align(32) = undefined;
-const Workload = enum { hot_reuse, fragmented_fit, fragmented_exhausted, page_batches, cached_pressure };
+const Workload = enum { hot_reuse, fragmented_fit, fragmented_exhausted, page_batches, cached_pressure, large_fragmented_fit, large_fragmented_exhausted };
 const PAGE_BATCH_COUNT = 512;
 const PAGE_BATCH_BYTES = 8192;
+const LARGE_HOLE_COUNT = 1024;
+const LARGE_HOLE_BYTES = 8192;
+const LARGE_REQUEST_BYTES = 32768;
+
+const LargeFixture = struct {
+    holes: [LARGE_HOLE_COUNT]*anyopaque,
+    candidate: *anyopaque,
+};
 
 pub fn main(init: std.process.Init) !void {
     var output_buffer: [1024]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &output_buffer);
     try output.interface.print("Heap allocator host benchmark: 16 MiB arena, 1024 separated free blocks; cached pressure uses 32 KiB\n", .{});
+    try output.interface.print("Large-span cases: 1024 separated 8 KiB holes and one 32 KiB candidate; fit times allocation and fixed pointer/payload checks, including clock overhead\n", .{});
     if (comptime @hasDecl(heap, "metadata_layout")) {
         try output.interface.print("Allocator array metadata: {d} bytes, {d} bytes/span, {d} bytes/index\n", .{
             heap.metadata_layout.array_bytes, heap.metadata_layout.span_bytes, heap.metadata_layout.index_bytes,
@@ -20,12 +29,34 @@ pub fn main(init: std.process.Init) !void {
         const iterations: u32 = switch (workload) {
             .hot_reuse => 200_000,
             .page_batches => 40,
+            .large_fragmented_fit => 1000,
             else => 2000,
         };
         var samples: [5]u64 = undefined;
         var checksum: u64 = 0;
         for (&samples) |*sample| {
             try heap.initHostArena(if (workload == .cached_pressure) arena[0 .. 32 * 1024] else &arena);
+            if (comptime workload == .large_fragmented_fit) {
+                var fixture = try largeFragment(false);
+                for (0..100) |_| {
+                    _ = try takeLargeCandidate(&fixture);
+                    try rearmLargeFixture(&fixture);
+                }
+                var elapsed: u64 = 0;
+                for (0..iterations) |_| {
+                    const start = std.Io.Clock.awake.now(init.io);
+                    const value = try takeLargeCandidate(&fixture);
+                    elapsed += @intCast(start.durationTo(std.Io.Clock.awake.now(init.io)).toNanoseconds());
+                    checksum +%= value;
+                    // Restore all smaller heads outside the measured interval.
+                    // Keep the only fitting span live while reclaiming holes.
+                    try rearmLargeFixture(&fixture);
+                }
+                try checkLargeGuards();
+                sample.* = elapsed;
+                continue;
+            }
+            if (workload == .large_fragmented_exhausted) _ = try largeFragment(true);
             if (workload == .fragmented_fit or workload == .fragmented_exhausted)
                 try fragment(workload == .fragmented_exhausted);
             for (0..if (workload == .page_batches) @as(usize, 2) else 100) |_| _ = try runIteration(workload);
@@ -35,6 +66,7 @@ pub fn main(init: std.process.Init) !void {
                 std.mem.doNotOptimizeAway(&arena);
             }
             sample.* = @intCast(start.durationTo(std.Io.Clock.awake.now(init.io)).toNanoseconds());
+            if (workload == .large_fragmented_exhausted) try checkLargeGuards();
         }
         std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
         const elapsed = @as(f64, @floatFromInt(samples[2])) / @as(f64, @floatFromInt(iterations));
@@ -62,9 +94,9 @@ fn fragment(exhaust: bool) !void {
 fn runIteration(comptime workload: Workload) !u64 {
     if (workload == .page_batches) return pageBatch();
     if (workload == .cached_pressure) return cachedPressure();
-    const size: usize = if (workload == .hot_reuse) 64 else 3072;
+    const size: usize = if (workload == .hot_reuse) 64 else if (workload == .large_fragmented_exhausted) LARGE_REQUEST_BYTES else 3072;
     const allocation = heap.kmalloc(size);
-    if (workload == .fragmented_exhausted) {
+    if (workload == .fragmented_exhausted or workload == .large_fragmented_exhausted) {
         if (allocation != null) return error.UnexpectedAllocation;
         return 1;
     }
@@ -73,6 +105,63 @@ fn runIteration(comptime workload: Workload) !u64 {
     std.mem.doNotOptimizeAway(&arena);
     heap.kfree(ptr);
     return size;
+}
+
+fn checkedAllocation(bytes: usize, offset: usize) !*anyopaque {
+    const ptr = heap.kmalloc(bytes) orelse return error.OutOfMemory;
+    if (@intFromPtr(ptr) != @intFromPtr(&arena) + offset) return error.UnexpectedFixtureLayout;
+    return ptr;
+}
+
+fn largeFragment(exhaust: bool) !LargeFixture {
+    var fixture: LargeFixture = undefined;
+    fixture.candidate = try checkedAllocation(LARGE_REQUEST_BYTES, 0);
+    _ = try checkedAllocation(32, LARGE_REQUEST_BYTES);
+    @memset(arena[LARGE_REQUEST_BYTES..][0..32], 0x5a);
+    var offset: usize = LARGE_REQUEST_BYTES + 32;
+    for (&fixture.holes, 0..) |*hole, index| {
+        hole.* = try checkedAllocation(LARGE_HOLE_BYTES, offset);
+        offset += LARGE_HOLE_BYTES;
+        _ = try checkedAllocation(32, offset);
+        @memset(arena[offset..][0..32], @as(u8, @truncate(index)) ^ 0xa5);
+        offset += 32;
+    }
+    _ = try checkedAllocation(arena.len - offset, offset);
+    arena[offset] = 0x3c;
+    arena[arena.len - 1] = 0xc3;
+    if (!exhaust) heap.kfree(fixture.candidate);
+    for (fixture.holes) |hole| heap.kfree(hole);
+    return fixture;
+}
+
+fn takeLargeCandidate(fixture: *const LargeFixture) !u64 {
+    const ptr = heap.kmalloc(LARGE_REQUEST_BYTES) orelse return error.OutOfMemory;
+    if (ptr != fixture.candidate) return error.UnexpectedAllocation;
+    const bytes = @as([*]u8, @ptrCast(ptr))[0..LARGE_REQUEST_BYTES];
+    bytes[0] = 0x69;
+    bytes[bytes.len - 1] = 0x96;
+    std.mem.doNotOptimizeAway(&arena);
+    return LARGE_REQUEST_BYTES;
+}
+
+fn rearmLargeFixture(fixture: *LargeFixture) !void {
+    if (arena[0] != 0x69 or arena[LARGE_REQUEST_BYTES - 1] != 0x96) return error.CorruptPayload;
+    for (&fixture.holes) |*hole| hole.* = heap.kmalloc(LARGE_HOLE_BYTES) orelse return error.OutOfMemory;
+    heap.kfree(fixture.candidate);
+    for (fixture.holes) |hole| heap.kfree(hole);
+}
+
+fn checkLargeGuards() !void {
+    for (arena[LARGE_REQUEST_BYTES..][0..32]) |byte| if (byte != 0x5a) return error.CorruptPayload;
+    var offset: usize = LARGE_REQUEST_BYTES + 32;
+    for (0..LARGE_HOLE_COUNT) |index| {
+        offset += LARGE_HOLE_BYTES;
+        for (arena[offset..][0..32]) |byte| {
+            if (byte != (@as(u8, @truncate(index)) ^ 0xa5)) return error.CorruptPayload;
+        }
+        offset += 32;
+    }
+    if (arena[offset] != 0x3c or arena[arena.len - 1] != 0xc3) return error.CorruptPayload;
 }
 
 fn cachedPressure() !u64 {

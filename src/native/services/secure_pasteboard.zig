@@ -16,6 +16,11 @@ pub const RECLAIMS_TERMINAL_GRANTS = true;
 pub const COMPACT_GRANT_LENGTHS = true;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 11_144;
 
+comptime {
+    if (MAX_PAYLOAD_BYTES > std.math.maxInt(u16))
+        @compileError("secure pasteboard payload exceeds its bounded read length");
+}
+
 pub const Error = event_ledger.Error || error{
     EmptyPayload,
     ExpiredGrant,
@@ -180,7 +185,8 @@ pub const Service = struct {
         return &self.grants[grant_index];
     }
 
-    pub fn read(self: *Service, request: ReadRequest, output: []u8, ledger: ?*event_ledger.Ledger) Error![]const u8 {
+    /// Copies the authorized payload into output and returns its written length.
+    pub fn read(self: *Service, request: ReadRequest, output: []u8, ledger: ?*event_ledger.Ledger) Error!u16 {
         if (request.user_gesture_id == 0) {
             try recordRead(ledger, request, false, "pasteboard read denied: missing user gesture");
             return error.MissingUserGesture;
@@ -235,7 +241,7 @@ pub const Service = struct {
             @memset(&grant.payload, 0);
             grant.payload_len = 0;
         }
-        return output[0..payload_len];
+        return @intCast(payload_len);
     }
 
     pub fn revoke(self: *Service, request: RevokeRequest, ledger: ?*event_ledger.Ledger) Error!void {
@@ -346,6 +352,47 @@ fn copyPurposeInto(purpose: []const u8) [MAX_PURPOSE_BYTES]u8 {
     return buffer;
 }
 
+test "secure pasteboard returns the full bounded payload length after a short-buffer retry" {
+    var service = Service.init();
+    const payload: [MAX_PAYLOAD_BYTES]u8 = @splat(0xD1);
+    const offer = OfferRequest{
+        .subject = .{ .kind = .app, .serial = 7101 },
+        .destination = .{ .kind = .app, .serial = 7102 },
+        .source_task_id = 71,
+        .destination_task_id = 72,
+        .user_gesture_id = 5,
+        .foreground_session_id = 8,
+        .expires_at_ticks = 50,
+        .now_ticks = 10,
+        .purpose = "paste into note",
+        .payload = &payload,
+    };
+    const grant = try service.offer(offer, null);
+    const request = ReadRequest{
+        .subject = offer.destination,
+        .destination_task_id = offer.destination_task_id,
+        .token_id = grant.token_id,
+        .user_gesture_id = 6,
+        .foreground_session_id = offer.foreground_session_id,
+        .now_ticks = 11,
+        .expected_purpose = offer.purpose,
+    };
+    var output: [MAX_PAYLOAD_BYTES + 1]u8 = @splat(0x55);
+    const before = grant.*;
+    try std.testing.expectError(error.OutputBufferTooSmall, service.read(request, output[0 .. MAX_PAYLOAD_BYTES - 1], null));
+    try std.testing.expectEqualDeep(before, grant.*);
+    try std.testing.expect(std.mem.allEqual(u8, &output, 0x55));
+
+    const written = try service.read(request, &output, null);
+    try std.testing.expectEqual(@as(u16, MAX_PAYLOAD_BYTES), written);
+    try std.testing.expectEqualSlices(u8, &payload, output[0..written]);
+    try std.testing.expectEqual(@as(u8, 0x55), output[MAX_PAYLOAD_BYTES]);
+    try std.testing.expect(grant.consumed);
+    try std.testing.expectEqual(@as(u16, 0), grant.payload_len);
+    try std.testing.expect(std.mem.allEqual(u8, &grant.payload, 0));
+    try std.testing.expectError(error.GrantAlreadyConsumed, service.read(request, &output, null));
+}
+
 test "secure pasteboard preserves exhausted grants without issuing zero or stale tokens" {
     var service = Service.init();
     const request = OfferRequest{
@@ -384,7 +431,8 @@ test "secure pasteboard preserves exhausted grants without issuing zero or stale
     try std.testing.expectError(error.GrantNotFound, service.read(read_request, &output, null));
     try std.testing.expect(std.mem.allEqual(u8, &output, 0x55));
     read_request.token_id = last.token_id;
-    try std.testing.expectEqualStrings(request.payload, try service.read(read_request, &output, null));
+    const written = try service.read(read_request, &output, null);
+    try std.testing.expectEqualStrings(request.payload, output[0..written]);
     try std.testing.expect(last.consumed);
     const exhausted = service;
     try std.testing.expectError(error.GrantTableFull, service.offer(request, null));
@@ -591,7 +639,7 @@ test "secure pasteboard requires foreground gestures destination scope expiry an
     }, &.{}, &ledger));
 
     var buffer: [MAX_PAYLOAD_BYTES]u8 = undefined;
-    const pasted = try service.read(.{
+    const pasted_len = try service.read(.{
         .subject = destination,
         .destination_task_id = 72,
         .token_id = grant.token_id,
@@ -601,7 +649,7 @@ test "secure pasteboard requires foreground gestures destination scope expiry an
         .expected_purpose = "paste into note",
         .detail = "private pasteboard payload",
     }, buffer[0..], &ledger);
-    try std.testing.expectEqualStrings("private pasteboard payload", pasted);
+    try std.testing.expectEqualStrings("private pasteboard payload", buffer[0..pasted_len]);
     try std.testing.expectError(error.GrantAlreadyConsumed, service.read(.{
         .subject = destination,
         .destination_task_id = 72,

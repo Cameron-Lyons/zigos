@@ -846,7 +846,9 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 return error.InvalidSignature;
             }
 
-            return self.insertVersionRef(request);
+            var result: PutResult = undefined;
+            try self.insertVersionRefInto(&result, request);
+            return result;
         }
 
         pub inline fn putLocallySignedVersion(self: *Self, request: PutLocallySignedRequest) PutLocallySignedError!PutResult {
@@ -859,16 +861,18 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 request.payload,
                 request.created_at_ticks,
             );
-            return self.insertVersionRef(&PutRequest{
+            var result: PutResult = undefined;
+            try self.insertVersionRefInto(&result, &PutRequest{
                 .preferred_object_id = request.preferred_object_id,
                 .object_type = request.object_type,
                 .payload = request.payload,
                 .metadata = metadata,
                 .parent_version_id = request.parent_version_id,
             });
+            return result;
         }
 
-        fn insertVersionRef(self: *Self, request: *const PutRequest) Error!PutResult {
+        fn insertVersionRefInto(self: *Self, out: *PutResult, request: *const PutRequest) Error!void {
             if (request.preferred_object_id) |object_id| {
                 if (object_id.isZero()) return error.InvalidObjectId;
             }
@@ -911,7 +915,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 return error.ParentMismatch;
             }
 
-            var chunk_refs = @as([MAX_BLOB_CHUNKS]ChunkRef, @splat(ChunkRef{}));
+            var chunk_refs: [MAX_BLOB_CHUNKS]ChunkRef = undefined;
             const chunk_count = try buildChunkRefs(request.payload, &chunk_refs);
             const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
             const blob_address = blobManifestAddressFromMerkleRoot(request.payload.len, chunk_count, merkle_root);
@@ -941,7 +945,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             self.markObjectDirty(target_object.id);
             self.markVersionDirty(version_id);
 
-            return .{
+            out.* = .{
                 .object_id = target_object.id,
                 .version_id = version_id,
                 .blob_address = blob_address,
@@ -1404,7 +1408,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
         pub fn putBlob(self: *Self, address: BlobAddress, payload: []const u8) Error!usize {
             if (payload.len > MAX_PAYLOAD_BYTES) return error.PayloadTooLarge;
-            var chunk_refs = @as([MAX_BLOB_CHUNKS]ChunkRef, @splat(ChunkRef{}));
+            var chunk_refs: [MAX_BLOB_CHUNKS]ChunkRef = undefined;
             const chunk_count = try buildChunkRefs(payload, &chunk_refs);
             const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
             const computed_address = blobManifestAddressFromMerkleRoot(payload.len, chunk_count, merkle_root);
@@ -1496,7 +1500,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
             if (slot.blob.manifestVerified()) return &slot.blob;
 
-            var chunk_refs = @as([MAX_BLOB_CHUNKS]ChunkRef, @splat(ChunkRef{}));
+            var chunk_refs: [MAX_BLOB_CHUNKS]ChunkRef = undefined;
             const live_chunk_refs = try self.copyBlobChunkRefs(&slot.blob, &chunk_refs);
             if (!chunkRefsMatchPayloadLen(slot.blob.payloadLen(), live_chunk_refs)) return error.CorruptBlob;
             if (!std.mem.eql(u8, &computeBlobManifestAddress(slot.blob.payloadLen(), live_chunk_refs), &slot.blob.address)) {
@@ -1660,7 +1664,7 @@ pub fn chunkRefsMatchPayloadLen(payload_len: usize, chunk_refs: []const ChunkRef
 }
 
 pub fn computeBlobAddress(payload: []const u8) BlobAddress {
-    var chunk_refs = @as([MAX_BLOB_CHUNKS]ChunkRef, @splat(ChunkRef{}));
+    var chunk_refs: [MAX_BLOB_CHUNKS]ChunkRef = undefined;
     const chunk_count = buildChunkRefs(payload, &chunk_refs) catch return crypto_hash.zero_digest;
     return computeBlobManifestAddress(payload.len, chunk_refs[0..chunk_count]);
 }
@@ -1671,7 +1675,8 @@ pub fn computeChunkAddress(payload: []const u8) ChunkAddress {
     return crypto_hash.finalize(&hasher);
 }
 
-pub fn computeBlobManifestAddress(payload_len: usize, chunk_refs: []const ChunkRef) BlobAddress {
+pub inline fn computeBlobManifestAddress(payload_len: usize, chunk_refs: []const ChunkRef) BlobAddress {
+    if (payload_len > MAX_PAYLOAD_BYTES or chunk_refs.len > MAX_BLOB_CHUNKS) return crypto_hash.zero_digest;
     return blobManifestAddressFromMerkleRoot(payload_len, chunk_refs.len, computeBlobMerkleRoot(chunk_refs));
 }
 
@@ -1684,13 +1689,16 @@ fn blobManifestAddressFromMerkleRoot(payload_len: usize, chunk_count: usize, mer
 }
 
 pub fn computeBlobMerkleRoot(chunk_refs: []const ChunkRef) BlobAddress {
+    if (chunk_refs.len > MAX_BLOB_CHUNKS) return crypto_hash.zero_digest;
     if (chunk_refs.len == 0) {
         var empty_hasher = crypto_hash.init();
         crypto_hash.updateBytes(&empty_hasher, "blob-merkle-empty", "");
         return crypto_hash.finalize(&empty_hasher);
     }
 
-    var level = @as([MAX_BLOB_CHUNKS]BlobAddress, @splat(crypto_hash.zero_digest));
+    // Populate every live leaf before reducing the tree; unused scratch never
+    // contributes to an address, including odd-leaf duplication at each level.
+    var level: [MAX_BLOB_CHUNKS]BlobAddress = undefined;
     var level_count = chunk_refs.len;
     for (chunk_refs, 0..) |chunk_ref, index| {
         var hasher = crypto_hash.init();

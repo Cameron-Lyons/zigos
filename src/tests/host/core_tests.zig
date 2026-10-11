@@ -2,6 +2,8 @@ const std = @import("std");
 
 const cpu_baseline = @import("../../arch/cpu_baseline.zig");
 const cpu_features = @import("../../arch/cpu_features.zig");
+const codegen_target = @import("../../arch/codegen_target.zig");
+const native_entry_state = @import("../../arch/x86_64/native_entry_state.zig");
 const boot_cpu_policy = @import("../../kernel/boot/cpu_policy.zig");
 const firmware_memory_map = @import("../../kernel/memory/firmware_memory_map.zig");
 const frame_allocator = @import("../../kernel/memory/frame_allocator.zig");
@@ -26,6 +28,11 @@ const x2apic = @import("../../kernel/interrupts/x2apic.zig");
 
 test "core host tests import native core modules" {
     std.testing.refAllDecls(cpu_baseline);
+    std.testing.refAllDecls(@import("../../arch/cache_policy.zig"));
+    std.testing.refAllDecls(@import("../../arch/x86_64/mapping_xstate_probe_model.zig"));
+    std.testing.refAllDecls(@import("../../kernel/smp/cache_rendezvous.zig"));
+    std.testing.refAllDecls(codegen_target);
+    std.testing.refAllDecls(native_entry_state);
     std.testing.refAllDecls(boot_cpu_policy);
     _ = @import("../../kernel/boot/init/devices.zig");
     _ = cpu_features;
@@ -36,10 +43,18 @@ test "core host tests import native core modules" {
     std.testing.refAllDecls(text_scanout_tests);
     std.testing.refAllDecls(page_table64);
     _ = @import("../../kernel/memory/paging64.zig");
+    std.testing.refAllDecls(@import("../../boot/efi_paging.zig"));
+    std.testing.refAllDecls(@import("../../boot/paging_info.zig"));
+    std.testing.refAllDecls(@import("../../arch/sparse_physical_map.zig"));
+    _ = @import("../../arch/x86_64/smp_cache_enabled_probe.zig");
+    std.testing.refAllDecls(@import("../../boot/efi_elf.zig"));
     std.testing.refAllDecls(virtual_layout);
     std.testing.refAllDecls(tsc_deadline);
     _ = @import("../../kernel/timer/timer.zig");
     std.testing.refAllDecls(abi);
+    std.testing.refAllDecls(@import("../../native/core/syscall_wire.zig"));
+    std.testing.refAllDecls(@import("../../native/core/task_create_wire.zig"));
+    std.testing.refAllDecls(@import("../../native/core/capability_wire.zig"));
     std.testing.refAllDecls(crypto_hash);
     _ = @import("../../native/core/transport_crypto.zig");
     _ = @import("../../native/core/noise_xx.zig");

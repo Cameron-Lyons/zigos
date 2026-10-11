@@ -170,7 +170,8 @@ const Fixture = struct {
     }
 
     pub fn send(f: *Fixture, cap: u64, correlation: u64, bytes: []const u8) client_mod.SendResult {
-        const request = component.EndpointSendRequest{ .header = component.makeHeader(.endpoint_send, f.app), .endpoint_capability_id = cap, .correlation_id = correlation, .payload = bytes };
+        if (bytes.len > abi.ENDPOINT_INLINE_BYTES) return .failed;
+        const request = abi.EndpointSendWireRequest{ .header = component.makeHeader(.endpoint_send, f.app), .endpoint_capability_id = cap, .correlation_id = correlation, .payload_address = if (bytes.len == 0) 0 else @intFromPtr(bytes.ptr), .payload_bytes = @intCast(bytes.len) };
         const result = syscall.dispatch(&f.port, f.app, f.now, request.header.operation, @intFromPtr(&request), 0, 0);
         return switch (result.status) {
             .success => .sent,
@@ -182,7 +183,7 @@ const Fixture = struct {
         var bytes: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
         var attached: abi.CapabilityDescriptor = undefined;
         var response: abi.EndpointRecvResponse = undefined;
-        const request = component.EndpointRecvRequest{ .header = component.makeHeader(.endpoint_recv, f.app), .endpoint_capability_id = cap, .receiver_task_id = f.app, .payload_out = &bytes, .attached_capability_out = &attached };
+        const request = abi.EndpointRecvWireRequest{ .header = component.makeHeader(.endpoint_recv, f.app), .endpoint_capability_id = cap, .receiver_task_id = f.app, .payload_address = @intFromPtr(&bytes), .payload_capacity = bytes.len, .attached_capability_address = @intFromPtr(&attached) };
         const result = syscall.dispatch(&f.port, f.app, f.now, request.header.operation, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(@TypeOf(response)));
         if (result.status != .success or response.has_attached_capability != 0) return .failed;
         if (response.present == 0) return .empty;
@@ -269,7 +270,7 @@ test "identity channel binds syscalls to the real caller and rejects malformed f
     defer f.deinit();
     var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
     const payload = try protocol.encode(&bytes, .{ .request_id = 77, .body = .{ .assert = "challenge" } });
-    const forged = component.EndpointSendRequest{ .header = component.makeHeader(.endpoint_send, f.service_task), .endpoint_capability_id = f.channel.server_capability, .correlation_id = 77, .payload = payload };
+    const forged = abi.EndpointSendWireRequest{ .header = component.makeHeader(.endpoint_send, f.service_task), .endpoint_capability_id = f.channel.server_capability, .correlation_id = 77, .payload_address = @intFromPtr(payload.ptr), .payload_bytes = @intCast(payload.len) };
     const denied = syscall.dispatch(&f.port, f.app, f.now, forged.header.operation, @intFromPtr(&forged), 0, 0);
     try std.testing.expect(denied.status != .success);
     try std.testing.expect(!f.channel.service(f.now));

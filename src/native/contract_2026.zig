@@ -10,6 +10,7 @@ const xhci_driver_task = @import("drivers/xhci_driver_task.zig");
 const userspace_layout = @import("core/userspace_layout.zig");
 const userspace_registry = @import("task/userspace_registry.zig");
 const userspace_executor = @import("task/userspace_executor.zig");
+const userspace_mailbox = @import("task/userspace_bootstrap_mailbox.zig");
 const task_runtime = @import("task/task_runtime.zig");
 const storage_volume = @import("storage/storage_volume.zig");
 const cpu_baseline = @import("../arch/cpu_baseline.zig");
@@ -25,7 +26,7 @@ pub const Floor = struct {
     owned_xstate: bool,
     register_fred_syscalls: bool,
     rings_only_ipc: bool,
-    wait_plus_rings: bool,
+    yield_plus_rings: bool,
     userspace_nvme_dataplane: bool,
     userspace_i225_dataplane: bool,
     userspace_xhci_dataplane: bool,
@@ -48,7 +49,9 @@ pub const floor: Floor = .{
         endpoint.RINGS_ONLY_DATAPLANE and
         endpoint.AUTO_ATTACHES_DATA_RINGS and
         shared_memory.SEALS_IPC_RINGS,
-    .wait_plus_rings = abi.WAIT_PLUS_SEALED_RINGS and @hasField(abi.NativeOperation, "wait"),
+    .yield_plus_rings = @backingInt(userspace_mailbox.YieldDisposition.runnable) == 0 and
+        @backingInt(userspace_mailbox.YieldDisposition.wait_for_event) == 1 and
+        !@hasField(abi.NativeOperation, "wait") and ipc_ring.DATA_PLANE_USES_SEALED_RINGS,
     .userspace_nvme_dataplane = storage_driver_task.USERSPACE_NVME_DATAPLANE and
         storage_driver_task.KERNEL_LATCHES_ONLY and
         storage_driver_task.DISPATCHES_FROM_BOUND_TASK,

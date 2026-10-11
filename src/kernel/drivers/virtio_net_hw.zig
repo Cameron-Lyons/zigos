@@ -196,8 +196,7 @@ pub fn activate() !void {
         reg(u16, controller.common + 28).* = 1;
         if (reg(u16, controller.common + 28).* != 1) return error.QueueEnableFailed;
     }
-    pci.enableMemoryBusMastering(device);
-    if (!pci.busMasteringEnabled(device)) return error.BusMasterEnableFailed;
+    pci.enableMemoryBusMastering(device) catch return error.BusMasterEnableFailed;
     @atomicStore(bool, &active, true, .release);
     reg(u8, controller.common + 20).* = READY_STATUS | STATUS_DRIVER_OK;
     if (reg(u8, controller.common + 20).* != READY_STATUS | STATUS_DRIVER_OK) return error.DeviceNotReady;
@@ -479,7 +478,7 @@ fn mapRegion(physical: u64, length: usize, slot: usize) !usize {
     const offset = address % PAGE;
     if (slot >= 6 or length == 0 or length > PAGE * 2 - offset) return error.InvalidRegion;
     const virtual = mmio.virtio_net.base + slot * PAGE * 2;
-    var page: usize = 0;
-    while (page < offset + length) : (page += PAGE) paging.mapKernelBorrowedPage(virtual + page, address - offset + page, paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE);
+    const page_bytes = std.mem.alignForward(usize, offset + length, PAGE);
+    try paging.mapKernelDeviceRange(virtual, address - offset, page_bytes, true);
     return virtual + offset;
 }

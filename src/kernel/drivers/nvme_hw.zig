@@ -80,6 +80,7 @@ pub const Error = error{
     ControllerFatal,
     QueueAllocationFailed,
     BusMasteringNotRevoked,
+    BusMasterEnableFailed,
     CommandTimeout,
     CommandFailed,
     CompletionOwnershipMismatch,
@@ -227,23 +228,27 @@ fn barPhysicalAddress(dev: pci.PCIDevice) ?usize {
     return bar.address;
 }
 
-fn mapBar(phys: usize) usize {
+fn mapBar(phys: usize) Error!usize {
+    paging.mapKernelDeviceRange(mmio_windows.nvme.base, phys, BAR_MAP_BYTES, true) catch return error.BarUnmappable;
     published_bar_physical = phys;
-    var offset: u32 = 0;
-    while (offset < BAR_MAP_BYTES) : (offset += PAGE_SIZE) {
-        const page_offset: usize = offset;
-        paging.mapKernelBorrowedPage(
-            mmio_windows.nvme.base + page_offset,
-            phys + page_offset,
-            paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE,
-        );
-    }
     return mmio_windows.nvme.base;
 }
 
 fn doorbellStride(cap: u64) usize {
     const dstrd: u5 = @intCast((cap >> 32) & 0xF);
     return @as(usize, 4) << dstrd;
+}
+
+inline fn mappedDoorbellsFit(stride: usize) bool {
+    return REG_DOORBELL_BASE + (2 * IO_QUEUE_ID + 1) * stride + @sizeOf(u32) <= BAR_MAP_BYTES;
+}
+
+test "NVMe rejects CAP doorbell strides outside the owned BAR window" {
+    const std = @import("std");
+    for (0..16) |dstrd| {
+        const capability = @as(u64, @intCast(dstrd)) << 32;
+        try std.testing.expectEqual(dstrd <= 8, mappedDoorbellsFit(doorbellStride(capability)));
+    }
 }
 
 fn spinUntilReady(controller: *const Controller, want_ready: bool) bool {
@@ -256,11 +261,8 @@ fn spinUntilReady(controller: *const Controller, want_ready: bool) bool {
     return false;
 }
 
-fn prepare(dev: pci.PCIDevice, frames: DmaFrames) Error!Controller {
-    const bar_phys = barPhysicalAddress(dev) orelse return error.BarUnmappable;
-    if (bar_phys == 0) return error.BarUnmappable;
-
-    const bar = mapBar(bar_phys);
+fn prepare(bar_phys: usize, frames: DmaFrames) Error!Controller {
+    const bar = try mapBar(bar_phys);
 
     var controller = Controller{
         .bar = bar,
@@ -268,6 +270,7 @@ fn prepare(dev: pci.PCIDevice, frames: DmaFrames) Error!Controller {
             @as(u64, @as(*volatile u32, @ptrFromInt(bar + REG_CAP)).*)),
         .admin = undefined,
     };
+    if (!mappedDoorbellsFit(controller.doorbell_stride)) return error.BarUnmappable;
 
     controller.writeReg32(REG_CC, controller.reg32(REG_CC) & ~CC_EN);
     if (!spinUntilReady(&controller, false)) {
@@ -638,6 +641,9 @@ pub fn attachAsBackend(
     if (scoped_dmar != null and vtd_summary != null) return error.InvalidDmaFirmware;
     const isolation_required = scoped_dmar != null or vtd_summary != null;
     if (pci.busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
+    const bar_phys = barPhysicalAddress(dev) orelse return error.BarUnmappable;
+    const aperture = (pci.probeMemoryBars(dev) catch return error.BarUnmappable)[0];
+    if (bar_phys == 0 or aperture.address != bar_phys or aperture.length < BAR_MAP_BYTES) return error.BarUnmappable;
     if (additional_domains.len > MAX_ADDITIONAL_DMA_DOMAINS) {
         return error.TooManyDmaDomains;
     }
@@ -650,7 +656,7 @@ pub fn attachAsBackend(
     const frames = DmaFrames{ .base = .{ .physical = dma_base, .alias = dma_alias } };
     for (0..DMA_FRAME_COUNT) |index| zeroFrame(frames.frame(@intCast(index)).alias);
 
-    var controller = try prepare(dev, frames);
+    var controller = try prepare(bar_phys, frames);
     var bus_master_enabled = false;
     errdefer if (bus_master_enabled) {
         controller.writeReg32(REG_CC, controller.reg32(REG_CC) & ~CC_EN);
@@ -672,8 +678,11 @@ pub fn attachAsBackend(
             try intel_vtd.enforceScopedDevices(scoped_dmar.?, domains[0..domain_count]);
         }
     }
-    pci.enableMemoryBusMastering(dev);
+    // A failed configuration readback does not prove that DMA stayed stopped.
+    // Retain the queue run from the first attempt to enable this requester.
+    retain_dma_frames = true;
     bus_master_enabled = true;
+    pci.enableMemoryBusMastering(dev) catch return error.BusMasterEnableFailed;
     try enable(&controller);
 
     var fault_proof: ?intel_vtd.FaultRecord = null;
@@ -689,7 +698,9 @@ pub fn attachAsBackend(
         issueFaultProbe(&controller, guard.physical);
         fault_proof = try intel_vtd.waitForBlockedWrite(guard.physical);
 
-        controller = try prepare(dev, frames);
+        // Reuse the aperture admitted before bus mastering. BAR sizing writes
+        // are forbidden while this requester owns live DMA commands.
+        controller = try prepare(bar_phys, frames);
         if (!guardPageIntact(guard.alias)) return error.DmaIsolationBypassed;
         guard_releasable = true;
         try enable(&controller);

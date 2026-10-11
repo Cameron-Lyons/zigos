@@ -7,9 +7,10 @@ const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const userspace_layout = @import("../core/userspace_layout.zig");
 const table_backing = @import("../core/table_backing.zig");
-const root = @import("root");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
+const cpu_identity = @import("../../kernel/cpu_identity.zig");
+const x86 = if (builtin.target.os.tag == .freestanding) @import("../../arch/x86.zig") else struct {};
+const paging = if (builtin.target.os.tag == .freestanding)
+    @import("root").kernel_paging
 else
     struct {};
 
@@ -33,25 +34,48 @@ pub const MappingLifetime = struct {
     context: *anyopaque,
     register: *const fn (*anyopaque, *Table, FreestandingMappingDescriptor, bool, bool) ?u64,
     unregister: *const fn (*anyopaque, *Table, u64, FreestandingMappingDescriptor) bool,
+
+    pub inline fn eql(self: @This(), other: @This()) bool {
+        return self.context == other.context and self.register == other.register and self.unregister == other.unregister;
+    }
 };
 
 var mapped_object_lifetime: ?MappingLifetime = null;
+var default_lifetime_registrations: u32 = 0;
+const DefaultLifetimeTesting = if (builtin.is_test) struct {
+    var registered_host_backend = false;
+} else struct {};
 
-pub fn setMappedObjectLifetime(lifetime: MappingLifetime) void {
+pub fn bindMappedObjectLifetime(lifetime: MappingLifetime) bool {
+    if (!defaultLifetimeOwner() or mapped_object_lifetime != null) return false;
     mapped_object_lifetime = lifetime;
+    return true;
 }
 
-pub fn clearMappedObjectLifetime(context: *anyopaque) void {
-    if (mapped_object_lifetime) |lifetime| {
-        if (lifetime.context == context) mapped_object_lifetime = null;
-    }
+pub inline fn mappedObjectLifetimeIsBound(expected: MappingLifetime) bool {
+    const lifetime = mapped_object_lifetime orelse return false;
+    return lifetime.eql(expected);
+}
+
+// Tables retain this callback through every published token and through the
+// registration callback itself. Its BSP-owned context must outlive them all.
+pub fn unbindMappedObjectLifetime(expected: MappingLifetime) bool {
+    if (!defaultLifetimeOwner() or default_lifetime_registrations != 0 or
+        !mappedObjectLifetimeIsBound(expected)) return false;
+    mapped_object_lifetime = null;
+    return true;
+}
+
+inline fn defaultLifetimeOwner() bool {
+    if (cpu_identity.currentIndex() != 0) return false;
+    return if (comptime builtin.target.os.tag == .freestanding) !x86.interruptsEnabled() else true;
 }
 const MAPPING_EDGE_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MAX_MAPPINGS_PER_OBJECT;
 const MAPPING_INDEX_CAPACITY: usize = MAPPING_EDGE_CAPACITY * 2;
 const MMU_MAPPING_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MMU_OBJECT_MAPPING_SCAN_BOUND;
 const no_mmu_mapping: u16 = std.math.maxInt(u16);
 const ObjectMappingCount = u16;
-const FREESTANDING_PHYSICAL_BASE: u64 = 0x0010_0000;
+const HOST_MODEL_PHYSICAL_BASE: u64 = 0x0010_0000;
 const TASK_SHARED_VIRTUAL_BASE: u64 = userspace_layout.shared_start;
 const TASK_SHARED_VIRTUAL_END_EXCLUSIVE: u64 = userspace_layout.shared_end_exclusive;
 const ACCELERATOR_APERTURE_BASE: u64 = userspace_layout.accelerator_start;
@@ -162,6 +186,15 @@ pub const FreestandingMappingDescriptor = struct {
     zero_copy: bool,
 };
 
+// An immediate copy admission describes the complete logical mapping, not its
+// rounded allocation. The caller must keep Table mutation serialized through
+// preparation and copying; this value neither pins nor extends its lifetime.
+pub const TaskCopySpan = struct {
+    virtual_base: u64,
+    physical_base: u64,
+    size_bytes: usize,
+};
+
 pub const TaskRetirement = struct {
     revoked_owned_objects: u16 = 0,
     removed_peer_mappings: u16 = 0,
@@ -176,6 +209,7 @@ pub const Error = error{
     AcceleratorAccessDenied,
     AcceleratorAlreadyAttached,
     AcceleratorNotAttached,
+    AcceleratorStillAttached,
     AlreadyMapped,
     MappingDescriptorMismatch,
     MappingNotFound,
@@ -206,8 +240,78 @@ const MmuMapping = struct {
 
 const MmuMappingArena = indexed_arena.GenerationalArena("MmuMapping", MmuMapping, MMU_MAPPING_CAPACITY);
 
+// Hosted fixtures can supply actual frame ownership and bytes. Production has
+// one allocator: paging's owned general-frame runs and their default-cache aliases.
+pub const HostedPhysicalBacking = struct {
+    context: *anyopaque,
+    allocate: *const fn (*anyopaque, u32) ?u64,
+    bytes: *const fn (*anyopaque, u64, u32) ?[]u8,
+    release: *const fn (*anyopaque, u64, u32) void,
+};
+
+const NativePhysicalBacking = struct {
+    fn allocate(_: @This(), count: u32) ?u64 {
+        const run = paging.allocGeneralFrames(count) orelse return null;
+        return run.base;
+    }
+
+    fn bytes(_: @This(), base: u64, count: u32) ?[]u8 {
+        const byte_count = std.math.mul(usize, count, PAGE_SIZE) catch return null;
+        const last = std.math.add(u64, base, byte_count - 1) catch return null;
+        const alias = paging.directMapAddress(base) orelse return null;
+        _ = paging.directMapAddress(last) orelse return null;
+        return @as([*]u8, @ptrFromInt(alias))[0..byte_count];
+    }
+
+    fn release(_: @This(), base: u64, count: u32) void {
+        paging.releaseGeneralFrames(.{ .base = base, .count = count }) catch |err|
+            native_util.impossibleByInvariantError("shared-memory backing releases its owned frame run", err);
+    }
+};
+
+const HostedBackingAdapter = struct {
+    backend: HostedPhysicalBacking,
+
+    fn allocate(self: @This(), count: u32) ?u64 {
+        return self.backend.allocate(self.backend.context, count);
+    }
+
+    fn bytes(self: @This(), base: u64, count: u32) ?[]u8 {
+        return self.backend.bytes(self.backend.context, base, count);
+    }
+
+    fn release(self: @This(), base: u64, count: u32) void {
+        self.backend.release(self.backend.context, base, count);
+    }
+};
+
+fn allocateZeroedFrames(backend: anytype, count: usize) Error!u64 {
+    const frames = std.math.cast(u32, count) orelse return error.OutOfMemory;
+    const byte_count = std.math.mul(usize, count, PAGE_SIZE) catch return error.OutOfMemory;
+    const base = backend.allocate(frames) orelse return error.OutOfMemory;
+    errdefer backend.release(base, frames);
+    if (base % PAGE_SIZE != 0) return error.OutOfMemory;
+    const bytes = backend.bytes(base, frames) orelse return error.OutOfMemory;
+    if (bytes.len != byte_count) return error.OutOfMemory;
+    @memset(bytes, 0);
+    return base;
+}
+
+fn eraseAndReleaseFrames(backend: anytype, base: u64, count: usize) void {
+    const frames: u32 = @intCast(count);
+    const bytes = backend.bytes(base, frames) orelse
+        native_util.impossibleByInvariant("owned shared-memory frames retain their direct access until release");
+    if (bytes.len != count * PAGE_SIZE) {
+        native_util.impossibleByInvariant("owned shared-memory direct access covers its complete frame run");
+    }
+    std.crypto.secureZero(u8, bytes);
+    backend.release(base, frames);
+}
+
 pub const FreestandingMmu = struct {
+    // This cursor describes hosted metadata fixtures only; never physical RAM.
     next_physical_frame: u64 = 1,
+    hosted_physical_backing: if (heap_backed_table) void else ?HostedPhysicalBacking = if (heap_backed_table) {} else null,
     next_task_virtual_page: u64 = 1,
     next_accelerator_virtual_page: u64 = 1,
     mappings: MmuMappingArena = MmuMappingArena.init(),
@@ -218,11 +322,33 @@ pub const FreestandingMmu = struct {
 
     pub fn allocatePhysicalFrames(self: *FreestandingMmu, count: usize) Error!u64 {
         if (count == 0) return error.SizeZero;
+        if (comptime heap_backed_table) return allocateZeroedFrames(NativePhysicalBacking{}, count);
+        if (self.hosted_physical_backing) |backend| {
+            return allocateZeroedFrames(HostedBackingAdapter{ .backend = backend }, count);
+        }
         const base_frame = self.next_physical_frame;
         const next_frame = std.math.add(u64, base_frame, @intCast(count)) catch return error.TableFull;
         const frame_offset = std.math.mul(u64, base_frame, PAGE_SIZE) catch return error.TableFull;
+        const physical_base = std.math.add(u64, HOST_MODEL_PHYSICAL_BASE, frame_offset) catch return error.TableFull;
+        const end_offset = std.math.mul(u64, next_frame, PAGE_SIZE) catch return error.TableFull;
+        _ = std.math.add(u64, HOST_MODEL_PHYSICAL_BASE, end_offset) catch return error.TableFull;
         self.next_physical_frame = next_frame;
-        return std.math.add(u64, FREESTANDING_PHYSICAL_BASE, frame_offset) catch return error.TableFull;
+        return physical_base;
+    }
+
+    fn releasePhysicalFrames(self: *FreestandingMmu, base: u64, count: usize) void {
+        if (comptime heap_backed_table) {
+            eraseAndReleaseFrames(NativePhysicalBacking{}, base, count);
+            return;
+        }
+        if (self.hosted_physical_backing) |backend| {
+            eraseAndReleaseFrames(HostedBackingAdapter{ .backend = backend }, base, count);
+        }
+    }
+
+    fn usesHostedPhysicalModel(self: *const FreestandingMmu) bool {
+        if (comptime heap_backed_table) return false;
+        return self.hosted_physical_backing == null;
     }
 
     fn mapTask(
@@ -388,11 +514,15 @@ pub const FreestandingMmu = struct {
 
     fn removeMapping(self: *FreestandingMmu, object: *Object, kind: MmuMappingKind, domain_id: u64) bool {
         const slot_index = self.findIndex(object, kind, domain_id) orelse return false;
+        self.removeResolvedMapping(object, slot_index);
+        return true;
+    }
+
+    fn removeResolvedMapping(self: *FreestandingMmu, object: *Object, slot_index: usize) void {
         self.unlinkObjectMapping(object, slot_index);
         if (!self.mappings.removeIndex(slot_index)) {
             native_util.impossibleByInvariant("shared-memory MMU unmap removes a live linked mapping");
         }
-        return true;
     }
 
     fn linkObjectMapping(self: *FreestandingMmu, object: *Object, slot_index: usize) void {
@@ -432,6 +562,7 @@ pub const FreestandingMmu = struct {
 
 const ObjectSlot = struct {
     in_use: bool = false,
+    retired: bool = false,
     object: Object = zeroObject(),
 };
 
@@ -443,6 +574,7 @@ const MappingIndex = indexed_arena.MultimapIndex(MAPPING_EDGE_CAPACITY, MAPPING_
 const TableBacking = struct {
     mmu: FreestandingMmu = FreestandingMmu.init(),
     arena: ObjectArena = ObjectArena.init(),
+    retired_count: u8 = 0,
     object_owner_index: ObjectOwnerIndex = ObjectOwnerIndex.init(),
     mapping_index: MappingIndex = MappingIndex.init(),
 
@@ -489,13 +621,39 @@ pub const Table = struct {
         return .{ .mapping_lifetime = lifetime, .uses_default_lifetime = false };
     }
 
+    pub fn initWithHostedPhysicalBacking(backend: HostedPhysicalBacking, lifetime: ?MappingLifetime) Table {
+        if (comptime heap_backed_table) @compileError("hosted physical fixtures cannot replace production frame ownership");
+        var table = Table.init();
+        table.backing.mmu.hosted_physical_backing = backend;
+        if (lifetime) |registered| {
+            table.mapping_lifetime = registered;
+            table.uses_default_lifetime = false;
+        }
+        return table;
+    }
+
     comptime {
         if (heap_backed_table and @sizeOf(@This()) > 64) {
             @compileError("heap-backed shared-memory tables exceed their compact resident layout");
         }
     }
 
-    pub fn deinit(self: *Table) void {
+    pub fn hasAcceleratorAttachments(self: *const Table) bool {
+        const backing = self.backingConst() orelse return false;
+        for (backing.arena.slots) |slot| {
+            if (slot.in_use and hasAttachedAccelerators(&slot.object)) return true;
+        }
+        return false;
+    }
+
+    // Call before dropping any services that own this table. Revocation removes
+    // CPU access, but only device completion/reset makes accelerator DMA quiet.
+    pub fn requireQuiescent(self: *const Table) Error!void {
+        if (self.hasAcceleratorAttachments()) return error.AcceleratorStillAttached;
+    }
+
+    pub fn tryDeinit(self: *Table) Error!void {
+        try self.requireQuiescent();
         if (self.backingPtr()) |backing| {
             for (&backing.arena.slots) |*slot| {
                 if (!slot.in_use) continue;
@@ -515,14 +673,22 @@ pub const Table = struct {
         self.uses_default_lifetime = true;
     }
 
-    fn registerDemandMapping(self: *Table, object: *const Object, mapping: FreestandingMappingDescriptor) Error!u64 {
+    pub fn deinit(self: *Table) void {
+        self.tryDeinit() catch |err|
+            native_util.impossibleByInvariantError("shared-memory table teardown requires completed accelerator claims", err);
+    }
+
+    fn registerDemandMapping(self: *Table, _: *const Object, mapping: FreestandingMappingDescriptor) Error!u64 {
         if (self.uses_default_lifetime) {
             // Hosted metadata tables have no hardware owner unless explicitly
             // supplied. A production mapping always needs its paired backend.
-            if (comptime !heap_backed_table) return 0;
+            if (comptime !heap_backed_table) {
+                if (comptime !builtin.is_test) return 0;
+                if (!DefaultLifetimeTesting.registered_host_backend) return 0;
+            }
             const registered = mapped_object_lifetime orelse return error.MappingRegistrationFailed;
             if (self.mapping_lifetime) |prior| {
-                if (prior.context != registered.context or prior.register != registered.register or prior.unregister != registered.unregister) {
+                if (!prior.eql(registered)) {
                     const backing = self.backingPtr() orelse return error.MappingRegistrationFailed;
                     for (backing.mmu.mappings.slots) |entry| {
                         if (entry.in_use and entry.registration_token != 0) return error.MappingRegistrationFailed;
@@ -530,9 +696,16 @@ pub const Table = struct {
                 }
             }
             self.mapping_lifetime = registered;
+            if (default_lifetime_registrations == std.math.maxInt(u32)) return error.MappingRegistrationFailed;
+            // Reserve callback lifetime before entering a trusted adapter: a
+            // reentrant compare-unbind must not drop its own live context.
+            default_lifetime_registrations += 1;
         }
+        errdefer if (self.uses_default_lifetime) {
+            default_lifetime_registrations -= 1;
+        };
         const lifetime = self.mapping_lifetime orelse return error.MappingRegistrationFailed;
-        const token = lifetime.register(lifetime.context, self, mapping, !object.isSealed(), object.isSealed() or object.isRing()) orelse
+        const token = lifetime.register(lifetime.context, self, mapping, true, false) orelse
             return error.MappingRegistrationFailed;
         if (token == 0) native_util.impossibleByInvariant("successful shared-memory registration supplies a nonzero lifetime token");
         return token;
@@ -546,6 +719,10 @@ pub const Table = struct {
             native_util.impossibleByInvariant("shared-memory teardown removes access before recycling its mapping");
         }
         mapping.registration_token = 0;
+        if (self.uses_default_lifetime) {
+            std.debug.assert(default_lifetime_registrations != 0);
+            default_lifetime_registrations -= 1;
+        }
     }
 
     fn backingPtr(self: *Table) ?*TableBacking {
@@ -657,6 +834,7 @@ pub const Table = struct {
         const backing = self.backingPtr() orelse return error.SharedMemoryNotFound;
         const object_handle = ObjectHandle{ .value = object_id.raw() };
         const object_slot = backing.arena.getByHandle(object_handle) orelse return error.SharedMemoryNotFound;
+        if (object_slot.retired) return error.SharedMemoryNotFound;
         const object_slot_index = object_handle.slotIndex();
         const object = &object_slot.object;
         if (object.isSealed()) return error.ObjectSealed;
@@ -692,6 +870,7 @@ pub const Table = struct {
         const backing = self.backingPtr() orelse return error.SharedMemoryNotFound;
         const object_handle = ObjectHandle{ .value = object_id.raw() };
         const object_slot = backing.arena.getByHandle(object_handle) orelse return error.SharedMemoryNotFound;
+        if (object_slot.retired) return error.SharedMemoryNotFound;
         const object_slot_index = object_handle.slotIndex();
         const object = &object_slot.object;
         if (object.isSealed() and !allow_sealed) return error.ObjectSealed;
@@ -702,21 +881,26 @@ pub const Table = struct {
             native_util.impossibleByInvariant("published shared-memory task mapping retains its MMU registration");
         self.unregisterDemandMapping(object, &backing.mmu.mappings.slots[mmu_index]);
 
-        _ = backing.mapping_index.remove(task_id.raw(), edge_index);
-        var tail = index;
-        while (tail + 1 < object.mapping_count) : (tail += 1) {
-            const moved_task_id = object.mapped_task_ids[tail + 1];
-            const old_edge_index = mappingEdgeIndex(object_slot_index, tail + 1);
-            const new_edge_index = mappingEdgeIndex(object_slot_index, tail);
-            _ = backing.mapping_index.remove(moved_task_id.raw(), old_edge_index);
-            if (!backing.mapping_index.append(moved_task_id.raw(), new_edge_index)) {
+        if (!backing.mapping_index.remove(task_id.raw(), edge_index)) {
+            native_util.impossibleByInvariant("shared-memory unmap removes its published task index edge");
+        }
+        // Task mapping order is internal. Fill the hole from the tail so only
+        // one survivor changes its task index edge, independent of position.
+        const last_index = object.mapping_count - 1;
+        if (index != last_index) {
+            const moved_task_id = object.mapped_task_ids[last_index];
+            const old_edge_index = mappingEdgeIndex(object_slot_index, last_index);
+            if (!backing.mapping_index.remove(moved_task_id.raw(), old_edge_index)) {
+                native_util.impossibleByInvariant("shared-memory unmap relocates a published task index edge");
+            }
+            if (!backing.mapping_index.append(moved_task_id.raw(), edge_index)) {
                 native_util.impossibleByInvariant("shared-memory unmap reuses the released task index edge");
             }
-            object.mapped_task_ids[tail] = moved_task_id;
+            object.mapped_task_ids[index] = moved_task_id;
         }
-        object.mapping_count -= 1;
-        object.mapped_task_ids[object.mapping_count] = ids.TaskId.zero;
-        _ = try backing.mmu.unmapTask(object, task_id);
+        object.mapping_count = last_index;
+        object.mapped_task_ids[last_index] = ids.TaskId.zero;
+        backing.mmu.removeResolvedMapping(object, mmu_index);
         return true;
     }
 
@@ -724,6 +908,7 @@ pub const Table = struct {
         const backing = self.backingPtr() orelse return error.SharedMemoryNotFound;
         const object_handle = ObjectHandle{ .value = object_id.raw() };
         const object_slot = backing.arena.getByHandle(object_handle) orelse return error.SharedMemoryNotFound;
+        if (object_slot.retired) return error.SharedMemoryNotFound;
         const object_slot_index = object_handle.slotIndex();
         const object = &object_slot.object;
         var mmu_index = object.mmu_mapping_head;
@@ -749,38 +934,57 @@ pub const Table = struct {
         backing.mmu.revokeObject(object);
         object.revocation_generation += 1;
         object.attachment_generation += 1;
-        object.attached_compute = ComputeAccess.empty();
         object.mapping_count = 0;
         object.mapped_task_ids = @as([MAX_MAPPINGS_PER_OBJECT]ids.TaskId, @splat(ids.TaskId.zero));
         const revoked_descriptor = descriptorForObject(object, true);
-        if (!backing.arena.removeHandle(object_handle)) {
-            native_util.impossibleByInvariant("revoked shared-memory handle remains live through teardown");
+        if (hasAttachedAccelerators(object)) {
+            // Retain the original generational slot as a pin. Only a completed
+            // accelerator claim can release it through detachAccelerator.
+            object_slot.retired = true;
+            backing.retired_count += 1;
+        } else {
+            self.releaseObjectSlot(object_handle);
+        }
+        return revoked_descriptor;
+    }
+
+    fn releaseObjectSlot(self: *Table, handle: ObjectHandle) void {
+        const backing = self.backingPtr().?;
+        const slot = backing.arena.getByHandle(handle) orelse
+            native_util.impossibleByInvariant("shared-memory release retains its owned object slot");
+        std.debug.assert(slot.object.mapping_count == 0 and slot.object.mmu_mapping_count == 0);
+        std.debug.assert(!hasAttachedAccelerators(&slot.object));
+        backing.mmu.releasePhysicalFrames(slot.object.page_base, slot.object.page_count);
+        if (slot.retired) backing.retired_count -= 1;
+        if (!backing.arena.removeHandle(handle)) {
+            native_util.impossibleByInvariant("shared-memory release removes its exact owned generational slot");
         }
         if (backing.arena.countInUse() == 0 and backing.mmu.mappings.countInUse() == 0) {
             backing.mmu.next_physical_frame = 1;
             backing.mmu.next_task_virtual_page = 1;
             backing.mmu.next_accelerator_virtual_page = 1;
         }
-        return revoked_descriptor;
     }
 
-    // Synchronous creation rollback: this object is still unpublished and its
-    // frame reservation is the allocator's tail. Preserve older live objects.
+    // Creation rollback precedes publication and releases only this run. The
+    // arithmetic tail rewind belongs exclusively to hosted metadata fixtures.
     pub fn rollbackCreate(self: *Table, object_id: ids.SharedMemoryId) void {
         const backing = self.backingPtr() orelse
             native_util.impossibleByInvariant("unpublished shared memory retains its backing");
         const slot = backing.arena.getByHandle(ObjectHandle{ .value = object_id.raw() }) orelse
             native_util.impossibleByInvariant("unpublished shared memory retains its live handle");
         const object = &slot.object;
-        const frame_start = (object.page_base - FREESTANDING_PHYSICAL_BASE) / PAGE_SIZE;
-        if (object.mapping_count != 0 or object.mmu_mapping_count != 0 or
-            backing.mmu.next_physical_frame != frame_start + object.page_count)
-        {
-            native_util.impossibleByInvariant("unpublished shared memory is unmapped and owns the frame allocator tail");
+        if (slot.retired or object.mapping_count != 0 or object.mmu_mapping_count != 0 or hasAttachedAccelerators(object)) {
+            native_util.impossibleByInvariant("unpublished shared memory is unmapped and unpinned");
+        }
+        const model = backing.mmu.usesHostedPhysicalModel();
+        const frame_start = if (model) (object.page_base - HOST_MODEL_PHYSICAL_BASE) / PAGE_SIZE else 0;
+        if (model and backing.mmu.next_physical_frame != frame_start + object.page_count) {
+            native_util.impossibleByInvariant("unpublished hosted shared memory owns the model allocator tail");
         }
         _ = self.revoke(object_id) catch |err|
             native_util.impossibleByInvariantError("shared-memory rollback revokes its live object", err);
-        backing.mmu.next_physical_frame = frame_start;
+        if (model) backing.mmu.next_physical_frame = frame_start;
     }
 
     pub fn retireTask(self: *Table, task_id: ids.TaskId) TaskRetirement {
@@ -828,29 +1032,32 @@ pub const Table = struct {
         return retired;
     }
 
-    // Executor reset and snapshot retirement can end a materialized lifetime
-    // while its task/object still exists. Remove its access before handle reuse.
-    pub fn retireMappingLifetime(self: *Table, registration_token: u64) void {
-        if (registration_token == 0) return;
+    // Arena handles are local to an Executor. Retire only this exact task's
+    // opaque lifetime token, never another arena's numerically equal handle.
+    pub fn retireTaskMappingLifetime(self: *Table, task_id: ids.TaskId, registration_token: u64) void {
+        if (task_id.eql(ids.TaskId.zero) or registration_token == 0) return;
         const backing = self.backingPtr() orelse return;
-        for (&backing.arena.slots) |*slot| {
-            if (!slot.in_use) continue;
-            const object = &slot.object;
-            var position: usize = 0;
-            while (position < object.mapping_count) {
-                const task_id = object.mapped_task_ids[position];
-                const mapping_index = backing.mmu.findIndex(object, .task, task_id.raw()) orelse
-                    native_util.impossibleByInvariant("published shared-memory task mapping retains its MMU registration");
-                if (backing.mmu.mappings.slots[mapping_index].registration_token != registration_token) {
-                    position += 1;
-                    continue;
-                }
-                if (!(self.unmapInternal(object.id, task_id, true) catch |err|
-                    native_util.impossibleByInvariantError("address-space retirement unmaps its shared-memory registration", err)))
-                {
-                    native_util.impossibleByInvariant("address-space retirement removes every matching shared-memory registration");
-                }
+        var edge_index = backing.mapping_index.head(task_id.raw());
+        var visited: usize = 0;
+        while (edge_index != indexed_arena.no_index) {
+            if (visited >= MAX_SHARED_MEMORY_OBJECTS or edge_index >= MAPPING_EDGE_CAPACITY) {
+                native_util.impossibleByInvariant("address-space retirement traverses its bounded task mapping index");
             }
+            visited += 1;
+            const next_edge = backing.mapping_index.next(edge_index);
+            const slot = &backing.arena.slots[mappingEdgeObjectSlotIndex(edge_index)];
+            const position = mappingEdgeMappingIndex(edge_index);
+            if (!slot.in_use or slot.retired or position >= slot.object.mapping_count or
+                !slot.object.mapped_task_ids[position].eql(task_id))
+                native_util.impossibleByInvariant("address-space retirement retains its exact published task mapping");
+            const mapping_index = backing.mmu.findIndex(&slot.object, .task, task_id.raw()) orelse
+                native_util.impossibleByInvariant("published shared-memory task mapping retains its MMU registration");
+            if (backing.mmu.mappings.slots[mapping_index].registration_token == registration_token) {
+                if (!(self.unmapInternal(slot.object.id, task_id, true) catch |err|
+                    native_util.impossibleByInvariantError("address-space retirement unmaps its shared-memory registration", err)))
+                    native_util.impossibleByInvariant("address-space retirement removes every matching shared-memory registration");
+            }
+            edge_index = next_edge;
         }
     }
 
@@ -871,14 +1078,31 @@ pub const Table = struct {
         };
     }
 
-    pub fn detachAccelerator(self: *Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
-        const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
-        if (object.isSealed()) return error.ObjectSealed;
-        if (!object.attachedTo(target)) return false;
+    // Unlike public lookup, release authenticates the retained original ID.
+    // Sealing freezes new topology; it cannot prevent completed DMA cleanup.
+    pub fn validateAcceleratorRelease(self: *const Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!void {
+        if (target == .cpu) return error.AcceleratorAccessDenied;
+        const backing = self.backingConst() orelse return error.SharedMemoryNotFound;
+        const slot = backing.arena.getConstByHandle(ObjectHandle{ .value = object_id.raw() }) orelse return error.SharedMemoryNotFound;
+        if (!slot.object.attachedTo(target)) return error.AcceleratorNotAttached;
+    }
 
-        _ = try self.backingPtr().?.mmu.unmapAccelerator(object, target);
+    // The caller must establish device completion or reset before detaching;
+    // removing metadata alone never establishes DMA quiescence.
+    pub fn detachAccelerator(self: *Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
+        try self.validateAcceleratorRelease(object_id, target);
+        const backing = self.backingPtr().?;
+        const handle = ObjectHandle{ .value = object_id.raw() };
+        const slot = backing.arena.getByHandle(handle).?;
+        const object = &slot.object;
+        if (!slot.retired) {
+            if (!(try backing.mmu.unmapAccelerator(object, target))) {
+                native_util.impossibleByInvariant("live accelerator attachment retains its MMU metadata");
+            }
+        }
         setComputeAccess(&object.attached_compute, target, false);
         object.attachment_generation += 1;
+        if (slot.retired and !hasAttachedAccelerators(object)) self.releaseObjectSlot(handle);
         return true;
     }
 
@@ -948,6 +1172,65 @@ pub const Table = struct {
         const object = self.findConst(mapping_descriptor.object_id) orelse return error.SharedMemoryNotFound;
         const current = try self.backingConst().?.mmu.taskMappingDescriptor(object, mapping_descriptor.task_id);
         try validateFreestandingDescriptorForObject(object, current, mapping_descriptor, mapping_descriptor.task_id, null, false);
+    }
+
+    pub fn taskCopySpanInto(
+        self: *const Table,
+        task_id: ids.TaskId,
+        registration_token: u64,
+        start: u64,
+        len: usize,
+        out: *TaskCopySpan,
+    ) Error!void {
+        if (len == 0) return error.SizeZero;
+        if (registration_token == 0) return error.MappingRegistrationFailed;
+        if (task_id.eql(ids.TaskId.zero)) return error.MappingNotFound;
+        const end = std.math.add(u64, start, len) catch return error.MappingDescriptorMismatch;
+        const backing = self.backingConst() orelse return error.MappingNotFound;
+        var edge_index = backing.mapping_index.head(task_id.raw());
+        var visited: usize = 0;
+        while (edge_index != indexed_arena.no_index) : (edge_index = backing.mapping_index.next(edge_index)) {
+            if (visited >= MAX_SHARED_MEMORY_OBJECTS or edge_index >= MAPPING_EDGE_CAPACITY) {
+                return error.MappingDescriptorMismatch;
+            }
+            visited += 1;
+            const object_slot_index = mappingEdgeObjectSlotIndex(edge_index);
+            const position = mappingEdgeMappingIndex(edge_index);
+            const slot = &backing.arena.slots[object_slot_index];
+            // map reserves its task-index edge before invoking registration.
+            // It becomes authority only after publishing task membership.
+            if (!slot.in_use or slot.retired or position >= slot.object.mapping_count or
+                !slot.object.mapped_task_ids[position].eql(task_id)) continue;
+            const object = &slot.object;
+            if (backing.arena.getConstByHandle(.{ .value = object.id.raw() }) != slot) {
+                return error.StaleMappingDescriptor;
+            }
+            const mapping = backing.mmu.findAny(object, .task, task_id.raw()) orelse return error.MappingNotFound;
+            const logical_end = std.math.add(u64, mapping.virtual_base, object.size_bytes) catch
+                return error.MappingDescriptorMismatch;
+            if (start < mapping.virtual_base or start >= logical_end) continue;
+            if (end > logical_end) return error.MappingDescriptorMismatch;
+            if (mapping.registration_token != registration_token) return error.StaleMappingDescriptor;
+            const mapped_bytes = std.math.mul(u64, object.page_count, PAGE_SIZE) catch
+                return error.MappingDescriptorMismatch;
+            if (object.size_bytes == 0 or object.size_bytes > mapped_bytes or
+                mapping.virtual_base < TASK_SHARED_VIRTUAL_BASE or
+                mapping.virtual_base % PAGE_SIZE != 0 or object.page_base % PAGE_SIZE != 0)
+            {
+                return error.MappingDescriptorMismatch;
+            }
+            const mapped_end = std.math.add(u64, mapping.virtual_base, mapped_bytes) catch
+                return error.MappingDescriptorMismatch;
+            if (mapped_end > TASK_SHARED_VIRTUAL_END_EXCLUSIVE) return error.MappingDescriptorMismatch;
+            _ = std.math.add(u64, object.page_base, mapped_bytes) catch return error.MappingDescriptorMismatch;
+            out.* = .{
+                .virtual_base = mapping.virtual_base,
+                .physical_base = object.page_base,
+                .size_bytes = object.size_bytes,
+            };
+            return;
+        }
+        return error.MappingNotFound;
     }
 
     pub fn freestandingAcceleratorMappingDescriptor(
@@ -1036,21 +1319,27 @@ pub const Table = struct {
 
     pub fn activeCount(self: *const Table) usize {
         const backing = self.backingConst() orelse return 0;
-        return backing.arena.countInUse();
+        return backing.arena.countInUse() - backing.retired_count;
     }
 
     fn find(self: *Table, object_id: ids.SharedMemoryId) ?*Object {
         const backing = self.backingPtr() orelse return null;
         const slot = backing.arena.getByHandle(ObjectHandle{ .value = object_id.raw() }) orelse return null;
+        if (slot.retired) return null;
         return &slot.object;
     }
 
     fn findConst(self: *const Table, object_id: ids.SharedMemoryId) ?*const Object {
         const backing = self.backingConst() orelse return null;
         const slot = backing.arena.getConstByHandle(ObjectHandle{ .value = object_id.raw() }) orelse return null;
+        if (slot.retired) return null;
         return &slot.object;
     }
 };
+
+fn hasAttachedAccelerators(object: *const Object) bool {
+    return object.attached_compute.gpu or object.attached_compute.npu or object.attached_compute.media;
+}
 
 fn objectTaskMappingPosition(object: *const Object, task_id: ids.TaskId) ?usize {
     if (object.mapping_count > OBJECT_TASK_MAPPING_SCAN_BOUND) {
@@ -1105,7 +1394,7 @@ fn descriptorForObject(object: *const Object, revoked: bool) abi.SharedMemoryDes
 }
 
 fn pageCount(size_bytes: usize) usize {
-    return (size_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    return size_bytes / PAGE_SIZE + @intFromBool(size_bytes % PAGE_SIZE != 0);
 }
 
 fn labelHash(label: []const u8) u64 {
@@ -1346,6 +1635,8 @@ test "revoking the final shared memory object reclaims descriptor cursors" {
     try table.attachAccelerator(object.id, .gpu);
 
     _ = try table.revoke(object.id);
+    try std.testing.expectError(error.AcceleratorStillAttached, table.requireQuiescent());
+    try std.testing.expect(try table.detachAccelerator(object.id, .gpu));
 
     const mmu = table.mmuForTests();
     try std.testing.expectEqual(@as(u64, 1), mmu.next_physical_frame);
@@ -1371,6 +1662,73 @@ test "bounded object task scans preserve compacted mappings" {
     try std.testing.expect(table.hasMapping(object.id, ids.task(4)));
     try std.testing.expectError(error.AlreadyMapped, table.map(object.id, ids.task(4)));
     try std.testing.expectEqual(@as(u16, 1), (try table.descriptor(object.id)).mapped_task_count);
+}
+
+test "shared memory removes first middle and last mappings without disturbing survivors" {
+    inline for (.{ 0, MAX_MAPPINGS_PER_OBJECT / 2, MAX_MAPPINGS_PER_OBJECT - 1 }) |removed_index| {
+        var table = Table.init();
+        defer table.deinit();
+        const object = try table.createWithAccess(ids.task(1), PAGE_SIZE, .{ .gpu = true, .npu = true, .media = true });
+        const peer = try table.create(ids.task(2), PAGE_SIZE * 2);
+        var descriptors: [MAX_MAPPINGS_PER_OBJECT]FreestandingMappingDescriptor = undefined;
+        for (0..MAX_MAPPINGS_PER_OBJECT) |index| {
+            const task_id = ids.task(100 + index);
+            try table.map(object.id, task_id);
+            try table.map(peer.id, task_id);
+        }
+        inline for (.{ ComputeTarget.gpu, ComputeTarget.npu, ComputeTarget.media }) |target| {
+            try table.attachAccelerator(object.id, target);
+        }
+        for (&descriptors, 0..) |*descriptor, index| {
+            descriptor.* = try table.freestandingTaskMappingDescriptor(object.id, ids.task(100 + index));
+        }
+
+        const removed_task = ids.task(100 + removed_index);
+        try std.testing.expect(try table.unmap(object.id, removed_task));
+        try std.testing.expect(!try table.unmap(object.id, removed_task));
+        try std.testing.expectEqual(@as(u16, 1), table.mappingsForTask(removed_task));
+        try std.testing.expectEqual(PAGE_SIZE * 2, table.liveMappedBytesForTask(removed_task));
+        try std.testing.expectError(error.MappingNotFound, table.freestandingTaskMappingDescriptor(object.id, removed_task));
+        try std.testing.expectEqual(MMU_OBJECT_MAPPING_SCAN_BOUND - 1, table.activeFreestandingMappings(object.id));
+
+        const stored = table.find(object.id).?;
+        const object_slot_index = (ObjectHandle{ .value = object.id.raw() }).slotIndex();
+        try std.testing.expect(stored.mapped_task_ids[MAX_MAPPINGS_PER_OBJECT - 1].isZero());
+        for (stored.mapped_task_ids[0..stored.mapping_count], 0..) |task_id, index| {
+            const original_index = task_id.raw() - 100;
+            const expected_index = if (index == removed_index) MAX_MAPPINGS_PER_OBJECT - 1 else index;
+            try std.testing.expectEqual(expected_index, original_index);
+            try std.testing.expectEqualDeep(descriptors[original_index], try table.freestandingTaskMappingDescriptor(object.id, task_id));
+            try std.testing.expectEqual(@as(u16, 2), table.mappingsForTask(task_id));
+            try std.testing.expectEqual(PAGE_SIZE * 3, table.liveMappedBytesForTask(task_id));
+            const expected_edge = mappingEdgeIndex(object_slot_index, index);
+            const mapping_index = &table.backingPtr().?.mapping_index;
+            try std.testing.expectEqual(task_id.raw(), mapping_index.buckets[mapping_index.bucketIndexForSlot(expected_edge).?].key);
+        }
+        try std.testing.expect(table.backingPtr().?.mapping_index.bucketIndexForSlot(mappingEdgeIndex(object_slot_index, MAX_MAPPINGS_PER_OBJECT - 1)) == null);
+
+        // Retire the survivor relocated into the hole, then revoke the object.
+        // Both paths must follow its updated edge and preserve the peer object.
+        const retired_task = ids.task(100 + if (removed_index == MAX_MAPPINGS_PER_OBJECT - 1) @as(usize, 0) else MAX_MAPPINGS_PER_OBJECT - 1);
+        const retired = table.retireTask(retired_task);
+        try std.testing.expectEqual(@as(u16, 2), retired.removed_peer_mappings);
+        try std.testing.expectEqual(@as(u16, 0), retired.revoked_owned_objects);
+        try std.testing.expectEqual(@as(u16, 0), table.mappingsForTask(retired_task));
+        try std.testing.expect(!table.hasMapping(object.id, retired_task));
+        try std.testing.expect(!table.hasMapping(peer.id, retired_task));
+        _ = try table.revoke(object.id);
+        inline for (.{ ComputeTarget.gpu, ComputeTarget.npu, ComputeTarget.media }) |target| {
+            try std.testing.expect(try table.detachAccelerator(object.id, target));
+        }
+        try std.testing.expectEqual(MAX_MAPPINGS_PER_OBJECT - 1, table.activeFreestandingMappings(peer.id));
+        for (0..MAX_MAPPINGS_PER_OBJECT) |index| {
+            const task_id = ids.task(100 + index);
+            if (task_id.eql(retired_task)) continue;
+            try std.testing.expect(table.hasMapping(peer.id, task_id));
+            try std.testing.expectEqual(@as(u16, 1), table.mappingsForTask(task_id));
+            try std.testing.expectEqual(PAGE_SIZE * 2, table.liveMappedBytesForTask(task_id));
+        }
+    }
 }
 
 test "task retirement revokes owned objects and removes only its peer mappings" {
@@ -1461,6 +1819,58 @@ test "shared memory object creation failures preserve capacity and frame allocat
     try std.testing.expectError(error.TableFull, table.create(ids.task(1_000), PAGE_SIZE));
     try std.testing.expectEqual(MAX_SHARED_MEMORY_OBJECTS, table.activeCount());
     try std.testing.expectEqual(next_frame_before_full, table.mmuForTests().next_physical_frame);
+}
+
+test "shared memory page rounding handles the complete size domain" {
+    const maximum = std.math.maxInt(usize);
+    for ([_]usize{ 0, 1, PAGE_SIZE - 1, PAGE_SIZE, PAGE_SIZE + 1, maximum - PAGE_SIZE, maximum - 1, maximum }) |size| {
+        const expected: usize = @intCast((@as(u128, size) + PAGE_SIZE - 1) / PAGE_SIZE);
+        try std.testing.expectEqual(expected, pageCount(size));
+    }
+}
+
+test "shared memory physical reservation validates its complete extent before advancing" {
+    const maximum = std.math.maxInt(u64);
+    const last_end_frame = (maximum - HOST_MODEL_PHYSICAL_BASE) / PAGE_SIZE;
+    var mmu = FreestandingMmu.init();
+    try std.testing.expectError(error.SizeZero, mmu.allocatePhysicalFrames(0));
+    try std.testing.expectEqual(@as(u64, 1), mmu.next_physical_frame);
+    try std.testing.expectError(error.TableFull, mmu.allocatePhysicalFrames(std.math.maxInt(usize)));
+    try std.testing.expectEqual(@as(u64, 1), mmu.next_physical_frame);
+
+    mmu.next_physical_frame = last_end_frame;
+    try std.testing.expectError(error.TableFull, mmu.allocatePhysicalFrames(1));
+    try std.testing.expectEqual(last_end_frame, mmu.next_physical_frame);
+    mmu.next_physical_frame = maximum / PAGE_SIZE;
+    try std.testing.expectError(error.TableFull, mmu.allocatePhysicalFrames(1));
+    try std.testing.expectEqual(maximum / PAGE_SIZE, mmu.next_physical_frame);
+
+    mmu.next_physical_frame = last_end_frame - 1;
+    const last_base = try mmu.allocatePhysicalFrames(1);
+    try std.testing.expectEqual(HOST_MODEL_PHYSICAL_BASE + (last_end_frame - 1) * PAGE_SIZE, last_base);
+    try std.testing.expectEqual(last_end_frame, mmu.next_physical_frame);
+    try std.testing.expectError(error.TableFull, mmu.allocatePhysicalFrames(1));
+    try std.testing.expectEqual(last_end_frame, mmu.next_physical_frame);
+}
+
+test "shared memory oversized creation leaves live objects and reusable capacity intact" {
+    var table = Table.init();
+    defer table.deinit();
+    const owner = ids.task(7);
+    const existing = try table.create(owner, PAGE_SIZE);
+    try table.map(existing.id, owner);
+    const mapping = try table.freestandingTaskMappingDescriptor(existing.id, owner);
+    const next_frame = table.mmuForTests().next_physical_frame;
+    for ([_]usize{ std.math.maxInt(usize), std.math.maxInt(usize) - PAGE_SIZE + 1 }) |size| {
+        try std.testing.expectError(error.TableFull, table.create(owner, size));
+        try std.testing.expectEqual(next_frame, table.mmuForTests().next_physical_frame);
+        try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+        try std.testing.expectEqual(@as(usize, PAGE_SIZE), table.liveOwnedBytesForTask(owner));
+        try std.testing.expectEqualDeep(mapping, try table.freestandingTaskMappingDescriptor(existing.id, owner));
+    }
+    for (1..MAX_SHARED_MEMORY_OBJECTS) |_| _ = try table.create(owner, PAGE_SIZE);
+    try std.testing.expectEqual(MAX_SHARED_MEMORY_OBJECTS, table.activeCount());
+    try std.testing.expectEqual(@as(usize, MAX_SHARED_MEMORY_OBJECTS * PAGE_SIZE), table.liveOwnedBytesForTask(owner));
 }
 
 test "shared memory identity paths avoid primary indexes and collision probes" {
@@ -1702,4 +2112,90 @@ test "sealed ipc rings map owner and peer then reject remap" {
     const descriptor = try table.revoke(object.id);
     try std.testing.expectEqual(@as(u16, 0), descriptor.mapped_task_count);
     try std.testing.expectError(error.SharedMemoryNotFound, table.descriptor(object.id));
+}
+
+test "shared default mapping lifetime binds one BSP owner and retains callbacks through publication" {
+    const Context = struct {
+        fail_register: bool = false,
+        registrations: usize = 0,
+        unregistrations: usize = 0,
+        refused_register_unbind: usize = 0,
+        refused_unregister_unbind: usize = 0,
+
+        fn lifetime(self: *@This()) MappingLifetime {
+            return .{ .context = self, .register = register, .unregister = unregister };
+        }
+
+        fn register(context: *anyopaque, _: *Table, _: FreestandingMappingDescriptor, _: bool, _: bool) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (mappedObjectLifetimeIsBound(self.lifetime()) and !unbindMappedObjectLifetime(self.lifetime()))
+                self.refused_register_unbind += 1;
+            if (self.fail_register) return null;
+            self.registrations += 1;
+            return 0x0000_0001_0000_0001;
+        }
+
+        fn unregister(context: *anyopaque, table: *Table, _: u64, mapping: FreestandingMappingDescriptor) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!table.hasMapping(mapping.object_id, mapping.task_id)) return false;
+            if (mappedObjectLifetimeIsBound(self.lifetime()) and !unbindMappedObjectLifetime(self.lifetime()))
+                self.refused_unregister_unbind += 1;
+            self.unregistrations += 1;
+            return true;
+        }
+    };
+    const prior_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(prior_cpu);
+    try std.testing.expect(mapped_object_lifetime == null);
+    try std.testing.expectEqual(@as(u32, 0), default_lifetime_registrations);
+    const prior_policy = DefaultLifetimeTesting.registered_host_backend;
+    DefaultLifetimeTesting.registered_host_backend = true;
+    defer DefaultLifetimeTesting.registered_host_backend = prior_policy;
+    var context = Context{ .fail_register = true };
+    var other = Context{};
+    for (1..cpu_identity.MAX_CPUS) |index| {
+        cpu_identity.setIndexForTest(@intCast(index));
+        try std.testing.expect(!bindMappedObjectLifetime(context.lifetime()));
+    }
+    cpu_identity.setIndexForTest(0);
+    try std.testing.expect(bindMappedObjectLifetime(context.lifetime()));
+    defer std.debug.assert(unbindMappedObjectLifetime(context.lifetime()));
+    try std.testing.expect(!bindMappedObjectLifetime(context.lifetime()));
+    try std.testing.expect(!bindMappedObjectLifetime(other.lifetime()));
+    try std.testing.expect(!unbindMappedObjectLifetime(other.lifetime()));
+    var first = Table.init();
+    defer first.deinit();
+    var second = Table.init();
+    defer second.deinit();
+    const first_object = try first.create(ids.task(801), PAGE_SIZE);
+    const second_object = try second.create(ids.task(802), PAGE_SIZE);
+    try std.testing.expectError(error.MappingRegistrationFailed, first.map(first_object.id, ids.task(801)));
+    try std.testing.expectEqual(@as(u32, 0), default_lifetime_registrations);
+    try std.testing.expectEqual(@as(u16, 0), first.mappingsForTask(ids.task(801)));
+    try std.testing.expectEqual(@as(usize, 1), context.refused_register_unbind);
+    context.fail_register = false;
+    try first.map(first_object.id, ids.task(801));
+    try second.map(second_object.id, ids.task(802));
+    try std.testing.expectEqual(@as(u32, 2), default_lifetime_registrations);
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        cpu_identity.setIndexForTest(@intCast(index));
+        try std.testing.expect(!unbindMappedObjectLifetime(context.lifetime()));
+        try std.testing.expect(mappedObjectLifetimeIsBound(context.lifetime()));
+    }
+    cpu_identity.setIndexForTest(0);
+    first.retireTaskMappingLifetime(ids.task(801), 0x0000_0001_0000_0001);
+    try std.testing.expectEqual(@as(u32, 1), default_lifetime_registrations);
+    try std.testing.expect(!unbindMappedObjectLifetime(context.lifetime()));
+    try std.testing.expectEqual(@as(u16, 1), second.mappingsForTask(ids.task(802)));
+    second.retireTaskMappingLifetime(ids.task(802), 0x0000_0001_0000_0001);
+    try std.testing.expectEqual(@as(u32, 0), default_lifetime_registrations);
+    try std.testing.expectEqual(@as(usize, 3), context.refused_register_unbind);
+    try std.testing.expectEqual(@as(usize, 2), context.refused_unregister_unbind);
+    try std.testing.expectEqual(context.registrations, context.unregistrations);
+    // With no tokens left, foreign owners still cannot release the callback.
+    for (1..cpu_identity.MAX_CPUS) |index| {
+        cpu_identity.setIndexForTest(@intCast(index));
+        try std.testing.expect(!unbindMappedObjectLifetime(context.lifetime()));
+    }
+    cpu_identity.setIndexForTest(0);
 }

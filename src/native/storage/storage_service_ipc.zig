@@ -336,14 +336,16 @@ fn syscallEndpointSend(
     move_attached_capability: bool,
     now_ticks: u64,
 ) Error!void {
-    var request = component_port.EndpointSendRequest{
+    if (payload.len > abi.ENDPOINT_INLINE_BYTES) return error.SyscallFailed;
+    var request = abi.EndpointSendWireRequest{
         .header = component_port.makeHeader(.endpoint_send, caller_task_id),
         .correlation_id = correlation_id,
         .endpoint_capability_id = endpoint_capability_id,
-        .payload = payload,
+        .payload_address = if (payload.len == 0) 0 else @intFromPtr(payload.ptr),
+        .payload_bytes = @intCast(payload.len),
         .reply_endpoint_id = reply_endpoint_id,
-        .attached_capability_id = attached_capability_id,
-        .move_attached_capability = move_attached_capability,
+        .attached_capability_id = attached_capability_id orelse 0,
+        .flags = if (move_attached_capability) abi.ENDPOINT_SEND_MOVE_ATTACHMENT else 0,
     };
     const result = syscall_surface.dispatch(
         port,
@@ -365,12 +367,13 @@ fn syscallEndpointRecv(
 ) Error!abi.EndpointRecvResult {
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
     var received = std.mem.zeroes(abi.EndpointRecvResult);
-    var request = component_port.EndpointRecvRequest{
+    var request = abi.EndpointRecvWireRequest{
         .header = component_port.makeHeader(.endpoint_recv, caller_task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .receiver_task_id = caller_task_id,
-        .payload_out = &received.payload,
-        .attached_capability_out = &received.attached_capability,
+        .payload_address = @intFromPtr(&received.payload),
+        .payload_capacity = received.payload.len,
+        .attached_capability_address = @intFromPtr(&received.attached_capability),
     };
     const result = syscall_surface.dispatch(
         port,

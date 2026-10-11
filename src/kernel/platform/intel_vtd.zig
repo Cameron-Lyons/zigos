@@ -145,6 +145,7 @@ pub const Error = error{
     InterruptRemappingUnsupported,
     ExtendedInterruptModeUnsupported,
     InvalidRegisterRange,
+    MmioMappingFailed,
     InvalidFaultRecordRange,
     FirmwareRemappingActive,
     TableAllocationFailed,
@@ -294,7 +295,8 @@ pub fn enforceScopedDevices(table: []const u8, domains: []const DmaDomain) Error
     try validateDomains(domains);
     var requesters: [MAX_DMA_DOMAINS]u16 = undefined;
     for (domains, 0..) |domain, index| requesters[index] = requesterId(domain.device);
-    const summary = dmar.scopedEnforcementSummary(table, requesters[0..domains.len]) catch
+    var summary: dmar.Summary = undefined;
+    dmar.scopedEnforcementSummaryInto(table, requesters[0..domains.len], &summary) catch
         return error.FirmwarePolicyUnsupported;
     return enforceValidatedDevices(&summary, domains, true);
 }
@@ -426,11 +428,12 @@ fn probeUnit(unit: dmar.RemappingUnit, index: usize, host_address_width: u8, all
     const register_base = std.math.cast(usize, unit.register_base_address) orelse
         return error.InvalidRegisterRange;
     const virtual_base = mmio_windows.intel_vtd.base + index * UNIT_MMIO_STRIDE;
-    paging.mapKernelBorrowedPage(
+    paging.mapKernelDeviceRange(
         virtual_base,
         register_base,
-        paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE,
-    );
+        PAGE_SIZE,
+        true,
+    ) catch return error.MmioMappingFailed;
 
     const version = read32(virtual_base + REG_VERSION);
     const major: u8 = @intCast((version >> 4) & 0xF);
@@ -458,11 +461,12 @@ fn probeUnit(unit: dmar.RemappingUnit, index: usize, host_address_width: u8, all
         if (iotlb_page == register_base) {
             iotlb_virtual = virtual_base + @as(usize, @intCast(iotlb_offset));
         } else {
-            paging.mapKernelBorrowedPage(
+            paging.mapKernelDeviceRange(
                 virtual_base + UNIT_IOTLB_PAGE_OFFSET,
                 iotlb_page,
-                paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE,
-            );
+                PAGE_SIZE,
+                true,
+            ) catch return error.MmioMappingFailed;
             iotlb_virtual = virtual_base + UNIT_IOTLB_PAGE_OFFSET +
                 @as(usize, @intCast(iotlb_physical & PAGE_MASK));
         }
@@ -483,14 +487,12 @@ fn probeUnit(unit: dmar.RemappingUnit, index: usize, host_address_width: u8, all
         return error.InvalidFaultRecordRange;
     const fault_page_count = ((fault_last_byte & ~PAGE_MASK) - fault_first_page) / PAGE_SIZE + 1;
     if (fault_page_count > MAX_FAULT_RECORD_PAGES) return error.InvalidFaultRecordRange;
-    for (0..@as(usize, @intCast(fault_page_count))) |page_index| {
-        paging.mapKernelBorrowedPage(
-            virtual_base + UNIT_FAULT_PAGE_OFFSET + page_index * PAGE_SIZE,
-            std.math.cast(usize, fault_first_page + page_index * PAGE_SIZE) orelse
-                return error.InvalidFaultRecordRange,
-            paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE,
-        );
-    }
+    paging.mapKernelDeviceRange(
+        virtual_base + UNIT_FAULT_PAGE_OFFSET,
+        fault_first_page,
+        @as(usize, @intCast(fault_page_count)) * PAGE_SIZE,
+        true,
+    ) catch return error.MmioMappingFailed;
 
     return .{
         .index = @intCast(index),

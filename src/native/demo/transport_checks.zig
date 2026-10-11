@@ -259,7 +259,7 @@ pub fn run(
                 .broker_service_id = state.services.policy_service.id,
             },
         },
-    }) catch |err| native_util.bootProofFailure("transport checks", err);
+    }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_DERIVE:OK");
     kernel_port.capabilityRevoke(.{
         .header = component_port.makeHeader(.capability_revoke, transport_probe_task.task_id),

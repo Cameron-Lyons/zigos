@@ -2,29 +2,31 @@ ENTRY(zigos_efi_entry)
 
 PHDRS
 {
-    kernel PT_LOAD FLAGS(6);
+    text PT_LOAD FLAGS(5);
+    readonly PT_LOAD FLAGS(4);
+    writable PT_LOAD FLAGS(6);
 }
 
 SECTIONS
 {
-    /* Leave firmware's low ACPI NVS and runtime allocations intact. */
-    . = 32M;
+    /* Keep synchronized with arch/kernel_address.zig. Physical allocations
+       remain above firmware's low ACPI NVS and runtime allocations. */
+    __kernel_image_bias = 0xffffffff80000000;
+    . = __kernel_image_bias + 32M;
     __kernel_start = .;
     __kernel_measure_start = .;
 
-    .text : ALIGN(4K)
+    .text ALIGN(4K) : AT(ADDR(.text) - __kernel_image_bias)
     {
         __kernel_text_start = .;
-        KEEP(*(.multiboot2))
-        *(.multiboot)
         KEEP(*(.text.boot))
         *(.text)
         *(.text.*)
         . = ALIGN(4K);
         __kernel_text_end = .;
-    } :kernel
+    } :text
 
-    .rodata : ALIGN(4K)
+    .rodata ALIGN(4K) : AT(ADDR(.rodata) - __kernel_image_bias)
     {
         __kernel_rodata_start = .;
         *(.rodata.boot)
@@ -38,18 +40,18 @@ SECTIONS
         *(.gcc_except_table.*)
         . = ALIGN(4K);
         __kernel_rodata_end = .;
-    } :kernel
+    } :readonly
     __kernel_measure_end = .;
 
-    .zigos_userspace_archive : ALIGN(4K)
+    .zigos_userspace_archive ALIGN(4K) : AT(ADDR(.zigos_userspace_archive) - __kernel_image_bias)
     {
         __kernel_archive_start = .;
         *(.zigos_userspace_archive)
         . = ALIGN(4K);
         __kernel_archive_end = .;
-    } :kernel
+    } :readonly
 
-    .relro : ALIGN(4K)
+    .relro ALIGN(4K) : AT(ADDR(.relro) - __kernel_image_bias)
     {
         __kernel_relro_start = .;
         *(.data.rel.ro)
@@ -58,18 +60,18 @@ SECTIONS
         *(.got.*)
         . = ALIGN(4K);
         __kernel_relro_end = .;
-    } :kernel
+    } :readonly
 
-    .data : ALIGN(4K)
+    .data ALIGN(4K) : AT(ADDR(.data) - __kernel_image_bias)
     {
         __kernel_data_start = .;
         *(.data)
         *(.data.*)
         . = ALIGN(4K);
         __kernel_data_end = .;
-    } :kernel
+    } :writable
 
-    .bss : ALIGN(4K)
+    .bss ALIGN(4K) : AT(ADDR(.bss) - __kernel_image_bias)
     {
         __kernel_bss_start = .;
         *(COMMON)
@@ -77,11 +79,11 @@ SECTIONS
         *(.bss.*)
         . = ALIGN(4K);
         __kernel_bss_end = .;
-    } :kernel
+    } :writable
 
     __kernel_end = .;
     /* Keep synchronized with PRECISE_IDENTITY_BYTES in paging64.zig. */
-    __kernel_precise_identity_end = 64M;
+    __kernel_precise_image_physical_end = 64M;
 
     ASSERT(__kernel_start == __kernel_text_start,
            "unexpected loadable section before kernel text")
@@ -97,8 +99,12 @@ SECTIONS
            "unexpected loadable section between kernel data and bss")
     ASSERT(__kernel_bss_end == __kernel_end,
            "unexpected loadable section after kernel bss")
-    ASSERT(__kernel_relro_end <= __kernel_precise_identity_end,
-           "immutable kernel image exceeds the precise identity-mapping region")
-    ASSERT(__kernel_end <= 0x40000000,
-           "kernel exceeds the low identity-mapping region")
+    ASSERT(__kernel_relro_end - __kernel_image_bias <= __kernel_precise_image_physical_end,
+           "immutable kernel image exceeds the precise mapping region")
+    ASSERT(__kernel_start - __kernel_image_bias == 32M,
+           "kernel physical load must start at 32 MiB")
+    ASSERT(__kernel_end - __kernel_image_bias <= 0x40000000,
+           "kernel exceeds the initial physical mapping region")
+    ASSERT(zigos_efi_entry >= __kernel_text_start && zigos_efi_entry < __kernel_text_end,
+           "kernel entry must use the upper-half text mapping")
 }

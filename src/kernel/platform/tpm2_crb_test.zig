@@ -3,6 +3,10 @@ const crb = @import("tpm2_crb.zig");
 const endian = @import("../utils/endian.zig");
 const checksum = @import("../utils/checksum.zig");
 
+comptime {
+    _ = @import("tpm_boot.zig");
+}
+
 const physical_base = 0xfed4_0000;
 const Fault = enum { none, locality, ready, command, cancel, oversized, header_changed, seized, device, idle, release };
 const FakeIo = struct {

@@ -37,44 +37,18 @@ fn printBootIdentity() void {
 }
 
 pub fn kernelMain() void {
-    x86.enableSse();
+    // Native assembly has already established FP controls before compiled code.
     console.init();
-    var features = cpu_features.detect();
+    const detected_features = cpu_features.detect();
     const model_request = cpuModelRequest();
-    features.tsc_frequency_hz = model_request.resolveTscFrequency(features.tsc_frequency_hz);
-    const software_cpu_fallback = model_request.enabled();
-    const hardware_process_contexts = features.pcid and features.invpcid;
-    const software_process_context_fallback = !hardware_process_contexts and software_cpu_fallback;
-    const hardware_tsc_timer = features.tsc_deadline and features.invariant_tsc;
-    const software_timer_fallback = !hardware_tsc_timer and software_cpu_fallback;
-    const hardware_cet = features.cet_ibt and features.cet_ss;
-    const software_cet_fallback = !hardware_cet and software_cpu_fallback;
+    const admission_policy = cpu_policy.AdmissionPolicy.init(detected_features, model_request);
+    const features = admission_policy.resolveFeatures(detected_features);
+    const hardware_process_contexts = admission_policy.process_context_mode == .hardware_pcid;
+    const hardware_tsc_timer = admission_policy.hardware_tsc_timer;
     const hardware_pku = features.pku;
-    const hardware_lass = features.lass;
-    const software_lass_fallback = !hardware_lass and software_cpu_fallback;
-    const hardware_fred = features.fred and features.lkgs;
-    const qemu_inventory_boot = software_cpu_fallback;
-    var required_features = features;
-    if (software_process_context_fallback) {
-        required_features.pcid = true;
-        required_features.invpcid = true;
-    }
-    if (software_timer_fallback) {
-        required_features.tsc_deadline = true;
-        required_features.invariant_tsc = true;
-    }
-    if (software_cet_fallback) {
-        required_features.cet_ibt = true;
-        required_features.cet_ss = true;
-    }
-    if (software_lass_fallback) {
-        required_features.lass = true;
-    }
-    if (qemu_inventory_boot and !hardware_fred) {
-        required_features.fred = true;
-        required_features.lkgs = true;
-    }
-    if (cpu_features.baseline.firstMissing(required_features)) |missing_feature| {
+    const hardware_lass = admission_policy.hardware_lass;
+    const hardware_fred = admission_policy.hardware_fred;
+    if (admission_policy.firstMissing(detected_features)) |missing_feature| {
         printBootIdentity();
         common.printBootMarker(boot_markers.cpu_baseline_rejected);
         console.print("Unsupported CPU: missing ");
@@ -83,6 +57,14 @@ pub fn kernelMain() void {
         x86.cli();
         while (true) x86.hlt();
     }
+    cpu_features.initializeNativeCachePolicy() catch |err| {
+        printBootIdentity();
+        console.print("Unsupported memory cache policy: ");
+        console.print(@errorName(err));
+        console.print("\n");
+        x86.cli();
+        while (true) x86.hlt();
+    };
     tsc_clock.init(features.tsc_frequency_hz);
     printBootIdentity();
     common.printBootMarker(boot_markers.cpu_baseline_ready);
@@ -100,9 +82,9 @@ pub fn kernelMain() void {
     console.print("\n");
     cpu_features.enableModernFeatures(
         features,
-        if (hardware_process_contexts) .hardware_pcid else .software_flush,
-        if (hardware_cet) .hardware else .deferred,
-        if (software_cpu_fallback) .explicit_model else .hardware,
+        admission_policy.process_context_mode,
+        admission_policy.cet_mode,
+        admission_policy.featureMode(),
     );
     common.printBootMarker(boot_markers.cpu_nx_enabled);
     common.printBootMarker(boot_markers.cpu_smep_enabled);
@@ -118,14 +100,19 @@ pub fn kernelMain() void {
     if (hardware_pku) {
         common.printBootMarker(boot_markers.cpu_pku_enabled);
     }
-    if (hardware_lass) {
-        common.printBootMarker(boot_markers.cpu_lass_enabled);
-    }
     console.print("Welcome to Zigos!\n");
     console.print("A minimal operating system written in Zig\n");
     hardware_proof.captureEarlyBootEvidence();
 
-    init_core.init();
+    init_core.init(hardware_lass) catch {
+        common.printBootMarker(boot_markers.cpu_lass_address_partition_rejected);
+        console.print("Unsupported kernel address partition: LASS requires canonical upper-half instruction, stack, kernel data and descriptor table addresses\n");
+        x86.cli();
+        while (true) x86.hlt();
+    };
+    if (hardware_lass) {
+        common.printBootMarker(boot_markers.cpu_lass_enabled);
+    }
     if (hardware_fred) {
         common.printBootMarker(boot_markers.cpu_fred_enabled);
     } else {
@@ -139,7 +126,7 @@ pub fn kernelMain() void {
         features,
         if (hardware_tsc_timer) .tsc_deadline else .calibrated_countdown,
     );
-    @import("../smp.zig").init(hardware_proof.madtTable());
+    @import("../smp.zig").init(hardware_proof.madtTable(), admission_policy);
 
     common.printBootMarker(boot_markers.boot_core_ready);
     switch (comptime config.bootProfile()) {
