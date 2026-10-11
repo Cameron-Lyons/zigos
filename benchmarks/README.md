@@ -53,8 +53,8 @@ quality gates. Values are cycles per complete create/claim/release/revoke:
 
 The standard 50% regression allowance remains; the 10000-cycle hard ceiling
 is tighter than that allowance and leaves about 21% above the slowest measured
-invocation. Allocation initialization, secure erasure and quality checks remain
-part of the measured work. Other workloads retain their existing baselines and
+invocation. Allocation initialization and secure erasure remain part of the
+measured work. All quality gates remain enforced. Other workloads retain their existing baselines and
 ceilings, including the unchanged heap and syscall workloads. Attempt 2 exceeded
 the heap allowance and attempt 3 exceeded the syscall allowance; these samples
 calibrate only the changed accelerator lifecycle.
