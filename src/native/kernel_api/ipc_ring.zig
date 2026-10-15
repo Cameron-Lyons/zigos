@@ -463,3 +463,92 @@ test "ipc payload enqueue consumes overlapping sources before replacing and scru
         for (record.bytes[length..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
     }
 }
+
+test "ipc payload producer and consumer preserve records through concurrent slot and sequence reuse" {
+    const transfers = 10_000;
+    const Context = struct {
+        buffer: []u8,
+        started: std.Io.Timestamp,
+        failed: std.atomic.Value(bool) = .init(false),
+
+        fn retry(self: *@This(), spins: *u32) bool {
+            if (self.failed.load(.acquire)) return false;
+            spins.* +%= 1;
+            // A lost publication must fail the test instead of hanging the
+            // producer, consumer, or join indefinitely. Leave scheduling room
+            // for hosted x86 tests running under translation.
+            if (spins.* % 1024 == 0 and
+                self.started.durationTo(std.Io.Clock.awake.now(std.testing.io)).toNanoseconds() > 10_000_000_000)
+            {
+                self.failed.store(true, .release);
+                return false;
+            }
+            std.atomic.spinLoopHint();
+            return true;
+        }
+
+        fn consume(self: *@This()) void {
+            for (0..transfers) |sequence| {
+                var out: [PAYLOAD_BYTES]u8 = undefined;
+                var spins: u32 = 0;
+                const header = while (true) {
+                    if (self.failed.load(.acquire)) return;
+                    const received = receive(self.buffer, &out) catch |err| {
+                        if (err == error.RingEmpty and self.retry(&spins)) continue;
+                        self.failed.store(true, .release);
+                        return;
+                    };
+                    break received;
+                };
+                const length = sequence % (PAYLOAD_BYTES + 1);
+                if (header.sender_endpoint_id != 11 or header.sender_task_id != 22 or
+                    header.correlation_id != sequence or header.attached_capability_id != sequence + 1 or
+                    header.flags != 5 or header.payload_len != length or header.move_attached != 1 or
+                    !std.mem.eql(u8, &header._pad, &.{ 0, 0, 0 }))
+                {
+                    self.failed.store(true, .release);
+                    return;
+                }
+                for (out[0..length], 0..) |byte, index| {
+                    if (byte != @as(u8, @truncate(sequence + index * 19))) {
+                        self.failed.store(true, .release);
+                        return;
+                    }
+                }
+            }
+        }
+    };
+    var storage: [minimumBytes(2)]u8 align(STORAGE_ALIGNMENT) = undefined;
+    _ = try init(&storage, SLOT_BYTES * 2);
+    const start = std.math.maxInt(u32) - 7;
+    @atomicStore(u32, indexPtr(&storage, HEAD_OFFSET), start, .release);
+    @atomicStore(u32, indexPtr(&storage, TAIL_OFFSET), start, .release);
+    var context = Context{ .buffer = &storage, .started = std.Io.Clock.awake.now(std.testing.io) };
+    const consumer = try std.Thread.spawn(.{}, Context.consume, .{&context});
+    for (0..transfers) |sequence| {
+        var bytes: [PAYLOAD_BYTES]u8 = undefined;
+        for (&bytes, 0..) |*byte, index| byte.* = @truncate(sequence + index * 19);
+        const length = sequence % (PAYLOAD_BYTES + 1);
+        var spins: u32 = 0;
+        while (!context.failed.load(.acquire)) {
+            pushPayload(&storage, .{
+                .sender_endpoint_id = 11,
+                .sender_task_id = 22,
+                .correlation_id = sequence,
+                .attached_capability_id = sequence + 1,
+                .flags = 5,
+                .payload_len = @intCast(length),
+                .move_attached = 1,
+            }, bytes[0..length]) catch |err| {
+                if (err == error.RingFull and context.retry(&spins)) continue;
+                context.failed.store(true, .release);
+                break;
+            };
+            break;
+        }
+        if (context.failed.load(.acquire)) break;
+    }
+    consumer.join();
+    try std.testing.expect(!context.failed.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), try queued(&storage));
+}
