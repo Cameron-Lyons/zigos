@@ -181,15 +181,17 @@ const Harness = struct {
             }
         }
         const paths = if (code) &[_][]const u8{
-            "/usr/share/OVMF/OVMF_CODE.fd",                 "/usr/share/OVMF/OVMF_CODE_4M.fd",
-            "/usr/share/edk2/ovmf/OVMF_CODE.fd",            "/usr/share/edk2/ovmf/OVMF_CODE_4M.fd",
-            "/usr/share/edk2/x64/OVMF_CODE.fd",             "/usr/share/qemu/edk2-x86_64-code.fd",
-            "/opt/homebrew/share/qemu/edk2-x86_64-code.fd", "/usr/local/share/qemu/edk2-x86_64-code.fd",
+            "/usr/share/OVMF/OVMF_CODE.fd",              "/usr/share/OVMF/OVMF_CODE_4M.fd",
+            "/usr/share/edk2/ovmf/OVMF_CODE.fd",         "/usr/share/edk2/ovmf/OVMF_CODE_4M.fd",
+            "/usr/share/edk2/x64/OVMF_CODE.fd",          "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
+            "/usr/share/qemu/edk2-x86_64-code.fd",       "/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
+            "/usr/local/share/qemu/edk2-x86_64-code.fd",
         } else &[_][]const u8{
-            "/usr/share/OVMF/OVMF_VARS.fd",                 "/usr/share/OVMF/OVMF_VARS_4M.fd",
-            "/usr/share/edk2/ovmf/OVMF_VARS.fd",            "/usr/share/edk2/ovmf/OVMF_VARS_4M.fd",
-            "/usr/share/edk2/x64/OVMF_VARS.fd",             "/usr/share/qemu/edk2-x86_64-vars.fd",
-            "/opt/homebrew/share/qemu/edk2-x86_64-vars.fd", "/usr/local/share/qemu/edk2-x86_64-vars.fd",
+            "/usr/share/OVMF/OVMF_VARS.fd",              "/usr/share/OVMF/OVMF_VARS_4M.fd",
+            "/usr/share/edk2/ovmf/OVMF_VARS.fd",         "/usr/share/edk2/ovmf/OVMF_VARS_4M.fd",
+            "/usr/share/edk2/x64/OVMF_VARS.fd",          "/usr/share/edk2/x64/OVMF_VARS.4m.fd",
+            "/usr/share/qemu/edk2-x86_64-vars.fd",       "/opt/homebrew/share/qemu/edk2-x86_64-vars.fd",
+            "/usr/local/share/qemu/edk2-x86_64-vars.fd",
         };
         for (paths) |path| if (regularFile(self.ctx, path)) return path;
         if (code) {
@@ -1280,9 +1282,11 @@ fn unifiedEfi(initial: Harness, args: []const []const u8) !void {
     const cmdline = try fmt(ctx, "{s}/cmdline.txt", .{directory});
     try ctx.write(kernel, "invalid ELF\n");
     try ctx.write(cmdline, "untrusted_external_options\n");
-    const esp = try fmt(ctx, "{s}/esp.img", .{sidecars});
-    try ctx.run(&.{ "mmd", "-i", esp, "::/boot" });
-    try ctx.run(&.{ "mcopy", "-i", esp, kernel, cmdline, "::/boot/" });
+    try images.writeEsp(ctx, try fmt(ctx, "{s}/esp.img", .{sidecars}), try images.sourceDateEpoch(ctx.envDefault("SOURCE_DATE_EPOCH", "315532800")), &.{
+        .{ .path = "EFI/BOOT/BOOTX64.EFI", .data = try ctx.read(try fmt(ctx, "{s}/EFI/BOOT/BOOTX64.EFI", .{sidecars})) },
+        .{ .path = "boot/kernel.elf", .data = try ctx.read(kernel) },
+        .{ .path = "boot/cmdline.txt", .data = try ctx.read(cmdline) },
+    });
     const media_status = try process.run(ctx, &.{ "xorriso", "-as", "mkisofs", "-R", "-J", "-e", "esp.img", "-no-emul-boot", "-o", try fmt(ctx, "{s}/sidecars.iso", .{directory}), sidecars }, try fmt(ctx, "{s}/sidecars.media.log", .{directory}));
     if (media_status != 0) return error.MediaBuildFailed;
     try unifiedCase(h, directory, work, "sidecars", authorized, "FIRMWARE_AUTHENTICATED", null);

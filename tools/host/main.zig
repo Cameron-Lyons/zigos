@@ -47,6 +47,7 @@ fn dispatch(ctx: *common.Context, command: []const u8, args: []const []const u8)
 }
 
 test {
+    _ = @import("fat.zig");
     std.testing.refAllDecls(images);
     std.testing.refAllDecls(checks);
     std.testing.refAllDecls(qemu);

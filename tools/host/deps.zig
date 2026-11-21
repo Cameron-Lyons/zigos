@@ -10,10 +10,11 @@ const Command = struct { argv: []const []const u8, fallback: bool = false };
 const apt_options = [_][]const u8{ "-o", "Acquire::Retries=4", "-o", "Acquire::http::Timeout=30", "-o", "Acquire::https::Timeout=30", "-o", "Acquire::ForceIPv4=true" };
 const apt_sources = [_][]const u8{ "/etc/apt/apt-mirrors.txt", "/etc/apt/sources.list", "/etc/apt/sources.list.d/ubuntu.sources" };
 const ovmf_paths = [_][]const u8{
-    "/usr/share/OVMF/OVMF_CODE.fd",                 "/usr/share/OVMF/OVMF_CODE_4M.fd",
-    "/usr/share/edk2/ovmf/OVMF_CODE.fd",            "/usr/share/edk2/ovmf/OVMF_CODE_4M.fd",
-    "/usr/share/edk2/x64/OVMF_CODE.fd",             "/usr/share/qemu/edk2-x86_64-code.fd",
-    "/opt/homebrew/share/qemu/edk2-x86_64-code.fd", "/usr/local/share/qemu/edk2-x86_64-code.fd",
+    "/usr/share/OVMF/OVMF_CODE.fd",              "/usr/share/OVMF/OVMF_CODE_4M.fd",
+    "/usr/share/edk2/ovmf/OVMF_CODE.fd",         "/usr/share/edk2/ovmf/OVMF_CODE_4M.fd",
+    "/usr/share/edk2/x64/OVMF_CODE.fd",          "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
+    "/usr/share/qemu/edk2-x86_64-code.fd",       "/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
+    "/usr/local/share/qemu/edk2-x86_64-code.fd",
 };
 
 pub fn run(ctx: *common.Context, args: []const []const u8) !void {
@@ -118,14 +119,14 @@ fn plannedCommand(allocator: std.mem.Allocator, privilege: Privilege, base: []co
 fn installPlan(allocator: std.mem.Allocator, manager: Manager, privilege: Privilege) ![]const Command {
     var commands = std.ArrayList(Command).empty;
     switch (manager) {
-        .brew => try commands.append(allocator, try plannedCommand(allocator, .direct, &.{ "brew", "install" }, &.{}, &.{ "python", "nasm", "qemu", "dosfstools", "xorriso", "mtools", "x86_64-elf-grub" }, false)),
+        .brew => try commands.append(allocator, try plannedCommand(allocator, .direct, &.{ "brew", "install" }, &.{}, &.{ "python", "nasm", "qemu", "xorriso", "x86_64-elf-grub" }, false)),
         .apt => {
             try commands.append(allocator, try plannedCommand(allocator, privilege, &.{"apt-get"}, &apt_options, &.{"update"}, false));
-            try commands.append(allocator, try plannedCommand(allocator, privilege, &.{"apt-get"}, &apt_options, &.{ "install", "-y", "python3", "python3-venv", "nasm", "qemu-system-x86", "ovmf", "grub-common", "grub-efi-amd64-bin", "dosfstools", "xorriso", "mtools", "swtpm", "swtpm-tools" }, false));
+            try commands.append(allocator, try plannedCommand(allocator, privilege, &.{"apt-get"}, &apt_options, &.{ "install", "-y", "python3", "python3-venv", "nasm", "qemu-system-x86", "ovmf", "grub-common", "grub-efi-amd64-bin", "xorriso", "swtpm", "swtpm-tools" }, false));
         },
-        .dnf => try commands.append(allocator, try plannedCommand(allocator, privilege, &.{ "dnf", "install", "-y" }, &.{}, &.{ "python3", "nasm", "qemu-system-x86", "edk2-ovmf", "grub2-tools", "grub2-tools-extra", "grub2-efi-x64-modules", "dosfstools", "xorriso", "mtools" }, false)),
+        .dnf => try commands.append(allocator, try plannedCommand(allocator, privilege, &.{ "dnf", "install", "-y" }, &.{}, &.{ "python3", "nasm", "qemu-system-x86", "edk2-ovmf", "grub2-tools", "grub2-tools-extra", "grub2-efi-x64-modules", "xorriso" }, false)),
         .pacman => {
-            try commands.append(allocator, try plannedCommand(allocator, privilege, &.{ "pacman", "-Sy", "--noconfirm" }, &.{}, &.{ "python", "nasm", "grub", "edk2-ovmf", "dosfstools", "xorriso", "mtools" }, false));
+            try commands.append(allocator, try plannedCommand(allocator, privilege, &.{ "pacman", "-Sy", "--noconfirm" }, &.{}, &.{ "python", "nasm", "grub", "edk2-ovmf", "xorriso" }, false));
             for ([_][]const u8{ "qemu-full", "qemu-desktop", "qemu" }, 0..) |package, i| try commands.append(allocator, try plannedCommand(allocator, privilege, &.{ "pacman", "-S", "--noconfirm" }, &.{}, &.{package}, i != 0));
         },
     }
@@ -215,7 +216,7 @@ fn verifyCompiler(ctx: *common.Context) ![]const u8 {
 fn verifyTools(ctx: *common.Context) !void {
     try ctx.print("Verifying toolchain...\n", .{});
     var missing = false;
-    for ([_][]const u8{ "python3", "nasm", "qemu-system-x86_64", "xorriso", "mformat", "mcopy", "mmd", "mkfs.fat" }) |name| if ((try ctx.findExecutable(name)) == null) {
+    for ([_][]const u8{ "python3", "nasm", "qemu-system-x86_64", "xorriso" }) |name| if ((try ctx.findExecutable(name)) == null) {
         try ctx.print("Missing command: {s}\n", .{name});
         missing = true;
     };
@@ -285,7 +286,7 @@ test "installer argv preserve packages apt retry flags and pacman fallbacks with
     try std.testing.expectEqualStrings("apt-get", apt[0].argv[1]);
     try std.testing.expectEqualSlices([]const u8, &apt_options, apt[0].argv[2..10]);
     try std.testing.expectEqualStrings("update", apt[0].argv[10]);
-    try std.testing.expectEqualSlices([]const u8, &.{ "install", "-y", "python3", "python3-venv", "nasm", "qemu-system-x86", "ovmf", "grub-common", "grub-efi-amd64-bin", "dosfstools", "xorriso", "mtools", "swtpm", "swtpm-tools" }, apt[1].argv[10..]);
+    try std.testing.expectEqualSlices([]const u8, &.{ "install", "-y", "python3", "python3-venv", "nasm", "qemu-system-x86", "ovmf", "grub-common", "grub-efi-amd64-bin", "xorriso", "swtpm", "swtpm-tools" }, apt[1].argv[10..]);
     const pacman = try installPlan(arena.allocator(), .pacman, .direct);
     try std.testing.expectEqual(@as(usize, 4), pacman.len);
     try std.testing.expect(!pacman[1].fallback and pacman[2].fallback and pacman[3].fallback);

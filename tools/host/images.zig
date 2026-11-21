@@ -1,5 +1,9 @@
 const std = @import("std");
 const common = @import("common.zig");
+const fat = @import("fat.zig");
+
+/// Size of the FAT16 EFI system partition embedded in boot media.
+pub const esp_size_mib = 40;
 
 pub fn run(ctx: *common.Context, command: []const u8, args: []const []const u8) !void {
     if (std.mem.eql(u8, command, "clean-build")) return clean(ctx, args);
@@ -179,14 +183,14 @@ pub fn validateElTorito(report: []const u8) !void {
 fn efiIso(ctx: *common.Context, args: []const []const u8) !void {
     try common.requireArgs(args, 3, 4);
     // Rock Ridge stores staging permissions. Match the original media builder
-    // regardless of the caller's umask, including child mtools/xorriso creation.
+    // regardless of the caller's umask, including child xorriso creation.
     const previous_umask = std.c.umask(0o022);
     defer _ = std.c.umask(previous_umask);
     const epoch = try sourceDateEpoch(common.arg(args, 3, ctx.envDefault("SOURCE_DATE_EPOCH", "315532800")));
     try ctx.environ.put("SOURCE_DATE_EPOCH", try ctx.fmt("{d}", .{epoch}));
     try ctx.environ.put("TZ", "UTC");
     try validateEfi(try ctx.read(args[0]));
-    for ([_][]const u8{ "xorriso", "mformat", "mcopy", "mmd" }) |name| if (try ctx.findExecutable(name) == null) return error.MissingMediaTool;
+    if (try ctx.findExecutable("xorriso") == null) return error.MissingMediaTool;
     try prepareStaging(ctx, args[2], &.{args[0]});
     const staged = try ctx.fmt("{s}/EFI/BOOT/BOOTX64.EFI", .{args[2]});
     try ctx.copy(args[0], staged);
@@ -194,14 +198,16 @@ fn efiIso(ctx: *common.Context, args: []const []const u8) !void {
     defer efi_file.close(ctx.io);
     try efi_file.setPermissions(ctx.io, .fromMode(0o644));
     try ctx.parent(args[1]);
-    const esp = try ctx.fmt("{s}/esp.img", .{args[2]});
-    try store(ctx, &.{ esp, "40", "reset" });
-    try ctx.run(&.{ "mformat", "-i", esp, "-N", "0", "-v", "ZIGOS", "::" });
-    try ctx.run(&.{ "mmd", "-i", esp, "::/EFI", "::/EFI/BOOT" });
-    try ctx.run(&.{ "mcopy", "-i", esp, staged, "::/EFI/BOOT/BOOTX64.EFI" });
+    try writeEsp(ctx, try ctx.fmt("{s}/esp.img", .{args[2]}), epoch, &.{.{ .path = "EFI/BOOT/BOOTX64.EFI", .data = try ctx.read(staged) }});
     try ctx.run(&.{ "xorriso", "-as", "mkisofs", "-R", "-J", "-uid", "0", "-gid", "0", "-e", "esp.img", "-no-emul-boot", "--set_all_file_dates", try ctx.fmt("={d}", .{epoch}), "-o", args[1], args[2] });
     try validateElTorito(try checkedReport(ctx, &.{ "xorriso", "-indev", args[1], "-report_el_torito", "plain" }));
     try ctx.print("Validated x86-64 UEFI native boot media: {s}\n", .{args[1]});
+}
+
+/// Writes a deterministic FAT16 EFI system partition image holding `files`.
+pub fn writeEsp(ctx: *common.Context, path: []const u8, epoch: u64, files: []const fat.File) !void {
+    try ctx.parent(path);
+    try fat.writeImage(ctx.io, ctx.allocator, path, esp_size_mib, "ZIGOS", epoch, files);
 }
 
 fn grubIso(ctx: *common.Context, args: []const []const u8) !void {

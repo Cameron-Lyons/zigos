@@ -1668,9 +1668,7 @@ For ISO and full disk-image workflows, install the tools verified by
 `zig build setup-deps`:
 
 - x86-64 EFI-capable GRUB `mkrescue` and modules
-- `xorriso`
-- `mtools`
-- `dosfstools`
+- `xorriso` (the EFI system partition itself is written natively)
 
 `build.zig` rejects any Zig version other than the repo pin. Install Zig 0.17.0
 before setup and invoke it directly as `zig` from `PATH`.
