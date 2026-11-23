@@ -1,9 +1,6 @@
 const abi = @import("core/abi.zig");
 const contract_2026 = @import("contract_2026.zig");
 const cpu_baseline = @import("../arch/cpu_baseline.zig");
-const display_driver_task = @import("drivers/display_driver_task.zig");
-const display_hw = @import("../kernel/drivers/display_hw.zig");
-const compositor_session = @import("platform/compositor_session.zig");
 const endpoint = @import("kernel_api/endpoint.zig");
 const event_wake = @import("../kernel/event_wake.zig");
 const ipc_ring = @import("kernel_api/ipc_ring.zig");
@@ -46,7 +43,6 @@ pub const native_2026 = .{
     .interrupt_driven_idle = event_wake.INTERRUPT_DRIVEN_IDLE and event_wake.WAKES_RUNTIME_OWNER,
     .unified_table_backing = table_backing.HEAP_BACKS_ON_ALL_TARGETS and table_backing.UNIFIED_ALLOCATOR,
     .ring_default_ipc = ipc_ring.DATA_PLANE_USES_SEALED_RINGS and endpoint.PREFERS_SEALED_RING_DATAPLANE and endpoint.AUTO_ATTACHES_DATA_RINGS and endpoint.RINGS_ONLY_DATAPLANE,
-    .present_by_handle = compositor_session.PRESENTS_BY_HANDLE and display_driver_task.PRESENTS_BY_HANDLE and abi.SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE,
     .userspace_xhci_dataplane = xhci_driver_task.USERSPACE_XHCI_DATAPLANE and
         xhci_driver_task.KERNEL_LATCHES_ONLY and
         xhci_driver_task.DISPATCHES_FROM_BOUND_TASK,
@@ -56,8 +52,6 @@ pub const native_2026 = .{
     .single_bootstrap_launch_mode = service_catalog.SINGLE_BOOTSTRAP_LAUNCH_MODE and
         userspace_launch.SINGLE_KERNEL_CONTRACT_LAUNCH,
     .demand_pages_user_objects = shared_memory.REGISTERS_DEMAND_PAGED_MAPPINGS,
-    .arc_scanout_by_handle = display_hw.PROGRAMS_SCANOUT_HANDLE and display_driver_task.ARC_SCANOUT_PREFERRED,
-    .drops_gop_copies = !display_hw.COPIES_GOP_PIXELS,
     .canonical_47_bit_user = contract_2026.floor.canonical_47_bit_user,
     .u64_user_stacks = contract_2026.floor.u64_user_stacks,
     .image_2m_pages = contract_2026.floor.image_2m_pages,
@@ -65,7 +59,6 @@ pub const native_2026 = .{
     .rings_only_ipc = contract_2026.floor.rings_only_ipc,
     .yield_plus_rings = contract_2026.floor.yield_plus_rings,
     .userspace_i225_dataplane = contract_2026.floor.userspace_i225_dataplane,
-    .userspace_gop_dataplane = contract_2026.floor.userspace_gop_dataplane,
     .eight_address_spaces = contract_2026.floor.eight_address_spaces,
     .checkpoint_only_cold_load = contract_2026.floor.checkpoint_only_cold_load,
     .generated_syscall_idl = generated_from_typed_idl and generated_syscall_operations == @typeInfo(abi.NativeOperation).@"enum".field_names.len,

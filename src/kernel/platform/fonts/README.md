@@ -17,10 +17,13 @@ Pinned inputs for `tools/host/unicode.zig`:
 - https://unifoundry.com/pub/unifont/unifont-18.0.01/font-builds/unifont_upper-18.0.01.hex.gz
 - https://www.unifoundry.com/LICENSE.txt (save as `UNIFONT-LICENSE.txt`)
 
-Each sorted 36-byte record contains a little-endian u32 (code point in bits
-0..20; bit 21 means 16 pixels wide, otherwise 8), then sixteen little-endian
-u16 bitmap rows. Unused high bits of narrow rows are zero. The two source
-files contain 114,988 retained glyphs. The generator verifies source hashes.
+The file groups glyphs into sorted runs of consecutive code points that share
+one width. All integers are little-endian: a u32 run count, then each run's
+first code point as a u32, then per run a u16 glyph count, a u16 width (8 or
+16 pixels) and a u32 byte offset into the row data that follows. Each glyph
+has sixteen rows: one byte per row for 8-pixel glyphs, one u16 per row for
+16-pixel glyphs. The two source files contain 114,988 retained glyphs in 3,199
+runs. The generator verifies source hashes.
 
 The scanout renderer centers 8×16 and 16×16 glyphs in one or two 12×20 cells.
 Ambiguous-width 16-pixel symbols fit ten horizontal pixels in a single cell.

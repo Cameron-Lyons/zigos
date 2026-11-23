@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const compositor_session = @import("compositor_session.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
+const yesNo = @import("../core/util.zig").yesNo;
 const principal = @import("../core/principal.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -82,16 +83,13 @@ pub const Framebuffer = struct {
         });
         try self.drawText(&cursor, "WINDOW STRIP");
 
-        var visible_count: usize = 0;
         var index: usize = 0;
         while (index < session.window_count) : (index += 1) {
             const window = session.windowAtOrder(index) orelse continue;
-            if (!window.visible) continue;
-            visible_count += 1;
             try self.drawWindowSummary(&cursor, session, window);
         }
 
-        if (visible_count == 0) {
+        if (session.window_count == 0) {
             try self.drawText(&cursor, "ACTIVE none");
             return;
         }
@@ -217,10 +215,9 @@ pub const Framebuffer = struct {
         if (window.ui_surface_id) |surface_id| {
             if (session.surfacePresentation(surface_id)) |surface| {
                 const presentation = &surface.presentation;
-                try self.drawFmt(cursor, "surface_state revision={d} object={d} bytes={d}", .{
+                try self.drawFmt(cursor, "surface_state revision={d} text={s}", .{
                     presentation.revision,
-                    presentation.buffer_object_id,
-                    presentation.buffer_bytes,
+                    yesNo(surface.text != null),
                 });
             }
         }
@@ -235,7 +232,7 @@ pub const Framebuffer = struct {
         var window_index: usize = 0;
         while (window_index < session.window_count) : (window_index += 1) {
             const window = session.windowAtOrder(window_index) orelse continue;
-            if (!window.visible or window.view_type != .app_panel or window.item_count == 0) continue;
+            if (window.view_type != .app_panel or window.item_count == 0) continue;
             if (!wrote_header) {
                 try self.drawText(cursor, "REVIEW CARDS");
                 wrote_header = true;
@@ -260,8 +257,8 @@ pub const Framebuffer = struct {
         while (item_index < session.item_count) : (item_index += 1) {
             const item = session.itemAtOrder(item_index) orelse continue;
             if (item.window_id != window_id) continue;
-            const object_scope = if (item.object_scope_len == 0) "none" else item.objectScopeSlice();
-            const network_path = if (item.network_path_len == 0) "none" else item.networkPathSlice();
+            const object_scope = if (item.objectScopeSlice().len == 0) "none" else item.objectScopeSlice();
+            const network_path = if (item.networkPathSlice().len == 0) "none" else item.networkPathSlice();
             try self.drawFmt(cursor, "permission kind={s} resource={s} reason={s}", .{
                 @tagName(item.kind),
                 item.resourceSlice(),
@@ -276,7 +273,7 @@ pub const Framebuffer = struct {
             try self.drawFmt(cursor, "permission_decision kind={s} resource={s} decision={s} local={s} lease={d}", .{
                 @tagName(item.kind),
                 item.resourceSlice(),
-                decisionLabel(item.decision),
+                @tagName(item.decision),
                 yesNo(item.decision_local_only),
                 item.decision_lease_ticks,
             });
@@ -335,18 +332,6 @@ fn trimRightSpaces(line: []const u8) []const u8 {
     var end = line.len;
     while (end != 0 and line[end - 1] == ' ') : (end -= 1) {}
     return line[0..end];
-}
-
-fn yesNo(value: bool) []const u8 {
-    return if (value) "yes" else "no";
-}
-
-fn decisionLabel(decision: compositor_session.DecisionState) []const u8 {
-    return switch (decision) {
-        .pending => "pending",
-        .allow => "allow",
-        .deny => "deny",
-    };
 }
 
 fn expectDisplayContains(display: *const Framebuffer, needle: []const u8) !void {
@@ -439,14 +424,10 @@ test "compositor display framebuffer renders windows switching recovery and perm
     try expectDisplayContains(&display, "active_type=full_screen_task_view");
     try expectDisplayContains(&display, "title=Coordinate Trip");
 
-    var presentation = std.mem.zeroes(abi.SurfacePresentation);
-    presentation.surface_id = 31;
-    presentation.revision = 2;
-    presentation.buffer_object_id = 31;
-    presentation.buffer_bytes = 4096;
+    const presentation = abi.SurfacePresentation{ .surface_id = 31, .revision = 2 };
     _ = try session.presentSurface(app_task, &presentation);
     try display.renderSession(&session);
-    try expectDisplayContains(&display, "surface_state revision=2 object=31 bytes=4096");
+    try expectDisplayContains(&display, "surface_state revision=2 text=no");
 
     var snapshot: compositor_session.SessionSnapshot = undefined;
     session.snapshotInto(&snapshot);

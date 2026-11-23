@@ -9,7 +9,6 @@ const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
-const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const input_router_mod = @import("../platform/input_router.zig");
 const trusted_auth = @import("../platform/trusted_auth_entry.zig");
@@ -331,7 +330,7 @@ pub const SessionManager = struct {
         const peer_work = self.servicePeerWork(now_ticks);
         const quote_work = self.servicePeerAttestationWork(now_ticks);
         const runtime = self.runtime_context.taskRuntime().?;
-        const pruned = self.recovery_context.review_compositor_session.pruneSurfacePresentations(runtime);
+        _ = self.recovery_context.review_compositor_session.pruneSurfacePresentations(runtime);
         if (runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
             _ = self.provisionSurfacePresentationCapabilities(now_ticks);
         }
@@ -341,7 +340,8 @@ pub const SessionManager = struct {
         const launched = self.launcher.service(self, now_ticks);
         const identity_work = if (self.identity_owner) |owner| owner.service_requests(owner.context, now_ticks) else false;
         const dispatched = self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
-        if (copied or serviced or launched or owned_launch or dispatched or pruned != 0) _ = desktop_display.present(self.compositorSessionPtr());
+        // Unchanged desktop frames cost one key comparison.
+        desktop_display.present(self.compositorSessionPtr());
         return copied or serviced or launched or owned_launch or dispatched or identity_work or peer_work != 0 or quote_work;
     }
 
@@ -650,12 +650,12 @@ pub const SessionManager = struct {
 
     pub fn bindTrustedAuthentication(self: *SessionManager, entry: *trusted_auth.Entry, now_ticks: u64) void {
         self.input_router.bindTrustedEntry(.{ .authentication = entry }, now_ticks);
-        _ = desktop_display.present(self.compositorSessionPtr());
+        desktop_display.present(self.compositorSessionPtr());
     }
 
     pub fn bindTrustedSetup(self: *SessionManager, entry: *@import("../platform/trusted_setup_entry.zig").Entry, now_ticks: u64) void {
         self.input_router.bindTrustedEntry(.{ .setup = entry }, now_ticks);
-        _ = desktop_display.present(self.compositorSessionPtr());
+        desktop_display.present(self.compositorSessionPtr());
     }
 
     pub fn attachIdentityOwner(self: *SessionManager, io: anytype, config: identity_owner_mod.Config, now_ticks: u64) !*identity_owner_mod.Owner(@TypeOf(io.*)) {
@@ -666,7 +666,7 @@ pub const SessionManager = struct {
         owner.bindDocumentView(try self.owned_documents.ensureView());
         self.identity_owner = owner.attach(&self.input_router, now_ticks);
         self.identity_owner.?.set_document_job(owner, self.owned_documents.creationJob());
-        _ = desktop_display.present(self.compositorSessionPtr());
+        desktop_display.present(self.compositorSessionPtr());
         return owner;
     }
 
@@ -697,14 +697,13 @@ pub const SessionManager = struct {
         const owner = self.identity_owner orelse return error.IdentityUnavailable;
         try owner.review_credential(owner.context, self.kernelPort() orelse return error.KernelUnavailable, request, now);
         self.input_router.synchronizeTrustedInput();
-        _ = desktop_display.present(self.compositorSessionPtr());
+        desktop_display.present(self.compositorSessionPtr());
     }
 
-    fn serviceIdentityOwner(self: *SessionManager, now_ticks: u64) bool {
-        const owner = self.identity_owner orelse return false;
-        const changed = owner.service(owner.context, &self.input_router, now_ticks);
-        const document_changed = self.serviceOwnedDocuments(now_ticks);
-        const before = if (self.input_router.trusted_entry) |entry| entry.revision() else 0;
+    fn serviceIdentityOwner(self: *SessionManager, now_ticks: u64) void {
+        const owner = self.identity_owner orelse return;
+        _ = owner.service(owner.context, &self.input_router, now_ticks);
+        _ = self.serviceOwnedDocuments(now_ticks);
         if (owner.take_credential(owner.context, now_ticks) catch null) |approved| {
             const binding = approved.binding;
             if (self.runtime_context.userspace_executor.bindIdentityChannel(self.userspaceCatalogPtr(), self.runtimePtr(), self.capabilityTablePtr(), approved.task_id, .{
@@ -716,16 +715,14 @@ pub const SessionManager = struct {
             } else owner.revoke_credential(owner.context, approved.task_id, now_ticks);
         }
         self.input_router.synchronizeTrustedInput();
-        return changed or document_changed or before != (if (self.input_router.trusted_entry) |entry| entry.revision() else 0);
     }
 
     pub fn serviceAuthenticationClock(self: *SessionManager, now_ticks: u64) void {
         const entry = self.input_router.trusted_entry orelse return;
-        const revision = entry.revision();
         entry.tick(now_ticks);
         self.input_router.synchronizeTrustedInput();
-        const changed = entry.revision() != revision;
-        if (self.serviceIdentityOwner(now_ticks) or changed) _ = desktop_display.present(self.compositorSessionPtr());
+        self.serviceIdentityOwner(now_ticks);
+        desktop_display.present(self.compositorSessionPtr());
     }
 
     pub fn servicePendingInputWork(self: *SessionManager, now_ticks: u64) usize {
@@ -743,14 +740,14 @@ pub const SessionManager = struct {
         const events_routed = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
         if (self.input_router.trusted_entry) |entry| {
             if (entry.prepareWork(now_ticks)) {
-                _ = desktop_display.present(self.compositorSessionPtr());
+                desktop_display.present(self.compositorSessionPtr());
                 entry.runWork(now_ticks);
                 self.input_router.synchronizeTrustedInput();
-                _ = desktop_display.present(self.compositorSessionPtr());
+                desktop_display.present(self.compositorSessionPtr());
             }
         }
-        const identity_changed = self.serviceIdentityOwner(now_ticks);
-        if (identity_changed or (events_routed != 0 and self.input_router.trusted_view.visible())) _ = desktop_display.present(self.compositorSessionPtr());
+        self.serviceIdentityOwner(now_ticks);
+        desktop_display.present(self.compositorSessionPtr());
         if (!self.runtime_context.constructed) return events_routed;
         const runtime = self.runtime_context.taskRuntime().?;
         const scheduler = self.runtime_context.userspaceScheduler().?;
@@ -1005,7 +1002,7 @@ pub const SessionManager = struct {
             }
         }
         common.printBootMarker(boot_markers.task_session_ready);
-        _ = desktop_display.present(self.compositorSessionPtr());
+        desktop_display.present(self.compositorSessionPtr());
         if (desktop_display.hasPresented()) common.printBootMarker(boot_markers.desktop_framebuffer_ready);
         common.printBootMarker(boot_markers.native_ready);
         printReadyBanner();
@@ -1183,25 +1180,12 @@ pub const SessionManager = struct {
         return true;
     }
 
+    // The first presented revision belongs to the compositor task's own
+    // focused window, so the desktop scans out that task's surface.
     fn proveUserspaceSurfacePresentation(self: *SessionManager, compositor_task: *const task_runtime.TaskRecord) bool {
         if (!self.currentUserspaceSurfacePresentationReady(compositor_task)) return false;
-        const surface_id = compositor_task.ui_surface_id orelse return false;
-        const surface = self.recovery_context.review_compositor_session.surfacePresentation(surface_id) orelse return false;
-
-        var storage: [compositor_display.MIN_WIDTH * compositor_display.MIN_HEIGHT]u8 = undefined;
-        var framebuffer = compositor_display.Framebuffer.init(&storage, compositor_display.MIN_WIDTH, compositor_display.MIN_HEIGHT) catch return false;
-        framebuffer.renderSession(&self.recovery_context.review_compositor_session) catch return false;
-        var expected_buffer: [96]u8 = undefined;
-        const expected = std.fmt.bufPrint(&expected_buffer, "surface_state revision={d} object={d}", .{
-            surface.presentation.revision,
-            surface.presentation.buffer_object_id,
-        }) catch return false;
-        _ = framebuffer.requirePresentation(
-            expected,
-            self.recovery_context.review_compositor_session.visibleWindowCount(),
-            self.recovery_context.review_compositor_session.active_window_id,
-        ) catch return false;
-        return true;
+        const window = self.recovery_context.review_compositor_session.activeWindow() orelse return false;
+        return window.subject_task_id == compositor_task.id and window.ui_surface_id == compositor_task.ui_surface_id;
     }
 
     fn currentUserspaceSurfacePresentationReady(self: *SessionManager, compositor_task: *const task_runtime.TaskRecord) bool {
@@ -1600,10 +1584,10 @@ fn presentSurfaceForKernel(
     context: *anyopaque,
     task: *const task_runtime.TaskRecord,
     presentation: *const abi.SurfacePresentation,
-    text: ?*const abi.SurfaceText,
+    text: *const abi.SurfaceText,
 ) native_kernel.SurfacePresentStatus {
     const session: *compositor_session.Session = @ptrCast(@alignCast(context));
-    return switch (session.presentSurfaceText(task, presentation, text) catch |err| switch (err) {
+    return switch (session.presentKernelValidatedSurfaceText(task, presentation, text) catch |err| switch (err) {
         error.StalePresentation, error.PresentationConflict => return .stale,
         error.SurfaceTableFull, error.OutOfMemory => return .full,
         else => return .invalid_surface,

@@ -322,11 +322,7 @@ test "Notes factory does not reuse a compositor surface retained after runtime r
     defer f.destroy();
     const first = try prepare(f, f.binding, 10);
     const candidate = first.owner;
-    var presentation = std.mem.zeroes(@import("../core/abi.zig").SurfacePresentation);
-    presentation.surface_id = candidate.serial;
-    presentation.revision = 1;
-    presentation.buffer_object_id = 71;
-    presentation.buffer_bytes = 4096;
+    const presentation = @import("../core/abi.zig").SurfacePresentation{ .surface_id = candidate.serial, .revision = 1 };
     _ = try f.compositor.presentSurface(first, &presentation);
     f.rebootRuntime();
     try std.testing.expect(f.compositor.surfacePresentation(candidate.serial) != null);

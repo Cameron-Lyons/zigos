@@ -111,29 +111,17 @@ pub fn dispatchSurfacePresent(
     response_len: usize,
 ) dispatch.DispatchResult {
     const wire = dispatch.decode(abi.SurfacePresentWireRequest, request);
-    var present = component_port.SurfacePresentRequest{
+    if (wire.text_address == 0) return dispatch.invalidRequest();
+    const text_address = @import("std").math.cast(usize, wire.text_address) orelse return dispatch.invalidRequest();
+    const text = dispatch.readUserValue(abi.SurfaceText, memory, text_address) orelse return dispatch.invalidRequest();
+    const present = component_port.SurfacePresentRequest{
         .header = wire.header,
         .presentation_capability_id = wire.presentation_capability_id,
         .presenter_task_id = wire.presenter_task_id,
         .surface_id = wire.surface_id,
-        .fence = wire.fence,
-        .buffer_object_id = wire.buffer_object_id,
-        .buffer_offset = wire.buffer_offset,
-        .buffer_bytes = wire.buffer_bytes,
+        .revision = wire.revision,
+        .text = &text,
     };
-    var text: abi.SurfaceText = undefined;
-    if (wire.text_address != 0) {
-        const address = @import("std").math.cast(usize, wire.text_address) orelse return dispatch.invalidRequest();
-        const encoded = dispatch.readUserValue(abi.SurfaceTextWire, memory, address) orelse return dispatch.invalidRequest();
-        text = .{
-            .window_id = encoded.window_id,
-            .text_length = encoded.text_length,
-            .cursor = encoded.cursor,
-            .state = @bitCast(encoded.state),
-            .text = encoded.text,
-        };
-        present.text = &text;
-    }
     const presented = component_port.invokeGenerated(.surface_present, port, present, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(presented));
 }

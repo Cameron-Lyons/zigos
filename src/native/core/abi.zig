@@ -3,7 +3,6 @@ pub const text_layout = @import("text_layout.zig");
 
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
-pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
 
 pub const InputByte = struct {
     // bytes[1..length] carries one supported UTF-8 scalar (1..4 bytes).
@@ -148,7 +147,6 @@ pub const InputRecvWireRequest = syscall_wire.InputRecvWireRequest;
 pub const SurfacePresentWireRequest = syscall_wire.SurfacePresentWireRequest;
 pub const DeviceDescribeWireRequest = syscall_wire.DeviceDescribeWireRequest;
 pub const DeviceMmioWindowWireRequest = syscall_wire.DeviceMmioWindowWireRequest;
-pub const SurfaceTextWire = syscall_wire.SurfaceTextWire;
 pub const TaskCreateWireRequest = @import("task_create_wire.zig").TaskCreateWireRequest;
 pub const ExecutableImageWireSpec = @import("task_create_wire.zig").ExecutableImageWireSpec;
 pub const CapabilityMintWireRequest = @import("capability_wire.zig").CapabilityMintWireRequest;
@@ -306,16 +304,11 @@ test "input viewport and caret affinity preserve fixed native wire sizes" {
     try std.testing.expect(!text.isCanonical());
 }
 
+// A presented revision of one task surface. Its content is the bounded
+// SurfaceText snapshot; the kernel compositor draws every pixel itself.
 pub const SurfacePresentation = extern struct {
     surface_id: u64,
     revision: u64,
-    buffer_object_id: u64,
-    buffer_offset: u32,
-    buffer_bytes: u32,
-
-    pub fn presentsByHandle(self: *const SurfacePresentation) bool {
-        return self.buffer_object_id != 0 and self.buffer_bytes != 0;
-    }
 };
 
 // Bounded text surfaces are copied once from task-owned memory. The compositor
@@ -493,7 +486,7 @@ pub fn serviceFlagsHas(flags: u16, mask: u16) bool {
 }
 
 pub fn isCanonicalSurfacePresentation(presentation: *const SurfacePresentation) bool {
-    return presentation.surface_id != 0 and presentation.revision != 0 and presentation.presentsByHandle();
+    return presentation.surface_id != 0 and presentation.revision != 0;
 }
 
 test "native ABI keeps all 23 retained opcodes and rejects the removed wait opcode" {
@@ -534,14 +527,13 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expectEqual(@as(usize, 88), ENDPOINT_INLINE_BYTES);
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ResourceDescriptor));
     try std.testing.expectEqual(@as(usize, 56), @sizeOf(InputEventDescriptor));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(InputRecvResponse));
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(SurfacePresentation));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(SurfacePresentation));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(DeviceDescriptor));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceMmioWindowDescriptor));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(BoolResponse));
@@ -555,13 +547,11 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expectEqual(InputByte.text, packet[0]);
     try std.testing.expectEqual(@as(u8, 'a'), packet[1]);
 
-    var presentation = std.mem.zeroes(SurfacePresentation);
-    presentation.surface_id = 9;
-    presentation.revision = 1;
-    presentation.buffer_object_id = 9;
-    presentation.buffer_bytes = 4096;
+    var presentation = SurfacePresentation{ .surface_id = 9, .revision = 1 };
     try std.testing.expect(isCanonicalSurfacePresentation(&presentation));
-    presentation.buffer_object_id = 0;
+    presentation.revision = 0;
+    try std.testing.expect(!isCanonicalSurfacePresentation(&presentation));
+    presentation = .{ .surface_id = 0, .revision = 1 };
     try std.testing.expect(!isCanonicalSurfacePresentation(&presentation));
 }
 

@@ -3,7 +3,6 @@ const ipc_ring = @import("kernel_api/ipc_ring.zig");
 const syscall_surface = @import("kernel_api/syscall_surface.zig");
 const shared_memory = @import("kernel_api/shared_memory.zig");
 const abi = @import("core/abi.zig");
-const display_driver_task = @import("drivers/display_driver_task.zig");
 const network_driver_task = @import("drivers/network_driver_task.zig");
 const storage_driver_task = @import("drivers/storage_driver_task.zig");
 const xhci_driver_task = @import("drivers/xhci_driver_task.zig");
@@ -27,7 +26,6 @@ pub const Floor = struct {
     userspace_nvme_dataplane: bool,
     userspace_i225_dataplane: bool,
     userspace_xhci_dataplane: bool,
-    userspace_gop_dataplane: bool,
     eight_address_spaces: bool,
     checkpoint_only_cold_load: bool,
     trusted_cpu_identity: bool,
@@ -55,9 +53,6 @@ pub const floor: Floor = .{
     .userspace_xhci_dataplane = xhci_driver_task.USERSPACE_XHCI_DATAPLANE and
         xhci_driver_task.KERNEL_LATCHES_ONLY and
         xhci_driver_task.DISPATCHES_FROM_BOUND_TASK,
-    .userspace_gop_dataplane = display_driver_task.USERSPACE_GOP_DATAPLANE and
-        display_driver_task.KERNEL_LATCHES_ONLY and
-        display_driver_task.PRESENTS_BY_HANDLE,
     .eight_address_spaces = userspace_registry.PRODUCTION_ADDRESS_SPACE_COUNT == 8 and
         userspace_registry.DRIVERS_USE_DISTINCT_ADDRESS_SPACES and
         userspace_registry.addressSpaceGroupForServiceClass(.network_stack) != userspace_registry.addressSpaceGroupForServiceClass(.compositor_ui_session) and

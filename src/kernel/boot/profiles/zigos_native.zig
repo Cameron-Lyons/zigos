@@ -9,7 +9,6 @@ const xhci_driver_task = @import("../../../native/drivers/xhci_driver_task.zig")
 const event_wake = @import("../../event_wake.zig");
 const smp = @import("../../smp.zig");
 const framebuffer_hw = @import("../../platform/framebuffer_hw.zig");
-const desktop_display = @import("../../../native/platform/desktop_display.zig");
 
 var recorded_input_report_count: u64 = 0;
 var reported_scheduler_idle = false;
@@ -50,7 +49,6 @@ pub fn run() noreturn {
         if (pending.xhci or pending.timer) {
             harvestInputProof();
             _ = session_manager.servicePendingInputWork(now_ticks);
-            _ = desktop_display.present(session_manager.system().compositorSessionPtr());
         }
 
         x86.cli();

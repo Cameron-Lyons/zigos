@@ -84,7 +84,6 @@
     "userspace_nvme_dataplane",
     "userspace_i225_dataplane",
     "userspace_xhci_dataplane",
-    "userspace_gop_dataplane",
     "eight_address_spaces_pku",
     "efi_only_production_boot",
     "checkpoint_only_cold_load"
@@ -1839,21 +1838,11 @@
         "src/native/platform/compositor_session.zig",
         "src/native/task/task_runtime_service.zig",
         "src/native/platform/native_ux.zig",
-        "src/native/platform/rendered_shell/task_shell_service.zig",
-        "src/native/platform/rendered_shell/shell.zig",
         "src/native/platform/event_ledger.zig",
         "src/native/policy/permission_review_service.zig",
         "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
-        {
-          "file": "src/native/platform/rendered_shell/tests.zig",
-          "name": "task shell service routes controls through compositor service and recovers persistent task state"
-        },
-        {
-          "file": "src/native/platform/rendered_shell/tests.zig",
-          "name": "task shell service rejects out-of-order controls before creating compositor state"
-        },
         {
           "file": "src/native/session/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
@@ -2315,8 +2304,6 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/rendered_shell/production_journey.zig",
-        "src/native/platform/rendered_shell/journey_surface.zig",
-        "src/native/platform/rendered_shell/task_shell_service.zig",
         "src/native/platform/compositor_session.zig",
         "src/native/platform/native_ux.zig",
         "src/native/platform/event_ledger.zig",
@@ -2334,10 +2321,6 @@
         {
           "file": "src/native/platform/compositor_session.zig",
           "name": "compositor service closes task windows during app removal"
-        },
-        {
-          "file": "src/native/platform/rendered_shell/tests.zig",
-          "name": "task shell service rejects out-of-order controls before creating compositor state"
         }
       ]
     },
@@ -2356,7 +2339,6 @@
         "src/native/platform/platform_policy_signals.zig",
         "src/native/task/task_runtime_model.zig",
         "src/native/task/userspace_scheduler.zig",
-        "src/native/platform/rendered_shell.zig",
         "src/native/platform/event_ledger.zig"
       ],
       "negative_tests": [

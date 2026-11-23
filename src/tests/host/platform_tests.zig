@@ -20,7 +20,9 @@ const os_identity = @import("../../native/platform/os_identity.zig");
 const unlock_context = @import("../../native/platform/unlock_context.zig");
 const platform_policy_signals = @import("../../native/platform/platform_policy_signals.zig");
 const recovery_environment = @import("../../native/platform/recovery_environment.zig");
-const rendered_shell = @import("../../native/platform/rendered_shell.zig");
+const booted_system = @import("../../native/platform/rendered_shell/booted_system.zig");
+const humane_shell = @import("../../native/platform/rendered_shell/humane_shell.zig");
+const production_journey = @import("../../native/platform/rendered_shell/production_journey.zig");
 const secure_secret_store = @import("../../native/platform/secure_secret_store.zig");
 const update_health = @import("../../native/platform/update_health.zig");
 
@@ -51,7 +53,10 @@ test "platform host tests import native platform modules" {
     std.testing.refAllDecls(unlock_context);
     std.testing.refAllDecls(platform_policy_signals);
     std.testing.refAllDecls(recovery_environment);
-    std.testing.refAllDecls(rendered_shell);
+    std.testing.refAllDecls(booted_system);
+    std.testing.refAllDecls(humane_shell);
+    std.testing.refAllDecls(production_journey);
+    _ = @import("../../native/platform/rendered_shell/tests.zig");
     std.testing.refAllDecls(secure_secret_store);
     std.testing.refAllDecls(update_health);
 }

@@ -344,7 +344,7 @@ pub fn sendInput(manager: anytype, usage: u8, modifiers: u8, now_ticks: u64) voi
     input_report.?.bytes[0] = modifiers;
     input_report.?.bytes[2] = usage;
     _ = manager.servicePendingInputWork(now_ticks);
-    _ = @import("../../platform/desktop_display.zig").present(manager.compositorSessionPtr());
+    @import("../../platform/desktop_display.zig").present(manager.compositorSessionPtr());
 }
 
 // Use elapsed invariant-clock ticks while exercising the real scheduler-facing

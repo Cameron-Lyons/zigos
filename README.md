@@ -888,9 +888,9 @@ the first-target readiness track remains blocked on real hardware validation.
   Cooperative host tests exercise the actual worker and storage service;
   physical latency and fault/recovery measurements remain pending.
 - Text surfaces use compositor-owned snapshots and the firmware framebuffer in
-  production, with writes limited to changed cells. The shared-buffer handle,
-  revision, and readiness-fence path still records modeled display requests;
-  accelerated scanout and modesetting remain open.
+  production, with writes limited to changed cells. A surface present carries
+  only a surface ID, a revision and the bounded text snapshot; the kernel
+  compositor draws every pixel. Accelerated scanout and modesetting remain open.
 - Local-first sync is modeled as core OS behavior: trusted device graph,
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and
@@ -1251,9 +1251,13 @@ signed-package restore with its normal mutation history reduced the median from
 checksums. Timings include signature verification and exclude fixture preparation
 and result checks.
 
+The desktop recomposes only when the compositor's display revision, trusted
+view or document chrome changes; an unchanged desktop frame costs one key
+comparison, while native identity screens always recompose.
 Text scanout compares visible cell metadata and grapheme bytes independently
 of pool offsets, so recomposing an unchanged Unicode frame causes no pixel
-writes. Damaged cells resolve glyph scaling and cursor coverage into row masks
+writes. Glyph lookup binary-searches a small table of code-point runs and then
+indexes width-packed rows directly. Damaged cells resolve glyph scaling and cursor coverage into row masks
 before writing the framebuffer. The `text-scanout-benchmark` target measures
 full redraws, single-cell edits, and pool reordering on host memory.
 The compositor locates the caret and retains visible rows in one layout pass

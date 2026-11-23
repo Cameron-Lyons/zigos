@@ -123,16 +123,14 @@ pub const AccountingQueryRequest = abi.AccountingQueryWireRequest;
 
 pub const InputRecvRequest = abi.InputRecvWireRequest;
 
+// Built in-kernel from the scalar wire request and a private text copy.
 pub const SurfacePresentRequest = struct {
     header: abi.RequestHeader,
     presentation_capability_id: u64,
     presenter_task_id: u64,
     surface_id: u64,
-    fence: u64,
-    buffer_object_id: u64,
-    buffer_offset: u32,
-    buffer_bytes: u32,
-    text: ?*const abi.SurfaceText = null,
+    revision: u64,
+    text: *const abi.SurfaceText,
 };
 
 pub const DeviceDescribeRequest = abi.DeviceDescribeWireRequest;
@@ -413,12 +411,7 @@ pub const KernelPort = struct {
         now_ticks: u64,
     ) Error!bool {
         try self.validateIncomingHeader(request.header, .surface_present);
-        var presentation = std.mem.zeroes(abi.SurfacePresentation);
-        presentation.surface_id = request.surface_id;
-        presentation.revision = request.fence;
-        presentation.buffer_object_id = request.buffer_object_id;
-        presentation.buffer_offset = request.buffer_offset;
-        presentation.buffer_bytes = request.buffer_bytes;
+        const presentation = abi.SurfacePresentation{ .surface_id = request.surface_id, .revision = request.revision };
         return self.kernel.surfacePresent(
             self.callContext(request.header, request.presentation_capability_id, .{ .task = request.presenter_task_id }),
             request.presenter_task_id,

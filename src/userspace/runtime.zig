@@ -516,10 +516,7 @@ fn surfacePresent(
         .presentation_capability_id = presentation_capability_id,
         .presenter_task_id = task_id,
         .surface_id = presentation.surface_id,
-        .fence = presentation.revision,
-        .buffer_object_id = presentation.buffer_object_id,
-        .buffer_offset = presentation.buffer_offset,
-        .buffer_bytes = presentation.buffer_bytes,
+        .revision = presentation.revision,
         .text_address = @intFromPtr(text),
     };
     const status = trapCall(&request, &response);

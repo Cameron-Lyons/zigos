@@ -50,13 +50,7 @@ pub const State = struct {
     }
 
     pub fn presentation(self: *const State, surface_id: u64) abi.SurfacePresentation {
-        var out = std.mem.zeroes(abi.SurfacePresentation);
-        out.surface_id = surface_id;
-        out.revision = self.revision;
-        out.buffer_object_id = surface_id;
-        out.buffer_offset = 0;
-        out.buffer_bytes = TEXT_CAPACITY;
-        return out;
+        return .{ .surface_id = surface_id, .revision = self.revision };
     }
 
     pub fn presentationText(self: *const State) abi.SurfaceText {
@@ -666,11 +660,8 @@ test "UI surface state serializes a canonical bounded presentation" {
 
     const presentation = state.presentation(91);
     try std.testing.expect(abi.isCanonicalSurfacePresentation(&presentation));
-    try std.testing.expect(presentation.presentsByHandle());
     try std.testing.expectEqual(@as(u64, 91), presentation.surface_id);
-    try std.testing.expectEqual(@as(u64, 91), presentation.buffer_object_id);
     try std.testing.expectEqual(state.revision, presentation.revision);
-    try std.testing.expectEqual(@as(u32, TEXT_CAPACITY), presentation.buffer_bytes);
     try std.testing.expectEqualStrings("x\n", state.textSlice());
     try std.testing.expectEqual(mailbox.UiModelKind.notes, state.model);
     try std.testing.expect(state.flags.dirty);

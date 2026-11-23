@@ -338,20 +338,20 @@ const TestSurfaceReceiver = struct {
     calls: usize = 0,
     last_task_id: u64 = 0,
     last_presentation: abi.SurfacePresentation = std.mem.zeroes(abi.SurfacePresentation),
-    last_text: ?abi.SurfaceText = null,
+    last_text: abi.SurfaceText = .{},
     status: native_kernel.SurfacePresentStatus = .accepted,
 
     fn present(
         context: *anyopaque,
         task: *const task_runtime.TaskRecord,
         presentation: *const abi.SurfacePresentation,
-        text: ?*const abi.SurfaceText,
+        text: *const abi.SurfaceText,
     ) native_kernel.SurfacePresentStatus {
         const self: *TestSurfaceReceiver = @ptrCast(@alignCast(context));
         self.calls += 1;
         self.last_task_id = task.id;
         self.last_presentation = presentation.*;
-        self.last_text = if (text) |content| content.* else null;
+        self.last_text = text.*;
         return self.status;
     }
 };
@@ -1083,20 +1083,15 @@ test "syscall surface copies bounded presentations through task-scoped authority
         .present = TestSurfaceReceiver.present,
     });
 
-    var presentation = std.mem.zeroes(abi.SurfacePresentation);
-    presentation.surface_id = 12;
-    presentation.revision = 3;
-    presentation.buffer_object_id = 12;
-    presentation.buffer_bytes = 4096;
+    var content = abi.SurfaceText{ .state = .{ .model = 1, .selection_anchor = 2 }, .text_length = 5, .cursor = 5 };
+    @memcpy(content.text[0..5], "Draft");
     const request = abi.SurfacePresentWireRequest{
         .header = component_port.makeHeader(.surface_present, app_task.id),
         .presentation_capability_id = presentation_capability.id,
         .presenter_task_id = app_task.id,
-        .surface_id = presentation.surface_id,
-        .fence = presentation.revision,
-        .buffer_object_id = presentation.buffer_object_id,
-        .buffer_offset = presentation.buffer_offset,
-        .buffer_bytes = presentation.buffer_bytes,
+        .surface_id = 12,
+        .revision = 3,
+        .text_address = @intFromPtr(&content),
     };
     var response = std.mem.zeroes(abi.BoolResponse);
     const presented = dispatchRequest(
@@ -1111,19 +1106,17 @@ test "syscall surface copies bounded presentations through task-scoped authority
     try std.testing.expectEqual(@as(u8, 1), response.value);
     try std.testing.expectEqual(@as(usize, 1), receiver.calls);
     try std.testing.expectEqual(app_task.id, receiver.last_task_id);
-    try std.testing.expect(receiver.last_presentation.presentsByHandle());
-    try std.testing.expectEqual(@as(u64, 12), receiver.last_presentation.buffer_object_id);
-
-    var content = abi.SurfaceText{ .state = .{ .model = 1, .selection_anchor = 2 }, .text_length = 5, .cursor = 5 };
-    @memcpy(content.text[0..5], "Draft");
-    var with_text = request;
-    with_text.text_address = @intFromPtr(&content);
-    const text_result = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
-    try std.testing.expectEqual(abi.SyscallStatus.success, text_result.status);
+    try std.testing.expectEqual(abi.SurfacePresentation{ .surface_id = 12, .revision = 3 }, receiver.last_presentation);
     @memset(content.text[0..5], 'x');
     content.state.selection_anchor = 0;
-    try std.testing.expectEqualStrings("Draft", receiver.last_text.?.textSlice());
-    try std.testing.expectEqual(@as(u10, 2), receiver.last_text.?.state.selection_anchor);
+    try std.testing.expectEqualStrings("Draft", receiver.last_text.textSlice());
+    try std.testing.expectEqual(@as(u10, 2), receiver.last_text.state.selection_anchor);
+
+    var with_text = request;
+    with_text.text_address = 0;
+    const missing_text = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, missing_text.status);
+    try std.testing.expectEqual(@as(usize, 1), receiver.calls);
     with_text.text_address = 0x1000;
     const invalid_text = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
     try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, invalid_text.status);
@@ -1131,18 +1124,18 @@ test "syscall surface copies bounded presentations through task-scoped authority
     content.state.selection_anchor = 6;
     const bad_selection = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
     try std.testing.expectEqual(abi.SyscallStatus.not_found, bad_selection.status);
-    try std.testing.expectEqual(@as(usize, 2), receiver.calls);
+    try std.testing.expectEqual(@as(usize, 1), receiver.calls);
     content.state.selection_anchor = 5;
     content.state.reserved = 1;
     const reserved_selection = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
     try std.testing.expectEqual(abi.SyscallStatus.not_found, reserved_selection.status);
-    try std.testing.expectEqual(@as(usize, 2), receiver.calls);
+    try std.testing.expectEqual(@as(usize, 1), receiver.calls);
     content.state.reserved = 0;
     content.text_length = 513;
     const oversized_text = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
     try std.testing.expectEqual(abi.SyscallStatus.not_found, oversized_text.status);
-    try std.testing.expectEqual(@as(usize, 2), receiver.calls);
-    receiver.calls = 1;
+    try std.testing.expectEqual(@as(usize, 1), receiver.calls);
+    content.text_length = 5;
 
     receiver.status = .duplicate;
     response = std.mem.zeroes(abi.BoolResponse);
@@ -1199,7 +1192,7 @@ test "syscall surface copies bounded presentations through task-scoped authority
     try std.testing.expectEqual(@as(usize, 4), receiver.calls);
 
     var malformed = request;
-    malformed.buffer_object_id = 0;
+    malformed.revision = 0;
     const rejected = dispatchRequest(
         &test_kernel.port,
         app_task.id,

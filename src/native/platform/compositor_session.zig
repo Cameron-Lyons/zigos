@@ -1,13 +1,11 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
-const binary_cursor = @import("binary_cursor");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const capability = @import("../kernel_api/capability.zig");
 const humane_permissions = @import("../policy/humane_permissions.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
-const display_driver_task = @import("../drivers/display_driver_task.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service = @import("../task/task_runtime_service.zig");
 const units = @import("../core/units.zig");
@@ -28,37 +26,27 @@ pub const MAX_REASON_BYTES: usize = 128;
 pub const MAX_RESOURCE_BYTES: usize = 96;
 pub const MAX_WINDOW_DETAIL_BYTES: usize = 96;
 pub const MAX_PRESENTED_SURFACES: usize = MAX_WINDOWS;
-pub const SERVICE_ENDPOINT_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
-pub const COMPACT_RECORD_METADATA = true;
-pub const COMPACT_SESSION_COUNT_METADATA = true;
-pub const COMPACT_REVIEW_LEASE_DURATIONS = true;
-pub const HEAP_BACKED_WINDOW_STATE_ON_FREESTANDING = true;
-pub const PRESENTS_BY_HANDLE = display_driver_task.PRESENTS_BY_HANDLE;
-pub const WINDOW_ALLOCATION_INDEX_RELOOKUPS: u8 = 0;
-pub const MODAL_REVIEWER_INDEX_RELOOKUPS: u8 = 0;
-pub const STEADY_SURFACE_PRIMARY_INDEX_LOOKUPS: u8 = 1;
-pub const STEADY_SURFACE_TASK_INDEX_LOOKUPS: u8 = 0;
-pub const SURFACE_LIFECYCLE_BACKING_RELOOKUPS: u8 = 0;
-pub const SURFACE_REMOVAL_TASK_INDEX_LOOKUPS: u8 = 1;
 pub const WindowOrderIndex = u8;
 pub const SessionCount = u8;
 pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
-pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 512;
+pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 248;
 // Eight bounded text snapshots add 4,288 bytes; freestanding resident handles
 // stay unchanged because the surface arena is allocated on first presentation.
-pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_200;
-pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_208;
-pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 28_216;
-pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 208;
+pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 19_560;
+pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 19_568;
+pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 19_584;
+pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 216;
 pub const SESSION_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_SESSION_SIZE_CEILING_BYTES
 else
     HOST_SESSION_SIZE_CEILING_BYTES;
 const LEASE_SUMMARY_BUFFER_BYTES: usize = 96;
-const heap_backed_window_state = builtin.target.os.tag == .freestanding and HEAP_BACKED_WINDOW_STATE_ON_FREESTANDING;
+// BSP-owned like every compositor session; see Session.display_revision.
+var display_revision_sequence: u64 = 0;
+// Freestanding sessions keep only handles resident and allocate each table on first use.
+const heap_backed_window_state = builtin.target.os.tag == .freestanding;
 const heap_backed_review_items = builtin.target.os.tag == .freestanding;
-pub const HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING = true;
-const heap_backed_surface_arena = builtin.target.os.tag == .freestanding and HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING;
+const heap_backed_surface_arena = builtin.target.os.tag == .freestanding;
 
 comptime {
     if (MAX_WINDOWS > std.math.maxInt(WindowOrderIndex) or
@@ -108,7 +96,6 @@ pub const WindowRecord = struct {
     subject_task_id: u64 = 0,
     ui_surface_id: ?u64 = null,
     view_type: ViewType = .app_panel,
-    visible: bool = true,
     modal: bool = true,
     workspace_id: u64 = 0,
     bundle_id_len: u8 = 0,
@@ -147,16 +134,10 @@ pub const WindowRecord = struct {
 pub const ReviewItemRecord = struct {
     window_id: u64 = 0,
     kind: manifest.PermissionKind = .object_access,
-    label_len: u8 = 0,
-    label: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     resource_len: u8 = 0,
     resource: [MAX_RESOURCE_BYTES]u8 = @as([MAX_RESOURCE_BYTES]u8, @splat(0)),
     reason_len: u8 = 0,
     reason: [MAX_REASON_BYTES]u8 = @as([MAX_REASON_BYTES]u8, @splat(0)),
-    object_scope_len: u8 = 0,
-    object_scope: [MAX_RESOURCE_BYTES]u8 = @as([MAX_RESOURCE_BYTES]u8, @splat(0)),
-    network_path_len: u8 = 0,
-    network_path: [MAX_RESOURCE_BYTES]u8 = @as([MAX_RESOURCE_BYTES]u8, @splat(0)),
     requested_local_only: bool = false,
     requested_lease_ticks: manifest.LeaseTicks = 0,
     decision: DecisionState = .pending,
@@ -165,7 +146,7 @@ pub const ReviewItemRecord = struct {
     decision_lease_ticks: manifest.LeaseTicks = 0,
 
     pub fn labelSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.label[0..@as(usize, self.label_len)];
+        return manifest.permissionDisplayLabel(self.kind);
     }
 
     pub fn resourceSlice(self: *const ReviewItemRecord) []const u8 {
@@ -176,12 +157,13 @@ pub const ReviewItemRecord = struct {
         return self.reason[0..@as(usize, self.reason_len)];
     }
 
+    // Scope and route are views of the reviewed resource for the matching kind.
     pub fn objectScopeSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.object_scope[0..@as(usize, self.object_scope_len)];
+        return if (self.kind == .object_access) self.resourceSlice() else "";
     }
 
     pub fn networkPathSlice(self: *const ReviewItemRecord) []const u8 {
-        return self.network_path[0..@as(usize, self.network_path_len)];
+        return if (self.kind == .network_egress) self.resourceSlice() else "";
     }
 
     comptime {
@@ -193,7 +175,6 @@ pub const ReviewItemRecord = struct {
 
 pub const SurfaceRecord = struct {
     task_id: u64 = 0,
-    presentation_count: u64 = 0,
     presentation: abi.SurfacePresentation = std.mem.zeroes(abi.SurfacePresentation),
     text: ?abi.SurfaceText = null,
 };
@@ -207,8 +188,6 @@ pub const Error = error{
     TaskNotFound,
     InvalidSurface,
     MalformedRequest,
-    RequestTooLarge,
-    ResponseTooLarge,
     RecoveryStateMissing,
     NoVisibleWindows,
     SurfaceTableFull,
@@ -223,11 +202,6 @@ const NO_WINDOW_ORDER_INDEX: WindowOrderIndex = @intCast(MAX_WINDOWS);
 const REVIEW_ITEM_INDEX_CAPACITY: usize = MAX_REVIEW_ITEMS * 2;
 const SURFACE_INDEX_CAPACITY: usize = MAX_PRESENTED_SURFACES * 2;
 const NO_SURFACE_SLOT_INDEX: u16 = std.math.maxInt(u16);
-const WIRE_MAGIC_REQUEST = [_]u8{ 'Z', 'U', 'X', '2' };
-const WIRE_MAGIC_RESPONSE = [_]u8{ 'Z', 'U', 'R', '1' };
-const RequestWriter = binary_cursor.Writer(Error, error.RequestTooLarge);
-const ResponseWriter = binary_cursor.Writer(Error, error.ResponseTooLarge);
-const WireReader = binary_cursor.Reader(Error, error.MalformedRequest);
 
 pub const WindowSlot = struct {
     in_use: bool = false,
@@ -288,12 +262,6 @@ pub const WindowState = struct {
 };
 
 const WindowStateStorage = if (heap_backed_window_state) ?*WindowState else WindowState;
-
-pub const window_state_layout = .{
-    .heap_backs_state_on_freestanding = HEAP_BACKED_WINDOW_STATE_ON_FREESTANDING,
-    .freestanding_handle_size_bytes = @sizeOf(?*WindowState),
-    .backing_size_bytes = @sizeOf(WindowState),
-};
 
 fn initializeSurfaceArena(surfaces: *SurfaceArena) void {
     @memset(std.mem.asBytes(surfaces), 0);
@@ -377,7 +345,6 @@ pub const SessionSnapshot = struct {
     windows: WindowArena = WindowArena.init(),
     window_order: [MAX_WINDOWS]u64 = @as([MAX_WINDOWS]u64, @splat(0)),
     window_count: SessionCount = 0,
-    visible_window_count: SessionCount = 0,
     items: ReviewItemArena = ReviewItemArena.init(),
     item_order: [MAX_REVIEW_ITEMS]u64 = @as([MAX_REVIEW_ITEMS]u64, @splat(0)),
     item_count: SessionCount = 0,
@@ -425,7 +392,6 @@ pub const Session = struct {
     active_window_id: u64 = 0,
     window_state: WindowStateStorage = if (heap_backed_window_state) null else WindowState.init(),
     window_count: SessionCount = 0,
-    visible_window_count: SessionCount = 0,
     review_items: ReviewItemBackingStorage = if (heap_backed_review_items) null else ReviewItemBacking.init(),
     item_count: SessionCount = 0,
     surfaces: SurfaceArenaBacking = if (heap_backed_surface_arena) null else SurfaceArena.init(),
@@ -436,15 +402,31 @@ pub const Session = struct {
     // miss the pruning cache. The other half tracks trusted focus changes.
     last_surface_prune_generation: u32 = 0,
     focus_epoch: u32 = 1,
+    // Changes whenever anything the desktop view draws changes, so an
+    // unchanged frame is never recomposed. Values come from one kernel-wide
+    // sequence: a reset session cannot repeat a revision still on screen.
+    display_revision: u64 = 0,
 
     pub fn init() Session {
         return .{};
+    }
+
+    fn touchDisplay(self: *Session) void {
+        display_revision_sequence += 1;
+        self.display_revision = display_revision_sequence;
+    }
+
+    // Binding or detaching native identity chrome changes the composed frame.
+    pub fn setTrustedView(self: *Session, view: ?*const @import("trusted_identity_entry.zig").View) void {
+        self.trusted_view = view;
+        self.touchDisplay();
     }
 
     fn changeFocus(self: *Session, window_id: u64) void {
         if (self.active_window_id == window_id) return;
         self.focus_epoch +|= 1;
         self.active_window_id = window_id;
+        self.touchDisplay();
     }
 
     comptime {
@@ -462,15 +444,15 @@ pub const Session = struct {
         self.releaseSurfaceArena();
         self.changeFocus(0);
         self.window_count = 0;
-        self.visible_window_count = 0;
         self.item_count = 0;
+        self.touchDisplay();
     }
 
     pub fn reset(self: *Session) void {
         const trusted_view = self.trusted_view;
         self.deinit();
-        self.* = init();
-        self.trusted_view = trusted_view;
+        self.* = .{ .trusted_view = trusted_view };
+        self.touchDisplay();
     }
 
     fn windowState(self: *Session) ?*WindowState {
@@ -592,7 +574,6 @@ pub const Session = struct {
         window.subject_task_id = app_task.id;
         window.ui_surface_id = surface_id;
         window.view_type = .app_panel;
-        window.visible = true;
         window.modal = true;
         window.bundle_id_len = @intCast(copyText(&window.bundle_id, bundle.bundle_id));
         window.display_name_len = @intCast(copyText(&window.display_name, bundle.display_name));
@@ -632,15 +613,6 @@ pub const Session = struct {
         return self.createWindow(.full_screen_task_view, app_task, 0, "", "", title, "", false);
     }
 
-    pub fn openSyncConflictReview(
-        self: *Session,
-        app_task: *const task_runtime.TaskRecord,
-        workspace_id: u64,
-        detail: []const u8,
-    ) Error!*WindowRecord {
-        return self.createWindow(.sync_conflict_review, app_task, workspace_id, "", "", "Sync conflicts", detail, true);
-    }
-
     pub fn ensureReviewItem(
         self: *Session,
         window_id: u64,
@@ -661,17 +633,15 @@ pub const Session = struct {
         item.* = zeroItem();
         item.window_id = window_id;
         item.kind = request.kind;
-        item.label_len = @intCast(copyText(&item.label, manifest.permissionDisplayLabel(request.kind)));
         item.resource_len = @intCast(copyText(&item.resource, request.resource));
         item.reason_len = @intCast(deriveReason(&item.reason, bundle, request));
-        item.object_scope_len = @intCast(deriveObjectScope(&item.object_scope, request));
-        item.network_path_len = @intCast(deriveNetworkPath(&item.network_path, request));
         item.requested_local_only = request.local_only;
         item.requested_lease_ticks = request.max_lease_ticks;
         self.indexReviewItemForWindow(slot_index, item);
         review_items.item_order[@as(usize, self.item_count)] = key;
         self.item_count += 1;
         window.item_count += 1;
+        self.touchDisplay();
         return item;
     }
 
@@ -688,27 +658,52 @@ pub const Session = struct {
         item.decision_local_only = allow and local_only;
         item.decision_has_lease = lease_ticks != null;
         item.decision_lease_ticks = lease_ticks orelse 0;
+        self.touchDisplay();
         return item;
     }
 
+    // Contentless presents record ordered revisions without any text.
     pub fn presentSurface(
         self: *Session,
         task: *const task_runtime.TaskRecord,
         presentation: *const abi.SurfacePresentation,
     ) Error!PresentResult {
-        return self.presentSurfaceText(task, presentation, null);
+        if (!abi.isCanonicalSurfacePresentation(presentation)) return error.MalformedPresentation;
+        return self.storePresentation(task, presentation, null);
     }
 
     pub fn presentSurfaceText(
         self: *Session,
         task: *const task_runtime.TaskRecord,
         presentation: *const abi.SurfacePresentation,
+        text: *const abi.SurfaceText,
+    ) Error!PresentResult {
+        if (!abi.isCanonicalSurfacePresentation(presentation) or !text.isCanonical()) return error.MalformedPresentation;
+        return self.storePresentation(task, presentation, text);
+    }
+
+    // The kernel validates canonical form on its private copies before it
+    // hands them to the compositor. Task, surface and window binding are
+    // still checked here, because the kernel does not know compositor windows.
+    pub fn presentKernelValidatedSurfaceText(
+        self: *Session,
+        task: *const task_runtime.TaskRecord,
+        presentation: *const abi.SurfacePresentation,
+        text: *const abi.SurfaceText,
+    ) Error!PresentResult {
+        if (builtin.mode == .debug) std.debug.assert(abi.isCanonicalSurfacePresentation(presentation) and text.isCanonical());
+        return self.storePresentation(task, presentation, text);
+    }
+
+    fn storePresentation(
+        self: *Session,
+        task: *const task_runtime.TaskRecord,
+        presentation: *const abi.SurfacePresentation,
         text: ?*const abi.SurfaceText,
     ) Error!PresentResult {
-        if (task.id == 0 or task.state != .active or !abi.isCanonicalSurfacePresentation(presentation)) return error.MalformedPresentation;
+        if (task.id == 0 or task.state != .active) return error.MalformedPresentation;
         if (task.ui_surface_id == null or task.ui_surface_id.? != presentation.surface_id) return error.InvalidSurface;
         if (text) |content| {
-            if (!content.isCanonical()) return error.MalformedPresentation;
             if (content.window_id != 0) {
                 const window = self.findWindowConst(content.window_id) orelse return error.InvalidSurface;
                 if (window.subject_task_id != task.id or window.ui_surface_id != presentation.surface_id) return error.InvalidSurface;
@@ -725,14 +720,12 @@ pub const Session = struct {
                 const previous_revision = slot.surface.presentation.revision;
                 if (presentation.revision < previous_revision) return error.StalePresentation;
                 if (presentation.revision == previous_revision) {
-                    if (std.meta.eql(slot.surface.presentation, presentation.*) and
-                        std.meta.eql(slot.surface.text, if (text) |content| content.* else null)) return .duplicate;
+                    if (std.meta.eql(slot.surface.text, if (text) |content| content.* else null)) return .duplicate;
                     return error.PresentationConflict;
                 }
                 slot.surface.presentation = presentation.*;
                 slot.surface.text = if (text) |content| content.* else null;
-                slot.surface.presentation_count +|= 1;
-                if (text == null) _ = display_driver_task.presentHandle(scanoutFromPresentation(presentation));
+                self.touchDisplay();
                 return .accepted;
             }
         }
@@ -744,13 +737,12 @@ pub const Session = struct {
         const slot_index = surfaces.reserveIndex(presentation.surface_id) orelse return error.SurfaceTableFull;
         surfaces.slots[slot_index].surface = .{
             .task_id = task.id,
-            .presentation_count = 1,
             .presentation = presentation.*,
             .text = if (text) |content| content.* else null,
         };
         self.surface_task_index.insertAbsent(surfaceTaskKey(task.id), slot_index);
         self.linkActiveSurface(surfaces, slot_index);
-        if (text == null) _ = display_driver_task.presentHandle(scanoutFromPresentation(presentation));
+        self.touchDisplay();
         return .accepted;
     }
 
@@ -794,6 +786,7 @@ pub const Session = struct {
         return removed;
     }
 
+    // Callers that change a field the desktop draws must touch the display.
     pub fn findWindow(self: *Session, window_id: u64) ?*WindowRecord {
         const window_state = self.windowState() orelse return null;
         const slot = window_state.windows.get(window_id) orelse return null;
@@ -844,7 +837,6 @@ pub const Session = struct {
         const window_state = self.windowStateConst() orelse return false;
         for (window_state.window_order[0..@as(usize, self.window_count)]) |window_id| {
             const window = self.findWindowConst(window_id) orelse continue;
-            if (!window.visible) continue;
             _ = renderWindowToBuffer(buffer, window) catch return false;
             return true;
         }
@@ -897,7 +889,7 @@ pub const Session = struct {
     }
 
     pub fn visibleWindowCount(self: *const Session) usize {
-        return @intCast(self.visible_window_count);
+        return self.window_count;
     }
 
     pub fn taskOwnsVisibleWindow(self: *const Session, task_id: u64) bool {
@@ -923,13 +915,10 @@ pub const Session = struct {
     }
 
     pub fn switchVisible(self: *Session, direction: SwitchDirection) Error!SwitchResult {
-        if (self.visible_window_count == 0) return error.NoVisibleWindows;
+        if (self.window_count == 0) return error.NoVisibleWindows;
         const window_state = self.windowState() orelse
             native_util.impossibleByInvariant("visible compositor windows retain window state");
-        if (self.visible_window_count != self.window_count) {
-            native_util.impossibleByInvariant("every live compositor window participates in visible order");
-        }
-        const visible_window_count: usize = self.visible_window_count;
+        const visible_window_count: usize = self.window_count;
 
         const target_index = if (self.activeWindowOrderIndex()) |current|
             switch (direction) {
@@ -943,7 +932,7 @@ pub const Session = struct {
         const window_id = window_state.window_order[target_index];
         const slot = window_state.windows.get(window_id) orelse
             native_util.impossibleByInvariant("visible window order points at a live window");
-        if (@as(usize, slot.order_index) != target_index or !slot.window.visible) {
+        if (@as(usize, slot.order_index) != target_index) {
             native_util.impossibleByInvariant("visible window order index points at the expected window");
         }
         self.changeFocus(window_id);
@@ -987,8 +976,6 @@ pub const Session = struct {
 
     pub fn switchView(self: *Session, window_id: u64) Error!*WindowRecord {
         const window = self.findWindow(window_id) orelse return error.WindowNotFound;
-        if (!window.visible) self.visible_window_count += 1;
-        window.visible = true;
         self.changeFocus(window.id);
         return window;
     }
@@ -1001,7 +988,6 @@ pub const Session = struct {
             .windows = if (window_state) |state| state.windows else WindowArena.init(),
             .window_order = if (window_state) |state| state.window_order else @as([MAX_WINDOWS]u64, @splat(0)),
             .window_count = self.window_count,
-            .visible_window_count = self.visible_window_count,
             .items = undefined,
             .item_order = undefined,
             .item_count = self.item_count,
@@ -1040,10 +1026,10 @@ pub const Session = struct {
         const surfaces = if (stored.surfaces.claimedCount() == 0) null else try self.ensureSurfaceArena();
         errdefer if (!retained_surfaces and surfaces != null) self.releaseSurfaceArena();
         self.focus_epoch +|= 1;
+        self.touchDisplay();
         self.next_window_id = stored.next_window_id;
         self.changeFocus(stored.active_window_id);
         self.window_count = stored.window_count;
-        self.visible_window_count = stored.visible_window_count;
         self.item_count = stored.item_count;
         self.surface_task_index = stored.surface_task_index;
         self.active_surface_head = stored.active_surface_head;
@@ -1089,7 +1075,6 @@ pub const Session = struct {
         window.subject_task_id = app_task.id;
         window.ui_surface_id = surface_id;
         window.view_type = view_type;
-        window.visible = true;
         window.modal = modal;
         window.workspace_id = workspace_id;
         window.bundle_id_len = @intCast(copyText(&window.bundle_id, bundle_id));
@@ -1108,6 +1093,7 @@ pub const Session = struct {
         if (window_state.windows.countInUse() >= MAX_WINDOWS) return error.WindowTableFull;
         const slot_index = window_state.windows.reserveIndex(window_id) orelse return error.WindowTableFull;
         self.next_window_id +%= 1;
+        self.touchDisplay();
         const slot = &window_state.windows.slots[slot_index];
         slot.window = zeroWindow();
         slot.window.id = window_id;
@@ -1115,7 +1101,6 @@ pub const Session = struct {
         slot.order_index = @intCast(order_index);
         window_state.window_order[order_index] = window_id;
         self.window_count += 1;
-        if (slot.window.visible) self.visible_window_count += 1;
         return .{ .slot_index = slot_index, .window = &slot.window };
     }
 
@@ -1175,7 +1160,7 @@ pub const Session = struct {
         if (slot_index == indexed_arena.no_index) return false;
         if (slot_index >= MAX_WINDOWS) native_util.impossibleByInvariant("task ownership index points outside window slots");
         const slot = &window_state.windows.slots[slot_index];
-        if (!slot.in_use or !slot.window.visible) native_util.impossibleByInvariant("task ownership index points at an inactive window");
+        if (!slot.in_use) native_util.impossibleByInvariant("task ownership index points at an inactive window");
         const indexed_task_id = if (reviewer) slot.window.reviewer_task_id else slot.window.subject_task_id;
         if (indexed_task_id != task_id) native_util.impossibleByInvariant("task ownership index points at the wrong task");
         return true;
@@ -1242,6 +1227,7 @@ pub const Session = struct {
         }
         self.surface_task_index.remove(task_key);
         self.unlinkActiveSurface(surfaces, slot_index);
+        self.touchDisplay();
         return surfaces.removeIndex(slot_index);
     }
 
@@ -1253,13 +1239,13 @@ pub const Session = struct {
         const window = &slot.window;
         const window_id = window.id;
 
+        self.touchDisplay();
         self.removeReviewItemsForWindow(window_id);
         if (window.bundle_id_len != 0) {
             window_state.task_bundle_index.remove(taskBundleKey(window.subject_task_id, window.bundleIdSlice()));
         }
         self.removeWindowFromTaskIndex(slot_index, window);
         self.removeWindowFromReviewerIndex(slot_index, window);
-        if (window.visible and self.visible_window_count != 0) self.visible_window_count -= 1;
         self.removeWindowOrderAt(@intCast(slot.order_index), window_id);
         _ = window_state.windows.removeIndex(slot_index);
         if (self.window_count == 0) self.releaseWindowState();
@@ -1355,7 +1341,6 @@ pub const Session = struct {
         if (self.window_count == 0) return 0;
         const window = self.windowAtOrder(0) orelse
             native_util.impossibleByInvariant("non-empty compositor order has a first window");
-        if (!window.visible) native_util.impossibleByInvariant("first live compositor window is visible");
         return window.id;
     }
 };
@@ -1413,12 +1398,6 @@ pub const Service = struct {
         response.visible_window_count = @intCast(self.session.visibleWindowCount());
         response.review_item_count = @intCast(self.session.item_count);
         return response;
-    }
-
-    pub fn dispatchPayload(self: *Service, payload: []const u8, out: []u8) Error![]const u8 {
-        const request = try decodeRequest(payload);
-        const response = self.dispatch(request);
-        return encodeResponse(out, response);
     }
 
     pub fn switchVisible(self: *Service, direction: SwitchDirection) Error!SwitchResult {
@@ -1492,127 +1471,13 @@ pub const Service = struct {
     }
 };
 
-pub fn encodeRequest(buffer: []u8, request: ServiceRequest) Error![]const u8 {
-    var writer = RequestWriter{ .buffer = buffer };
-    try writer.writeBytes(&WIRE_MAGIC_REQUEST);
-    try writer.writeByte(@backingInt(request.operation));
-    try writer.writeByte(@backingInt(request.view_type));
-    try writer.writeByte(@backingInt(request.permission_kind));
-    try writer.writeByte(requestFlags(request));
-    try writer.writeU64(request.subject_task_id);
-    try writer.writeU64(request.reviewer_task_id);
-    try writer.writeU64(request.window_id);
-    try writer.writeU64(request.workspace_id);
-    try writer.writeU32(request.lease_ticks);
-    try writer.writeU32(request.max_lease_ticks);
-    try writeText(&writer, request.bundle_id);
-    try writeText(&writer, request.display_name);
-    try writeText(&writer, request.resource);
-    try writeText(&writer, request.detail);
-    try writer.writeByte(@backingInt(request.egress_intent.kind));
-    try writeText(&writer, request.egress_intent.object);
-    try writeText(&writer, request.egress_intent.principal);
-    try writeText(&writer, request.egress_intent.service);
-    try writeText(&writer, request.egress_intent.event_type);
-    return buffer[0..writer.offset];
-}
-
-pub fn decodeRequest(payload: []const u8) Error!ServiceRequest {
-    var reader = WireReader{ .buffer = payload };
-    if (!std.mem.eql(u8, try reader.readSlice(WIRE_MAGIC_REQUEST.len), &WIRE_MAGIC_REQUEST)) return error.MalformedRequest;
-    const operation = std.enums.fromInt(Operation, try reader.readByte()) orelse return error.MalformedRequest;
-    const view_type = std.enums.fromInt(ViewType, try reader.readByte()) orelse return error.MalformedRequest;
-    const permission_kind = std.enums.fromInt(manifest.PermissionKind, try reader.readByte()) orelse return error.MalformedRequest;
-    const flags = try reader.readByte();
-    const subject_task_id = try reader.readU64();
-    const reviewer_task_id = try reader.readU64();
-    const window_id = try reader.readU64();
-    const workspace_id = try reader.readU64();
-    const lease_ticks = try reader.readU32();
-    const max_lease_ticks = try reader.readU32();
-    const bundle_id = try readText(&reader);
-    const display_name = try readText(&reader);
-    const resource = try readText(&reader);
-    const detail = try readText(&reader);
-    const egress_intent_kind = std.enums.fromInt(manifest.DataEgressIntentKind, try reader.readByte()) orelse return error.MalformedRequest;
-    const egress_intent_object = try readText(&reader);
-    const egress_intent_principal = try readText(&reader);
-    const egress_intent_service = try readText(&reader);
-    const egress_intent_event_type = try readText(&reader);
-    if (!reader.eof()) return error.MalformedRequest;
-    return .{
-        .operation = operation,
-        .view_type = view_type,
-        .permission_kind = permission_kind,
-        .allow = (flags & 0x01) != 0,
-        .local_only = (flags & 0x02) != 0,
-        .required = (flags & 0x04) != 0,
-        .has_lease = (flags & 0x08) != 0,
-        .subject_task_id = subject_task_id,
-        .reviewer_task_id = reviewer_task_id,
-        .window_id = window_id,
-        .workspace_id = workspace_id,
-        .lease_ticks = lease_ticks,
-        .max_lease_ticks = max_lease_ticks,
-        .bundle_id = bundle_id,
-        .display_name = display_name,
-        .resource = resource,
-        .detail = detail,
-        .egress_intent = .{
-            .kind = egress_intent_kind,
-            .object = egress_intent_object,
-            .principal = egress_intent_principal,
-            .service = egress_intent_service,
-            .event_type = egress_intent_event_type,
-        },
-    };
-}
-
-pub fn encodeResponse(buffer: []u8, response: ServiceResponse) Error![]const u8 {
-    var writer = ResponseWriter{ .buffer = buffer };
-    try writer.writeBytes(&WIRE_MAGIC_RESPONSE);
-    try writer.writeByte(@backingInt(response.operation));
-    try writer.writeByte(@backingInt(response.status));
-    try writer.writeByte(@backingInt(response.decision));
-    try writer.writeByte(if (response.recovered) 1 else 0);
-    try writer.writeU64(response.window_id);
-    try writer.writeU64(response.active_window_id);
-    try writer.writeU16(response.visible_window_count);
-    try writer.writeU16(response.review_item_count);
-    return buffer[0..writer.offset];
-}
-
-pub fn decodeResponse(payload: []const u8) Error!ServiceResponse {
-    var reader = WireReader{ .buffer = payload };
-    if (!std.mem.eql(u8, try reader.readSlice(WIRE_MAGIC_RESPONSE.len), &WIRE_MAGIC_RESPONSE)) return error.MalformedRequest;
-    const operation = std.enums.fromInt(Operation, try reader.readByte()) orelse return error.MalformedRequest;
-    const status = std.enums.fromInt(ServiceStatus, try reader.readByte()) orelse return error.MalformedRequest;
-    const decision = std.enums.fromInt(DecisionState, try reader.readByte()) orelse return error.MalformedRequest;
-    const recovered = (try reader.readByte()) != 0;
-    const window_id = try reader.readU64();
-    const active_window_id = try reader.readU64();
-    const visible_window_count = try reader.readU16();
-    const review_item_count = try reader.readU16();
-    if (!reader.eof()) return error.MalformedRequest;
-    return .{
-        .operation = operation,
-        .status = status,
-        .decision = decision,
-        .recovered = recovered,
-        .window_id = window_id,
-        .active_window_id = active_window_id,
-        .visible_window_count = visible_window_count,
-        .review_item_count = review_item_count,
-    };
-}
-
 pub fn renderWindowToBuffer(buffer: []u8, window: *const WindowRecord) ![]const u8 {
     const surface_id = window.ui_surface_id orelse 0;
     var used: usize = 0;
     used += (try std.fmt.bufPrint(buffer[used..], "UI window: id={d} surface={d} type={s} modal={s} title={s} bundle={s} display={s}", .{
         window.id,
         surface_id,
-        viewTypeLabel(window.view_type),
+        @tagName(window.view_type),
         yesNo(window.modal),
         window.titleSlice(),
         window.bundleIdSlice(),
@@ -1632,9 +1497,9 @@ pub fn renderReviewItemToBuffer(
     window_id: u64,
     item: *const ReviewItemRecord,
 ) ![]const u8 {
-    const object_scope = if (item.object_scope_len == 0) "none" else item.objectScopeSlice();
-    const network_path = if (item.network_path_len == 0) "none" else item.networkPathSlice();
-    const data_leaves = if (item.kind == .network_egress and item.network_path_len != 0)
+    const object_scope = if (item.objectScopeSlice().len == 0) "none" else item.objectScopeSlice();
+    const network_path = if (item.networkPathSlice().len == 0) "none" else item.networkPathSlice();
+    const data_leaves = if (item.networkPathSlice().len != 0)
         network_path
     else
         "none";
@@ -1673,7 +1538,7 @@ pub fn renderDecisionToBuffer(
         window_id,
         @tagName(item.kind),
         item.resourceSlice(),
-        decisionLabel(item.decision),
+        @tagName(item.decision),
     })).len;
     if (item.decision == .allow) {
         used += (try std.fmt.bufPrint(buffer[used..], " decision_local_only={s}", .{yesNo(item.decision_local_only)})).len;
@@ -1699,17 +1564,6 @@ fn surfaceSlotId(slot: *const SurfaceSlot) u64 {
 
 fn surfaceTaskKey(task_id: u64) u64 {
     return indexed_arena.nonZeroKey(task_id);
-}
-
-fn scanoutFromPresentation(presentation: *const abi.SurfacePresentation) display_driver_task.Scanout {
-    const object_id = if (presentation.buffer_object_id != 0) presentation.buffer_object_id else presentation.surface_id;
-    const bytes: u32 = presentation.buffer_bytes;
-    return .{
-        .object_id = object_id,
-        .offset = presentation.buffer_offset,
-        .bytes = bytes,
-        .revision = presentation.revision,
-    };
 }
 
 fn taskBundleKey(task_id: u64, bundle_id: []const u8) u64 {
@@ -1785,7 +1639,7 @@ fn statusForError(err: Error) ServiceStatus {
         error.WindowTableFull, error.ReviewItemTableFull, error.SurfaceTableFull => .table_full,
         error.RecoveryStateMissing => .recovery_missing,
         error.OutOfMemory => .resource_exhausted,
-        error.InvalidSurface, error.MalformedRequest, error.MalformedPresentation, error.StalePresentation, error.PresentationConflict, error.RequestTooLarge, error.ResponseTooLarge, error.NoVisibleWindows => .invalid_request,
+        error.InvalidSurface, error.MalformedRequest, error.MalformedPresentation, error.StalePresentation, error.PresentationConflict, error.NoVisibleWindows => .invalid_request,
     };
 }
 
@@ -1793,26 +1647,6 @@ fn requireTaskSurface(app_task: *const task_runtime.TaskRecord) Error!u64 {
     const surface_id = app_task.ui_surface_id orelse return error.InvalidSurface;
     if (surface_id == 0) return error.InvalidSurface;
     return surface_id;
-}
-
-fn requestFlags(request: ServiceRequest) u8 {
-    var flags: u8 = 0;
-    if (request.allow) flags |= 0x01;
-    if (request.local_only) flags |= 0x02;
-    if (request.required) flags |= 0x04;
-    if (request.has_lease) flags |= 0x08;
-    return flags;
-}
-
-fn writeText(writer: *RequestWriter, text: []const u8) Error!void {
-    if (text.len > std.math.maxInt(u8)) return error.RequestTooLarge;
-    try writer.writeByte(@intCast(text.len));
-    try writer.writeBytes(text);
-}
-
-fn readText(reader: *WireReader) Error![]const u8 {
-    const len = try reader.readByte();
-    return reader.readSlice(len);
 }
 
 fn deriveReason(buffer: *[MAX_REASON_BYTES]u8, bundle: manifest.BundleManifest, request: manifest.PermissionRequest) usize {
@@ -1838,14 +1672,6 @@ fn deriveReason(buffer: *[MAX_REASON_BYTES]u8, bundle: manifest.BundleManifest, 
     return rendered.len;
 }
 
-fn deriveObjectScope(buffer: *[MAX_RESOURCE_BYTES]u8, request: manifest.PermissionRequest) usize {
-    return if (request.kind == .object_access) copyText(buffer, request.resource) else 0;
-}
-
-fn deriveNetworkPath(buffer: *[MAX_RESOURCE_BYTES]u8, request: manifest.PermissionRequest) usize {
-    return if (request.kind == .network_egress) copyText(buffer, request.resource) else 0;
-}
-
 fn deriveDataEgressReason(
     buffer: *[MAX_REASON_BYTES]u8,
     display_name: []const u8,
@@ -1866,24 +1692,6 @@ fn deriveDataEgressReason(
             display_name,
             intent.event_type,
         }),
-    };
-}
-
-fn decisionLabel(decision: DecisionState) []const u8 {
-    return switch (decision) {
-        .pending => "pending",
-        .allow => "allow",
-        .deny => "deny",
-    };
-}
-
-fn viewTypeLabel(view_type: ViewType) []const u8 {
-    return switch (view_type) {
-        .document_view => "document_view",
-        .workspace_view => "workspace_view",
-        .app_panel => "app_panel",
-        .full_screen_task_view => "full_screen_task_view",
-        .sync_conflict_review => "sync_conflict_review",
     };
 }
 
@@ -1912,13 +1720,8 @@ fn compositorTestBudget(endpoint_slots: u16) task_runtime.ResourceBudget {
     };
 }
 
-fn testSurfacePresentation(surface_id: u64, buffer_bytes: u64) abi.SurfacePresentation {
-    var presentation = std.mem.zeroes(abi.SurfacePresentation);
-    presentation.surface_id = surface_id;
-    presentation.revision = 1;
-    presentation.buffer_object_id = surface_id;
-    presentation.buffer_bytes = @intCast(buffer_bytes);
-    return presentation;
+fn testSurfacePresentation(surface_id: u64) abi.SurfacePresentation {
+    return .{ .surface_id = surface_id, .revision = 1 };
 }
 
 const EPHEMERAL_TEST_SHARED_MEMORY_BYTES: usize = 512;
@@ -1929,13 +1732,8 @@ const TEST_REVIEW_DECISION_BUFFER_BYTES: usize = 256;
 const TEST_COMPACT_RENDER_BUFFER_BYTES: usize = 320;
 
 test "compositor compact record metadata preserves exact text capacities" {
-    try std.testing.expect(HEAP_BACKED_WINDOW_STATE_ON_FREESTANDING);
-    try std.testing.expect(window_state_layout.heap_backs_state_on_freestanding);
-    try std.testing.expectEqual(@sizeOf(?*anyopaque), window_state_layout.freestanding_handle_size_bytes);
-    try std.testing.expect(window_state_layout.backing_size_bytes > window_state_layout.freestanding_handle_size_bytes);
     try std.testing.expect(@FieldType(WindowSlot, "order_index") == WindowOrderIndex);
     try std.testing.expect(@FieldType(Session, "window_count") == SessionCount);
-    try std.testing.expect(@FieldType(Session, "visible_window_count") == SessionCount);
     try std.testing.expect(@FieldType(Session, "item_count") == SessionCount);
     try std.testing.expectEqual(@as(usize, SESSION_SNAPSHOT_SIZE_CEILING_BYTES), @sizeOf(SessionSnapshot));
     try std.testing.expectEqual(@as(usize, CHECKPOINT_STORE_SIZE_CEILING_BYTES), @sizeOf(CheckpointStore));
@@ -1958,16 +1756,15 @@ test "compositor compact record metadata preserves exact text capacities" {
     try std.testing.expectEqual(@as(u8, MAX_REVIEW_ITEMS), window.item_count);
 
     var item = zeroItem();
-    item.label_len = @intCast(copyText(&item.label, &long_label));
     item.resource_len = @intCast(copyText(&item.resource, &long_resource));
     item.reason_len = @intCast(copyText(&item.reason, &long_reason));
-    item.object_scope_len = @intCast(copyText(&item.object_scope, &long_resource));
-    item.network_path_len = @intCast(copyText(&item.network_path, &long_resource));
-    try std.testing.expectEqual(@as(usize, MAX_LABEL_BYTES), item.labelSlice().len);
     try std.testing.expectEqual(@as(usize, MAX_RESOURCE_BYTES), item.resourceSlice().len);
     try std.testing.expectEqual(@as(usize, MAX_REASON_BYTES), item.reasonSlice().len);
     try std.testing.expectEqual(@as(usize, MAX_RESOURCE_BYTES), item.objectScopeSlice().len);
+    try std.testing.expectEqualStrings("", item.networkPathSlice());
+    item.kind = .network_egress;
     try std.testing.expectEqual(@as(usize, MAX_RESOURCE_BYTES), item.networkPathSlice().len);
+    try std.testing.expectEqualStrings("", item.objectScopeSlice());
 }
 
 test "allocated compositor review backing initializes its arena order and index" {
@@ -1996,7 +1793,7 @@ test "allocated compositor surface arena preserves empty and reusable slot invar
     try std.testing.expectEqual(slot_index, surfaces.reserveIndex(8).?);
 }
 
-test "compositor service wire protocol opens switches reviews decides and recovers" {
+test "compositor service opens switches reviews decides and recovers" {
     var runtime = task_runtime.Runtime.init();
     const app_task = try runtime.createTask(.{
         .owner = .{ .kind = .user, .serial = 9 },
@@ -2009,16 +1806,13 @@ test "compositor service wire protocol opens switches reviews decides and recove
     var checkpoint_store = CheckpointStore{};
     var service = Service.initWithCheckpoint(44, 45, &runtime, &session, &checkpoint_store);
 
-    var request_buffer: [SERVICE_ENDPOINT_BYTES]u8 = undefined;
-    var response_buffer: [SERVICE_ENDPOINT_BYTES]u8 = undefined;
-    const open_payload = try encodeRequest(&request_buffer, .{
+    const open_response = service.dispatch(.{
         .operation = .open_view,
         .view_type = .workspace_view,
         .subject_task_id = app_task.id,
         .workspace_id = 41,
         .detail = "Trip",
     });
-    const open_response = try decodeResponse(try service.dispatchPayload(open_payload, &response_buffer));
     try std.testing.expectEqual(ServiceStatus.ok, open_response.status);
     try std.testing.expectEqual(@as(u16, 1), open_response.visible_window_count);
 
@@ -2062,20 +1856,6 @@ test "compositor service wire protocol opens switches reviews decides and recove
     try std.testing.expect(recover_response.recovered);
     try std.testing.expectEqual(@as(usize, 2), session.window_count);
     try std.testing.expectEqual(DecisionState.allow, session.findReviewItemConst(review_response.window_id, .object_access, "ws:trip").?.decision);
-}
-
-test "compositor request wire stores compact lease durations" {
-    var buffer: [SERVICE_ENDPOINT_BYTES]u8 = undefined;
-    const encoded = try encodeRequest(&buffer, .{
-        .operation = .record_decision,
-        .lease_ticks = std.math.maxInt(manifest.LeaseTicks),
-        .max_lease_ticks = std.math.maxInt(manifest.LeaseTicks),
-    });
-    try std.testing.expectEqual(@as(usize, 57), encoded.len);
-
-    const decoded = try decodeRequest(encoded);
-    try std.testing.expectEqual(std.math.maxInt(manifest.LeaseTicks), decoded.lease_ticks);
-    try std.testing.expectEqual(std.math.maxInt(manifest.LeaseTicks), decoded.max_lease_ticks);
 }
 
 test "compositor service closes task windows during app removal" {
@@ -2633,11 +2413,7 @@ test "compositor session owns bounded monotonic surface presentations" {
     });
     var session = Session.init();
 
-    var presentation = std.mem.zeroes(abi.SurfacePresentation);
-    presentation.surface_id = 71;
-    presentation.revision = 2;
-    presentation.buffer_object_id = 71;
-    presentation.buffer_bytes = 4096;
+    var presentation = abi.SurfacePresentation{ .surface_id = 71, .revision = 2 };
 
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
     try std.testing.expectEqual(PresentResult.duplicate, try session.presentSurface(app_task, &presentation));
@@ -2646,28 +2422,25 @@ test "compositor session owns bounded monotonic surface presentations" {
     try std.testing.expectEqual(@as(?usize, surface_slot_index), session.surface_task_index.lookup(surfaceTaskKey(app_task.id)));
     try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), session.active_surface_head);
     try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), session.active_surface_tail);
-    try std.testing.expectEqual(@as(u64, 71), session.surfacePresentation(71).?.presentation.buffer_object_id);
-    try std.testing.expectEqual(@as(u64, 1), session.surfacePresentation(71).?.presentation_count);
+    try std.testing.expectEqual(@as(u64, 2), session.surfacePresentation(71).?.presentation.revision);
     _ = try session.openTaskView(app_task, "Notes");
 
     presentation.revision = 3;
-    presentation.buffer_bytes = 8192;
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
-    try std.testing.expectEqual(@as(u64, 2), session.surfacePresentation(71).?.presentation_count);
 
     var snapshot: SessionSnapshot = undefined;
     session.snapshotInto(&snapshot);
     var restored = Session.init();
     try restored.restoreFromSnapshot(&snapshot);
-    try std.testing.expectEqual(@as(u32, 8192), restored.surfacePresentation(71).?.presentation.buffer_bytes);
+    try std.testing.expectEqual(@as(u64, 3), restored.surfacePresentation(71).?.presentation.revision);
     try std.testing.expectEqual(@as(?usize, surface_slot_index), restored.surface_task_index.lookup(surfaceTaskKey(app_task.id)));
     try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), restored.active_surface_head);
 
     presentation.revision = 2;
     try std.testing.expectError(error.StalePresentation, restored.presentSurface(app_task, &presentation));
     presentation.revision = 3;
-    presentation.buffer_offset = 16;
-    try std.testing.expectError(error.PresentationConflict, restored.presentSurface(app_task, &presentation));
+    const blank = abi.SurfaceText{ .state = .{ .model = 1 } };
+    try std.testing.expectError(error.PresentationConflict, restored.presentSurfaceText(app_task, &presentation, &blank));
     const foreign_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 82 },
         .component_class = .app_component,
@@ -2697,7 +2470,7 @@ test "compositor text snapshots isolate mutations and reject revision and window
     });
     var session = Session.init();
     const window = try session.openTaskView(task, "Notes");
-    var presentation = testSurfacePresentation(72, 512);
+    var presentation = testSurfacePresentation(72);
     var text = abi.SurfaceText{ .window_id = window.id, .state = .{ .model = 1, .selection_anchor = 5 }, .text_length = 5, .cursor = 5 };
     @memcpy(text.text[0..5], "Draft");
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurfaceText(task, &presentation, &text));
@@ -2739,7 +2512,7 @@ test "compositor surface pruning caches unchanged task lifecycle generations" {
     });
     const app_task_id = app_task.id;
     var session = Session.init();
-    const presentation = testSurfacePresentation(73, 30_000);
+    const presentation = testSurfacePresentation(73);
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
 
     try std.testing.expectEqual(@as(u64, 0), session.last_surface_prune_generation);
@@ -2790,7 +2563,7 @@ test "compositor surface indexes saturate prune restore and reuse exact slots" {
             .ui_surface_id = surface_id,
             .local_only = true,
         });
-        const presentation = testSurfacePresentation(surface_id, 10_000 + @as(u64, @intCast(index)));
+        const presentation = testSurfacePresentation(surface_id);
         try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(task, &presentation));
         task_ids[index] = task.id;
         surface_ids[index] = surface_id;
@@ -2808,7 +2581,7 @@ test "compositor surface indexes saturate prune restore and reuse exact slots" {
         .ui_surface_id = 2_000,
         .local_only = true,
     });
-    const overflow_presentation = testSurfacePresentation(2_000, 20_000);
+    const overflow_presentation = testSurfacePresentation(2_000);
     try std.testing.expectError(error.SurfaceTableFull, session.presentSurface(overflow_task, &overflow_presentation));
 
     const removed_index = MAX_PRESENTED_SURFACES / 2;
@@ -2854,32 +2627,7 @@ test "compositor surface indexes saturate prune restore and reuse exact slots" {
     try std.testing.expectEqual(restored.active_surface_tail, previous);
 }
 
-test "compositor presents by shared-memory handle without a pixel copy" {
-    display_driver_task.reset();
-    var runtime = task_runtime.Runtime.init();
-    const app_task = try runtime.createTask(.{
-        .owner = .{ .kind = .app, .serial = 91 },
-        .component_class = .app_component,
-        .budget = compositorTestBudget(4),
-        .ui_surface_id = 91,
-        .local_only = true,
-    });
-    var session = Session.init();
-    var presentation = std.mem.zeroes(abi.SurfacePresentation);
-    presentation.surface_id = 91;
-    presentation.revision = 3;
-    presentation.buffer_object_id = 42;
-    presentation.buffer_bytes = 4096;
-    try std.testing.expect(presentation.presentsByHandle());
-    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
-    try std.testing.expectEqual(@as(u64, 42), display_driver_task.activeScanout().object_id);
-    try std.testing.expectEqual(@as(u64, 3), display_driver_task.activeScanout().revision);
-    display_driver_task.reset();
-}
-
-test "compositor orders handle revisions per surface before driver submission" {
-    display_driver_task.reset();
-    defer display_driver_task.reset();
+test "compositor orders presentation revisions per surface" {
     var runtime = task_runtime.Runtime.init();
     const first_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 101 },
@@ -2897,31 +2645,21 @@ test "compositor orders handle revisions per surface before driver submission" {
     });
     var session = Session.init();
     defer session.deinit();
-    var first = testSurfacePresentation(101, 4096);
+    var first = testSurfacePresentation(101);
     first.revision = 100;
-    var second = testSurfacePresentation(102, 4096);
+    var second = testSurfacePresentation(102);
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(first_task, &first));
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(second_task, &second));
-    const second_scanout = display_driver_task.activeScanout();
-    try std.testing.expectEqual(second.buffer_object_id, second_scanout.object_id);
-    try std.testing.expectEqual(@as(u64, 1), second_scanout.revision);
 
     first.revision = 99;
     try std.testing.expectError(error.StalePresentation, session.presentSurface(first_task, &first));
-    try std.testing.expectEqual(second_scanout, display_driver_task.activeScanout());
-    var conflict = second;
-    conflict.buffer_offset = 64;
-    try std.testing.expectError(error.PresentationConflict, session.presentSurface(second_task, &conflict));
-    try std.testing.expectEqual(second_scanout, display_driver_task.activeScanout());
+    try std.testing.expectEqual(@as(u64, 100), session.surfacePresentation(101).?.presentation.revision);
 
     first.revision = 101;
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(first_task, &first));
-    const first_scanout = display_driver_task.activeScanout();
-    try std.testing.expectEqual(first.buffer_object_id, first_scanout.object_id);
     try std.testing.expectEqual(PresentResult.duplicate, try session.presentSurface(second_task, &second));
-    try std.testing.expectEqual(first_scanout, display_driver_task.activeScanout());
     second.revision = 2;
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(second_task, &second));
-    try std.testing.expectEqual(second.buffer_object_id, display_driver_task.activeScanout().object_id);
-    try std.testing.expectEqual(@as(u64, 2), display_driver_task.activeScanout().revision);
+    try std.testing.expectEqual(@as(u64, 101), session.surfacePresentation(101).?.presentation.revision);
+    try std.testing.expectEqual(@as(u64, 2), session.surfacePresentation(102).?.presentation.revision);
 }

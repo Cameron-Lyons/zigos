@@ -33,7 +33,7 @@ pub fn run(manager: anytype, io: anytype, request: provisioning.Request, pin: []
         identity_proof.sendInput(manager, 0, 0, clock.now());
         if (previous_compositor) |compositor| router.bindCompositor(compositor, previous_task_id) else router.clearCompositor();
         if (previous_source) |source| router.bindHardwareSource(source) else router.clearHardwareSource();
-        _ = display.present(manager.compositorSessionPtr());
+        display.present(manager.compositorSessionPtr());
     }
     var saved = recovery.Record{};
     defer saved.erase();
@@ -141,7 +141,7 @@ pub fn runBoot(manager: anytype, io: anytype, request: provisioning.Request, pin
         identity_proof.sendInput(manager, 0, 0, clock.now());
         if (previous_compositor) |compositor| router.bindCompositor(compositor, previous_task_id) else router.clearCompositor();
         if (previous_source) |source| router.bindHardwareSource(source) else router.clearHardwareSource();
-        _ = display.present(manager.compositorSessionPtr());
+        display.present(manager.compositorSessionPtr());
     }
     _ = manager.servicePendingInputWork(clock.now());
     while (owner.setup.busy() or owner.setup.pending != null) try service(manager, &owner.setup, clock);

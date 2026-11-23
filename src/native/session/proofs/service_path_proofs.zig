@@ -17,7 +17,6 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
     session_manager.boot();
 
     const runtime = session_manager.testing.runtimePtr();
-    const runtime_service = session_manager.testing.runtimeServicePtr();
     const capability_table = session_manager.system().capabilityTablePtr();
     const supervisor = session_manager.testing.supervisorPtr();
     const service_directory = session_manager.testing.serviceDirectoryPtr();
@@ -77,11 +76,9 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
         session_authority_id,
     );
     try compositor_path.proveBootedCompositorServicePath(
-        kernel_port,
         runtime,
         capability_table,
         storage,
-        runtime_service,
         supervisor.findByClass(.compositor_ui_session).?,
         compositor_task,
         session_manager.testing.compositorSessionPtr(),

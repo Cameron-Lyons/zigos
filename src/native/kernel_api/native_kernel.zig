@@ -52,7 +52,7 @@ pub const SurfacePresentationReceiver = struct {
         context: *anyopaque,
         task: *const task_runtime.TaskRecord,
         presentation: *const abi.SurfacePresentation,
-        text: ?*const abi.SurfaceText,
+        text: *const abi.SurfaceText,
     ) SurfacePresentStatus,
 };
 
@@ -774,7 +774,7 @@ pub const Kernel = struct {
         context: KernelCallContext,
         presenter_task_id: u64,
         presentation: *const abi.SurfacePresentation,
-        text: ?*const abi.SurfaceText,
+        text: *const abi.SurfaceText,
         now_ticks: u64,
     ) Error!bool {
         const authorization = try self.authorizeSubjectTaskOperation(.surface_present, context, presenter_task_id, now_ticks, .{
@@ -783,8 +783,7 @@ pub const Kernel = struct {
         const task = authorization.task;
         if (task.state != .active) return error.InvalidSurfacePresentation;
         if (task.ui_surface_id == null or task.ui_surface_id.? != presentation.surface_id) return error.ScopeViolation;
-        if (!abi.isCanonicalSurfacePresentation(presentation)) return error.InvalidSurfacePresentation;
-        if (text) |content| if (!content.isCanonical()) return error.InvalidSurfacePresentation;
+        if (!abi.isCanonicalSurfacePresentation(presentation) or !text.isCanonical()) return error.InvalidSurfacePresentation;
         const receiver = self.surface_presentation_receiver orelse return error.SurfacePresentationUnavailable;
         var borrow = self.runtime.borrowResolvedTask(task);
         defer borrow.release();
@@ -1364,7 +1363,7 @@ test "surface presentation retains the presenter across reentrant termination an
             opaque_context: *anyopaque,
             task: *const task_runtime.TaskRecord,
             _: *const abi.SurfacePresentation,
-            _: ?*const abi.SurfaceText,
+            _: *const abi.SurfaceText,
         ) SurfacePresentStatus {
             const self: *@This() = @ptrCast(@alignCast(opaque_context));
             const terminated = self.kernel.taskTerminate(self.context, 0) catch @panic("receiver can terminate its presenter");
@@ -1411,14 +1410,9 @@ test "surface presentation retains the presenter across reentrant termination an
         };
         var receiver = Receiver{ .harness = harness, .kernel = &kernel, .context = context, .task_id = task_id, .handle = handle, .status = status };
         kernel.bindSurfacePresentationReceiver(.{ .context = &receiver, .present = Receiver.present });
-        const presentation = abi.SurfacePresentation{
-            .surface_id = 7,
-            .revision = 1,
-            .buffer_object_id = 1,
-            .buffer_offset = 0,
-            .buffer_bytes = 8,
-        };
-        const result = kernel.surfacePresent(context, task_id, &presentation, null, 0);
+        const presentation = abi.SurfacePresentation{ .surface_id = 7, .revision = 1 };
+        const text = abi.SurfaceText{ .state = .{ .model = 1 } };
+        const result = kernel.surfacePresent(context, task_id, &presentation, &text, 0);
         try std.testing.expectEqual(@as(usize, 1), receiver.calls);
         try std.testing.expect(receiver.record_retained);
         switch (status) {

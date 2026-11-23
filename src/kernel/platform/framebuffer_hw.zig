@@ -10,7 +10,6 @@ const scanout = @import("text_scanout.zig");
 var renderer: scanout.Renderer = undefined;
 var composed_frame: scanout.Frame = undefined;
 var initialized = false;
-var pixels_written: u64 = 0;
 
 pub const Mapping = struct {
     physical_base: usize,
@@ -62,12 +61,7 @@ pub fn present() !scanout.PresentStats {
     const result = try renderer.present(&composed_frame);
     // Drain write-combining buffers before scanout or any verification read.
     if (comptime builtin.os.tag == .freestanding) asm volatile ("sfence" ::: .{ .memory = true });
-    pixels_written +|= result.pixels_written;
     return result;
-}
-
-pub fn totalPixelWrites() u64 {
-    return pixels_written;
 }
 
 pub fn verifyCell(column: usize, row: usize) bool {
