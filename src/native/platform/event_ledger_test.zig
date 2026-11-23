@@ -20,9 +20,6 @@ const DETAIL_PAYLOAD_BUFFER_BYTES: usize = 96;
 const QUERY_EVENT_RECORD_CAPACITY: usize = 4;
 
 test "event ledger text metadata stays compact" {
-    try std.testing.expect(event_ledger.RECORDS_EVENTS_IN_PLACE);
-    try std.testing.expect(event_ledger.DERIVES_PERMISSION_DENIAL_METADATA);
-    try std.testing.expect(event_ledger.COMPACT_PERSISTENCE_BATCH_METADATA);
     try std.testing.expect(!@hasField(Event, "policy_label"));
     try std.testing.expect(!@hasField(Event, "missing_capability"));
     try std.testing.expect(!@hasField(Event, "user_approval_can_resolve"));
@@ -627,6 +624,46 @@ test "event ledger evicts oldest events instead of jamming past MAX_EVENTS" {
     const recycled_matches = recycled_task_ledger.queryEvents(.{ .task_id = 1 }, &records);
     try std.testing.expectEqual(@as(usize, 1), recycled_matches.len);
     try std.testing.expectEqual(recycled_total, recycled_matches[0].sequence);
+}
+
+fn expectChronologicalExport(ledger: *const Ledger, first_sequence: u64, first_tick: u64) !void {
+    var buffer: [units.kibibytes(8)]u8 = undefined;
+    const exported = try ledger.exportText(&buffer, .{});
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, exported, "\n"), '\n');
+    var offset: u64 = 0;
+    while (lines.next()) |line| : (offset += 1) {
+        var prefix_buffer: [48]u8 = undefined;
+        const prefix = try std.fmt.bufPrint(&prefix_buffer, "#{d} tick={d} ", .{ first_sequence + offset, first_tick + offset });
+        try std.testing.expect(std.mem.startsWith(u8, line, prefix));
+    }
+    try std.testing.expectEqual(@as(u64, event_ledger.MAX_EVENTS), offset);
+}
+
+test "event ledger walks wrapped history in chronological order" {
+    var source = Ledger.init();
+    defer source.deinit();
+    const service = principal.PrincipalId{ .kind = .service, .serial = 9 };
+    const total: u64 = event_ledger.MAX_EVENTS * 2 + 5;
+    const oldest_retained = total - event_ledger.MAX_EVENTS + 1;
+    var tick: u64 = 1;
+    while (tick <= total) : (tick += 1) {
+        try source.recordProcessCrash(.network_stack, service, tick, 5001, "segfault");
+    }
+    try expectChronologicalExport(&source, oldest_retained, oldest_retained);
+
+    var ledger = Ledger.init();
+    defer ledger.deinit();
+    try ledger.absorb(&source);
+
+    var records: [event_ledger.MAX_EVENTS]Event = undefined;
+    const events = ledger.queryEvents(.{}, &records);
+    try std.testing.expectEqual(event_ledger.MAX_EVENTS, events.len);
+    for (events, 0..) |event, index| {
+        try std.testing.expectEqual(index + 1, event.sequence);
+        try std.testing.expectEqual(oldest_retained + index, event.tick);
+    }
+    try std.testing.expectEqual(total, ledger.latestKind(.process_crash).?.tick);
+    try expectChronologicalExport(&ledger, 1, oldest_retained);
 }
 
 test "event ledger renders what an app knows about a document" {

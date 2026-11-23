@@ -35,6 +35,7 @@ test "core host tests import native core modules" {
     std.testing.refAllDecls(native_entry_state);
     std.testing.refAllDecls(boot_cpu_policy);
     _ = @import("../../kernel/boot/init/devices.zig");
+    _ = @import("../../kernel/tcb.zig");
     _ = cpu_features;
     std.testing.refAllDecls(firmware_memory_map);
     std.testing.refAllDecls(frame_allocator);

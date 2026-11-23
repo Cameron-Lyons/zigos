@@ -26,13 +26,6 @@ else
 
 pub const MAX_EVENTS: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 512;
-pub const COMPACT_EVENT_TEXT_METADATA = true;
-pub const RECORDS_EVENTS_IN_PLACE = true;
-pub const INLINE_EVENT_TEXT_WRITES = true;
-pub const DERIVES_PERMISSION_DENIAL_METADATA = true;
-pub const DIRECT_PERSISTENT_EVENT_ENCODING = true;
-pub const PACKS_PERSISTENT_EVENT_RECORD = true;
-pub const COMPACT_PERSISTENCE_BATCH_METADATA = true;
 pub const EVENT_SIZE_CEILING_BYTES: usize = 584;
 pub const EVENT_BACKING_SIZE_CEILING_BYTES: usize = 46_080;
 pub const PERSISTENT_EVENT_RECORD_SIZE_BYTES: usize = 576;
@@ -433,7 +426,6 @@ pub const Ledger = struct {
         state_signer: signing.SignerIdentity,
     ) Error!Ledger {
         const workspace_record = storage.findWorkspace(owner, state_workspace_label) orelse
-            storage.findWorkspaceByLabel(state_workspace_label) orelse
             try storage.createWorkspace(.{
                 .owner = owner,
                 .label = state_workspace_label,
@@ -1433,11 +1425,9 @@ pub const Ledger = struct {
     pub fn exportText(self: *const Ledger, buffer: []u8, options: ExportOptions) Error![]const u8 {
         var used: usize = 0;
         const backing = self.backingConst() orelse return buffer[0..0];
-        var index: usize = 0;
-        while (index < backing.events.next_unclaimed_index) : (index += 1) {
-            const slot = &backing.events.slots[index];
-            if (!slot.in_use) continue;
-            try renderTextEvent(&slot.event, buffer, &used, options.include_protected_content);
+        var cursor = backing.event_order_index.head(EVENT_ORDER_KEY);
+        while (cursor != indexed_arena.no_index) : (cursor = backing.event_order_index.next(cursor)) {
+            try renderTextEvent(&backing.events.slots[cursor].event, buffer, &used, options.include_protected_content);
         }
         return buffer[0..used];
     }
@@ -1831,8 +1821,9 @@ pub const Ledger = struct {
         defer if (batch_open) {
             self.persistence_batch_depth -= 1;
         };
-        for (&source_backing.events.slots) |*slot| {
-            if (!slot.in_use) continue;
+        var cursor = source_backing.event_order_index.head(EVENT_ORDER_KEY);
+        while (cursor != indexed_arena.no_index) : (cursor = source_backing.event_order_index.next(cursor)) {
+            const slot = &source_backing.events.slots[cursor];
             if (owns_batch and !batch_open) {
                 self.beginPersistenceBatch();
                 batch_open = true;
@@ -1971,13 +1962,7 @@ pub const Ledger = struct {
             return;
         }
 
-        for (&backing.events.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (!matchesQuery(&slot.event, query)) continue;
-            if (count.* >= limit) break;
-            if (output) |records| records[count.*] = redactedForQuery(&slot.event, query);
-            count.* += 1;
-        }
+        self.visitIndex(&backing.event_order_index, EVENT_ORDER_KEY, query, limit, count, output);
     }
 
     fn visitIndex(
@@ -2041,7 +2026,7 @@ pub const Ledger = struct {
         while (indexed_count < backing.events.countInUse()) : (indexed_count += 1) {
             var selected_index: usize = indexed_arena.no_index;
             var selected_sequence: u64 = std.math.maxInt(u64);
-            for (backing.events.slots, 0..) |slot, slot_index| {
+            for (&backing.events.slots, 0..) |*slot, slot_index| {
                 if (!slot.in_use or slot.event.sequence <= last_sequence or slot.event.sequence >= selected_sequence) continue;
                 selected_index = slot_index;
                 selected_sequence = slot.event.sequence;
@@ -2065,7 +2050,7 @@ pub const Ledger = struct {
     fn scanOldestSequence(self: *const Ledger) u64 {
         const backing = self.backingConst() orelse return 0;
         var oldest_sequence: u64 = 0;
-        for (backing.events.slots) |slot| {
+        for (&backing.events.slots) |*slot| {
             if (!slot.in_use) continue;
             if (oldest_sequence == 0 or slot.event.sequence < oldest_sequence) {
                 oldest_sequence = slot.event.sequence;
@@ -2170,7 +2155,6 @@ pub const Ledger = struct {
     fn loadPersistedEvents(self: *Ledger) Error!void {
         const storage = self.storage orelse return;
         const backing = try self.ensureBacking();
-        try self.rebuildIndexes();
         self.next_sequence = 1;
         self.oldest_retained_sequence = 0;
         self.header_version_id = 0;
@@ -2185,7 +2169,10 @@ pub const Ledger = struct {
         }
 
         const entries = try storage.entries(self.workspace_id);
+        // Workspace entries are byte-sorted, so slots load out of sequence
+        // order; rebuildIndexes restores chronological order indexes.
         var loaded_count: usize = 0;
+        var last_sequence: u64 = 0;
         for (entries) |entry| {
             if (!std.mem.startsWith(u8, entry.pathSlice(), event_entry_prefix)) continue;
             if (loaded_count >= MAX_EVENTS) break;
@@ -2193,21 +2180,11 @@ pub const Ledger = struct {
             const event = try parsePersistentEvent(try storage.versionPayload(version));
             const slot_index = backing.events.reserveIndexAt(event.sequence, loaded_count) orelse return error.CorruptState;
             backing.events.slots[slot_index].event = event;
+            last_sequence = @max(last_sequence, event.sequence);
             loaded_count += 1;
         }
 
-        var index: usize = 1;
-        while (index < loaded_count) : (index += 1) {
-            var cursor = index;
-            while (cursor > 0 and backing.events.slots[cursor - 1].event.sequence > backing.events.slots[cursor].event.sequence) : (cursor -= 1) {
-                const tmp = backing.events.slots[cursor - 1];
-                backing.events.slots[cursor - 1] = backing.events.slots[cursor];
-                backing.events.slots[cursor] = tmp;
-            }
-        }
-
         if (loaded_count == 0) return error.CorruptState;
-        const last_sequence = backing.events.slots[loaded_count - 1].event.sequence;
         if (last_sequence == 0 or last_sequence == std.math.maxInt(u64)) return error.CorruptState;
         self.next_sequence = last_sequence + 1;
         try self.rebuildIndexes();

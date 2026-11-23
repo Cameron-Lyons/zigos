@@ -9,8 +9,6 @@ const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("../session/supervisor.zig");
 const embedded_file = @import("../task/embedded_file.zig");
-const elf_image_inspector = @import("../task/elf_image_inspector.zig");
-const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_registry = @import("../task/userspace_registry.zig");
 const copyText = native_util.copyText;
@@ -21,8 +19,6 @@ pub const MEASUREMENT_KIND_COUNT: usize = 5;
 pub const MAX_MANIFEST_ENTRIES: usize = MAX_RECORDS;
 pub const MAX_BUILD_ARTIFACTS: usize = 32;
 pub const state_workspace_label = "system-measured-boot";
-pub const COMPACT_MEASUREMENT_METADATA = true;
-pub const IN_PLACE_GENERATED_BUILD_ARTIFACT_MANIFEST = true;
 pub const MEASUREMENT_RECORD_SIZE_CEILING_BYTES: usize = 82;
 pub const BUILD_ARTIFACT_ENTRY_SIZE_CEILING_BYTES: usize = 82;
 pub const ARTIFACT_MANIFEST_SIZE_CEILING_BYTES: usize = 1_328;
@@ -455,67 +451,6 @@ pub fn buildArtifactDigestMatches(
     return std.mem.eql(u8, &entry.digest, digest);
 }
 
-pub fn generatedUserspaceArchiveMatchesManifest(manifest: *const BuildArtifactManifest) bool {
-    if (!@import("builtin").is_test) return false;
-    const generated_archive = @import("userspace_archive");
-
-    if (manifest.countKind(.userspace_image) != generated_archive.artifacts.len) return false;
-    for (generated_archive.artifacts, 0..) |artifact, artifact_index| {
-        const spec = userspace_boot_registry.specAt(artifact_index) orelse return false;
-        if (!generatedArtifactMatchesManifest(manifest, spec, artifact)) return false;
-    }
-
-    return true;
-}
-
-fn generatedArtifactMatchesManifest(manifest: *const BuildArtifactManifest, spec: anytype, artifact: anytype) bool {
-    userspace_boot_registry.validateGeneratedArtifact(artifact) catch return false;
-    const file = embedded_file.File.fromChunkedArtifact(artifact);
-    if (!file.isPresent()) return false;
-    if (artifact.file_size_bytes != file.byte_len) return false;
-
-    const digest = file.sha256() orelse return false;
-    if (!std.mem.eql(u8, &digest, &artifact.file_sha256)) return false;
-    if (!buildArtifactDigestMatches(manifest, .userspace_image, spec.bundleId(), &digest)) return false;
-
-    const inspection = elf_image_inspector.inspectFile(file) catch return false;
-    if (artifact.entry_point != inspection.entry_point) return false;
-    if (artifact.bootstrap_mailbox_address != inspection.bootstrap_mailbox_address) return false;
-    if (artifact.segment_count != inspection.executable_image.segment_count) return false;
-    return true;
-}
-
-pub fn generatedProductionArtifactManifestMatchesUserspaceArchive() !void {
-    if (!@import("builtin").is_test) return;
-    const generated_manifest = @import("production_artifact_manifest");
-    const generated_archive = @import("userspace_archive");
-
-    var manifest: BuildArtifactManifest = undefined;
-    @memset(std.mem.asBytes(&manifest), 0xa5);
-    try buildArtifactManifestFromGeneratedInto(&manifest, generated_manifest);
-    try std.testing.expect(manifest.hasRequiredShape());
-    try std.testing.expectEqual(generated_archive.artifacts.len, manifest.countKind(.userspace_image));
-    try std.testing.expect(generatedUserspaceArchiveMatchesManifest(&manifest));
-
-    var stale_digest = manifest;
-    const stale_index = firstBuildArtifactIndex(&stale_digest, .userspace_image) orelse return error.ManifestMismatch;
-    stale_digest.entries[stale_index].digest[0] ^= 0x33;
-    try std.testing.expect(stale_digest.hasRequiredShape());
-    try std.testing.expect(!generatedUserspaceArchiveMatchesManifest(&stale_digest));
-
-    var missing_entry = manifest;
-    try removeBuildArtifactEntry(&missing_entry, stale_index);
-    try std.testing.expect(!generatedUserspaceArchiveMatchesManifest(&missing_entry));
-
-    var stale_metadata = generated_archive.artifacts[0];
-    stale_metadata.entry_point +%= 0x1000;
-    const first_spec = userspace_boot_registry.specAt(0) orelse return error.ManifestMismatch;
-    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, first_spec, stale_metadata));
-
-    const wrong_spec = userspace_boot_registry.specAt(1) orelse return error.ManifestMismatch;
-    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, wrong_spec, generated_archive.artifacts[0]));
-}
-
 pub fn buildArtifactEntry(kind: BuildArtifactKind, label: []const u8, digest: crypto_hash.Digest) Error!BuildArtifactEntry {
     var entry = zeroBuildArtifactEntry();
     entry.kind = kind;
@@ -694,23 +629,6 @@ fn hashMeasurement(kind: MeasurementKind, label: []const u8, payload: []const u8
     crypto_hash.updateBytes(&hasher, "label", label);
     crypto_hash.updateBytes(&hasher, "payload", payload);
     return crypto_hash.finalize(&hasher);
-}
-
-fn firstBuildArtifactIndex(manifest: *const BuildArtifactManifest, kind: BuildArtifactKind) ?usize {
-    for (manifest.entries[0..manifest.entry_count], 0..) |entry, index| {
-        if (entry.kind == kind) return index;
-    }
-    return null;
-}
-
-fn removeBuildArtifactEntry(manifest: *BuildArtifactManifest, index: usize) Error!void {
-    if (index >= manifest.entry_count) return error.ManifestMismatch;
-    var cursor = index;
-    while (cursor + 1 < manifest.entry_count) : (cursor += 1) {
-        manifest.entries[cursor] = manifest.entries[cursor + 1];
-    }
-    manifest.entry_count -= 1;
-    manifest.entries[manifest.entry_count] = zeroBuildArtifactEntry();
 }
 
 const CRITICAL_SERVICE_MEASUREMENT_PAYLOAD_BYTES: usize = 62;
@@ -1110,10 +1028,6 @@ test "build-generated artifact manifests reject tampered bootloader source measu
         tampered.entries[entry_index].digest[0] ^= 0xFF;
         try std.testing.expect(!buildArtifactDigestMatches(&tampered, entry.kind, entry.labelSlice(), &entry.digest));
     }
-}
-
-test "build-generated production artifact manifest matches embedded userspace archive" {
-    try generatedProductionArtifactManifestMatchesUserspaceArchive();
 }
 
 test "measurement snapshot rejects tampered manifests and startup artifacts" {

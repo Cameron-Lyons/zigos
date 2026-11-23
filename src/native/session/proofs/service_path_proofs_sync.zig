@@ -1,15 +1,12 @@
 const std = @import("std");
 const abi = @import("../../core/abi.zig");
-const attestation_service = @import("../../platform/attestation_service.zig");
 const binary_cursor = @import("binary_cursor");
 const capability = @import("../../kernel_api/capability.zig");
 const component_port = @import("../../kernel_api/component_port.zig");
-const manifest = @import("../../policy/manifest.zig");
 const measured_boot = @import("../../platform/measured_boot.zig");
 const object_store = @import("../../storage/object_store.zig");
 const principal = @import("../../core/principal.zig");
 const session_manager = @import("../session_manager.zig");
-const signing = @import("../../core/signing.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 const sync_service = @import("../../sync/sync_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
@@ -212,66 +209,8 @@ pub fn proveBootedSyncServicePath(
         .mode = .named_service_identity,
         .target = "overlay.service-path.notes",
     });
-    const network_attestation_root = signer("booted-network-attestation-root", 0x7B);
-    const network_attestation_identity = try signing.publicIdentity(network_attestation_root);
-    const network_attestation_key = attestation_service.AttestationRootKeyHandle{
-        .key_id = "booted-network-attestation-root",
-        .label = "booted-network-attestation-root",
-        .public_identity = network_attestation_identity,
-        .generation = 1,
-        .origin = .tpm,
-        .provider_boundary = .platform_tpm,
-        .custody = .tpm,
-    };
-    const network_attestation_descriptor = attestation_service.RootProviderDescriptor{
-        .name = "booted-sync-tpm-attestation-root",
-        .role = .production,
-        .origin = .tpm,
-        .key_id = "booted-network-attestation-root",
-        .key_generation = 1,
-        .provider_boundary = .platform_tpm,
-        .custody = .tpm,
-        .customer_verifiable = true,
-    };
-    const NetworkAttestationSigner = struct {
-        signer: signing.SignerIdentity,
-
-        fn sign(context: *anyopaque, handle: attestation_service.AttestationRootKeyHandle, digest: []const u8) !manifest.Signature {
-            const fixture: *@This() = @ptrCast(@alignCast(context));
-            if (!std.mem.eql(u8, fixture.signer.label, handle.label)) return error.RootIdentityMismatch;
-            return signing.signWithDefaultRegistry(.ed25519, fixture.signer, digest);
-        }
-    };
-    var network_attestation_fixture = NetworkAttestationSigner{ .signer = network_attestation_root };
-    var network_attestation_provider = try attestation_service.ExternalAttestationRootProvider.init(
-        network_attestation_descriptor,
-        network_attestation_key,
-        &network_attestation_fixture,
-        NetworkAttestationSigner.sign,
-    );
-    const network_attestation_metadata_digest = network_attestation_provider.verifierMetadataDigest();
+    const network_attestation_metadata_digest = crypto_hash.digestFromByte(0x7B);
     const peer_boot = try verifiedBootedNetworkPeer(7_050);
-    var peer_attestation = attestation_service.Service.init(tablet);
-    try peer_attestation.provisionRootProvider(network_attestation_provider.provider());
-    const native_identity_request = try attestation_service.RemoteAttestationRequest.init(.{
-        .remote_party = "overlay.service-path.notes",
-        .nonce = "native-net-00001",
-        .policy_label = "booted-service-path-network-identity",
-        .expected_key_origin = .tpm,
-        .root_key_id = "booted-network-attestation-root",
-        .minimum_root_generation = 1,
-        .attestation_verifier_metadata_digest_required = true,
-        .attestation_verifier_metadata_digest = network_attestation_metadata_digest,
-    });
-    const native_identity_response = try peer_attestation.respondToRemoteAttestationRequest(peer_boot, native_identity_request);
-    try std.testing.expect(attestation_service.Service.verifyRemoteAttestationResponse(
-        native_identity_response,
-        native_identity_request,
-        &peer_boot,
-        network_attestation_identity,
-    ));
-    try std.testing.expect(native_identity_response.attestation_verifier_metadata_digest_present);
-    try std.testing.expect(std.mem.eql(u8, &network_attestation_metadata_digest, &native_identity_response.attestation_verifier_metadata_digest));
     _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_id,
         .owner = user,

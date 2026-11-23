@@ -9,12 +9,11 @@ const device_graph = @import("device_graph.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");
 const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
-const manifest = @import("../policy/manifest.zig");
-const measured_boot = @import("../platform/measured_boot.zig");
 const network_driver_task = @import("../drivers/network_driver_task.zig");
 const network_policy = @import("network_policy.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+const tpm_quote = @import("../platform/tpm2_quote.zig");
 const sync_state = @import("sync_state_support.zig");
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/memory/memory.zig")
@@ -30,7 +29,6 @@ pub const SignedEncryptedFrame = harness.SignedEncryptedFrame;
 pub const Relay = harness.Relay;
 pub const BootedOverlayRelayService = harness.BootedOverlayRelayService;
 pub const TransportSession = harness.TransportSession;
-pub const VerifiedServiceIdentityOpenRequest = harness.VerifiedServiceIdentityOpenRequest;
 pub const Harness = harness.Harness;
 pub const TelemetryCount = harness.TelemetryCount;
 pub const signPacket = harness.signPacket;
@@ -466,26 +464,6 @@ pub const NativeTransportService = struct {
     ) Error!NativeConnection {
         try self.ensureTrustedTransportDevices(source_device, target_device);
         var session = try self.harness.openServiceIdentity(
-            broker,
-            request,
-            source_device,
-            target_device,
-        );
-        defer session.deinit();
-        return self.openEndpointBackedConnection(session, source_task_id, target_task_id, false);
-    }
-
-    pub fn openVerifiedServiceIdentity(
-        self: *NativeTransportService,
-        broker: *network_policy.EgressBroker,
-        request: VerifiedServiceIdentityOpenRequest,
-        source_task_id: u64,
-        target_task_id: u64,
-        source_device: principal.PrincipalId,
-        target_device: principal.PrincipalId,
-    ) Error!NativeConnection {
-        try self.ensureTrustedTransportDevices(source_device, target_device);
-        var session = try self.harness.openVerifiedServiceIdentity(
             broker,
             request,
             source_device,
@@ -1349,23 +1327,6 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expectEqual(@as(usize, 1), native_transport.replay_rejection_count);
 }
 
-fn verifiedSyncPeerBoot(generation: u64) !measured_boot.BootRecord {
-    var recorder = measured_boot.Recorder.init();
-    var artifact_manifest = measured_boot.ArtifactManifest.init(generation);
-    recorder.begin(generation);
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .kernel, "kernel-zigos-sync", "kernel=v1");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .base_image, "stable-sync", "image=v1");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "policy", "healthy");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "storage", "healthy");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "compositor", "healthy");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "network", "healthy");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "production-sync-policy", "strict");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "production-sync-drivers", "i225");
-    var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
-    return boot;
-}
-
 test "native sync transport rejects revoked trusted devices and unattested production sessions" {
     var graph = device_graph.Graph.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 170 };
@@ -1500,62 +1461,16 @@ test "native sync transport rejects revoked trusted devices and unattested produ
     try std.testing.expectEqual(@as(usize, 0), production_transport.capture.capturedCount());
     try std.testing.expectEqual(@as(usize, 0), network_driver_task.activeDriverTransmitCount());
 
-    const peer_attestation_signer = signing.SignerIdentity{
-        .label = "production-sync-peer-root",
-        .seed = signing.seedFromByte(0xD7),
-    };
-    const peer_attestation_identity = try signing.publicIdentity(peer_attestation_signer);
-    const peer_attestation_key = attestation_service.AttestationRootKeyHandle{
-        .key_id = "production-sync-peer-root",
-        .label = "production-sync-peer-root",
-        .public_identity = peer_attestation_identity,
-        .generation = 1,
-        .origin = .tpm,
-        .provider_boundary = .platform_tpm,
-        .custody = .tpm,
-    };
-    const peer_attestation_descriptor = attestation_service.RootProviderDescriptor{
-        .name = "production-sync-tpm-attestation-root",
-        .role = .production,
-        .origin = .tpm,
-        .key_id = "production-sync-peer-root",
-        .key_generation = 1,
-        .provider_boundary = .platform_tpm,
-        .custody = .tpm,
-        .customer_verifiable = true,
-    };
-    const PeerAttestationSigner = struct {
-        signer: signing.SignerIdentity,
-
-        fn sign(context: *anyopaque, handle: attestation_service.AttestationRootKeyHandle, digest: []const u8) !manifest.Signature {
-            const fixture: *@This() = @ptrCast(@alignCast(context));
-            if (!std.mem.eql(u8, fixture.signer.label, handle.label)) return error.RootIdentityMismatch;
-            return signing.signWithDefaultRegistry(.ed25519, fixture.signer, digest);
+    const PeerQuoteEntropy = struct {
+        pub fn random(_: *@This(), out: []u8) !void {
+            @memset(out, 0x5D);
         }
     };
-    var peer_attestation_fixture = PeerAttestationSigner{ .signer = peer_attestation_signer };
-    var peer_attestation_provider = try attestation_service.ExternalAttestationRootProvider.init(
-        peer_attestation_descriptor,
-        peer_attestation_key,
-        &peer_attestation_fixture,
-        PeerAttestationSigner.sign,
-    );
-    const peer_attestation_metadata_digest = peer_attestation_provider.verifierMetadataDigest();
-    var peer_attestation = attestation_service.Service.init(target);
-    try peer_attestation.provisionRootProvider(peer_attestation_provider.provider());
-    const peer_boot = try verifiedSyncPeerBoot(32);
-    const peer_attestation_request = try attestation_service.RemoteAttestationRequest.init(.{
-        .remote_party = "overlay.production.sync",
-        .nonce = "native-sync-verified-0001",
-        .policy_label = "production-service-identity",
-        .expected_key_origin = .tpm,
-        .root_key_id = "production-sync-peer-root",
-        .minimum_root_generation = 1,
-        .attestation_verifier_metadata_digest_required = true,
-        .attestation_verifier_metadata_digest = peer_attestation_metadata_digest,
-    });
-    const peer_attestation_response = try peer_attestation.respondToRemoteAttestationRequest(peer_boot, peer_attestation_request);
-    const pinned_peer_root = peer_attestation_response.statement.root_digest;
+    const peer_pcr: tpm_quote.Digest = @splat(0x31);
+    const peer_quote_identity = try tpm_quote.testing.QuoteFixture.initFor(@splat(1), peer_pcr);
+    const peer_enrollment = try attestation_service.tpm.Enrollment.init(target, peer_quote_identity.identity, 1, "production-sync-peer-root");
+    const peer_attestation_metadata_digest = peer_enrollment.digest();
+    const pinned_peer_root = attestation_service.tpm.bootDigest(&peer_pcr);
     const service_identity_policy = try policies.create(.{
         .owner = owner,
         .label = "production-service-identity",
@@ -1578,45 +1493,31 @@ test "native sync transport rejects revoked trusted devices and unattested produ
     ProductionDriver.allowed_policy_id = service_identity_policy.id;
     network_driver_task.bindEgressCapability(service_identity_capability.id, service_identity_policy.id);
 
-    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.openVerifiedServiceIdentity(&broker, .{
+    var peer_quote_entropy = PeerQuoteEntropy{};
+    var peer_quote = try attestation_service.tpm.Pending.init(&peer_quote_entropy, peer_enrollment, peer_pcr, .{
+        .remote_party = "overlay.production.sync",
+        .policy_label = "production-service-identity",
+    }, 100, 1000);
+    const peer_quote_evidence = try tpm_quote.testing.QuoteFixture.initFor(peer_quote.challenge.qualifyingData(), peer_pcr);
+    var service_identity_request = network_policy.TpmServiceIdentityOpenRequest{
         .task_id = 176,
         .principal_id = app,
         .capability_id = service_identity_capability.id,
         .policy_id = service_identity_policy.id,
         .service_identity = "overlay.other.sync",
-        .attestation_response = peer_attestation_response,
-        .attestation_request = peer_attestation_request,
-        .attested_boot = &peer_boot,
-        .trusted_root = peer_attestation_identity,
+        .pending = &peer_quote,
+        .response = &peer_quote_evidence.evidence,
+        .now_ms = 101,
         .now_ticks = 31,
-    }, 176, 177, source, target));
+    };
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.openTpmServiceIdentity(&broker, service_identity_request, 176, 177, source, target));
 
-    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.openVerifiedServiceIdentity(&broker, .{
-        .task_id = 176,
-        .principal_id = app,
-        .capability_id = service_identity_capability.id,
-        .policy_id = service_identity_policy.id,
-        .service_identity = "overlay.production.sync",
-        .attestation_response = peer_attestation_response,
-        .attestation_request = peer_attestation_request,
-        .attested_boot = &peer_boot,
-        .trusted_root = peer_attestation_identity,
-        .now_ticks = 31,
-    }, 176, 177, source, .{ .kind = .device, .serial = target.serial + 1 }));
+    service_identity_request.service_identity = "overlay.production.sync";
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.openTpmServiceIdentity(&broker, service_identity_request, 176, 177, source, .{ .kind = .device, .serial = target.serial + 1 }));
     try std.testing.expectEqual(@as(usize, 0), ProductionDriver.send_count);
+    try std.testing.expect(!peer_quote.verifier.consumed);
 
-    var production_service_connection = try production_transport.openVerifiedServiceIdentity(&broker, .{
-        .task_id = 176,
-        .principal_id = app,
-        .capability_id = service_identity_capability.id,
-        .policy_id = service_identity_policy.id,
-        .service_identity = "overlay.production.sync",
-        .attestation_response = peer_attestation_response,
-        .attestation_request = peer_attestation_request,
-        .attested_boot = &peer_boot,
-        .trusted_root = peer_attestation_identity,
-        .now_ticks = 31,
-    }, 176, 177, source, target);
+    var production_service_connection = try production_transport.openTpmServiceIdentity(&broker, service_identity_request, 176, 177, source, target);
     try std.testing.expect(production_service_connection.session.productionAttested());
     try std.testing.expect(production_service_connection.session.attestation_verifier_metadata_digest_present);
     try std.testing.expect(production_service_connection.session.attestation_verifier_metadata_digest_bound);

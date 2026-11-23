@@ -1,13 +1,11 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const transport_crypto = @import("../core/transport_crypto.zig");
-const attestation_service = @import("../platform/attestation_service.zig");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
-const measured_boot = @import("../platform/measured_boot.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -99,19 +97,6 @@ pub const SignedEncryptedFrame = struct {
 pub const SessionTrustPosture = enum(u8) {
     local_lab_only,
     production_attested,
-};
-
-pub const VerifiedServiceIdentityOpenRequest = struct {
-    task_id: u64,
-    principal_id: principal.PrincipalId,
-    capability_id: u64,
-    policy_id: u64,
-    service_identity: []const u8,
-    attestation_response: attestation_service.RemoteAttestationResponse,
-    attestation_request: attestation_service.RemoteAttestationRequest,
-    attested_boot: *const measured_boot.BootRecord,
-    trusted_root: signing.PublicIdentity,
-    now_ticks: u64,
 };
 
 const RelayPacketSlot = struct {
@@ -488,37 +473,6 @@ pub const Harness = struct {
             target_device,
             "",
         );
-    }
-
-    pub fn openVerifiedServiceIdentity(
-        self: *Harness,
-        broker: *network_policy.EgressBroker,
-        request: VerifiedServiceIdentityOpenRequest,
-        source_device: principal.PrincipalId,
-        target_device: principal.PrincipalId,
-    ) Error!TransportSession {
-        if (!request.attestation_response.statement.device.eql(target_device)) {
-            self.denied_sessions +|= 1;
-            return error.ProductionAttestationRequired;
-        }
-        const evidence = network_policy.ConnectionEvidence.fromVerifiedRemoteAttestation(
-            .{ .service_identity = request.service_identity },
-            request.attestation_response,
-            request.attestation_request,
-            request.attested_boot,
-            request.trusted_root,
-        ) orelse {
-            self.denied_sessions +|= 1;
-            return error.ProductionAttestationRequired;
-        };
-        return self.openServiceIdentity(broker, .{
-            .task_id = request.task_id,
-            .principal_id = request.principal_id,
-            .capability_id = request.capability_id,
-            .policy_id = request.policy_id,
-            .evidence = evidence,
-            .now_ticks = request.now_ticks,
-        }, source_device, target_device);
     }
 
     pub fn openTpmServiceIdentity(

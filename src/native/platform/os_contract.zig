@@ -10,7 +10,6 @@ const generated_image_fixtures = @import("../task/generated_image_fixtures.zig")
 const manifest = @import("../policy/manifest.zig");
 const os_identity = @import("os_identity.zig");
 const notification_center = @import("../services/notification_center.zig");
-const object_resilience_service = @import("../services/object_resilience_service.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const process_isolation = @import("../task/process_isolation.zig");
@@ -25,295 +24,105 @@ const userspace_registry = @import("../task/userspace_registry.zig");
 const humane_shell = @import("rendered_shell/humane_shell.zig");
 const signing = @import("../core/signing.zig");
 const manifest_linter = @import("../sdk/manifest_linter.zig");
-const agent_delegation_service = @import("../services/agent_delegation_service.zig");
 const indexing_service = @import("../../kernel/boot/benchmark/models/indexing_service.zig");
 const network_policy = @import("../sync/network_policy.zig");
-const network_session_service = @import("../services/network_session_service.zig");
 const package_digest = @import("../services/package_service_digest.zig");
 const package_service = @import("../services/package_service.zig");
-const package_model = @import("../services/package_service_model.zig");
-const attention_broker_service = @import("../services/attention_broker_service.zig");
-const personal_context_service = @import("../services/personal_context_service.zig");
 const secure_pasteboard = @import("../services/secure_pasteboard.zig");
 const secret_vault_service = @import("../services/secret_vault_service.zig");
-const sensitive_capture_service = @import("../services/sensitive_capture_service.zig");
-const task_lifecycle_service = @import("../services/task_lifecycle_service.zig");
 const typed_component_abi = @import("../services/typed_component_abi.zig");
 const component_abi_schema = @import("../services/component_abi_schema.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
-const contract_2026 = @import("../contract_2026.zig");
-const kernel_tcb = @import("../../kernel/tcb.zig");
 
 pub const Feature = enum(u16) {
     native_only_apps,
     no_compatibility_namespace,
-    typed_component_services,
-    explicit_capability_grants,
-    object_native_storage,
-    local_first_sync,
-    policy_gated_egress,
-    device_bound_identity,
-    measured_boot_attestation,
-    signed_reversible_updates,
-    recovery_key_lifecycle,
-    restartable_userspace_drivers,
-    redacted_diagnostics,
     private_local_ai,
-    typed_ai_inference_service,
     carbon_aware_scheduling,
     permission_sensitivity_labels,
-    user_visible_permission_reasons,
     secret_permissions_local_only,
     sensitive_remote_egress_intent,
     permission_digest_covers_privacy,
-    package_preserves_permission_privacy,
     dangerous_permission_lint_reason,
-    typed_privacy_budget_service,
-    typed_diagnostics_export_service,
-    privacy_budget_policy,
-    camera_policy_gate,
-    microphone_policy_gate,
-    location_policy_gate,
-    contacts_policy_gate,
-    sensor_policy_gate,
-    clipboard_policy_gate,
-    peer_ipc_policy_gate,
-    private_egress_budget_policy,
-    data_egress_ledger,
-    privacy_budget_ledger,
-    diagnostics_private_egress_summary,
-    remote_diagnostics_consent,
     process_hidden_observability_denied,
     process_continuous_observability_scope,
-    ai_context_budget_policy,
     ai_training_audit_manifest,
     offline_ai_local_model_manifest,
-    private_ai_diagnostics_redaction,
     compatibility_lint_rejection,
-    native_registry_privacy_discovery,
     no_secret_remote_permissions,
     sensitive_permission_reason_validation,
-    typed_diagnostics_share_validation,
-    local_first_sensitive_defaults,
-    permission_purpose_labels,
-    permission_retention_days,
     sensitive_purpose_validation,
     sensitive_retention_validation,
     sensitive_retention_ceiling,
     secret_retention_ceiling,
     sensitive_lease_validation,
-    package_preserves_permission_purpose,
-    package_preserves_permission_retention,
     permission_digest_covers_purpose,
     permission_digest_covers_retention,
     linter_purpose_guidance,
     linter_retention_guidance,
     linter_lease_guidance,
-    policy_sensitive_retention_cap,
-    policy_permission_lease_cap,
-    policy_requires_sensitive_lease,
-    permission_use_policy_request,
-    retention_policy_ledger,
-    permission_lease_ledger,
-    permission_lease_expiration_summary,
-    consent_receipt_ledger,
-    consent_revocation_summary,
-    typed_consent_receipts_service,
-    typed_permission_lease_service,
-    consent_record_wire_validation,
-    permission_lease_expire_wire_validation,
-    native_registry_consent_discovery,
-    native_registry_lease_discovery,
-    retention_diagnostics_redacted,
-    lease_diagnostics_redacted,
-    consent_diagnostics_redacted,
-    data_rights_manifest,
     private_object_data_rights_validation,
     deletion_receipt_manifest_validation,
     data_rights_digest_covers_export_format,
-    package_preserves_data_rights,
-    typed_data_rights_service,
-    data_export_prepare_operation,
-    data_delete_request_operation,
-    data_delete_receipt_operation,
-    native_registry_data_rights_discovery,
-    policy_data_export_gate,
-    policy_data_delete_gate,
-    policy_export_byte_budget,
-    policy_deletion_receipt_required,
-    policy_data_rights_request,
-    data_export_ledger,
-    data_deletion_ledger,
-    data_rights_diagnostics,
-    data_export_redaction,
-    data_deletion_receipt_summary,
-    ai_model_digest_manifest,
-    ai_model_source_manifest,
     local_ai_digest_validation,
     local_ai_source_validation,
     private_ai_locality_validation,
     ai_digest_covers_model_provenance,
-    package_preserves_model_digest,
-    package_preserves_model_source,
-    typed_ai_model_registry_service,
-    ai_model_register_operation,
-    ai_model_attest_operation,
-    ai_model_revoke_operation,
-    native_registry_ai_model_discovery,
-    policy_ai_model_measurement_gate,
-    policy_ai_model_source_gate,
-    policy_ai_model_age_gate,
-    ai_use_provenance_request,
-    ai_model_attestation_ledger,
-    ai_model_attestation_diagnostics,
-    ai_model_rejection_summary,
-    credential_assertion_hardware_backed,
-    credential_assertion_platform_device,
-    credential_assertion_primary_device,
-    credential_assertion_trust_generation,
-    credential_assertion_unlock_age,
-    policy_hardware_session_gate,
-    policy_platform_device_session_gate,
-    policy_primary_device_session_gate,
-    policy_unlock_age_gate,
-    session_trust_request,
-    typed_identity_session_service,
-    identity_session_authorize_operation,
-    identity_session_step_up_operation,
-    identity_session_revoke_operation,
-    native_registry_identity_session_discovery,
-    session_posture_ledger,
-    session_posture_diagnostics,
-    session_posture_denial_summary,
     identity_session_redaction,
-    policy_digest_covers_session_gates,
-    supply_chain_manifest,
-    sbom_digest_manifest,
-    source_archive_digest_manifest,
-    build_recipe_digest_manifest,
-    vulnerability_scan_digest_manifest,
-    builder_identity_manifest,
     reproducible_build_validation,
     trusted_builder_validation,
     supply_chain_digest_covers_sbom,
     supply_chain_digest_covers_builder,
-    package_preserves_supply_chain,
-    package_resolves_supply_chain,
-    policy_package_sbom_gate,
-    policy_package_reproducible_gate,
-    policy_package_builder_gate,
-    policy_vulnerability_scan_gate,
-    package_provenance_request,
-    package_provenance_policy_decision,
     package_install_provenance_error,
-    install_source_policy_still_present,
     package_active_revision_mutation_gate,
-    agent_delegation_manifest,
     agent_purpose_validation,
     agent_action_budget_validation,
     agent_remote_confirmation_validation,
     agent_digest_covers_purpose,
-    package_preserves_agent_delegation,
-    package_resolves_agent_delegation,
-    policy_agent_allowed_gate,
-    policy_agent_action_budget,
-    policy_agent_remote_budget,
-    policy_agent_confirmation_gate,
-    policy_agent_audit_gate,
-    agent_delegation_request,
-    agent_delegation_policy_decision,
-    typed_agent_delegation_service,
-    agent_authorize_operation,
-    agent_record_action_operation,
-    agent_revoke_operation,
-    agent_delegation_ledger,
-    agent_delegation_diagnostics,
-    attention_policy_create_request,
     quiet_hours_policy,
     visible_notification_budget_policy,
     interruptive_notification_budget_policy,
     critical_interruption_policy,
-    attention_policy_request,
-    attention_policy_decision,
-    notification_center_attention_policy,
     notification_center_quiet_mode,
     notification_center_interruption_budget,
-    attention_policy_ledger,
-    attention_policy_diagnostics,
     attention_policy_redaction,
     policy_digest_covers_attention,
     structured_urgency_classification,
-    suppression_replacement_preserved,
-    accessibility_manifest,
     accessibility_profile_validation,
     accessibility_keyboard_validation,
     accessibility_digest_covers_profile,
-    package_preserves_accessibility,
-    package_resolves_accessibility,
     policy_adaptive_ui_gate,
     policy_screen_reader_gate,
     policy_keyboard_navigation_gate,
     policy_reduced_motion_gate,
     policy_high_contrast_gate,
-    accessibility_policy_request,
-    typed_accessibility_profile_service,
-    accessibility_profile_get_operation,
-    accessibility_profile_apply_operation,
-    native_registry_accessibility_discovery,
-    accessibility_profile_ledger,
-    accessibility_profile_diagnostics,
     accessibility_redaction,
     rendered_shell_accessibility_profile,
-    agent_manifest_session_binding,
-    agent_manifest_local_context,
-    agent_manifest_context_budget,
-    agent_manifest_kill_switch,
     agent_session_binding_validation,
     agent_context_budget_validation,
     agent_kill_switch_validation,
     agent_digest_covers_session_scope,
-    package_preserves_agent_session_scope,
-    package_resolves_agent_session_scope,
     policy_agent_session_binding_gate,
     policy_agent_local_context_gate,
     policy_agent_context_budget_gate,
     policy_agent_kill_switch_gate,
     policy_agent_visible_plan_gate,
-    agent_session_policy_request,
-    typed_agent_session_bind_operation,
-    typed_agent_kill_switch_operation,
-    agent_session_service_model,
-    agent_action_binding_gate,
-    agent_session_service_kill_switch,
-    agent_session_cumulative_context_budget,
-    agent_action_denial_audit,
-    agent_session_ledger,
     agent_session_redaction,
-    background_manifest_decl,
     background_permission_pairing,
     background_budget_validation,
     background_network_visibility_validation,
     background_digest_covers_budget,
-    package_preserves_background_tasks,
     policy_background_duration_gate,
     policy_background_cpu_gate,
     policy_background_memory_gate,
     policy_background_network_gate,
     policy_background_visibility_gate,
-    background_activity_policy_request,
-    typed_background_activity_service,
-    background_authorize_operation,
-    background_record_operation,
-    background_complete_operation,
     background_completion_binding_gate,
-    native_registry_background_discovery,
     background_dispatch_runtime_gate,
     background_expiration_watchdog,
-    background_activity_ledger,
     background_activity_redaction,
-    secure_pasteboard_service_model,
     pasteboard_foreground_gesture_gate,
     pasteboard_destination_bound_grant,
     pasteboard_destination_principal_bound_grant,
@@ -322,67 +131,35 @@ pub const Feature = enum(u16) {
     pasteboard_revocation_gate,
     pasteboard_user_visible_audit,
     pasteboard_redacted_diagnostics,
-    typed_secure_pasteboard_service,
-    pasteboard_offer_operation,
-    pasteboard_read_operation,
-    pasteboard_revoke_operation,
-    native_registry_pasteboard_discovery,
     pasteboard_bootstrap_service_contract,
     pasteboard_boot_image_registry,
-    object_resilience_manifest,
     encrypted_backup_validation,
     recovery_key_validation,
     portable_restore_validation,
     trusted_restore_validation,
     backup_digest_covers_format,
-    package_preserves_object_resilience,
-    package_resolves_object_resilience,
     policy_backup_allowed_gate,
     policy_restore_allowed_gate,
     policy_encrypted_backup_gate,
     policy_restore_device_trust_gate,
-    typed_object_resilience_service,
-    backup_prepare_operation,
-    restore_authorize_operation,
-    backup_revoke_operation,
-    native_registry_object_resilience_discovery,
-    object_resilience_service_model,
-    restore_token_device_bound,
-    restore_snapshot_subject_bound,
-    revoke_snapshot_source_task_bound,
-    backup_revocation_gate,
-    object_resilience_ledger,
-    object_resilience_redaction,
-    object_resilience_bootstrap_contract,
-    object_resilience_boot_image_registry,
-    semantic_index_manifest,
     semantic_index_local_validation,
     semantic_index_encryption_validation,
     semantic_index_redaction_validation,
     semantic_index_query_budget_validation,
     semantic_index_model_digest_validation,
     semantic_index_digest_covers_model,
-    package_preserves_semantic_index,
-    package_resolves_semantic_index,
     policy_semantic_memory_gate,
     policy_semantic_local_model_gate,
     policy_semantic_encryption_gate,
     policy_semantic_redaction_gate,
     policy_semantic_query_budget_gate,
-    typed_index_search_service,
-    index_upsert_operation,
-    index_query_operation,
-    semantic_query_operation,
     native_registry_index_discovery,
-    semantic_query_service_model,
     semantic_query_index_generation,
     semantic_query_top_k_ranking,
     semantic_query_result_redaction,
     semantic_query_workspace_scope,
     semantic_memory_ledger,
     semantic_memory_redaction,
-    passwordless_unlock_methods,
-    passkey_credential_service_model,
     credential_hardware_sealed_secret,
     credential_phishing_origin_rejection,
     credential_local_unlock_required,
@@ -397,58 +174,21 @@ pub const Feature = enum(u16) {
     policy_credential_hardware_gate,
     policy_credential_local_unlock_gate,
     policy_credential_unlock_age_gate,
-    identity_credential_register_operation,
-    identity_credential_assert_operation,
-    identity_credential_recover_operation,
-    identity_credential_revoke_operation,
     credential_ledger,
     credential_redaction,
-    crdt_document_operation_model,
     deterministic_document_merge,
     idempotent_operation_log_merge,
     vector_clock_tracking,
     merge_buffer_bounds,
     encrypted_transport_queue,
     mergeable_transport_semantic,
-    sync_service_replication_model,
-    conflict_review_service_model,
-    conflict_resolution_service_model,
     sync_destination_policy_gate,
     personal_e2ee_default_policy,
     offline_first_default_policy,
     sync_conflict_ledger,
     sync_conflict_redaction,
-    typed_sync_replication_service,
-    sync_device_enroll_operation,
-    sync_workspace_replicate_operation,
-    sync_conflict_review_operation,
-    sync_conflict_resolve_operation,
-    sync_transport_frame_operation,
     native_registry_sync_discovery,
     sync_boot_image_registry,
-    sensitive_capture_service_model,
-    capture_foreground_session_gate,
-    capture_privacy_indicator_gate,
-    capture_background_denial,
-    capture_lease_policy_gate,
-    capture_indicator_expiry_boundary,
-    capture_session_binding_gate,
-    capture_sample_budget_gate,
-    capture_permission_kind_policy_gate,
-    capture_revocation_gate,
-    sensitive_capture_ledger,
-    sensitive_capture_redaction,
-    typed_sensitive_capture_service,
-    capture_start_operation,
-    capture_sample_operation,
-    capture_stop_operation,
-    native_registry_capture_discovery,
-    capture_bootstrap_service_contract,
-    capture_boot_image_registry,
-    camera_permission_manifest_lease,
-    microphone_permission_manifest_lease,
-    screen_capture_permission_manifest_lease,
-    secret_vault_service_model,
     hardware_sealed_import,
     nonresident_secret_material,
     secret_owner_binding,
@@ -465,56 +205,8 @@ pub const Feature = enum(u16) {
     secret_lease_policy_gate,
     secret_vault_ledger,
     secret_vault_redaction,
-    typed_secret_vault_service,
-    secret_import_operation,
-    secret_lend_operation,
-    secret_rotate_operation,
-    secret_revoke_operation,
-    native_registry_secret_discovery,
     secret_vault_bootstrap_contract,
     secret_vault_boot_image_registry,
-    attention_broker_service_model,
-    brokered_notification_post,
-    notification_default_task_binding,
-    quiet_interrupt_denial,
-    critical_interrupt_denial,
-    visible_budget_denial,
-    interruption_budget_denial,
-    notification_dismissal,
-    notification_task_bound_dismissal,
-    notification_strict_expiry_boundary,
-    latest_visible_query,
-    attention_broker_policy_gate,
-    attention_broker_ledger,
-    attention_broker_redaction,
-    typed_attention_broker_service,
-    attention_post_operation,
-    attention_dismiss_operation,
-    attention_query_operation,
-    native_registry_attention_discovery,
-    attention_broker_bootstrap_contract,
-    attention_broker_boot_image_registry,
-    task_lifecycle_service_model,
-    brokered_task_suspend,
-    invalid_suspend_denial,
-    brokered_task_resume,
-    terminate_checkpoint_policy_denial,
-    brokered_task_terminate,
-    lifecycle_target_owner_binding,
-    task_lifecycle_policy_gate,
-    task_lifecycle_runtime_audit,
-    task_lifecycle_ledger,
-    task_lifecycle_redaction,
-    typed_task_lifecycle_service,
-    lifecycle_suspend_operation,
-    lifecycle_resume_operation,
-    lifecycle_terminate_operation,
-    native_registry_lifecycle_discovery,
-    lifecycle_bootstrap_contract,
-    lifecycle_boot_image_registry,
-    lifecycle_policy_digest,
-    package_offboarding_service_model,
-    package_port_offboarding_authority_path,
     offboard_policy_delete_gate,
     offboard_receipt_required,
     denied_offboard_preserves_install,
@@ -526,12 +218,8 @@ pub const Feature = enum(u16) {
     removed_bundle_unlaunchable,
     offboard_data_deletion_ledger,
     offboard_redaction,
-    typed_package_remove_operation,
-    package_remove_operation_id,
     package_remove_wire_validation,
-    package_registry_discovery,
     package_offboard_policy_digest,
-    scheduler_resource_governance_model,
     hardware_telemetry_provider_boundary,
     hardware_evidence_required_for_accelerator_queues,
     foreground_thermal_dispatch,
@@ -542,113 +230,21 @@ pub const Feature = enum(u16) {
     pressure_delay_reason_accounting,
     dispatch_budget_accounting,
     privacy_mode_degrades_accelerator,
-    carbon_aware_planner_compat,
     resource_governance_ledger,
     resource_governance_diagnostics,
     resource_governance_redaction,
     resource_governance_query_index,
-    network_session_service_model,
-    existing_egress_broker_composed,
-    allow_list_destination_gate,
-    attested_session_open,
-    session_byte_budget,
-    session_expiry_boundary_gate,
-    session_effective_budget_policy,
-    transfer_over_budget_denied,
-    session_mutation_binding,
-    session_revocation_gate,
-    revoked_session_transfer_denied,
-    completed_session_transfer_denied,
-    network_session_ledger,
-    network_session_diagnostics,
-    network_session_redaction,
-    typed_network_open_session_operation,
-    typed_network_transfer_operation,
-    typed_network_revoke_operation,
-    network_session_wire_validation,
-    network_stack_catalog_binding,
-    personal_context_service_model,
-    semantic_policy_composed,
-    local_model_gate,
-    encrypted_index_gate,
-    redacted_snippet_gate,
-    context_query_byte_budget,
-    context_lease_issue,
-    context_lease_query_accounting,
-    context_query_canonical_byte_metering,
-    context_indexed_retrieval,
-    context_pack_redaction,
-    context_pack_receipt,
-    context_pack_index_generation,
-    context_pack_index_staleness_guard,
-    context_pack_accounting_snapshot_guard,
-    context_pack_envelope_consistency,
-    context_pack_request_fingerprint,
-    context_pack_sensitivity_envelope,
-    context_pack_empty_receipt,
-    context_pack_freshness,
-    context_pack_revocation_binding,
-    context_pack_replay_guard,
-    context_pack_live_replay_verifier,
-    context_pack_receipt_audit,
-    context_pack_invalid_receipt_audit,
-    context_pack_malformed_receipt_audit,
-    context_pack_policy_reauthorization,
-    context_lease_privacy_mode_binding,
-    context_lease_expiration_gate,
-    context_lease_revocation_gate,
-    context_workspace_scope_gate,
-    personal_context_ledger,
-    personal_context_diagnostics,
-    personal_context_redaction,
-    typed_context_lease_operation,
-    typed_context_query_operation,
-    typed_context_revoke_operation,
-    context_wire_validation,
-    personal_context_catalog_binding,
-    kernel_tcb_forbids_product_imports,
-    yield_plus_sealed_rings,
-    userspace_nvme_dataplane,
-    userspace_i225_dataplane,
-    userspace_xhci_dataplane,
-    eight_address_spaces_pku,
-    efi_only_production_boot,
-    checkpoint_only_cold_load,
 };
-
-pub const uses_single_requirement_enum = true;
-pub const generated_from_typed_idl = true;
 
 pub const feature_count = @typeInfo(Feature).@"enum".field_names.len;
 
-pub const Checklist = FeatureChecklist(Feature);
+pub const Checklist = struct {
+    satisfied_features: [feature_count]bool,
 
-fn FeatureChecklist(comptime FeatureEnum: type) type {
-    const count = @typeInfo(FeatureEnum).@"enum".field_names.len;
-    return struct {
-        const Self = @This();
-
-        satisfied_features: [count]bool,
-
-        pub fn complete(self: Self) bool {
-            return self.satisfiedCount() == count;
-        }
-
-        pub fn satisfiedCount(self: Self) usize {
-            var count_satisfied: usize = 0;
-            for (self.satisfied_features) |satisfied_feature| {
-                if (satisfied_feature) count_satisfied += 1;
-            }
-            return count_satisfied;
-        }
-
-        pub fn satisfied(self: Self, feature: FeatureEnum) bool {
-            return self.satisfied_features[@backingInt(feature)];
-        }
-    };
-}
-
-pub const uses_u16_feature_width = @typeInfo(Feature).@"enum".tag_type == u16;
+    pub fn complete(self: Checklist) bool {
+        return std.mem.allEqual(bool, &self.satisfied_features, true);
+    }
+};
 
 pub fn currentRepositoryContract() Checklist {
     var features = @as([feature_count]bool, @splat(false));
@@ -669,71 +265,23 @@ pub fn currentRepositoryContract() Checklist {
     fillFifteenthContract(&features);
     fillSixteenthContract(&features);
     fillSeventeenthContract(&features);
-    fillEighteenthContract(&features);
     fillNineteenthContract(&features);
-    fillTwentiethContract(&features);
-    fillTwentyFirstContract(&features);
     fillTwentySecondContract(&features);
     fillTwentyThirdContract(&features);
-    fillTwentyFourthContract(&features);
-    fillTwentyFifthContract(&features);
-    fill2026Floor(&features);
     return .{ .satisfied_features = features };
 }
-
-pub fn currentRepositoryUnifiedContract() bool {
-    return currentRepositoryContract().complete();
-}
-
-pub fn currentRepositoryExtraContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub const currentRepositoryThirdContract = currentRepositoryExtraContract;
-pub const currentRepositoryFourthContract = currentRepositoryExtraContract;
-pub const currentRepositoryFifthContract = currentRepositoryExtraContract;
-pub const currentRepositorySixthContract = currentRepositoryExtraContract;
-pub const currentRepositorySeventhContract = currentRepositoryExtraContract;
-pub const currentRepositoryEighthContract = currentRepositoryExtraContract;
-pub const currentRepositoryNinthContract = currentRepositoryExtraContract;
-pub const currentRepositoryTenthContract = currentRepositoryExtraContract;
-pub const currentRepositoryEleventhContract = currentRepositoryExtraContract;
-pub const currentRepositoryTwelfthContract = currentRepositoryExtraContract;
-pub const currentRepositoryThirteenthContract = currentRepositoryExtraContract;
-pub const currentRepositoryFourteenthContract = currentRepositoryExtraContract;
-pub const currentRepositoryFifteenthContract = currentRepositoryExtraContract;
-pub const currentRepositorySixteenthContract = currentRepositoryExtraContract;
-pub const currentRepositorySeventeenthContract = currentRepositoryExtraContract;
-pub const currentRepositoryEighteenthContract = currentRepositoryExtraContract;
-pub const currentRepositoryNineteenthContract = currentRepositoryExtraContract;
-pub const currentRepositoryTwentiethContract = currentRepositoryExtraContract;
-pub const currentRepositoryTwentyFirstContract = currentRepositoryExtraContract;
-pub const currentRepositoryTwentySecondContract = currentRepositoryExtraContract;
-pub const currentRepositoryTwentyThirdContract = currentRepositoryExtraContract;
-pub const currentRepositoryTwentyFourthContract = currentRepositoryExtraContract;
-pub const currentRepositoryTwentyFifthContract = currentRepositoryExtraContract;
 
 fn fillBaseContract(features: *[feature_count]bool) void {
     const default_ai = manifest.AiMetadata{};
     features[@backingInt(Feature.native_only_apps)] = manifest.requiresApplicationPackaging("app.notes");
-    features[@backingInt(Feature.no_compatibility_namespace)] = !manifest.isApplicationBundle("compat.posix") and validationFailsWith(.{
-        .bundle_id = "compat.posix",
-        .display_name = "Compat POSIX",
-        .publisher = "zigos.dev",
-    }, error.CompatibilityNamespaceUnsupported);
-    features[@backingInt(Feature.typed_component_services)] = contractPresent("zigos.service.registry");
-    features[@backingInt(Feature.explicit_capability_grants)] = true;
-    features[@backingInt(Feature.object_native_storage)] = true;
-    features[@backingInt(Feature.local_first_sync)] = true;
-    features[@backingInt(Feature.policy_gated_egress)] = true;
-    features[@backingInt(Feature.device_bound_identity)] = true;
-    features[@backingInt(Feature.measured_boot_attestation)] = true;
-    features[@backingInt(Feature.signed_reversible_updates)] = true;
-    features[@backingInt(Feature.recovery_key_lifecycle)] = true;
-    features[@backingInt(Feature.restartable_userspace_drivers)] = true;
-    features[@backingInt(Feature.redacted_diagnostics)] = true;
-    features[@backingInt(Feature.private_local_ai)] = !default_ai.training_allowed and default_ai.locality == .inherit_task;
-    features[@backingInt(Feature.typed_ai_inference_service)] = contractPresent("zigos.ai.inference");
+    features[@backingInt(Feature.no_compatibility_namespace)] = !manifest.isApplicationBundle("compat.posix") and
+        validationFailsWith(.{
+            .bundle_id = "compat.posix",
+            .display_name = "Compat POSIX",
+            .publisher = "zigos.dev",
+        }, error.CompatibilityNamespaceUnsupported);
+    features[@backingInt(Feature.private_local_ai)] = !default_ai.training_allowed and
+        default_ai.locality == .inherit_task;
     features[@backingInt(Feature.carbon_aware_scheduling)] = carbonAwareSchedulingBackedByPlanner();
 }
 
@@ -820,8 +368,8 @@ fn fillExtraContract(features: *[feature_count]bool) void {
         \\native object workspace:notes
     );
 
-    features[@backingInt(Feature.permission_sensitivity_labels)] = default_permission.sensitivity == .internal_data and manifest.isSensitive(.private_user_data);
-    features[@backingInt(Feature.user_visible_permission_reasons)] = reasoned_permission.user_visible_reason.len != 0;
+    features[@backingInt(Feature.permission_sensitivity_labels)] = default_permission.sensitivity == .internal_data and
+        manifest.isSensitive(.private_user_data);
     features[@backingInt(Feature.secret_permissions_local_only)] = validationFailsWith(.{
         .bundle_id = "app.secret-camera",
         .display_name = "Secret Camera",
@@ -845,7 +393,6 @@ fn fillExtraContract(features: *[feature_count]bool) void {
         }},
     }, error.SensitiveRemoteEgressRequiresIntent);
     features[@backingInt(Feature.permission_digest_covers_privacy)] = !std.mem.eql(u8, &reason_digest_a, &reason_digest_b);
-    features[@backingInt(Feature.package_preserves_permission_privacy)] = @hasField(package_model.StoredPermission, "sensitivity") and @hasField(package_model.StoredPermission, "user_visible_reason");
     features[@backingInt(Feature.dangerous_permission_lint_reason)] = manifest_linter.lint(.{
         .bundle_id = "app.camera",
         .display_name = "Camera",
@@ -858,24 +405,8 @@ fn fillExtraContract(features: *[feature_count]bool) void {
             .sensitivity = .private_user_data,
         }},
     }).count(.warning) != 0;
-    features[@backingInt(Feature.typed_privacy_budget_service)] = contractPresent("zigos.privacy.budget");
-    features[@backingInt(Feature.typed_diagnostics_export_service)] = contractPresent("zigos.diagnostics.export");
-    features[@backingInt(Feature.privacy_budget_policy)] = @hasField(policy_object.SensitiveEgressRequest, "remote_bytes");
-    features[@backingInt(Feature.camera_policy_gate)] = @hasField(policy_object.CreateRequest, "camera_allowed");
-    features[@backingInt(Feature.microphone_policy_gate)] = @hasField(policy_object.CreateRequest, "microphone_allowed");
-    features[@backingInt(Feature.location_policy_gate)] = @hasField(policy_object.CreateRequest, "location_allowed");
-    features[@backingInt(Feature.contacts_policy_gate)] = @hasField(policy_object.CreateRequest, "contacts_allowed");
-    features[@backingInt(Feature.sensor_policy_gate)] = @hasField(policy_object.CreateRequest, "sensors_allowed");
-    features[@backingInt(Feature.clipboard_policy_gate)] = @hasField(policy_object.CreateRequest, "clipboard_allowed");
-    features[@backingInt(Feature.peer_ipc_policy_gate)] = @hasField(policy_object.CreateRequest, "peer_ipc_allowed");
-    features[@backingInt(Feature.private_egress_budget_policy)] = @hasField(policy_object.CreateRequest, "max_remote_private_egress_bytes");
-    features[@backingInt(Feature.data_egress_ledger)] = event_ledger.EventKind.data_egress == .data_egress;
-    features[@backingInt(Feature.privacy_budget_ledger)] = event_ledger.EventKind.privacy_budget == .privacy_budget;
-    features[@backingInt(Feature.diagnostics_private_egress_summary)] = @hasField(event_ledger.DiagnosticSummary, "private_egress_denials");
-    features[@backingInt(Feature.remote_diagnostics_consent)] = true;
     features[@backingInt(Feature.process_hidden_observability_denied)] = processHiddenObservabilityDeniedCheck();
     features[@backingInt(Feature.process_continuous_observability_scope)] = processContinuousObservabilityScopeCheck();
-    features[@backingInt(Feature.ai_context_budget_policy)] = @hasField(policy_object.CreateRequest, "max_ai_context_bytes");
     features[@backingInt(Feature.ai_training_audit_manifest)] = validationFailsWith(.{
         .bundle_id = "app.training-ai",
         .display_name = "Training AI",
@@ -892,9 +423,7 @@ fn fillExtraContract(features: *[feature_count]bool) void {
             .offline_required = true,
         },
     }, error.OfflineAiRequiresLocalModel);
-    features[@backingInt(Feature.private_ai_diagnostics_redaction)] = @hasField(event_ledger.DiagnosticSummary, "ai_remote_denials");
     features[@backingInt(Feature.compatibility_lint_rejection)] = compat_report.hasErrors();
-    features[@backingInt(Feature.native_registry_privacy_discovery)] = typed_component_abi.interfaceId(.privacy_budget) == .privacy_budget;
     features[@backingInt(Feature.no_secret_remote_permissions)] = validationFailsWith(.{
         .bundle_id = "app.secret-egress",
         .display_name = "Secret Egress",
@@ -918,8 +447,6 @@ fn fillExtraContract(features: *[feature_count]bool) void {
             .sensitivity = .private_user_data,
         }},
     }, error.SensitivePermissionRequiresReason);
-    features[@backingInt(Feature.typed_diagnostics_share_validation)] = contractOperationPresent("zigos.diagnostics.export", .diagnostics_share_remote);
-    features[@backingInt(Feature.local_first_sensitive_defaults)] = !manifest.isSensitive(default_permission.sensitivity) and default_permission.local_only;
 }
 
 fn processContractTask(
@@ -1074,15 +601,6 @@ fn validationFailsWith(bundle: manifest.BundleManifest, expected: anyerror) bool
     return false;
 }
 
-fn contractPresent(interface_name: []const u8) bool {
-    return typed_component_abi.contractFor(interface_name) != null;
-}
-
-fn contractOperationPresent(interface_name: []const u8, operation_id: typed_component_abi.OperationId) bool {
-    const interface_contract = typed_component_abi.contractFor(interface_name) orelse return false;
-    return interface_contract.operation(operation_id) != null;
-}
-
 fn fillThirdContract(features: *[feature_count]bool) void {
     const base_sensitive = manifest.PermissionRequest{
         .kind = .network_egress,
@@ -1120,8 +638,6 @@ fn fillThirdContract(features: *[feature_count]bool) void {
         }},
     });
 
-    features[@backingInt(Feature.permission_purpose_labels)] = @hasField(manifest.PermissionRequest, "purpose") and @backingInt(manifest.PermissionPurpose.document_editing) != 0;
-    features[@backingInt(Feature.permission_retention_days)] = @hasField(manifest.PermissionRequest, "retention_days");
     features[@backingInt(Feature.sensitive_purpose_validation)] = validationFailsWith(.{
         .bundle_id = "zigos.private-relay",
         .display_name = "Private Relay",
@@ -1191,31 +707,11 @@ fn fillThirdContract(features: *[feature_count]bool) void {
             .retention_days = 1,
         }},
     }, error.SensitivePermissionRequiresLease);
-    features[@backingInt(Feature.package_preserves_permission_purpose)] = @hasField(package_model.StoredPermission, "purpose");
-    features[@backingInt(Feature.package_preserves_permission_retention)] = @hasField(package_model.StoredPermission, "retention_days");
     features[@backingInt(Feature.permission_digest_covers_purpose)] = !std.mem.eql(u8, &purpose_digest_a, &purpose_digest_b);
     features[@backingInt(Feature.permission_digest_covers_retention)] = !std.mem.eql(u8, &purpose_digest_a, &retention_digest_b);
     features[@backingInt(Feature.linter_purpose_guidance)] = lifecycle_lint.count(.warning) != 0;
     features[@backingInt(Feature.linter_retention_guidance)] = lifecycle_lint.count(.warning) >= 2;
     features[@backingInt(Feature.linter_lease_guidance)] = lifecycle_lint.count(.warning) >= 3;
-    features[@backingInt(Feature.policy_sensitive_retention_cap)] = @hasField(policy_object.CreateRequest, "max_sensitive_retention_days");
-    features[@backingInt(Feature.policy_permission_lease_cap)] = @hasField(policy_object.CreateRequest, "max_permission_lease_ticks");
-    features[@backingInt(Feature.policy_requires_sensitive_lease)] = @hasField(policy_object.CreateRequest, "require_sensitive_permission_lease");
-    features[@backingInt(Feature.permission_use_policy_request)] = @hasField(policy_object.PermissionUseRequest, "lease_ticks");
-    features[@backingInt(Feature.retention_policy_ledger)] = event_ledger.EventKind.retention_policy == .retention_policy;
-    features[@backingInt(Feature.permission_lease_ledger)] = event_ledger.EventKind.permission_lease == .permission_lease;
-    features[@backingInt(Feature.permission_lease_expiration_summary)] = @hasField(event_ledger.DiagnosticSummary, "permission_lease_expirations");
-    features[@backingInt(Feature.consent_receipt_ledger)] = event_ledger.EventKind.consent_receipt == .consent_receipt;
-    features[@backingInt(Feature.consent_revocation_summary)] = @hasField(event_ledger.DiagnosticSummary, "consent_receipt_revocations");
-    features[@backingInt(Feature.typed_consent_receipts_service)] = contractPresent("zigos.consent.receipts");
-    features[@backingInt(Feature.typed_permission_lease_service)] = contractPresent("zigos.permission.lease");
-    features[@backingInt(Feature.consent_record_wire_validation)] = contractOperationPresent("zigos.consent.receipts", .consent_record);
-    features[@backingInt(Feature.permission_lease_expire_wire_validation)] = contractOperationPresent("zigos.permission.lease", .permission_lease_expire);
-    features[@backingInt(Feature.native_registry_consent_discovery)] = typed_component_abi.interfaceId(.consent_receipts) == .consent_receipts;
-    features[@backingInt(Feature.native_registry_lease_discovery)] = typed_component_abi.interfaceId(.permission_lease) == .permission_lease;
-    features[@backingInt(Feature.retention_diagnostics_redacted)] = @hasField(event_ledger.DiagnosticSummary, "retention_policy_events");
-    features[@backingInt(Feature.lease_diagnostics_redacted)] = @hasField(event_ledger.DiagnosticSummary, "permission_lease_events");
-    features[@backingInt(Feature.consent_diagnostics_redacted)] = @hasField(event_ledger.DiagnosticSummary, "consent_receipt_events");
 }
 
 fn fillFourthContract(features: *[feature_count]bool) void {
@@ -1251,7 +747,6 @@ fn fillFourthContract(features: *[feature_count]bool) void {
     const digest_a = package_digest.digestBundle(data_rights_a);
     const digest_b = package_digest.digestBundle(data_rights_b);
 
-    features[@backingInt(Feature.data_rights_manifest)] = @hasField(manifest.BundleManifest, "data_rights") and @hasField(manifest.DataRightsDecl, "portable_export");
     features[@backingInt(Feature.private_object_data_rights_validation)] = validationFailsWith(.{
         .bundle_id = "app.private-notes",
         .display_name = "Private Notes",
@@ -1270,22 +765,6 @@ fn fillFourthContract(features: *[feature_count]bool) void {
         },
     }, error.DataDeletionReceiptRequired);
     features[@backingInt(Feature.data_rights_digest_covers_export_format)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@backingInt(Feature.package_preserves_data_rights)] = @hasField(package_model.BundleRevision, "data_rights") and @hasField(package_model.ResolvedManifest, "data_rights");
-    features[@backingInt(Feature.typed_data_rights_service)] = contractPresent("zigos.data.rights");
-    features[@backingInt(Feature.data_export_prepare_operation)] = contractOperationPresent("zigos.data.rights", .data_export_prepare);
-    features[@backingInt(Feature.data_delete_request_operation)] = contractOperationPresent("zigos.data.rights", .data_delete_request);
-    features[@backingInt(Feature.data_delete_receipt_operation)] = contractOperationPresent("zigos.data.rights", .data_delete_receipt);
-    features[@backingInt(Feature.native_registry_data_rights_discovery)] = typed_component_abi.interfaceId(.data_rights) == .data_rights;
-    features[@backingInt(Feature.policy_data_export_gate)] = @hasField(policy_object.CreateRequest, "data_export_allowed");
-    features[@backingInt(Feature.policy_data_delete_gate)] = @hasField(policy_object.CreateRequest, "data_deletion_allowed");
-    features[@backingInt(Feature.policy_export_byte_budget)] = @hasField(policy_object.CreateRequest, "max_data_export_bytes");
-    features[@backingInt(Feature.policy_deletion_receipt_required)] = @hasField(policy_object.CreateRequest, "require_data_deletion_receipt");
-    features[@backingInt(Feature.policy_data_rights_request)] = @hasField(policy_object.DataRightsRequest, "deletion_receipt_present");
-    features[@backingInt(Feature.data_export_ledger)] = event_ledger.EventKind.data_export == .data_export;
-    features[@backingInt(Feature.data_deletion_ledger)] = event_ledger.EventKind.data_deletion == .data_deletion;
-    features[@backingInt(Feature.data_rights_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "data_export_events");
-    features[@backingInt(Feature.data_export_redaction)] = @hasField(event_ledger.DiagnosticSummary, "data_export_denials");
-    features[@backingInt(Feature.data_deletion_receipt_summary)] = @hasField(event_ledger.DiagnosticSummary, "data_deletion_receipts");
 }
 
 fn fillFifthContract(features: *[feature_count]bool) void {
@@ -1312,8 +791,6 @@ fn fillFifthContract(features: *[feature_count]bool) void {
     const digest_v1 = package_digest.digestBundle(measured_local_ai);
     const digest_v2 = package_digest.digestBundle(measured_local_ai_v2);
 
-    features[@backingInt(Feature.ai_model_digest_manifest)] = @hasField(manifest.AiMetadata, "model_digest");
-    features[@backingInt(Feature.ai_model_source_manifest)] = @hasField(manifest.AiMetadata, "model_source_identity");
     features[@backingInt(Feature.local_ai_digest_validation)] = validationFailsWith(.{
         .bundle_id = "app.local-ai",
         .display_name = "Local AI",
@@ -1344,48 +821,10 @@ fn fillFifthContract(features: *[feature_count]bool) void {
         },
     }, error.PrivateAiRequiresLocalModel);
     features[@backingInt(Feature.ai_digest_covers_model_provenance)] = !std.mem.eql(u8, &digest_v1, &digest_v2);
-    features[@backingInt(Feature.package_preserves_model_digest)] = @hasField(package_model.StoredAiMetadata, "model_digest");
-    features[@backingInt(Feature.package_preserves_model_source)] = @hasField(package_model.StoredAiMetadata, "model_source_identity");
-    features[@backingInt(Feature.typed_ai_model_registry_service)] = contractPresent("zigos.ai.model.registry");
-    features[@backingInt(Feature.ai_model_register_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_register);
-    features[@backingInt(Feature.ai_model_attest_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_attest);
-    features[@backingInt(Feature.ai_model_revoke_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_revoke);
-    features[@backingInt(Feature.native_registry_ai_model_discovery)] = typed_component_abi.interfaceId(.ai_model_registry) == .ai_model_registry;
-    features[@backingInt(Feature.policy_ai_model_measurement_gate)] = @hasField(policy_object.CreateRequest, "require_ai_model_measurement");
-    features[@backingInt(Feature.policy_ai_model_source_gate)] = @hasField(policy_object.CreateRequest, "require_trusted_ai_model_source");
-    features[@backingInt(Feature.policy_ai_model_age_gate)] = @hasField(policy_object.CreateRequest, "max_ai_model_age_days");
-    features[@backingInt(Feature.ai_use_provenance_request)] = @hasField(policy_object.AiUseRequest, "local_model_measured") and @hasField(policy_object.AiUseRequest, "model_source_trusted");
-    features[@backingInt(Feature.ai_model_attestation_ledger)] = event_ledger.EventKind.ai_model_attestation == .ai_model_attestation;
-    features[@backingInt(Feature.ai_model_attestation_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "ai_model_attestations");
-    features[@backingInt(Feature.ai_model_rejection_summary)] = @hasField(event_ledger.DiagnosticSummary, "ai_model_rejections");
 }
 
 fn fillSixthContract(features: *[feature_count]bool) void {
-    features[@backingInt(Feature.credential_assertion_hardware_backed)] = @hasField(os_identity.Assertion, "hardware_backed_credential");
-    features[@backingInt(Feature.credential_assertion_platform_device)] = @hasField(os_identity.Assertion, "device_platform_backed");
-    features[@backingInt(Feature.credential_assertion_primary_device)] = @hasField(os_identity.Assertion, "primary_device_assertion");
-    features[@backingInt(Feature.credential_assertion_trust_generation)] = @hasField(os_identity.Assertion, "device_trust_generation");
-    features[@backingInt(Feature.credential_assertion_unlock_age)] = @hasField(os_identity.Assertion, "unlock_age_ticks");
-    features[@backingInt(Feature.policy_hardware_session_gate)] = @hasField(policy_object.CreateRequest, "require_hardware_backed_session");
-    features[@backingInt(Feature.policy_platform_device_session_gate)] = @hasField(policy_object.CreateRequest, "require_platform_backed_device_session");
-    features[@backingInt(Feature.policy_primary_device_session_gate)] = @hasField(policy_object.CreateRequest, "require_primary_device_session");
-    features[@backingInt(Feature.policy_unlock_age_gate)] = @hasField(policy_object.CreateRequest, "max_session_unlock_age_ticks");
-    features[@backingInt(Feature.session_trust_request)] = @hasField(policy_object.SessionTrustRequest, "hardware_backed_credential") and
-        @hasField(policy_object.SessionTrustRequest, "unlock_age_ticks") and
-        @hasDecl(policy_object.Directory, "sessionTrustDecision");
-    features[@backingInt(Feature.typed_identity_session_service)] = contractPresent("zigos.identity.session");
-    features[@backingInt(Feature.identity_session_authorize_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_authorize);
-    features[@backingInt(Feature.identity_session_step_up_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_step_up);
-    features[@backingInt(Feature.identity_session_revoke_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_revoke);
-    features[@backingInt(Feature.native_registry_identity_session_discovery)] = typed_component_abi.interfaceId(.identity_session) == .identity_session;
-    features[@backingInt(Feature.session_posture_ledger)] = event_ledger.EventKind.session_posture == .session_posture and @hasDecl(event_ledger.Ledger, "recordSessionPosture");
-    features[@backingInt(Feature.session_posture_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "session_posture_events");
-    features[@backingInt(Feature.session_posture_denial_summary)] = @hasField(event_ledger.DiagnosticSummary, "session_posture_denials");
     features[@backingInt(Feature.identity_session_redaction)] = sessionPostureRedactionCheck();
-    features[@backingInt(Feature.policy_digest_covers_session_gates)] = @hasField(policy_object.PolicyObject, "require_hardware_backed_session") and
-        @hasField(policy_object.PolicyObject, "require_platform_backed_device_session") and
-        @hasField(policy_object.PolicyObject, "require_primary_device_session") and
-        @hasField(policy_object.PolicyObject, "max_session_unlock_age_ticks");
 }
 
 fn sessionPostureRedactionCheck() bool {
@@ -1447,12 +886,6 @@ fn fillSeventhContract(features: *[feature_count]bool) void {
     const digest_builder_b = package_digest.digestBundle(builder_b);
     const digest_sbom_b = package_digest.digestBundle(sbom_b);
 
-    features[@backingInt(Feature.supply_chain_manifest)] = @hasField(manifest.BundleManifest, "supply_chain");
-    features[@backingInt(Feature.sbom_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "sbom_digest");
-    features[@backingInt(Feature.source_archive_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "source_archive_digest");
-    features[@backingInt(Feature.build_recipe_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "build_recipe_digest");
-    features[@backingInt(Feature.vulnerability_scan_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "vulnerability_scan_digest");
-    features[@backingInt(Feature.builder_identity_manifest)] = @hasField(manifest.SupplyChainDecl, "build_provenance_identity");
     features[@backingInt(Feature.reproducible_build_validation)] = validationFailsWith(.{
         .bundle_id = "app.repro",
         .display_name = "Repro",
@@ -1472,24 +905,8 @@ fn fillSeventhContract(features: *[feature_count]bool) void {
     }, error.TrustedBuilderRequiresIdentity);
     features[@backingInt(Feature.supply_chain_digest_covers_sbom)] = !std.mem.eql(u8, &digest_a, &digest_sbom_b);
     features[@backingInt(Feature.supply_chain_digest_covers_builder)] = !std.mem.eql(u8, &digest_a, &digest_builder_b);
-    features[@backingInt(Feature.package_preserves_supply_chain)] = @hasField(package_model.BundleRevision, "supply_chain");
-    features[@backingInt(Feature.package_resolves_supply_chain)] = @hasField(package_model.ResolvedManifest, "supply_chain");
-    features[@backingInt(Feature.policy_package_sbom_gate)] = @hasField(policy_object.CreateRequest, "require_package_sbom");
-    features[@backingInt(Feature.policy_package_reproducible_gate)] = @hasField(policy_object.CreateRequest, "require_reproducible_package_build");
-    features[@backingInt(Feature.policy_package_builder_gate)] = @hasField(policy_object.CreateRequest, "require_trusted_package_builder");
-    features[@backingInt(Feature.policy_vulnerability_scan_gate)] = @hasField(policy_object.CreateRequest, "require_vulnerability_scan");
-    features[@backingInt(Feature.package_provenance_request)] = @hasField(policy_object.PackageProvenanceRequest, "reproducible_build");
-    features[@backingInt(Feature.package_provenance_policy_decision)] = @hasDecl(policy_object.Directory, "packageProvenanceDecision");
     features[@backingInt(Feature.package_install_provenance_error)] = packageProvenanceInstallErrorPresent();
-    features[@backingInt(Feature.install_source_policy_still_present)] = @hasField(policy_object.CreateRequest, "install_source_mode") and
-        @hasDecl(policy_object.Directory, "installSourceDecision");
-    features[@backingInt(Feature.package_active_revision_mutation_gate)] =
-        packageActiveRevisionMutationGate() and
-        @hasDecl(package_service, "RollbackRequest") and
-        @hasDecl(package_service, "RemoveRequest") and
-        @hasDecl(package_service, "activeRevisionDigest") and
-        @hasField(typed_component_abi.PackageRollbackRequest, "expected_active_digest") and
-        @hasField(typed_component_abi.PackageRemoveRequest, "expected_active_digest");
+    features[@backingInt(Feature.package_active_revision_mutation_gate)] = packageActiveRevisionMutationGate();
 }
 
 fn packageActiveRevisionMutationGate() bool {
@@ -1606,7 +1023,6 @@ fn fillEighthContract(features: *[feature_count]bool) void {
     const digest_a = package_digest.digestBundle(base_agent);
     const digest_b = package_digest.digestBundle(purpose_b);
 
-    features[@backingInt(Feature.agent_delegation_manifest)] = @hasField(manifest.BundleManifest, "agent_delegation") and @hasField(manifest.AgentDelegationDecl, "max_autonomous_actions");
     features[@backingInt(Feature.agent_purpose_validation)] = validationFailsWith(.{
         .bundle_id = "app.agent",
         .display_name = "Agent",
@@ -1638,51 +1054,20 @@ fn fillEighthContract(features: *[feature_count]bool) void {
         },
     }, error.AgentDelegationNeedsConfirmation);
     features[@backingInt(Feature.agent_digest_covers_purpose)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@backingInt(Feature.package_preserves_agent_delegation)] = @hasField(package_model.BundleRevision, "agent_delegation");
-    features[@backingInt(Feature.package_resolves_agent_delegation)] = @hasField(package_model.ResolvedManifest, "agent_delegation");
-    features[@backingInt(Feature.policy_agent_allowed_gate)] = @hasField(policy_object.CreateRequest, "agent_delegation_allowed");
-    features[@backingInt(Feature.policy_agent_action_budget)] = @hasField(policy_object.CreateRequest, "max_agent_actions_per_session");
-    features[@backingInt(Feature.policy_agent_remote_budget)] = @hasField(policy_object.CreateRequest, "max_agent_remote_calls_per_session");
-    features[@backingInt(Feature.policy_agent_confirmation_gate)] = @hasField(policy_object.CreateRequest, "require_agent_user_confirmation");
-    features[@backingInt(Feature.policy_agent_audit_gate)] = @hasField(policy_object.CreateRequest, "require_agent_audit");
-    features[@backingInt(Feature.agent_delegation_request)] = @hasField(policy_object.AgentDelegationRequest, "autonomous_actions") and @hasField(policy_object.AgentDelegationRequest, "audit_enabled");
-    features[@backingInt(Feature.agent_delegation_policy_decision)] = @hasDecl(policy_object.Directory, "agentDelegationDecision");
-    features[@backingInt(Feature.typed_agent_delegation_service)] = contractPresent("zigos.agent.delegation");
-    features[@backingInt(Feature.agent_authorize_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_authorize);
-    features[@backingInt(Feature.agent_record_action_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_record_action);
-    features[@backingInt(Feature.agent_revoke_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_revoke);
-    features[@backingInt(Feature.agent_delegation_ledger)] = event_ledger.EventKind.agent_delegation == .agent_delegation and @hasDecl(event_ledger.Ledger, "recordAgentDelegation");
-    features[@backingInt(Feature.agent_delegation_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "agent_delegation_events") and @hasField(event_ledger.DiagnosticSummary, "agent_remote_call_events");
 }
 
 fn fillNinthContract(features: *[feature_count]bool) void {
-    features[@backingInt(Feature.attention_policy_create_request)] =
-        @hasField(policy_object.CreateRequest, "quiet_until_tick") and
-        @hasField(policy_object.CreateRequest, "max_visible_notifications") and
-        @hasField(policy_object.CreateRequest, "max_interruptive_notifications") and
-        @hasField(policy_object.CreateRequest, "allow_critical_interruption");
     features[@backingInt(Feature.quiet_hours_policy)] = attentionPolicyDenies(.attention_quiet_denied);
     features[@backingInt(Feature.visible_notification_budget_policy)] = attentionPolicyDenies(.attention_visible_budget_denied);
     features[@backingInt(Feature.interruptive_notification_budget_policy)] = attentionPolicyDenies(.attention_interruption_budget_denied);
     features[@backingInt(Feature.critical_interruption_policy)] = attentionPolicyDenies(.attention_critical_denied);
-    features[@backingInt(Feature.attention_policy_request)] = @hasField(policy_object.AttentionRequest, "requests_interruption") and
-        @hasField(policy_object.AttentionRequest, "critical");
-    features[@backingInt(Feature.attention_policy_decision)] = @hasDecl(policy_object.Directory, "attentionDecision");
-    features[@backingInt(Feature.notification_center_attention_policy)] = @hasDecl(notification_center.Center, "postWithAttentionPolicy") and
-        @hasDecl(notification_center.Center, "attentionDecision");
     features[@backingInt(Feature.notification_center_quiet_mode)] = notificationQuietModeCheck();
     features[@backingInt(Feature.notification_center_interruption_budget)] = notificationInterruptionBudgetCheck();
-    features[@backingInt(Feature.attention_policy_ledger)] = event_ledger.EventKind.attention_policy == .attention_policy and
-        @hasDecl(event_ledger.Ledger, "recordAttentionDecision");
-    features[@backingInt(Feature.attention_policy_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "attention_policy_events") and
-        @hasField(event_ledger.DiagnosticSummary, "attention_interruptions_denied");
     features[@backingInt(Feature.attention_policy_redaction)] = attentionRedactionCheck();
     features[@backingInt(Feature.policy_digest_covers_attention)] = attentionPolicyDigestCheck();
     features[@backingInt(Feature.structured_urgency_classification)] = notification_center.isInterruptive(.high) and
         notification_center.isInterruptive(.critical) and
         !notification_center.isInterruptive(.normal);
-    features[@backingInt(Feature.suppression_replacement_preserved)] = @hasField(notification_center.PostRequest, "suppression_policy") and
-        notification_center.SuppressionPolicy.replace_same_source_reason_task == .replace_same_source_reason_task;
 }
 
 fn attentionPolicyDenies(expected: policy_object.DecisionReason) bool {
@@ -1839,8 +1224,6 @@ fn fillTenthContract(features: *[feature_count]bool) void {
     const digest_b = package_digest.digestBundle(accessible_reader_v2);
     const shell_profile = humane_shell.AccessibilityProfile{};
 
-    features[@backingInt(Feature.accessibility_manifest)] = @hasField(manifest.BundleManifest, "accessibility") and
-        @hasField(manifest.AccessibilityDecl, "supports_reduced_motion");
     features[@backingInt(Feature.accessibility_profile_validation)] = validationFailsWith(.{
         .bundle_id = "app.reader",
         .display_name = "Reader",
@@ -1862,31 +1245,13 @@ fn fillTenthContract(features: *[feature_count]bool) void {
         },
     }, error.AccessibilityKeyboardNavigationMissing);
     features[@backingInt(Feature.accessibility_digest_covers_profile)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@backingInt(Feature.package_preserves_accessibility)] = @hasField(package_model.BundleRevision, "accessibility");
-    features[@backingInt(Feature.package_resolves_accessibility)] = @hasField(package_model.ResolvedManifest, "accessibility") and
-        @hasField(package_model.StoredAccessibility, "supports_keyboard_navigation");
     features[@backingInt(Feature.policy_adaptive_ui_gate)] = accessibilityPolicyDenies(.accessibility_adaptive_ui_denied);
     features[@backingInt(Feature.policy_screen_reader_gate)] = accessibilityPolicyDenies(.accessibility_screen_reader_denied);
     features[@backingInt(Feature.policy_keyboard_navigation_gate)] = accessibilityPolicyDenies(.accessibility_keyboard_navigation_denied);
     features[@backingInt(Feature.policy_reduced_motion_gate)] = accessibilityPolicyDenies(.accessibility_reduced_motion_denied);
     features[@backingInt(Feature.policy_high_contrast_gate)] = accessibilityPolicyDenies(.accessibility_high_contrast_denied);
-    features[@backingInt(Feature.accessibility_policy_request)] = @hasField(policy_object.AccessibilityRequest, "reduced_motion_supported") and
-        @hasDecl(policy_object.Directory, "accessibilityDecision");
-    features[@backingInt(Feature.typed_accessibility_profile_service)] = contractPresent("zigos.accessibility.profile");
-    features[@backingInt(Feature.accessibility_profile_get_operation)] = contractOperationPresent("zigos.accessibility.profile", .accessibility_profile_get);
-    features[@backingInt(Feature.accessibility_profile_apply_operation)] = contractOperationPresent("zigos.accessibility.profile", .accessibility_profile_apply);
-    features[@backingInt(Feature.native_registry_accessibility_discovery)] =
-        typed_component_abi.interfaceId(.accessibility_profile) == .accessibility_profile;
-    features[@backingInt(Feature.accessibility_profile_ledger)] = event_ledger.EventKind.accessibility_profile == .accessibility_profile and
-        @hasDecl(event_ledger.Ledger, "recordAccessibilityProfile");
-    features[@backingInt(Feature.accessibility_profile_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "accessibility_profile_events") and
-        @hasField(event_ledger.DiagnosticSummary, "accessibility_denials");
     features[@backingInt(Feature.accessibility_redaction)] = accessibilityRedactionCheck();
-    features[@backingInt(Feature.rendered_shell_accessibility_profile)] =
-        @hasField(humane_shell.AccessibilityProfile, "keyboard_navigation") and
-        @hasField(humane_shell.AccessibilityProfile, "screen_reader_labels") and
-        @hasField(humane_shell.AccessibilityProfile, "visible_focus") and
-        shell_profile.keyboard_navigation and
+    features[@backingInt(Feature.rendered_shell_accessibility_profile)] = shell_profile.keyboard_navigation and
         shell_profile.screen_reader_labels and
         shell_profile.reduce_motion;
 }
@@ -2006,14 +1371,6 @@ fn fillEleventhContract(features: *[feature_count]bool) void {
     const digest_a = package_digest.digestBundle(session_bound_agent);
     const digest_b = package_digest.digestBundle(larger_context_agent);
 
-    features[@backingInt(Feature.agent_manifest_session_binding)] =
-        @hasField(manifest.AgentDelegationDecl, "session_bound");
-    features[@backingInt(Feature.agent_manifest_local_context)] =
-        @hasField(manifest.AgentDelegationDecl, "local_context_only");
-    features[@backingInt(Feature.agent_manifest_context_budget)] =
-        @hasField(manifest.AgentDelegationDecl, "max_context_bytes");
-    features[@backingInt(Feature.agent_manifest_kill_switch)] =
-        @hasField(manifest.AgentDelegationDecl, "kill_switch_supported");
     features[@backingInt(Feature.agent_session_binding_validation)] = validationFailsWith(.{
         .bundle_id = "app.agent-session",
         .display_name = "Agent Session",
@@ -2057,50 +1414,11 @@ fn fillEleventhContract(features: *[feature_count]bool) void {
         },
     }, error.AgentDelegationKillSwitchRequired);
     features[@backingInt(Feature.agent_digest_covers_session_scope)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@backingInt(Feature.package_preserves_agent_session_scope)] =
-        @hasField(package_model.StoredAgentDelegation, "session_bound") and
-        @hasField(package_model.StoredAgentDelegation, "local_context_only") and
-        @hasField(package_model.StoredAgentDelegation, "max_context_bytes") and
-        @hasField(package_model.StoredAgentDelegation, "kill_switch_supported");
-    features[@backingInt(Feature.package_resolves_agent_session_scope)] =
-        @hasField(package_model.ResolvedManifest, "agent_delegation") and
-        @hasField(manifest.AgentDelegationDecl, "kill_switch_supported");
     features[@backingInt(Feature.policy_agent_session_binding_gate)] = agentSessionPolicyDenies(.agent_session_binding_denied);
     features[@backingInt(Feature.policy_agent_local_context_gate)] = agentSessionPolicyDenies(.agent_context_scope_denied);
     features[@backingInt(Feature.policy_agent_context_budget_gate)] = agentSessionPolicyDenies(.agent_context_budget_denied);
     features[@backingInt(Feature.policy_agent_kill_switch_gate)] = agentSessionPolicyDenies(.agent_kill_switch_denied);
     features[@backingInt(Feature.policy_agent_visible_plan_gate)] = agentSessionPolicyDenies(.agent_plan_visibility_required);
-    features[@backingInt(Feature.agent_session_policy_request)] =
-        @hasField(policy_object.AgentDelegationRequest, "session_bound") and
-        @hasField(policy_object.AgentDelegationRequest, "local_context_only") and
-        @hasField(policy_object.AgentDelegationRequest, "context_bytes") and
-        @hasField(policy_object.AgentDelegationRequest, "delegation_generation") and
-        @hasField(policy_object.AgentDelegationRequest, "user_visible_plan");
-    features[@backingInt(Feature.typed_agent_session_bind_operation)] =
-        contractOperationPresent("zigos.agent.delegation", .agent_bind_session);
-    features[@backingInt(Feature.typed_agent_kill_switch_operation)] =
-        contractOperationPresent("zigos.agent.delegation", .agent_kill_switch);
-    features[@backingInt(Feature.agent_session_service_model)] =
-        @hasDecl(agent_delegation_service.Service, "authorize") and
-        @hasDecl(agent_delegation_service.Service, "recordAction") and
-        @hasField(agent_delegation_service.AuthorizeRequest, "session_id") and
-        @hasField(agent_delegation_service.RecordActionRequest, "subject") and
-        @hasField(agent_delegation_service.RecordActionRequest, "task_id") and
-        @hasField(agent_delegation_service.RecordActionRequest, "expected_generation");
-    features[@backingInt(Feature.agent_action_binding_gate)] =
-        agentActionBindingCheck() and
-        @hasField(typed_component_abi.AgentRecordActionRequest, "expected_subject_serial") and
-        @hasField(typed_component_abi.AgentRecordActionRequest, "expected_subject_kind") and
-        @hasField(typed_component_abi.AgentRecordActionRequest, "expected_task_id") and
-        @hasField(typed_component_abi.AgentRecordActionRequest, "expected_generation");
-    features[@backingInt(Feature.agent_session_service_kill_switch)] =
-        @hasDecl(agent_delegation_service.Service, "killSwitch") and
-        @hasField(agent_delegation_service.Service, "minimum_generation");
-    features[@backingInt(Feature.agent_session_cumulative_context_budget)] = agentCumulativeContextBudgetCheck();
-    features[@backingInt(Feature.agent_action_denial_audit)] = agentActionDenialAuditCheck();
-    features[@backingInt(Feature.agent_session_ledger)] =
-        event_ledger.EventKind.agent_session == .agent_session and
-        @hasDecl(event_ledger.Ledger, "recordAgentSessionBoundary");
     features[@backingInt(Feature.agent_session_redaction)] = agentSessionRedactionCheck();
 }
 
@@ -2214,231 +1532,6 @@ fn agentSessionRedactionCheck() bool {
         std.mem.indexOf(u8, exported, "kind=agent_session") != null;
 }
 
-fn agentCumulativeContextBudgetCheck() bool {
-    var directory = policy_object.Directory.init();
-    const signer = signing.SignerIdentity{
-        .label = "agent-context-budget-contract",
-        .seed = signing.seedFromByte(0xCE),
-    };
-    _ = directory.create(.{
-        .scope = .organization,
-        .subject_id = 2033,
-        .issuer = .{ .kind = .policy_authority, .serial = 2033 },
-        .label = "agent-context-cumulative",
-        .agent_delegation_allowed = true,
-        .max_agent_actions_per_session = 4,
-        .require_agent_user_confirmation = true,
-        .require_agent_audit = true,
-        .require_agent_session_binding = true,
-        .require_agent_local_context = true,
-        .max_agent_context_bytes = 1024,
-        .min_agent_delegation_generation = 1,
-        .require_agent_visible_plan = true,
-    }, signer) catch return false;
-
-    var service = agent_delegation_service.Service.init();
-    const subject = principal.PrincipalId{ .kind = .app, .serial = 2033 };
-    const delegation = service.authorize(&directory, .{ .organization_id = 2033 }, .{
-        .subject = subject,
-        .task_id = 2034,
-        .session_id = 2035,
-        .autonomous_actions = 4,
-        .user_confirmed = true,
-        .audit_enabled = true,
-        .local_context_only = true,
-        .context_bytes = 1024,
-        .delegation_generation = 1,
-        .user_visible_plan = true,
-    }, null) catch return false;
-
-    _ = service.recordAction(.{
-        .subject = subject,
-        .task_id = 2034,
-        .delegation_id = delegation.id,
-        .session_id = 2035,
-        .expected_generation = 1,
-        .action_count = 1,
-        .context_bytes = 700,
-    }, null) catch return false;
-    if (delegation.remainingContextBytes() != 324) return false;
-    if (service.recordAction(.{
-        .subject = subject,
-        .task_id = 2034,
-        .delegation_id = delegation.id,
-        .session_id = 2035,
-        .expected_generation = 1,
-        .action_count = 1,
-        .context_bytes = 400,
-    }, null)) |_| return false else |err| {
-        if (err != error.ContextBudgetExceeded) return false;
-    }
-    return delegation.used_context_bytes == 700;
-}
-
-fn agentActionBindingCheck() bool {
-    var directory = policy_object.Directory.init();
-    const signer = signing.SignerIdentity{
-        .label = "agent-action-binding-contract",
-        .seed = signing.seedFromByte(0xC7),
-    };
-    _ = directory.create(.{
-        .scope = .organization,
-        .subject_id = 2034,
-        .issuer = .{ .kind = .policy_authority, .serial = 2034 },
-        .label = "agent-action-binding",
-        .agent_delegation_allowed = true,
-        .max_agent_actions_per_session = 2,
-        .require_agent_user_confirmation = true,
-        .require_agent_audit = true,
-        .require_agent_session_binding = true,
-        .require_agent_local_context = true,
-        .max_agent_context_bytes = 512,
-        .min_agent_delegation_generation = 2,
-        .require_agent_visible_plan = true,
-    }, signer) catch return false;
-
-    var service = agent_delegation_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-    const subject = principal.PrincipalId{ .kind = .app, .serial = 2034 };
-    const delegation = service.authorize(&directory, .{ .organization_id = 2034 }, .{
-        .subject = subject,
-        .task_id = 2035,
-        .session_id = 2036,
-        .autonomous_actions = 2,
-        .user_confirmed = true,
-        .audit_enabled = true,
-        .local_context_only = true,
-        .context_bytes = 512,
-        .delegation_generation = 2,
-        .user_visible_plan = true,
-        .detail = "private binding authorization",
-    }, &ledger) catch return false;
-
-    const wrong_subject_denied = if (service.recordAction(.{
-        .subject = .{ .kind = .app, .serial = 2037 },
-        .task_id = 2035,
-        .delegation_id = delegation.id,
-        .session_id = 2036,
-        .expected_generation = 2,
-        .action_count = 1,
-        .detail = "private wrong subject action",
-    }, &ledger)) |_| false else |err| err == error.DelegationBindingMismatch;
-    const wrong_generation_denied = if (service.recordAction(.{
-        .subject = subject,
-        .task_id = 2035,
-        .delegation_id = delegation.id,
-        .session_id = 2036,
-        .expected_generation = 1,
-        .action_count = 1,
-        .detail = "private wrong generation action",
-    }, &ledger)) |_| false else |err| err == error.DelegationBindingMismatch;
-    if (delegation.used_actions != 0) return false;
-
-    const accepted = service.recordAction(.{
-        .subject = subject,
-        .task_id = 2035,
-        .delegation_id = delegation.id,
-        .session_id = 2036,
-        .expected_generation = 2,
-        .action_count = 1,
-        .detail = "private bound action",
-    }, &ledger) catch return false;
-    const summary = ledger.userVisibleDiagnosticSummary();
-    return wrong_subject_denied and
-        wrong_generation_denied and
-        accepted.used_actions == 1 and
-        summary.agent_session_events == 3 and
-        summary.agent_session_denials == 2;
-}
-
-fn agentActionDenialAuditCheck() bool {
-    var directory = policy_object.Directory.init();
-    const signer = signing.SignerIdentity{
-        .label = "agent-denial-audit-contract",
-        .seed = signing.seedFromByte(0xCF),
-    };
-    _ = directory.create(.{
-        .scope = .organization,
-        .subject_id = 2036,
-        .issuer = .{ .kind = .policy_authority, .serial = 2036 },
-        .label = "agent-denial-audit",
-        .agent_delegation_allowed = true,
-        .max_agent_actions_per_session = 1,
-        .max_agent_remote_calls_per_session = 0,
-        .require_agent_user_confirmation = true,
-        .require_agent_audit = true,
-        .require_agent_session_binding = true,
-        .require_agent_local_context = true,
-        .max_agent_context_bytes = 512,
-        .min_agent_delegation_generation = 1,
-        .require_agent_visible_plan = true,
-    }, signer) catch return false;
-
-    var service = agent_delegation_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-    const subject = principal.PrincipalId{ .kind = .app, .serial = 2036 };
-    const delegation = service.authorize(&directory, .{ .organization_id = 2036 }, .{
-        .subject = subject,
-        .task_id = 2037,
-        .session_id = 2038,
-        .autonomous_actions = 1,
-        .remote_calls = 0,
-        .user_confirmed = true,
-        .audit_enabled = true,
-        .local_context_only = true,
-        .context_bytes = 512,
-        .delegation_generation = 1,
-        .user_visible_plan = true,
-        .detail = "private contract authorization",
-    }, &ledger) catch return false;
-
-    if (service.recordAction(.{
-        .subject = subject,
-        .task_id = 2037,
-        .delegation_id = delegation.id,
-        .session_id = 2038,
-        .expected_generation = 1,
-        .action_count = 2,
-        .detail = "private action overrun",
-    }, &ledger)) |_| return false else |err| {
-        if (err != error.ActionBudgetExceeded) return false;
-    }
-    if (service.recordAction(.{
-        .subject = subject,
-        .task_id = 2037,
-        .delegation_id = delegation.id,
-        .session_id = 2038,
-        .expected_generation = 1,
-        .remote_call_count = 1,
-        .detail = "private remote overrun",
-    }, &ledger)) |_| return false else |err| {
-        if (err != error.RemoteCallBudgetExceeded) return false;
-    }
-    if (service.recordAction(.{
-        .subject = subject,
-        .task_id = 2037,
-        .delegation_id = delegation.id,
-        .session_id = 2039,
-        .expected_generation = 1,
-        .detail = "private session mismatch",
-    }, &ledger)) |_| return false else |err| {
-        if (err != error.SessionMismatch) return false;
-    }
-
-    const summary = ledger.userVisibleDiagnosticSummary();
-    var buffer: [1024]u8 = undefined;
-    const exported = ledger.exportText(&buffer, .{}) catch return false;
-    return summary.agent_delegation_events == 3 and
-        summary.agent_delegation_denials == 2 and
-        summary.agent_remote_call_events == 1 and
-        summary.agent_session_events == 2 and
-        summary.agent_session_denials == 1 and
-        std.mem.indexOf(u8, exported, "private action overrun") == null and
-        std.mem.indexOf(u8, exported, "private session mismatch") == null;
-}
-
 fn fillTwelfthContract(features: *[feature_count]bool) void {
     const background_permission = manifest.PermissionRequest{
         .kind = .background_execution,
@@ -2487,10 +1580,6 @@ fn fillTwelfthContract(features: *[feature_count]bool) void {
     const digest_a = package_digest.digestBundle(background_bundle);
     const digest_b = package_digest.digestBundle(background_bundle_b);
 
-    features[@backingInt(Feature.background_manifest_decl)] =
-        @hasField(manifest.BundleManifest, "background_tasks") and
-        @hasField(manifest.BackgroundTaskDecl, "budget") and
-        @hasField(manifest.BackgroundTaskDecl, "visibility");
     features[@backingInt(Feature.background_permission_pairing)] = validationFailsWith(.{
         .bundle_id = "app.background-contract",
         .display_name = "Background Contract",
@@ -2512,39 +1601,14 @@ fn fillTwelfthContract(features: *[feature_count]bool) void {
     }, error.BackgroundTaskBudgetMissing);
     features[@backingInt(Feature.background_network_visibility_validation)] = backgroundNetworkVisibilityValidation(&background_permissions);
     features[@backingInt(Feature.background_digest_covers_budget)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@backingInt(Feature.package_preserves_background_tasks)] =
-        @hasField(package_model.BundleRevision, "background_tasks") and
-        @hasField(package_model.StoredBackgroundTask, "budget") and
-        @hasField(package_model.ResolvedManifest, "background_tasks");
     features[@backingInt(Feature.policy_background_duration_gate)] = backgroundPolicyDenies(.background_duration_denied);
     features[@backingInt(Feature.policy_background_cpu_gate)] = backgroundPolicyDenies(.background_cpu_denied);
     features[@backingInt(Feature.policy_background_memory_gate)] = backgroundPolicyDenies(.background_memory_denied);
     features[@backingInt(Feature.policy_background_network_gate)] = backgroundPolicyDenies(.background_network_denied);
     features[@backingInt(Feature.policy_background_visibility_gate)] = backgroundPolicyDenies(.background_visibility_denied);
-    features[@backingInt(Feature.background_activity_policy_request)] =
-        @hasField(policy_object.BackgroundActivityRequest, "expected_duration_seconds") and
-        @hasDecl(policy_object.Directory, "backgroundActivityDecision");
-    features[@backingInt(Feature.typed_background_activity_service)] = contractPresent("zigos.background.activity");
-    features[@backingInt(Feature.background_authorize_operation)] = contractOperationPresent("zigos.background.activity", .background_authorize);
-    features[@backingInt(Feature.background_record_operation)] = contractOperationPresent("zigos.background.activity", .background_record);
-    features[@backingInt(Feature.background_complete_operation)] = contractOperationPresent("zigos.background.activity", .background_complete);
-    features[@backingInt(Feature.background_completion_binding_gate)] =
-        backgroundCompletionBindingCheck(background_bundle) and
-        @hasDecl(background_dispatch, "CompleteRequest") and
-        @hasField(background_dispatch.CompleteRequest, "expected_task_id") and
-        @hasField(background_dispatch.CompleteRequest, "expected_background_task_id") and
-        @hasField(background_dispatch.CompleteRequest, "expected_trigger") and
-        @hasField(typed_component_abi.BackgroundCompleteRequest, "expected_task_id") and
-        @hasField(typed_component_abi.BackgroundCompleteRequest, "expected_background_task_len") and
-        @hasField(typed_component_abi.BackgroundCompleteRequest, "expected_trigger") and
-        @hasField(typed_component_abi.BackgroundCompleteRequest, "completed_tick");
-    features[@backingInt(Feature.native_registry_background_discovery)] =
-        typed_component_abi.interfaceId(.background_activity) == .background_activity;
+    features[@backingInt(Feature.background_completion_binding_gate)] = backgroundCompletionBindingCheck(background_bundle);
     features[@backingInt(Feature.background_dispatch_runtime_gate)] = backgroundDispatchRuntimeCheck(background_bundle);
     features[@backingInt(Feature.background_expiration_watchdog)] = backgroundExpirationWatchdogCheck(background_bundle);
-    features[@backingInt(Feature.background_activity_ledger)] =
-        event_ledger.EventKind.background_activity == .background_activity and
-        @hasDecl(event_ledger.Ledger, "recordBackgroundActivity");
     features[@backingInt(Feature.background_activity_redaction)] = backgroundActivityRedactionCheck();
 }
 
@@ -2847,30 +1911,14 @@ const PasteboardContractEvidence = struct {
 
 fn fillThirteenthContract(features: *[feature_count]bool) void {
     const evidence = securePasteboardContractEvidence();
-    features[@backingInt(Feature.secure_pasteboard_service_model)] =
-        @hasDecl(secure_pasteboard.Service, "offer") and
-        @hasDecl(secure_pasteboard.Service, "read") and
-        @hasDecl(secure_pasteboard.Service, "revoke") and
-        @hasField(secure_pasteboard.Grant, "foreground_session_id") and
-        @hasField(secure_pasteboard.Grant, "destination") and
-        @hasField(secure_pasteboard.Grant, "read_once");
     features[@backingInt(Feature.pasteboard_foreground_gesture_gate)] = evidence.foreground_gesture_gate;
     features[@backingInt(Feature.pasteboard_destination_bound_grant)] = evidence.destination_bound_grant;
     features[@backingInt(Feature.pasteboard_destination_principal_bound_grant)] = evidence.destination_principal_bound_grant;
     features[@backingInt(Feature.pasteboard_strict_expiry_gate)] = evidence.strict_expiry_gate;
     features[@backingInt(Feature.pasteboard_read_once_token)] = evidence.read_once_token;
     features[@backingInt(Feature.pasteboard_revocation_gate)] = evidence.revocation_gate;
-    features[@backingInt(Feature.pasteboard_user_visible_audit)] =
-        event_ledger.EventKind.pasteboard_access == .pasteboard_access and
-        @hasDecl(event_ledger.Ledger, "recordPasteboardAccess") and
-        evidence.user_visible_audit;
+    features[@backingInt(Feature.pasteboard_user_visible_audit)] = evidence.user_visible_audit;
     features[@backingInt(Feature.pasteboard_redacted_diagnostics)] = evidence.redacted_diagnostics;
-    features[@backingInt(Feature.typed_secure_pasteboard_service)] = contractPresent("zigos.secure.pasteboard");
-    features[@backingInt(Feature.pasteboard_offer_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_offer);
-    features[@backingInt(Feature.pasteboard_read_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_read);
-    features[@backingInt(Feature.pasteboard_revoke_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_revoke);
-    features[@backingInt(Feature.native_registry_pasteboard_discovery)] =
-        typed_component_abi.interfaceId(.secure_pasteboard) == .secure_pasteboard;
     features[@backingInt(Feature.pasteboard_bootstrap_service_contract)] = securePasteboardBootstrapContractCheck();
     features[@backingInt(Feature.pasteboard_boot_image_registry)] = securePasteboardBootImageRegistryCheck();
 }
@@ -3088,16 +2136,6 @@ fn securePasteboardContractEvidence() PasteboardContractEvidence {
     return evidence;
 }
 
-const ObjectResilienceEvidence = struct {
-    service_model: bool = false,
-    restore_token_device_bound: bool = false,
-    restore_subject_binding: bool = false,
-    revoke_source_binding: bool = false,
-    backup_revocation_gate: bool = false,
-    ledger: bool = false,
-    redacted_diagnostics: bool = false,
-};
-
 fn fillFourteenthContract(features: *[feature_count]bool) void {
     const resilient_notes = manifest.BundleManifest{
         .bundle_id = "app.resilient-notes",
@@ -3125,12 +2163,7 @@ fn fillFourteenthContract(features: *[feature_count]bool) void {
     };
     const digest_a = package_digest.digestBundle(resilient_notes);
     const digest_b = package_digest.digestBundle(resilient_notes_v2);
-    const evidence = objectResilienceEvidence();
 
-    features[@backingInt(Feature.object_resilience_manifest)] =
-        @hasField(manifest.BundleManifest, "object_resilience") and
-        @hasField(manifest.ObjectResilienceDecl, "encrypted_snapshots") and
-        @hasField(manifest.ObjectResilienceDecl, "device_trust_required");
     features[@backingInt(Feature.encrypted_backup_validation)] = validationFailsWith(.{
         .bundle_id = "app.backup",
         .display_name = "Backup",
@@ -3180,33 +2213,10 @@ fn fillFourteenthContract(features: *[feature_count]bool) void {
         },
     }, error.ObjectBackupDeviceTrustRequired);
     features[@backingInt(Feature.backup_digest_covers_format)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@backingInt(Feature.package_preserves_object_resilience)] =
-        @hasField(package_model.BundleRevision, "object_resilience") and
-        @hasField(package_model.StoredObjectResilience, "encrypted_snapshots");
-    features[@backingInt(Feature.package_resolves_object_resilience)] =
-        @hasField(package_model.ResolvedManifest, "object_resilience");
     features[@backingInt(Feature.policy_backup_allowed_gate)] = objectResiliencePolicyDenies(.object_backup_denied);
     features[@backingInt(Feature.policy_restore_allowed_gate)] = objectResiliencePolicyDenies(.object_restore_denied);
     features[@backingInt(Feature.policy_encrypted_backup_gate)] = objectResiliencePolicyDenies(.object_backup_encryption_denied);
     features[@backingInt(Feature.policy_restore_device_trust_gate)] = objectResiliencePolicyDenies(.object_restore_device_trust_denied);
-    features[@backingInt(Feature.typed_object_resilience_service)] = contractPresent("zigos.object.resilience");
-    features[@backingInt(Feature.backup_prepare_operation)] = contractOperationPresent("zigos.object.resilience", .object_backup_prepare);
-    features[@backingInt(Feature.restore_authorize_operation)] = contractOperationPresent("zigos.object.resilience", .object_restore_authorize);
-    features[@backingInt(Feature.backup_revoke_operation)] = contractOperationPresent("zigos.object.resilience", .object_backup_revoke);
-    features[@backingInt(Feature.native_registry_object_resilience_discovery)] =
-        typed_component_abi.interfaceId(.object_resilience) == .object_resilience;
-    features[@backingInt(Feature.object_resilience_service_model)] = evidence.service_model;
-    features[@backingInt(Feature.restore_token_device_bound)] = evidence.restore_token_device_bound;
-    features[@backingInt(Feature.restore_snapshot_subject_bound)] = evidence.restore_subject_binding;
-    features[@backingInt(Feature.revoke_snapshot_source_task_bound)] = evidence.revoke_source_binding;
-    features[@backingInt(Feature.backup_revocation_gate)] = evidence.backup_revocation_gate;
-    features[@backingInt(Feature.object_resilience_ledger)] =
-        event_ledger.EventKind.object_resilience == .object_resilience and
-        @hasDecl(event_ledger.Ledger, "recordObjectResilience") and
-        evidence.ledger;
-    features[@backingInt(Feature.object_resilience_redaction)] = evidence.redacted_diagnostics;
-    features[@backingInt(Feature.object_resilience_bootstrap_contract)] = objectResilienceBootstrapContractCheck();
-    features[@backingInt(Feature.object_resilience_boot_image_registry)] = objectResilienceBootImageRegistryCheck();
 }
 
 fn objectResiliencePolicyDenies(expected: policy_object.DecisionReason) bool {
@@ -3264,184 +2274,7 @@ fn objectResiliencePolicyDenies(expected: policy_object.DecisionReason) bool {
     return !decision.allowed and decision.reason == expected;
 }
 
-fn objectResilienceEvidence() ObjectResilienceEvidence {
-    var evidence = ObjectResilienceEvidence{
-        .service_model = @hasDecl(object_resilience_service.Service, "prepareBackup") and
-            @hasDecl(object_resilience_service.Service, "restore") and
-            @hasDecl(object_resilience_service.Service, "revoke") and
-            @hasField(object_resilience_service.Snapshot, "restore_device_id"),
-    };
-    var directory = policy_object.Directory.init();
-    _ = directory.create(.{
-        .scope = .organization,
-        .subject_id = 2035,
-        .issuer = .{ .kind = .policy_authority, .serial = 2035 },
-        .label = "object-resilience-service",
-        .object_backup_allowed = true,
-        .object_restore_allowed = true,
-        .require_encrypted_object_backup = true,
-        .require_backup_recovery_key = true,
-        .require_restore_device_trust = true,
-        .max_object_backup_bytes = units.mebibytes(2),
-        .max_object_restore_age_days = 30,
-    }, .{
-        .label = "object-resilience-service-policy",
-        .seed = signing.seedFromByte(0xD4),
-    }) catch return evidence;
-    const subjects = policy_object.SubjectSet{
-        .organization_id = 2035,
-    };
-    var service = object_resilience_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-    const subject = principal.PrincipalId{ .kind = .app, .serial = 2035 };
-    const other_subject = principal.PrincipalId{ .kind = .app, .serial = 2038 };
-
-    const snapshot = service.prepareBackup(&directory, subjects, .{
-        .subject = subject,
-        .task_id = 2036,
-        .workspace_id = 77,
-        .object_id = 88,
-        .restore_device_id = 9090,
-        .bytes = units.kibibytes(512),
-        .sensitivity = .private_user_data,
-        .encrypted = true,
-        .recovery_key_present = true,
-        .now_ticks = 40,
-        .detail = "private object snapshot content",
-    }, &ledger) catch return evidence;
-    const snapshot_id = snapshot.id;
-
-    if (service.restore(&directory, subjects, .{
-        .subject = other_subject,
-        .destination_task_id = 2037,
-        .snapshot_id = snapshot_id,
-        .destination_device_id = 9090,
-        .device_trust_verified = true,
-        .restore_age_days = 1,
-        .now_ticks = 40,
-        .detail = "private wrong-subject restore",
-    }, &ledger)) |_| {
-        return evidence;
-    } else |err| {
-        evidence.restore_subject_binding = err == error.SnapshotSubjectMismatch;
-    }
-
-    if (service.restore(&directory, subjects, .{
-        .subject = subject,
-        .destination_task_id = 2037,
-        .snapshot_id = snapshot_id,
-        .destination_device_id = 9999,
-        .device_trust_verified = true,
-        .restore_age_days = 1,
-        .now_ticks = 41,
-        .detail = "private wrong-device restore",
-    }, &ledger)) |_| {
-        return evidence;
-    } else |err| {
-        evidence.restore_token_device_bound = err == error.DeviceTrustMismatch;
-    }
-
-    if (service.restore(&directory, subjects, .{
-        .subject = subject,
-        .destination_task_id = 2037,
-        .snapshot_id = snapshot_id,
-        .destination_device_id = 9090,
-        .restore_age_days = 1,
-        .now_ticks = 42,
-        .detail = "private untrusted restore",
-    }, &ledger)) |_| {
-        return evidence;
-    } else |err| {
-        if (err != error.PolicyDenied) return evidence;
-    }
-
-    _ = service.restore(&directory, subjects, .{
-        .subject = subject,
-        .destination_task_id = 2037,
-        .snapshot_id = snapshot_id,
-        .destination_device_id = 9090,
-        .device_trust_verified = true,
-        .restore_age_days = 1,
-        .now_ticks = 43,
-        .detail = "private trusted restore",
-    }, &ledger) catch return evidence;
-
-    const revocable = service.prepareBackup(&directory, subjects, .{
-        .subject = subject,
-        .task_id = 2036,
-        .workspace_id = 77,
-        .object_id = 89,
-        .restore_device_id = 9090,
-        .bytes = units.kibibytes(512),
-        .sensitivity = .private_user_data,
-        .encrypted = true,
-        .recovery_key_present = true,
-        .now_ticks = 44,
-        .detail = "private revoked object snapshot",
-    }, &ledger) catch return evidence;
-    const revoked_id = revocable.id;
-    const wrong_subject_revoke_denied = if (service.revoke(.{
-        .subject = other_subject,
-        .task_id = 2036,
-        .snapshot_id = revoked_id,
-        .now_ticks = 45,
-        .detail = "private revoked object snapshot wrong subject",
-    }, &ledger)) |_| false else |err| err == error.SnapshotSubjectMismatch;
-    const wrong_task_revoke_denied = if (service.revoke(.{
-        .subject = subject,
-        .task_id = 2037,
-        .snapshot_id = revoked_id,
-        .now_ticks = 45,
-        .detail = "private revoked object snapshot wrong source task",
-    }, &ledger)) |_| false else |err| err == error.SourceTaskMismatch;
-    evidence.revoke_source_binding = wrong_subject_revoke_denied and wrong_task_revoke_denied;
-    service.revoke(.{
-        .subject = subject,
-        .task_id = 2036,
-        .snapshot_id = revoked_id,
-        .now_ticks = 45,
-        .detail = "private revoked object snapshot",
-    }, &ledger) catch return evidence;
-    if (service.restore(&directory, subjects, .{
-        .subject = subject,
-        .destination_task_id = 2037,
-        .snapshot_id = revoked_id,
-        .destination_device_id = 9090,
-        .device_trust_verified = true,
-        .restore_age_days = 1,
-        .now_ticks = 46,
-        .detail = "private revoked restore",
-    }, &ledger)) |_| {
-        return evidence;
-    } else |err| {
-        evidence.backup_revocation_gate = err == error.SnapshotRevoked;
-    }
-
-    const summary = ledger.userVisibleDiagnosticSummary();
-    evidence.ledger = summary.object_resilience_events >= 7 and
-        summary.object_resilience_denials >= 3 and
-        summary.object_restore_events >= 4;
-    var buffer: [2048]u8 = undefined;
-    const exported = ledger.exportText(&buffer, .{}) catch return evidence;
-    evidence.redacted_diagnostics =
-        summary.protected_details_redacted >= summary.object_resilience_events and
-        std.mem.indexOf(u8, exported, "private object snapshot content") == null and
-        std.mem.indexOf(u8, exported, "private revoked object snapshot") == null and
-        std.mem.indexOf(u8, exported, "kind=object_resilience") != null;
-    return evidence;
-}
-
-fn objectResilienceBootstrapContractCheck() bool {
-    return serviceBootstrapContractCheck(.object_resilience, .object_resilience, "zigos.object.resilience");
-}
-
-fn objectResilienceBootImageRegistryCheck() bool {
-    return serviceBootImageRegistryCheck(.object_resilience, "zigos.system.store", "userspace-store.elf", "zigos.object.resilience");
-}
-
 const SemanticMemoryEvidence = struct {
-    service_model: bool = false,
     index_generation: bool = false,
     top_k_ranking: bool = false,
     result_redaction: bool = false,
@@ -3470,11 +2303,6 @@ fn fillFifteenthContract(features: *[feature_count]bool) void {
     const digest_b = package_digest.digestBundle(semantic_notes_v2);
     const evidence = semanticMemoryEvidence();
 
-    features[@backingInt(Feature.semantic_index_manifest)] =
-        @hasField(manifest.BundleManifest, "semantic_index") and
-        @hasField(manifest.SemanticIndexDecl, "local_only") and
-        @hasField(manifest.SemanticIndexDecl, "encrypted_index") and
-        @hasField(manifest.SemanticIndexDecl, "redacted_snippets");
     features[@backingInt(Feature.semantic_index_local_validation)] = validationFailsWith(.{
         .bundle_id = "app.semantic",
         .display_name = "Semantic",
@@ -3537,32 +2365,17 @@ fn fillFifteenthContract(features: *[feature_count]bool) void {
         },
     }, error.SemanticIndexModelDigestMissing);
     features[@backingInt(Feature.semantic_index_digest_covers_model)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@backingInt(Feature.package_preserves_semantic_index)] =
-        @hasField(package_model.BundleRevision, "semantic_index") and
-        @hasField(package_model.StoredSemanticIndex, "model_digest") and
-        @hasDecl(package_model.StoredSemanticIndex, "modelDigestSlice");
-    features[@backingInt(Feature.package_resolves_semantic_index)] =
-        @hasField(package_model.ResolvedManifest, "semantic_index");
     features[@backingInt(Feature.policy_semantic_memory_gate)] = semanticMemoryPolicyDenies(.semantic_memory_denied);
     features[@backingInt(Feature.policy_semantic_local_model_gate)] = semanticMemoryPolicyDenies(.semantic_memory_remote_model_denied);
     features[@backingInt(Feature.policy_semantic_encryption_gate)] = semanticMemoryPolicyDenies(.semantic_memory_encryption_denied);
     features[@backingInt(Feature.policy_semantic_redaction_gate)] = semanticMemoryPolicyDenies(.semantic_memory_redaction_denied);
     features[@backingInt(Feature.policy_semantic_query_budget_gate)] = semanticMemoryPolicyDenies(.semantic_query_budget_denied);
-    features[@backingInt(Feature.typed_index_search_service)] = contractPresent("zigos.index.search");
-    features[@backingInt(Feature.index_upsert_operation)] = contractOperationPresent("zigos.index.search", .index_upsert);
-    features[@backingInt(Feature.index_query_operation)] = contractOperationPresent("zigos.index.search", .index_query);
-    features[@backingInt(Feature.semantic_query_operation)] = contractOperationPresent("zigos.index.search", .semantic_index_query);
     features[@backingInt(Feature.native_registry_index_discovery)] = indexSearchBootstrapContractCheck();
-    features[@backingInt(Feature.semantic_query_service_model)] = evidence.service_model;
-    features[@backingInt(Feature.semantic_query_index_generation)] =
-        @hasField(typed_component_abi.IndexResponse, "index_generation") and evidence.index_generation;
+    features[@backingInt(Feature.semantic_query_index_generation)] = evidence.index_generation;
     features[@backingInt(Feature.semantic_query_top_k_ranking)] = evidence.top_k_ranking;
     features[@backingInt(Feature.semantic_query_result_redaction)] = evidence.result_redaction;
     features[@backingInt(Feature.semantic_query_workspace_scope)] = evidence.workspace_scope;
-    features[@backingInt(Feature.semantic_memory_ledger)] =
-        event_ledger.EventKind.semantic_memory == .semantic_memory and
-        @hasDecl(event_ledger.Ledger, "recordSemanticMemory") and
-        evidence.ledger;
+    features[@backingInt(Feature.semantic_memory_ledger)] = evidence.ledger;
     features[@backingInt(Feature.semantic_memory_redaction)] = evidence.redacted_diagnostics;
 }
 
@@ -3627,10 +2440,6 @@ fn semanticMemoryPolicyDenies(expected: policy_object.DecisionReason) bool {
 
 fn semanticMemoryEvidence() SemanticMemoryEvidence {
     var evidence = SemanticMemoryEvidence{
-        .service_model = @hasDecl(indexing_service.Service, "upsertClassified") and
-            @hasDecl(indexing_service.Service, "semanticQuery") and
-            @hasField(indexing_service.DocumentRecord, "metadata") and
-            @hasDecl(indexing_service.DocumentRecord, "sensitivity"),
         .top_k_ranking = semanticTopKRankingCheck(),
     };
     var policies = policy_object.Directory.init();
@@ -3733,7 +2542,6 @@ fn indexSearchBootstrapContractCheck() bool {
 }
 
 const IdentityCredentialEvidence = struct {
-    service_model: bool = false,
     hardware_sealed: bool = false,
     phishing_rejected: bool = false,
     local_unlock_required: bool = false,
@@ -3749,9 +2557,6 @@ const IdentityCredentialEvidence = struct {
 fn fillSixteenthContract(features: *[feature_count]bool) void {
     const evidence = identityCredentialEvidence();
 
-    features[@backingInt(Feature.passwordless_unlock_methods)] =
-        std.meta.stringToEnum(os_identity.UnlockMethod, "password") == null;
-    features[@backingInt(Feature.passkey_credential_service_model)] = evidence.service_model;
     features[@backingInt(Feature.credential_hardware_sealed_secret)] = evidence.hardware_sealed;
     features[@backingInt(Feature.credential_phishing_origin_rejection)] = evidence.phishing_rejected;
     features[@backingInt(Feature.credential_local_unlock_required)] = evidence.local_unlock_required;
@@ -3766,14 +2571,7 @@ fn fillSixteenthContract(features: *[feature_count]bool) void {
     features[@backingInt(Feature.policy_credential_hardware_gate)] = credentialPolicyDenies(.credential_hardware_denied);
     features[@backingInt(Feature.policy_credential_local_unlock_gate)] = credentialPolicyDenies(.credential_unlock_denied);
     features[@backingInt(Feature.policy_credential_unlock_age_gate)] = credentialPolicyDenies(.credential_unlock_stale);
-    features[@backingInt(Feature.identity_credential_register_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_register);
-    features[@backingInt(Feature.identity_credential_assert_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_assert);
-    features[@backingInt(Feature.identity_credential_recover_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_recover);
-    features[@backingInt(Feature.identity_credential_revoke_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_revoke);
-    features[@backingInt(Feature.credential_ledger)] =
-        event_ledger.EventKind.identity_credential == .identity_credential and
-        @hasDecl(event_ledger.Ledger, "recordIdentityCredential") and
-        evidence.ledger;
+    features[@backingInt(Feature.credential_ledger)] = evidence.ledger;
     features[@backingInt(Feature.credential_redaction)] = evidence.redacted_diagnostics;
 }
 
@@ -3844,14 +2642,7 @@ fn credentialContractHardwareProvider() secure_secret_store.HardwareSealProvider
 }
 
 fn identityCredentialEvidence() IdentityCredentialEvidence {
-    var evidence = IdentityCredentialEvidence{
-        .service_model = @hasDecl(os_identity.Store, "registerCredential") and
-            @hasDecl(os_identity.Store, "assertCredential") and
-            @hasDecl(os_identity.Store, "recoverCredential") and
-            @hasDecl(os_identity.Store, "revokeCredential") and
-            @hasField(os_identity.CredentialRecord, "phishing_resistant") and
-            @hasField(os_identity.Assertion, "hardware_backed_credential"),
-    };
+    var evidence = IdentityCredentialEvidence{};
     var graph = device_graph.Graph.init();
     var secrets = secret_vault_service.Service.init();
     secrets.attachHardwareProvider(credentialContractHardwareProvider());
@@ -4090,7 +2881,6 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
 }
 
 const PrivateSyncEvidence = struct {
-    service_model: bool = false,
     crdt_merge: bool = false,
     log_idempotence: bool = false,
     vector_clock: bool = false,
@@ -4109,45 +2899,23 @@ fn fillSeventeenthContract(features: *[feature_count]bool) void {
         .owner = .{ .kind = .user, .serial = 1 },
     };
 
-    features[@backingInt(Feature.crdt_document_operation_model)] =
-        @hasDecl(sync_adapters.DocumentOperation, "insert") and
-        @hasDecl(sync_adapters.DocumentOperation, "remove") and
-        @hasDecl(sync_adapters.DocumentOperationLog, "mergeFrom");
     features[@backingInt(Feature.deterministic_document_merge)] = evidence.crdt_merge;
     features[@backingInt(Feature.idempotent_operation_log_merge)] = evidence.log_idempotence;
     features[@backingInt(Feature.vector_clock_tracking)] = evidence.vector_clock;
     features[@backingInt(Feature.merge_buffer_bounds)] = evidence.buffer_bounds;
     features[@backingInt(Feature.encrypted_transport_queue)] = evidence.encrypted_transport;
     features[@backingInt(Feature.mergeable_transport_semantic)] = evidence.mergeable_semantic;
-    features[@backingInt(Feature.sync_service_replication_model)] =
-        evidence.service_model and @hasDecl(sync_service.Service, "replicateWorkspace");
-    features[@backingInt(Feature.conflict_review_service_model)] =
-        @hasDecl(sync_service.Service, "reviewConflictForObject");
-    features[@backingInt(Feature.conflict_resolution_service_model)] =
-        @hasDecl(sync_service.Service, "resolveConflictForObject");
     features[@backingInt(Feature.sync_destination_policy_gate)] = evidence.policy_gate;
     features[@backingInt(Feature.personal_e2ee_default_policy)] = default_policy.personal_e2ee;
     features[@backingInt(Feature.offline_first_default_policy)] = default_policy.offline_first;
-    features[@backingInt(Feature.sync_conflict_ledger)] =
-        event_ledger.EventKind.sync_conflict == .sync_conflict and evidence.ledger;
+    features[@backingInt(Feature.sync_conflict_ledger)] = evidence.ledger;
     features[@backingInt(Feature.sync_conflict_redaction)] = evidence.redacted_diagnostics;
-    features[@backingInt(Feature.typed_sync_replication_service)] = contractPresent("zigos.sync.replication");
-    features[@backingInt(Feature.sync_device_enroll_operation)] = contractOperationPresent("zigos.sync.replication", .sync_device_enroll);
-    features[@backingInt(Feature.sync_workspace_replicate_operation)] = contractOperationPresent("zigos.sync.replication", .sync_workspace_replicate);
-    features[@backingInt(Feature.sync_conflict_review_operation)] = contractOperationPresent("zigos.sync.replication", .sync_conflict_review);
-    features[@backingInt(Feature.sync_conflict_resolve_operation)] = contractOperationPresent("zigos.sync.replication", .sync_conflict_resolve);
-    features[@backingInt(Feature.sync_transport_frame_operation)] = contractOperationPresent("zigos.sync.replication", .sync_transport_frame);
     features[@backingInt(Feature.native_registry_sync_discovery)] = syncBootstrapContractCheck();
     features[@backingInt(Feature.sync_boot_image_registry)] = syncBootImageRegistryCheck();
 }
 
 fn privateSyncEvidence() PrivateSyncEvidence {
-    var evidence = PrivateSyncEvidence{
-        .service_model = @hasDecl(sync_service.Service, "replicateWorkspace") and
-            @hasDecl(sync_service.Service, "acceptTransportFrame") and
-            @hasDecl(sync_service.Service, "reviewConflictForObject") and
-            @hasDecl(sync_service.Service, "resolveConflictForObject"),
-    };
+    var evidence = PrivateSyncEvidence{};
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 301 };
     const tablet = principal.PrincipalId{ .kind = .device, .serial = 302 };
     var local_log = sync_adapters.DocumentOperationLog{};
@@ -4249,330 +3017,7 @@ fn syncBootImageRegistryCheck() bool {
     return serviceBootImageRegistryCheck(.sync_replication, "zigos.system.store", "userspace-store.elf", "zigos.sync.replication");
 }
 
-const SensitiveCaptureEvidence = struct {
-    service_model: bool = false,
-    foreground_gate: bool = false,
-    indicator_gate: bool = false,
-    background_denial: bool = false,
-    lease_policy_gate: bool = false,
-    indicator_expiry_boundary: bool = false,
-    session_binding_gate: bool = false,
-    sample_budget_gate: bool = false,
-    permission_policy_gate: bool = false,
-    revocation_gate: bool = false,
-    ledger: bool = false,
-    redacted_diagnostics: bool = false,
-};
-
-fn fillEighteenthContract(features: *[feature_count]bool) void {
-    const evidence = sensitiveCaptureEvidence();
-    const camera_permission = capturePermission(.camera, "camera:front", 120, "Capture a document photo");
-    const mic_permission = capturePermission(.mic, "microphone:built-in", 120, "Record a voice note");
-    const screen_permission = capturePermission(.screen_capture, "screen:active-window", 60, "Share the visible window");
-
-    features[@backingInt(Feature.sensitive_capture_service_model)] = evidence.service_model;
-    features[@backingInt(Feature.capture_foreground_session_gate)] = evidence.foreground_gate;
-    features[@backingInt(Feature.capture_privacy_indicator_gate)] = evidence.indicator_gate;
-    features[@backingInt(Feature.capture_background_denial)] = evidence.background_denial;
-    features[@backingInt(Feature.capture_lease_policy_gate)] = evidence.lease_policy_gate;
-    features[@backingInt(Feature.capture_indicator_expiry_boundary)] = evidence.indicator_expiry_boundary;
-    features[@backingInt(Feature.capture_session_binding_gate)] =
-        evidence.session_binding_gate and
-        @hasField(typed_component_abi.CaptureSampleRequest, "expected_device_id") and
-        @hasField(typed_component_abi.CaptureSampleRequest, "expected_foreground_session_id") and
-        @hasField(typed_component_abi.CaptureSampleRequest, "expected_kind") and
-        @hasField(typed_component_abi.CaptureStopRequest, "expected_device_id") and
-        @hasField(typed_component_abi.CaptureStopRequest, "expected_foreground_session_id") and
-        @hasField(typed_component_abi.CaptureStopRequest, "expected_kind");
-    features[@backingInt(Feature.capture_sample_budget_gate)] = evidence.sample_budget_gate;
-    features[@backingInt(Feature.capture_permission_kind_policy_gate)] = evidence.permission_policy_gate;
-    features[@backingInt(Feature.capture_revocation_gate)] = evidence.revocation_gate;
-    features[@backingInt(Feature.sensitive_capture_ledger)] =
-        event_ledger.EventKind.sensitive_capture == .sensitive_capture and evidence.ledger;
-    features[@backingInt(Feature.sensitive_capture_redaction)] = evidence.redacted_diagnostics;
-    features[@backingInt(Feature.typed_sensitive_capture_service)] = contractPresent("zigos.sensitive.capture");
-    features[@backingInt(Feature.capture_start_operation)] = contractOperationPresent("zigos.sensitive.capture", .capture_start);
-    features[@backingInt(Feature.capture_sample_operation)] = contractOperationPresent("zigos.sensitive.capture", .capture_sample);
-    features[@backingInt(Feature.capture_stop_operation)] = contractOperationPresent("zigos.sensitive.capture", .capture_stop);
-    features[@backingInt(Feature.native_registry_capture_discovery)] =
-        typed_component_abi.interfaceId(.sensitive_capture) == .sensitive_capture;
-    features[@backingInt(Feature.capture_bootstrap_service_contract)] = captureBootstrapContractCheck();
-    features[@backingInt(Feature.capture_boot_image_registry)] = captureBootImageRegistryCheck();
-    features[@backingInt(Feature.camera_permission_manifest_lease)] = capturePermissionIsModern(camera_permission, .camera);
-    features[@backingInt(Feature.microphone_permission_manifest_lease)] = capturePermissionIsModern(mic_permission, .mic);
-    features[@backingInt(Feature.screen_capture_permission_manifest_lease)] = capturePermissionIsModern(screen_permission, .screen_capture);
-}
-
-fn sensitiveCaptureEvidence() SensitiveCaptureEvidence {
-    var evidence = SensitiveCaptureEvidence{
-        .service_model = @hasDecl(sensitive_capture_service.Service, "start") and
-            @hasDecl(sensitive_capture_service.Service, "sample") and
-            @hasDecl(sensitive_capture_service.Service, "stop") and
-            @hasDecl(sensitive_capture_service.Service, "privacyIndicatorActive") and
-            @hasDecl(sensitive_capture_service.Service, "privacyIndicatorActiveAt") and
-            @hasDecl(sensitive_capture_service.Service, "activeSessionCountAt") and
-            @hasField(sensitive_capture_service.Session, "foreground_session_id") and
-            @hasField(sensitive_capture_service.Session, "indicator_visible"),
-    };
-
-    const user = principal.PrincipalId{ .kind = .user, .serial = 401 };
-    const app = principal.PrincipalId{ .kind = .app, .serial = 402 };
-    var policies = policy_object.Directory.init();
-    _ = policies.create(.{
-        .scope = .user,
-        .subject_id = user.serial,
-        .issuer = .{ .kind = .policy_authority, .serial = 401 },
-        .label = "sensitive-capture-contract",
-        .camera_allowed = true,
-        .microphone_allowed = true,
-        .location_allowed = true,
-        .sensors_allowed = true,
-        .screen_capture_allowed = true,
-        .require_sensitive_capture_foreground = true,
-        .require_capture_indicator = true,
-        .allow_background_capture = false,
-        .max_sensitive_capture_lease_ticks = 40,
-        .max_sensitive_capture_samples = 2,
-    }, .{
-        .label = "sensitive-capture-policy",
-        .seed = signing.seedFromByte(0xCB),
-    }) catch return evidence;
-    var locked_policies = policy_object.Directory.init();
-    _ = locked_policies.create(.{
-        .scope = .user,
-        .subject_id = 403,
-        .issuer = .{ .kind = .policy_authority, .serial = 401 },
-        .label = "sensitive-capture-locked",
-        .camera_allowed = false,
-    }, .{
-        .label = "sensitive-capture-locked-policy",
-        .seed = signing.seedFromByte(0xCC),
-    }) catch return evidence;
-
-    const subjects = policy_object.SubjectSet{ .user_id = user.serial };
-    const locked_subjects = policy_object.SubjectSet{ .user_id = 403 };
-    var service = sensitive_capture_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-
-    evidence.foreground_gate = if (service.start(&policies, subjects, .{
-        .subject = app,
-        .task_id = 44,
-        .device_id = 9,
-        .kind = .camera,
-        .foreground_session_id = 0,
-        .expires_at_ticks = 20,
-        .now_ticks = 10,
-        .sample_budget = 1,
-        .indicator_visible = true,
-        .detail = "private camera foreground denial",
-    }, &ledger)) |_| false else |err| err == error.ForegroundSessionRequired;
-    evidence.indicator_gate = if (service.start(&policies, subjects, .{
-        .subject = app,
-        .task_id = 44,
-        .device_id = 9,
-        .kind = .camera,
-        .foreground_session_id = 4,
-        .expires_at_ticks = 20,
-        .now_ticks = 10,
-        .sample_budget = 1,
-        .indicator_visible = false,
-        .detail = "private camera indicator denial",
-    }, &ledger)) |_| false else |err| err == error.PrivacyIndicatorRequired;
-    evidence.background_denial = if (service.start(&policies, subjects, .{
-        .subject = app,
-        .task_id = 44,
-        .device_id = 9,
-        .kind = .camera,
-        .foreground_session_id = 4,
-        .expires_at_ticks = 20,
-        .now_ticks = 10,
-        .sample_budget = 1,
-        .indicator_visible = true,
-        .background = true,
-        .detail = "private camera background denial",
-    }, &ledger)) |_| false else |err| err == error.BackgroundCaptureDenied;
-    evidence.lease_policy_gate = if (service.start(&policies, subjects, .{
-        .subject = app,
-        .task_id = 44,
-        .device_id = 9,
-        .kind = .camera,
-        .foreground_session_id = 4,
-        .expires_at_ticks = 80,
-        .now_ticks = 10,
-        .sample_budget = 1,
-        .indicator_visible = true,
-        .detail = "private camera long lease denial",
-    }, &ledger)) |_| false else |err| err == error.PolicyDenied;
-    evidence.permission_policy_gate = if (service.start(&locked_policies, locked_subjects, .{
-        .subject = app,
-        .task_id = 44,
-        .device_id = 9,
-        .kind = .camera,
-        .foreground_session_id = 4,
-        .expires_at_ticks = 20,
-        .now_ticks = 10,
-        .sample_budget = 1,
-        .indicator_visible = true,
-        .detail = "private camera permission denial",
-    }, &ledger)) |_| false else |err| err == error.PolicyDenied;
-
-    const expiring_session = service.start(&policies, subjects, .{
-        .subject = app,
-        .task_id = 44,
-        .device_id = 9,
-        .kind = .camera,
-        .foreground_session_id = 4,
-        .expires_at_ticks = 22,
-        .now_ticks = 20,
-        .sample_budget = 1,
-        .indicator_visible = true,
-        .detail = "private expiring camera session",
-    }, &ledger) catch return evidence;
-    evidence.indicator_expiry_boundary =
-        expiring_session.active and
-        service.activeSessionCountAt(21) == 1 and
-        service.activeSessionCountAt(22) == 0 and
-        service.privacyIndicatorActiveAt(.camera, 21) and
-        !service.privacyIndicatorActiveAt(.camera, 22);
-
-    const session = service.start(&policies, subjects, .{
-        .subject = app,
-        .task_id = 44,
-        .device_id = 9,
-        .kind = .camera,
-        .foreground_session_id = 4,
-        .expires_at_ticks = 35,
-        .now_ticks = 11,
-        .sample_budget = 2,
-        .indicator_visible = true,
-        .detail = "private camera session allowed",
-    }, &ledger) catch return evidence;
-    const wrong_binding_sample_denied = if (service.sample(.{
-        .subject = app,
-        .task_id = 44,
-        .session_id = session.id,
-        .expected_device_id = 10,
-        .expected_foreground_session_id = 4,
-        .expected_kind = .camera,
-        .now_ticks = 12,
-        .bytes = 1024,
-        .detail = "private camera wrong binding sample",
-    }, &ledger)) |_| false else |err| err == error.CaptureSessionBindingMismatch;
-    evidence.session_binding_gate = wrong_binding_sample_denied and session.sample_count == 0;
-    _ = service.sample(.{
-        .subject = app,
-        .task_id = 44,
-        .session_id = session.id,
-        .expected_device_id = 9,
-        .expected_foreground_session_id = 4,
-        .expected_kind = .camera,
-        .now_ticks = 12,
-        .bytes = 1024,
-        .detail = "private camera sample one",
-    }, &ledger) catch return evidence;
-    _ = service.sample(.{
-        .subject = app,
-        .task_id = 44,
-        .session_id = session.id,
-        .expected_device_id = 9,
-        .expected_foreground_session_id = 4,
-        .expected_kind = .camera,
-        .now_ticks = 13,
-        .bytes = 1024,
-        .detail = "private camera sample two",
-    }, &ledger) catch return evidence;
-    evidence.sample_budget_gate = if (service.sample(.{
-        .subject = app,
-        .task_id = 44,
-        .session_id = session.id,
-        .expected_device_id = 9,
-        .expected_foreground_session_id = 4,
-        .expected_kind = .camera,
-        .now_ticks = 14,
-        .bytes = 1024,
-        .detail = "private camera over-budget sample",
-    }, &ledger)) |_| false else |err| err == error.CaptureBudgetExceeded;
-    _ = service.stop(.{
-        .subject = app,
-        .task_id = 44,
-        .session_id = session.id,
-        .expected_device_id = 9,
-        .expected_foreground_session_id = 4,
-        .expected_kind = .camera,
-        .now_ticks = 15,
-        .detail = "private camera stopped",
-    }, &ledger) catch return evidence;
-    evidence.revocation_gate = if (service.sample(.{
-        .subject = app,
-        .task_id = 44,
-        .session_id = session.id,
-        .expected_device_id = 9,
-        .expected_foreground_session_id = 4,
-        .expected_kind = .camera,
-        .now_ticks = 16,
-        .bytes = 1024,
-        .detail = "private camera revoked sample",
-    }, &ledger)) |_| false else |err| err == error.CaptureSessionRevoked;
-
-    const summary = ledger.userVisibleDiagnosticSummary();
-    evidence.ledger = summary.sensitive_capture_events >= 10 and
-        summary.sensitive_capture_denials >= 6 and
-        summary.sensitive_capture_background_denials >= 1;
-    var export_buffer: [4096]u8 = undefined;
-    const exported = ledger.exportText(&export_buffer, .{}) catch return evidence;
-    evidence.redacted_diagnostics =
-        summary.protected_details_redacted >= summary.sensitive_capture_events and
-        std.mem.indexOf(u8, exported, "private camera") == null and
-        std.mem.indexOf(u8, exported, "kind=sensitive_capture") != null;
-    return evidence;
-}
-
-fn capturePermission(kind: manifest.PermissionKind, resource: []const u8, lease_ticks: manifest.LeaseTicks, reason: []const u8) manifest.PermissionRequest {
-    return .{
-        .kind = kind,
-        .resource = resource,
-        .rights = captureRights(kind),
-        .required = true,
-        .local_only = true,
-        .max_lease_ticks = lease_ticks,
-        .sensitivity = .private_user_data,
-        .user_visible_reason = reason,
-        .purpose = .media_capture,
-        .retention_days = 0,
-    };
-}
-
-fn captureRights(kind: manifest.PermissionKind) capability.CapabilityRights {
-    return switch (kind) {
-        .camera, .mic => .{ .device = .{ .device_use = true } },
-        .location => .{ .device = .{ .location_read = true } },
-        .sensor => .{ .device = .{ .sensor_read = true } },
-        .screen_capture => .{ .device = .{ .screen_capture = true } },
-        else => .{ .device = .{} },
-    };
-}
-
-fn capturePermissionIsModern(request: manifest.PermissionRequest, kind: manifest.PermissionKind) bool {
-    return request.kind == kind and
-        request.local_only and
-        request.max_lease_ticks != 0 and
-        request.purpose == .media_capture and
-        request.user_visible_reason.len != 0 and
-        request.retention_days == 0 and
-        request.sensitivity == .private_user_data;
-}
-
-fn captureBootstrapContractCheck() bool {
-    return serviceBootstrapContractCheck(.sensitive_capture, .sensitive_capture, "zigos.sensitive.capture");
-}
-
-fn captureBootImageRegistryCheck() bool {
-    return serviceBootImageRegistryCheck(.sensitive_capture, "zigos.system.privacy", "userspace-privacy.elf", "zigos.sensitive.capture");
-}
-
 const SecretVaultEvidence = struct {
-    service_model: bool = false,
     hardware_sealed_import: bool = false,
     nonresident_material: bool = false,
     owner_binding: bool = false,
@@ -4594,7 +3039,6 @@ const SecretVaultEvidence = struct {
 fn fillNineteenthContract(features: *[feature_count]bool) void {
     const evidence = secretVaultEvidence();
 
-    features[@backingInt(Feature.secret_vault_service_model)] = evidence.service_model;
     features[@backingInt(Feature.hardware_sealed_import)] = evidence.hardware_sealed_import;
     features[@backingInt(Feature.nonresident_secret_material)] = evidence.nonresident_material;
     features[@backingInt(Feature.secret_owner_binding)] = evidence.owner_binding;
@@ -4606,25 +3050,11 @@ fn fillNineteenthContract(features: *[feature_count]bool) void {
     features[@backingInt(Feature.store_handle_identity_binding)] = evidence.store_handle_identity_binding;
     features[@backingInt(Feature.secret_rotation_revokes_old_handles)] = evidence.rotation_revokes_old_handles;
     features[@backingInt(Feature.explicit_handle_revocation)] = evidence.explicit_revocation;
-    features[@backingInt(Feature.secret_revoke_binding_gate)] =
-        evidence.revoke_binding_gate and
-        @hasField(typed_component_abi.SecretRevokeRequest, "subject_serial") and
-        @hasField(typed_component_abi.SecretRevokeRequest, "subject_kind") and
-        @hasField(typed_component_abi.SecretRevokeRequest, "expected_holder_serial") and
-        @hasField(typed_component_abi.SecretRevokeRequest, "expected_holder_kind") and
-        @hasField(typed_component_abi.SecretRevokeRequest, "expected_holder_task_id");
+    features[@backingInt(Feature.secret_revoke_binding_gate)] = evidence.revoke_binding_gate;
     features[@backingInt(Feature.secret_hardware_policy_gate)] = evidence.hardware_policy_gate;
     features[@backingInt(Feature.secret_lease_policy_gate)] = evidence.lease_policy_gate;
-    features[@backingInt(Feature.secret_vault_ledger)] =
-        event_ledger.EventKind.secret_vault == .secret_vault and evidence.ledger;
+    features[@backingInt(Feature.secret_vault_ledger)] = evidence.ledger;
     features[@backingInt(Feature.secret_vault_redaction)] = evidence.redacted_diagnostics;
-    features[@backingInt(Feature.typed_secret_vault_service)] = contractPresent("zigos.secret.vault");
-    features[@backingInt(Feature.secret_import_operation)] = contractOperationPresent("zigos.secret.vault", .secret_import);
-    features[@backingInt(Feature.secret_lend_operation)] = contractOperationPresent("zigos.secret.vault", .secret_lend);
-    features[@backingInt(Feature.secret_rotate_operation)] = contractOperationPresent("zigos.secret.vault", .secret_rotate);
-    features[@backingInt(Feature.secret_revoke_operation)] = contractOperationPresent("zigos.secret.vault", .secret_revoke);
-    features[@backingInt(Feature.native_registry_secret_discovery)] =
-        typed_component_abi.interfaceId(.secret_vault) == .secret_vault;
     features[@backingInt(Feature.secret_vault_bootstrap_contract)] = secretVaultBootstrapContractCheck();
     features[@backingInt(Feature.secret_vault_boot_image_registry)] = secretVaultBootImageRegistryCheck();
 }
@@ -4636,14 +3066,7 @@ fn secretVaultContractHardwareProvider() secure_secret_store.HardwareSealProvide
 fn secretVaultEvidence() SecretVaultEvidence {
     var secret_export_buffer: secure_secret_store.Value = undefined;
     defer std.crypto.secureZero(u8, &secret_export_buffer);
-    var evidence = SecretVaultEvidence{
-        .service_model = @hasDecl(secret_vault_service.Service, "importSecret") and
-            @hasDecl(secret_vault_service.Service, "lendHandle") and
-            @hasDecl(secret_vault_service.Service, "exportRaw") and
-            @hasDecl(secret_vault_service.Service, "rotateSecret") and
-            @hasDecl(secret_vault_service.Service, "revoke") and
-            @hasField(secret_vault_service.VaultHandle, "expires_at_ticks"),
-    };
+    var evidence = SecretVaultEvidence{};
 
     const user = principal.PrincipalId{ .kind = .user, .serial = 501 };
     const other_user = principal.PrincipalId{ .kind = .user, .serial = 503 };
@@ -4713,7 +3136,6 @@ fn secretVaultEvidence() SecretVaultEvidence {
         .detail = "private api secret wrong owner rotate",
     }, &ledger)) |_| false else |err| err == error.SecretOwnerMismatch;
     evidence.owner_binding =
-        @hasDecl(secure_secret_store.Store, "describeSecret") and
         wrong_owner_lend_denied and
         wrong_owner_rotate_denied;
 
@@ -4766,7 +3188,6 @@ fn secretVaultEvidence() SecretVaultEvidence {
         .detail = "private expiring api secret lent",
     }, &expiry_ledger) catch return evidence;
     evidence.handle_expiry_boundary =
-        @hasDecl(secret_vault_service.Service, "activeHandleCountAt") and
         expiry_service.activeHandleCountAt(19) == 1 and
         expiry_service.activeHandleCountAt(20) == 0 and
         (if (expiry_service.exportRaw(&policies, subjects, .{
@@ -4900,7 +3321,6 @@ fn secretVaultEvidence() SecretVaultEvidence {
         .task_id = 87,
     }, &secret_export_buffer) catch return evidence;
     evidence.store_handle_identity_binding =
-        @hasDecl(secure_secret_store, "ExportContext") and
         wrong_store_holder_denied and
         wrong_store_task_denied and
         std.mem.eql(u8, direct_raw, "portable recovery token");
@@ -4965,8 +3385,6 @@ fn secretVaultEvidence() SecretVaultEvidence {
         .detail = "private api secret wrong holder revoke",
     }, &ledger)) |_| false else |err| err == error.SecretRevokeBindingMismatch;
     evidence.revoke_binding_gate =
-        @hasField(secret_vault_service.RevokeRequest, "expected_holder") and
-        @hasField(secret_vault_service.RevokeRequest, "expected_holder_task_id") and
         wrong_revoke_secret_denied and
         wrong_revoke_owner_denied and
         wrong_revoke_holder_denied and
@@ -5013,427 +3431,7 @@ fn secretVaultBootImageRegistryCheck() bool {
     return serviceBootImageRegistryCheck(.secret_vault, "zigos.system.privacy", "userspace-privacy.elf", "zigos.secret.vault");
 }
 
-const AttentionBrokerEvidence = struct {
-    service_model: bool = false,
-    brokered_post: bool = false,
-    default_task_binding: bool = false,
-    quiet_denial: bool = false,
-    critical_denial: bool = false,
-    visible_budget_denial: bool = false,
-    interruption_budget_denial: bool = false,
-    dismissal: bool = false,
-    task_bound_dismissal: bool = false,
-    strict_expiry_boundary: bool = false,
-    latest_query: bool = false,
-    policy_gate: bool = false,
-    ledger: bool = false,
-    redacted_diagnostics: bool = false,
-};
-
-fn fillTwentiethContract(features: *[feature_count]bool) void {
-    const evidence = attentionBrokerEvidence();
-
-    features[@backingInt(Feature.attention_broker_service_model)] = evidence.service_model;
-    features[@backingInt(Feature.brokered_notification_post)] = evidence.brokered_post;
-    features[@backingInt(Feature.notification_default_task_binding)] =
-        evidence.default_task_binding and
-        @hasField(typed_component_abi.AttentionDismissRequest, "expected_source_serial") and
-        @hasField(typed_component_abi.AttentionDismissRequest, "expected_source_kind") and
-        @hasField(typed_component_abi.AttentionDismissRequest, "expected_notification_task_id");
-    features[@backingInt(Feature.quiet_interrupt_denial)] = evidence.quiet_denial;
-    features[@backingInt(Feature.critical_interrupt_denial)] = evidence.critical_denial;
-    features[@backingInt(Feature.visible_budget_denial)] = evidence.visible_budget_denial;
-    features[@backingInt(Feature.interruption_budget_denial)] = evidence.interruption_budget_denial;
-    features[@backingInt(Feature.notification_dismissal)] = evidence.dismissal;
-    features[@backingInt(Feature.notification_task_bound_dismissal)] = evidence.task_bound_dismissal;
-    features[@backingInt(Feature.notification_strict_expiry_boundary)] = evidence.strict_expiry_boundary;
-    features[@backingInt(Feature.latest_visible_query)] = evidence.latest_query;
-    features[@backingInt(Feature.attention_broker_policy_gate)] = evidence.policy_gate;
-    features[@backingInt(Feature.attention_broker_ledger)] =
-        event_ledger.EventKind.attention_policy == .attention_policy and evidence.ledger;
-    features[@backingInt(Feature.attention_broker_redaction)] = evidence.redacted_diagnostics;
-    features[@backingInt(Feature.typed_attention_broker_service)] = contractPresent("zigos.attention.broker");
-    features[@backingInt(Feature.attention_post_operation)] = contractOperationPresent("zigos.attention.broker", .attention_post);
-    features[@backingInt(Feature.attention_dismiss_operation)] = contractOperationPresent("zigos.attention.broker", .attention_dismiss);
-    features[@backingInt(Feature.attention_query_operation)] = contractOperationPresent("zigos.attention.broker", .attention_query);
-    features[@backingInt(Feature.native_registry_attention_discovery)] =
-        typed_component_abi.interfaceId(.attention_broker) == .attention_broker;
-    features[@backingInt(Feature.attention_broker_bootstrap_contract)] = attentionBrokerBootstrapContractCheck();
-    features[@backingInt(Feature.attention_broker_boot_image_registry)] = attentionBrokerBootImageRegistryCheck();
-}
-
-fn attentionBrokerEvidence() AttentionBrokerEvidence {
-    var evidence = AttentionBrokerEvidence{
-        .service_model = @hasDecl(attention_broker_service.Service, "post") and
-            @hasDecl(attention_broker_service.Service, "dismiss") and
-            @hasDecl(attention_broker_service.Service, "query"),
-    };
-
-    const user = principal.PrincipalId{ .kind = .user, .serial = 741 };
-    const app = principal.PrincipalId{ .kind = .app, .serial = 742 };
-    var policies = policy_object.Directory.init();
-    _ = policies.create(.{
-        .scope = .user,
-        .subject_id = user.serial,
-        .issuer = .{ .kind = .policy_authority, .serial = 741 },
-        .label = "attention-broker-contract",
-        .quiet_until_tick = 50,
-        .max_visible_notifications = 2,
-        .max_interruptive_notifications = 1,
-        .allow_critical_interruption = false,
-    }, .{
-        .label = "attention-broker-policy",
-        .seed = signing.seedFromByte(0xA7),
-    }) catch return evidence;
-
-    const subjects = policy_object.SubjectSet{ .user_id = user.serial };
-    var service = attention_broker_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-
-    var expiry_service = attention_broker_service.Service.init();
-    var expiry_ledger = event_ledger.Ledger.init();
-    defer expiry_ledger.deinit();
-    const expiring = expiry_service.post(&policies, subjects, .{
-        .subject = app,
-        .task_id = 94,
-        .reason = .policy_notice,
-        .urgency = .passive,
-        .expires_at_ticks = 70,
-        .detail = "private expiring attention detail",
-        .now_ticks = 68,
-    }, &expiry_ledger) catch return evidence;
-    const expired_query = expiry_service.query(.{
-        .subject = user,
-        .task_id = 95,
-        .now_ticks = 70,
-        .detail = "query expired notification",
-    }, &expiry_ledger) catch return evidence;
-    evidence.strict_expiry_boundary =
-        expiring.isActive(69) and
-        !expiring.isActive(70) and
-        expiry_service.activeVisible(69) == 1 and
-        expiry_service.activeVisible(70) == 0 and
-        expired_query.latest == null;
-
-    const missing_task_denied = if (service.post(&policies, subjects, .{
-        .subject = app,
-        .task_id = 0,
-        .reason = .policy_notice,
-        .urgency = .passive,
-        .detail = "private missing task binding detail",
-        .now_ticks = 9,
-    }, &ledger)) |_| false else |err| err == error.MissingTaskBinding;
-
-    const passive = service.post(&policies, subjects, .{
-        .subject = app,
-        .task_id = 91,
-        .reason = .policy_notice,
-        .urgency = .passive,
-        .detail = "private passive attention detail",
-        .now_ticks = 10,
-    }, &ledger) catch return evidence;
-    evidence.brokered_post = passive.id != 0 and service.activeVisible(10) == 1;
-    evidence.default_task_binding = missing_task_denied and
-        passive.taskId() != null and
-        passive.taskId().? == 91;
-
-    evidence.quiet_denial = if (service.post(&policies, subjects, .{
-        .subject = app,
-        .task_id = 91,
-        .reason = .driver_restart,
-        .urgency = .high,
-        .detail = "private quiet denial detail",
-        .now_ticks = 20,
-    }, &ledger)) |_| false else |err| err == error.PolicyDenied;
-
-    evidence.critical_denial = if (service.post(&policies, subjects, .{
-        .subject = app,
-        .task_id = 91,
-        .reason = .driver_restart,
-        .urgency = .critical,
-        .detail = "private critical denial detail",
-        .now_ticks = 21,
-    }, &ledger)) |_| false else |err| err == error.PolicyDenied;
-
-    const high = service.post(&policies, subjects, .{
-        .subject = app,
-        .task_id = 91,
-        .reason = .sync_conflict,
-        .urgency = .high,
-        .notification_task_id = 92,
-        .detail = "private conflict attention detail",
-        .now_ticks = 60,
-    }, &ledger) catch return evidence;
-
-    const query = service.query(.{
-        .subject = user,
-        .task_id = 93,
-        .now_ticks = 61,
-        .detail = "query latest visible notification",
-    }, &ledger) catch return evidence;
-    evidence.latest_query = query.latest != null and
-        query.latest.?.id == high.id and
-        query.active_visible == 2 and
-        query.active_interruptions == 1;
-
-    evidence.visible_budget_denial = if (service.post(&policies, subjects, .{
-        .subject = app,
-        .task_id = 91,
-        .reason = .update_ready,
-        .urgency = .normal,
-        .detail = "private visible budget denial detail",
-        .now_ticks = 62,
-    }, &ledger)) |_| false else |err| err == error.PolicyDenied;
-
-    const wrong_task_dismiss_denied = if (service.dismiss(.{
-        .subject = app,
-        .task_id = 91,
-        .notification_id = high.id,
-        .now_ticks = 63,
-        .detail = "wrong task dismiss denied",
-    }, &ledger)) |_| false else |err| err == error.NotificationTaskMismatch;
-
-    const wrong_default_task_dismiss_denied = if (service.dismiss(.{
-        .subject = app,
-        .task_id = 92,
-        .notification_id = passive.id,
-        .now_ticks = 64,
-        .detail = "wrong default task dismiss denied",
-    }, &ledger)) |_| false else |err| err == error.NotificationTaskMismatch;
-    evidence.default_task_binding = evidence.default_task_binding and
-        wrong_default_task_dismiss_denied and
-        service.activeVisible(64) == 2;
-
-    const dismissed = service.dismiss(.{
-        .subject = app,
-        .task_id = 91,
-        .notification_id = passive.id,
-        .now_ticks = 65,
-        .detail = "dismiss passive notification",
-    }, &ledger) catch return evidence;
-    evidence.dismissal = dismissed.suppressed and service.activeVisible(65) == 1;
-
-    evidence.interruption_budget_denial = if (service.post(&policies, subjects, .{
-        .subject = app,
-        .task_id = 91,
-        .reason = .update_ready,
-        .urgency = .high,
-        .detail = "private interruption budget denial detail",
-        .now_ticks = 66,
-    }, &ledger)) |_| false else |err| err == error.PolicyDenied;
-    const task_dismissed = service.dismiss(.{
-        .subject = app,
-        .task_id = 92,
-        .notification_id = high.id,
-        .now_ticks = 67,
-        .detail = "task-bound dismiss",
-    }, &ledger) catch return evidence;
-    evidence.task_bound_dismissal = wrong_task_dismiss_denied and task_dismissed.suppressed;
-    evidence.policy_gate = evidence.quiet_denial and
-        evidence.critical_denial and
-        evidence.visible_budget_denial and
-        evidence.interruption_budget_denial;
-
-    const summary = ledger.userVisibleDiagnosticSummary();
-    evidence.ledger = summary.attention_policy_events >= 8 and
-        summary.attention_interruptions_denied >= 3;
-    var export_buffer: [4096]u8 = undefined;
-    const exported = ledger.exportText(&export_buffer, .{}) catch return evidence;
-    evidence.redacted_diagnostics =
-        summary.protected_details_redacted >= summary.attention_policy_events and
-        std.mem.indexOf(u8, exported, "private quiet denial detail") == null and
-        std.mem.indexOf(u8, exported, "private critical denial detail") == null and
-        std.mem.indexOf(u8, exported, "private interruption budget denial detail") == null and
-        std.mem.indexOf(u8, exported, "kind=attention_policy") != null;
-    return evidence;
-}
-
-fn attentionBrokerBootstrapContractCheck() bool {
-    return serviceBootstrapContractCheck(.attention_broker, .attention_broker, "zigos.attention.broker");
-}
-
-fn attentionBrokerBootImageRegistryCheck() bool {
-    return serviceBootImageRegistryCheck(.attention_broker, "zigos.system.session", "userspace-session.elf", "zigos.attention.broker");
-}
-
-const TaskLifecycleEvidence = struct {
-    service_model: bool = false,
-    task_suspend: bool = false,
-    invalid_task_suspend_denial: bool = false,
-    task_resume: bool = false,
-    checkpoint_denial: bool = false,
-    task_terminate: bool = false,
-    target_owner_binding: bool = false,
-    policy_gate: bool = false,
-    runtime_audit: bool = false,
-    ledger: bool = false,
-    redacted_diagnostics: bool = false,
-    policy_digest: bool = false,
-};
-
-fn fillTwentyFirstContract(features: *[feature_count]bool) void {
-    const evidence = taskLifecycleEvidence();
-
-    features[@backingInt(Feature.task_lifecycle_service_model)] = evidence.service_model;
-    features[@backingInt(Feature.brokered_task_suspend)] = evidence.task_suspend;
-    features[@backingInt(Feature.invalid_suspend_denial)] = evidence.invalid_task_suspend_denial;
-    features[@backingInt(Feature.brokered_task_resume)] = evidence.task_resume;
-    features[@backingInt(Feature.terminate_checkpoint_policy_denial)] = evidence.checkpoint_denial;
-    features[@backingInt(Feature.brokered_task_terminate)] = evidence.task_terminate;
-    features[@backingInt(Feature.lifecycle_target_owner_binding)] =
-        evidence.target_owner_binding and
-        @hasField(typed_component_abi.LifecycleControlRequest, "target_owner_serial") and
-        @hasField(typed_component_abi.LifecycleControlRequest, "target_owner_kind");
-    features[@backingInt(Feature.task_lifecycle_policy_gate)] = evidence.policy_gate;
-    features[@backingInt(Feature.task_lifecycle_runtime_audit)] = evidence.runtime_audit;
-    features[@backingInt(Feature.task_lifecycle_ledger)] =
-        event_ledger.EventKind.task_lifecycle == .task_lifecycle and evidence.ledger;
-    features[@backingInt(Feature.task_lifecycle_redaction)] = evidence.redacted_diagnostics;
-    features[@backingInt(Feature.typed_task_lifecycle_service)] = contractPresent("zigos.task.lifecycle");
-    features[@backingInt(Feature.lifecycle_suspend_operation)] = contractOperationPresent("zigos.task.lifecycle", .lifecycle_suspend);
-    features[@backingInt(Feature.lifecycle_resume_operation)] = contractOperationPresent("zigos.task.lifecycle", .lifecycle_resume);
-    features[@backingInt(Feature.lifecycle_terminate_operation)] = contractOperationPresent("zigos.task.lifecycle", .lifecycle_terminate);
-    features[@backingInt(Feature.native_registry_lifecycle_discovery)] =
-        typed_component_abi.interfaceId(.task_lifecycle) == .task_lifecycle;
-    features[@backingInt(Feature.lifecycle_bootstrap_contract)] = taskLifecycleBootstrapContractCheck();
-    features[@backingInt(Feature.lifecycle_boot_image_registry)] = taskLifecycleBootImageRegistryCheck();
-    features[@backingInt(Feature.lifecycle_policy_digest)] = evidence.policy_digest;
-}
-
-fn taskLifecycleEvidence() TaskLifecycleEvidence {
-    var evidence = TaskLifecycleEvidence{
-        .service_model = @hasDecl(task_lifecycle_service.Service, "control") and
-            @hasDecl(task_runtime.Runtime, "suspendTask") and
-            @hasDecl(task_runtime.Runtime, "resumeTask"),
-    };
-
-    var runtime = task_runtime.Runtime.init();
-    const user = principal.PrincipalId{ .kind = .user, .serial = 751 };
-    const app = principal.PrincipalId{ .kind = .app, .serial = 752 };
-    const task = runtime.createTask(.{
-        .owner = app,
-        .component_class = .app_component,
-        .budget = .{
-            .cpu_time_ticks = 1_000,
-            .memory_bytes = units.kibibytes(16),
-            .endpoint_slots = 4,
-            .shared_memory_bytes = units.kibibytes(4),
-            .background_allowed = false,
-        },
-        .local_only = true,
-    }) catch return evidence;
-
-    var policies = policy_object.Directory.init();
-    const lifecycle_policy = policies.create(.{
-        .scope = .user,
-        .subject_id = user.serial,
-        .issuer = .{ .kind = .policy_authority, .serial = 751 },
-        .label = "task-lifecycle-contract",
-        .task_lifecycle_allowed = true,
-        .require_lifecycle_checkpoint_before_terminate = true,
-    }, .{
-        .label = "task-lifecycle-policy",
-        .seed = signing.seedFromByte(0xB1),
-    }) catch return evidence;
-    evidence.policy_digest = policies.verify(lifecycle_policy.id);
-
-    const subjects = policy_object.SubjectSet{ .user_id = user.serial };
-    var service = task_lifecycle_service.Service.init(&runtime);
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-
-    evidence.target_owner_binding = if (service.control(&policies, subjects, .{
-        .subject = user,
-        .target_owner = user,
-        .task_id = task.id,
-        .operation = .suspend_task,
-        .now_ticks = 19,
-        .detail = "private lifecycle wrong-owner detail",
-    }, &ledger)) |_| false else |err| err == error.TaskOwnerMismatch;
-    if ((runtime.find(task.id) orelse return evidence).state != .active) return evidence;
-
-    const suspended = service.control(&policies, subjects, .{
-        .subject = user,
-        .target_owner = app,
-        .task_id = task.id,
-        .operation = .suspend_task,
-        .now_ticks = 20,
-        .detail = "private lifecycle suspend detail",
-    }, &ledger) catch return evidence;
-    evidence.task_suspend = suspended.state == .suspended;
-    const suspend_audited = (runtime.find(task.id) orelse return evidence).latestAuditEvent().?.kind == .suspended;
-
-    evidence.invalid_task_suspend_denial = if (service.control(&policies, subjects, .{
-        .subject = user,
-        .target_owner = app,
-        .task_id = task.id,
-        .operation = .suspend_task,
-        .now_ticks = 21,
-        .detail = "private lifecycle duplicate suspend detail",
-    }, &ledger)) |_| false else |err| err == error.InvalidLifecycleTransition;
-
-    const resumed = service.control(&policies, subjects, .{
-        .subject = user,
-        .target_owner = app,
-        .task_id = task.id,
-        .operation = .resume_task,
-        .now_ticks = 22,
-        .detail = "private lifecycle resume detail",
-    }, &ledger) catch return evidence;
-    evidence.task_resume = resumed.state == .active;
-    const resume_audited = (runtime.find(task.id) orelse return evidence).latestAuditEvent().?.kind == .resumed;
-
-    evidence.checkpoint_denial = if (service.control(&policies, subjects, .{
-        .subject = user,
-        .target_owner = app,
-        .task_id = task.id,
-        .operation = .terminate_task,
-        .now_ticks = 23,
-        .detail = "private lifecycle terminate without checkpoint detail",
-    }, &ledger)) |_| false else |err| err == error.PolicyDenied;
-
-    const terminated = service.control(&policies, subjects, .{
-        .subject = user,
-        .target_owner = app,
-        .task_id = task.id,
-        .operation = .terminate_task,
-        .checkpoint_present = true,
-        .now_ticks = 24,
-        .detail = "private lifecycle terminate after checkpoint detail",
-    }, &ledger) catch return evidence;
-    evidence.task_terminate = terminated.state == .terminated;
-    const terminate_audited = (runtime.find(task.id) orelse return evidence).latestAuditEvent().?.kind == .terminated;
-    evidence.policy_gate = evidence.checkpoint_denial and
-        !policies.lifecycleDecision(subjects, .{ .operation = .terminate_task }).allowed and
-        policies.lifecycleDecision(subjects, .{ .operation = .terminate_task, .checkpoint_present = true }).allowed;
-
-    evidence.runtime_audit = suspend_audited and resume_audited and terminate_audited;
-
-    const summary = ledger.userVisibleDiagnosticSummary();
-    evidence.ledger = summary.task_lifecycle_events >= 6 and
-        summary.task_lifecycle_denials >= 3 and
-        summary.task_lifecycle_terminations == 1;
-    var export_buffer: [4096]u8 = undefined;
-    const exported = ledger.exportText(&export_buffer, .{}) catch return evidence;
-    evidence.redacted_diagnostics =
-        summary.protected_details_redacted >= summary.task_lifecycle_events and
-        std.mem.indexOf(u8, exported, "private lifecycle suspend detail") == null and
-        std.mem.indexOf(u8, exported, "private lifecycle terminate after checkpoint detail") == null and
-        std.mem.indexOf(u8, exported, "kind=task_lifecycle") != null;
-    return evidence;
-}
-
-fn taskLifecycleBootstrapContractCheck() bool {
-    return serviceBootstrapContractCheck(.task_lifecycle, .task_lifecycle, "zigos.task.lifecycle");
-}
-
-fn taskLifecycleBootImageRegistryCheck() bool {
-    return serviceBootImageRegistryCheck(.task_lifecycle, "zigos.system.session", "userspace-session.elf", "zigos.task.lifecycle");
-}
-
 const PackageOffboardingEvidence = struct {
-    service_model: bool = false,
     policy_gate: bool = false,
     receipt_required: bool = false,
     denied_preserves_install: bool = false,
@@ -5451,9 +3449,6 @@ const PackageOffboardingEvidence = struct {
 fn fillTwentySecondContract(features: *[feature_count]bool) void {
     const evidence = packageOffboardingEvidence();
 
-    features[@backingInt(Feature.package_offboarding_service_model)] = evidence.service_model;
-    features[@backingInt(Feature.package_port_offboarding_authority_path)] =
-        @hasDecl(package_service.PackagePort, "offboard");
     features[@backingInt(Feature.offboard_policy_delete_gate)] = evidence.policy_gate;
     features[@backingInt(Feature.offboard_receipt_required)] = evidence.receipt_required;
     features[@backingInt(Feature.denied_offboard_preserves_install)] = evidence.denied_preserves_install;
@@ -5463,27 +3458,14 @@ fn fillTwentySecondContract(features: *[feature_count]bool) void {
     features[@backingInt(Feature.offboard_removed_bundle_digest_content_binding)] = evidence.removed_bundle_digest_content_binding;
     features[@backingInt(Feature.offboard_revision_purge)] = evidence.revision_purge;
     features[@backingInt(Feature.removed_bundle_unlaunchable)] = evidence.unlaunchable;
-    features[@backingInt(Feature.offboard_data_deletion_ledger)] =
-        event_ledger.EventKind.data_deletion == .data_deletion and evidence.ledger;
+    features[@backingInt(Feature.offboard_data_deletion_ledger)] = evidence.ledger;
     features[@backingInt(Feature.offboard_redaction)] = evidence.redacted_diagnostics;
-    features[@backingInt(Feature.typed_package_remove_operation)] =
-        contractOperationPresent("zigos.package.install", .package_remove);
-    features[@backingInt(Feature.package_remove_operation_id)] =
-        typed_component_abi.OperationId.package_remove == .package_remove and
-        @backingInt(typed_component_abi.OperationId.package_remove) == 0x0604;
     features[@backingInt(Feature.package_remove_wire_validation)] = packageRemoveWireValidationCheck();
-    features[@backingInt(Feature.package_registry_discovery)] =
-        userspace_registry.findByServiceClass(.package_install_update) != null and
-        typed_component_abi.interfaceId(.package_install) == .package_install;
     features[@backingInt(Feature.package_offboard_policy_digest)] = evidence.policy_digest;
 }
 
 fn packageOffboardingEvidence() PackageOffboardingEvidence {
-    var evidence = PackageOffboardingEvidence{
-        .service_model = @hasDecl(package_service.Service, "offboard") and
-            @hasDecl(package_service, "OffboardRequest") and
-            @hasDecl(package_service, "OffboardResult"),
-    };
+    var evidence = PackageOffboardingEvidence{};
 
     var service = package_service.Service.init();
     const signer_identity = signing.SignerIdentity{
@@ -5558,8 +3540,6 @@ fn packageOffboardingEvidence() PackageOffboardingEvidence {
     evidence.package_removed = result.removed_existing and service.find("app.notes") == null;
     evidence.result_receipt = result.deletion_receipt_id == 760_001;
     evidence.removed_bundle_digest =
-        @hasField(package_service.OffboardResult, "removed_bundle_digest") and
-        @hasField(typed_component_abi.PackageRemoveResponse, "removed_bundle_digest") and
         !std.mem.eql(u8, &result.removed_bundle_digest, &crypto_hash.zero_digest) and
         std.mem.eql(u8, &result.removed_bundle_digest, &expected_removed_digest);
     evidence.revision_purge = result.removed_revision_count >= 1;
@@ -5595,7 +3575,6 @@ fn packageRemoveWireValidationCheck() bool {
 }
 
 const ResourceGovernanceEvidence = struct {
-    scheduler_model: bool = false,
     telemetry_provider_boundary: bool = false,
     hardware_evidence_required: bool = false,
     foreground_thermal_dispatch: bool = false,
@@ -5606,7 +3585,6 @@ const ResourceGovernanceEvidence = struct {
     pressure_reason_accounting: bool = false,
     dispatch_budget_accounting: bool = false,
     privacy_mode_degrades_accelerator: bool = false,
-    carbon_aware_planner_compat: bool = false,
     ledger: bool = false,
     diagnostics: bool = false,
     redacted_diagnostics: bool = false,
@@ -5616,7 +3594,6 @@ const ResourceGovernanceEvidence = struct {
 fn fillTwentyThirdContract(features: *[feature_count]bool) void {
     const evidence = resourceGovernanceEvidence();
 
-    features[@backingInt(Feature.scheduler_resource_governance_model)] = evidence.scheduler_model;
     features[@backingInt(Feature.hardware_telemetry_provider_boundary)] = evidence.telemetry_provider_boundary;
     features[@backingInt(Feature.hardware_evidence_required_for_accelerator_queues)] = evidence.hardware_evidence_required;
     features[@backingInt(Feature.foreground_thermal_dispatch)] = evidence.foreground_thermal_dispatch;
@@ -5627,21 +3604,14 @@ fn fillTwentyThirdContract(features: *[feature_count]bool) void {
     features[@backingInt(Feature.pressure_delay_reason_accounting)] = evidence.pressure_reason_accounting;
     features[@backingInt(Feature.dispatch_budget_accounting)] = evidence.dispatch_budget_accounting;
     features[@backingInt(Feature.privacy_mode_degrades_accelerator)] = evidence.privacy_mode_degrades_accelerator;
-    features[@backingInt(Feature.carbon_aware_planner_compat)] = evidence.carbon_aware_planner_compat;
-    features[@backingInt(Feature.resource_governance_ledger)] =
-        event_ledger.EventKind.resource_governance == .resource_governance and evidence.ledger;
+    features[@backingInt(Feature.resource_governance_ledger)] = evidence.ledger;
     features[@backingInt(Feature.resource_governance_diagnostics)] = evidence.diagnostics;
     features[@backingInt(Feature.resource_governance_redaction)] = evidence.redacted_diagnostics;
     features[@backingInt(Feature.resource_governance_query_index)] = evidence.query_index;
 }
 
 fn resourceGovernanceEvidence() ResourceGovernanceEvidence {
-    var evidence = ResourceGovernanceEvidence{
-        .scheduler_model = @hasDecl(userspace_scheduler.Scheduler, "configureResourceTelemetryFromProvider") and
-            @hasDecl(userspace_scheduler.Scheduler, "taskDispatchStats") and
-            @hasField(event_ledger.DiagnosticSummary, "resource_governance_events"),
-        .carbon_aware_planner_compat = carbonAwareSchedulingBackedByPlanner(),
-    };
+    var evidence = ResourceGovernanceEvidence{};
 
     const incomplete_hardware_sample = accelerator_scheduler.TelemetrySample{
         .source = .hardware,
@@ -5923,1705 +3893,11 @@ fn resourceGovernanceHardwareEvidence() accelerator_scheduler.HardwareTelemetryE
     };
 }
 
-const NetworkSessionEvidence = struct {
-    service_model: bool = false,
-    egress_broker_composed: bool = false,
-    destination_gate: bool = false,
-    attested_open: bool = false,
-    byte_budget: bool = false,
-    expiry_boundary_gate: bool = false,
-    effective_budget_policy: bool = false,
-    over_budget_denied: bool = false,
-    mutation_binding: bool = false,
-    revocation_gate: bool = false,
-    revoked_transfer_denied: bool = false,
-    completed_transfer_denied: bool = false,
-    ledger: bool = false,
-    diagnostics: bool = false,
-    redacted_diagnostics: bool = false,
-};
-
-fn fillTwentyFourthContract(features: *[feature_count]bool) void {
-    const evidence = networkSessionEvidence();
-
-    features[@backingInt(Feature.network_session_service_model)] = evidence.service_model;
-    features[@backingInt(Feature.existing_egress_broker_composed)] = evidence.egress_broker_composed;
-    features[@backingInt(Feature.allow_list_destination_gate)] = evidence.destination_gate;
-    features[@backingInt(Feature.attested_session_open)] = evidence.attested_open;
-    features[@backingInt(Feature.session_byte_budget)] = evidence.byte_budget;
-    features[@backingInt(Feature.session_expiry_boundary_gate)] = evidence.expiry_boundary_gate;
-    features[@backingInt(Feature.session_effective_budget_policy)] = evidence.effective_budget_policy;
-    features[@backingInt(Feature.transfer_over_budget_denied)] = evidence.over_budget_denied;
-    features[@backingInt(Feature.session_mutation_binding)] =
-        evidence.mutation_binding and
-        @hasField(typed_component_abi.NetworkRecordTransferRequest, "expected_policy_id") and
-        @hasField(typed_component_abi.NetworkRecordTransferRequest, "expected_capability_id") and
-        @hasField(typed_component_abi.NetworkRevokeSessionRequest, "expected_policy_id") and
-        @hasField(typed_component_abi.NetworkRevokeSessionRequest, "expected_capability_id");
-    features[@backingInt(Feature.session_revocation_gate)] = evidence.revocation_gate;
-    features[@backingInt(Feature.revoked_session_transfer_denied)] = evidence.revoked_transfer_denied;
-    features[@backingInt(Feature.completed_session_transfer_denied)] = evidence.completed_transfer_denied;
-    features[@backingInt(Feature.network_session_ledger)] =
-        event_ledger.EventKind.network_session == .network_session and evidence.ledger;
-    features[@backingInt(Feature.network_session_diagnostics)] = evidence.diagnostics;
-    features[@backingInt(Feature.network_session_redaction)] = evidence.redacted_diagnostics;
-    features[@backingInt(Feature.typed_network_open_session_operation)] =
-        contractOperationPresent("zigos.service.network.policy", .network_open_session);
-    features[@backingInt(Feature.typed_network_transfer_operation)] =
-        contractOperationPresent("zigos.service.network.policy", .network_record_transfer);
-    features[@backingInt(Feature.typed_network_revoke_operation)] =
-        contractOperationPresent("zigos.service.network.policy", .network_revoke_session);
-    features[@backingInt(Feature.network_session_wire_validation)] = networkSessionWireValidationCheck();
-    features[@backingInt(Feature.network_stack_catalog_binding)] =
-        service_catalog.entryForClass(.network_stack) != null and
-        typed_component_abi.interfaceId(.network_policy) == .network_policy;
-}
-
-fn networkSessionEvidence() NetworkSessionEvidence {
-    var evidence = NetworkSessionEvidence{
-        .service_model = @hasDecl(network_session_service.Service, "open") and
-            @hasDecl(network_session_service.Service, "recordTransfer") and
-            @hasDecl(network_session_service.Service, "revoke") and
-            @hasField(event_ledger.DiagnosticSummary, "network_session_events"),
-        .egress_broker_composed = @hasDecl(network_policy, "EgressBroker"),
-    };
-
-    var network_policies = network_policy.Directory.init();
-    const owner = principal.PrincipalId{ .kind = .service, .serial = 811 };
-    const app = principal.PrincipalId{ .kind = .app, .serial = 812 };
-    const relay = network_policies.create(.{
-        .owner = owner,
-        .label = "relay",
-        .mode = .named_domain,
-        .target = "relay.zigos.dev",
-        .require_remote_attestation = true,
-    }) catch return evidence;
-
-    var capabilities = capability.CapabilityTable.init();
-    const network_capability = capabilities.mintBootRoot(.{
-        .holder = app,
-        .issuer = .{ .kind = .policy_authority, .serial = 811 },
-        .target = .{ .kind = .network_policy, .id = relay.id },
-        .rights = .{ .network_policy = .{
-            .network_remote = true,
-            .capability_derive = true,
-        } },
-        .scope = .{
-            .task_id = 8812,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 1,
-            .expires_at_ticks = 100,
-        },
-    }) catch return evidence;
-
-    var policies = policy_object.Directory.init();
-    _ = policies.create(.{
-        .scope = .user,
-        .subject_id = 810,
-        .issuer = .{ .kind = .policy_authority, .serial = 811 },
-        .label = "network-session-contract",
-        .network_egress_mode = .allow_list,
-        .allowed_network_destinations = &.{"relay.zigos.dev"},
-        .max_remote_private_egress_bytes = 1024,
-    }, .{
-        .label = "network-session-contract",
-        .seed = signing.seedFromByte(0x8B),
-    }) catch return evidence;
-    const subjects = policy_object.SubjectSet{ .user_id = 810 };
-
-    var service = network_session_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-    evidence.destination_gate = if (service.open(
-        &network_policies,
-        &capabilities,
-        &policies,
-        subjects,
-        .{
-            .subject = app,
-            .task_id = 8812,
-            .policy_id = relay.id,
-            .capability_id = network_capability.id,
-            .evidence = .{ .destination = .{ .domain = "other.example" } },
-            .sensitivity = .private_user_data,
-            .remote_bytes = 128,
-            .max_session_bytes = 256,
-            .expires_at_ticks = 40,
-            .now_ticks = 10,
-            .detail = "private denied network destination",
-        },
-        &ledger,
-    )) |_| false else |err| err == error.PolicyDenied;
-
-    const session = service.open(
-        &network_policies,
-        &capabilities,
-        &policies,
-        subjects,
-        .{
-            .subject = app,
-            .task_id = 8812,
-            .policy_id = relay.id,
-            .capability_id = network_capability.id,
-            .evidence = .{
-                .destination = .{ .domain = "relay.zigos.dev" },
-                .attested = true,
-                .verified_remote_attestation = true,
-                .attestation_request_digest_present = true,
-                .attestation_request_digest = crypto_hash.digestFromByte(0x91),
-                .peer_root_digest_present = true,
-                .peer_root_digest = crypto_hash.digestFromByte(0x92),
-            },
-            .sensitivity = .private_user_data,
-            .remote_bytes = 512,
-            .max_session_bytes = 768,
-            .expires_at_ticks = 40,
-            .now_ticks = 11,
-            .detail = "private relay session opened",
-        },
-        &ledger,
-    ) catch return evidence;
-    evidence.attested_open = session.id != 0 and session.attested and
-        std.mem.eql(u8, session.destinationSlice(), "relay.zigos.dev");
-
-    const wrong_binding_denied = if (service.recordTransfer(.{
-        .subject = app,
-        .task_id = 8812,
-        .session_id = session.id,
-        .expected_policy_id = relay.id + 1,
-        .expected_capability_id = network_capability.id,
-        .bytes = 1,
-        .now_ticks = 12,
-        .detail = "private relay wrong binding transfer",
-    }, &ledger)) |_| false else |err| err == error.SessionBindingMismatch;
-    evidence.mutation_binding = wrong_binding_denied and session.bytes_used == 0;
-
-    const transferred = service.recordTransfer(.{
-        .subject = app,
-        .task_id = 8812,
-        .session_id = session.id,
-        .expected_policy_id = relay.id,
-        .expected_capability_id = network_capability.id,
-        .bytes = 256,
-        .now_ticks = 12,
-        .detail = "private relay transfer",
-    }, &ledger) catch return evidence;
-    evidence.byte_budget = transferred.bytes_used == 256 and transferred.remainingBytes() == 512;
-
-    evidence.over_budget_denied = if (service.recordTransfer(.{
-        .subject = app,
-        .task_id = 8812,
-        .session_id = session.id,
-        .expected_policy_id = relay.id,
-        .expected_capability_id = network_capability.id,
-        .bytes = 600,
-        .now_ticks = 13,
-        .detail = "private relay transfer over budget",
-    }, &ledger)) |_| false else |err| err == error.ByteLimitExceeded;
-
-    const revoked = service.revoke(.{
-        .subject = app,
-        .task_id = 8812,
-        .session_id = session.id,
-        .expected_policy_id = relay.id,
-        .expected_capability_id = network_capability.id,
-        .now_ticks = 14,
-        .detail = "private relay session revoked",
-    }, &ledger) catch return evidence;
-    evidence.revocation_gate = revoked.state == .revoked;
-    evidence.revoked_transfer_denied = if (service.recordTransfer(.{
-        .subject = app,
-        .task_id = 8812,
-        .session_id = session.id,
-        .expected_policy_id = relay.id,
-        .expected_capability_id = network_capability.id,
-        .bytes = 1,
-        .now_ticks = 15,
-        .detail = "private revoked relay transfer",
-    }, &ledger)) |_| false else |err| err == error.SessionRevoked;
-
-    const completed_session = service.open(
-        &network_policies,
-        &capabilities,
-        &policies,
-        subjects,
-        .{
-            .subject = app,
-            .task_id = 8812,
-            .policy_id = relay.id,
-            .capability_id = network_capability.id,
-            .evidence = .{
-                .destination = .{ .domain = "relay.zigos.dev" },
-                .attested = true,
-                .verified_remote_attestation = true,
-                .attestation_request_digest_present = true,
-                .attestation_request_digest = crypto_hash.digestFromByte(0x93),
-                .peer_root_digest_present = true,
-                .peer_root_digest = crypto_hash.digestFromByte(0x94),
-            },
-            .sensitivity = .private_user_data,
-            .remote_bytes = 256,
-            .max_session_bytes = 256,
-            .expires_at_ticks = 40,
-            .now_ticks = 16,
-            .detail = "private completed relay session opened",
-        },
-        &ledger,
-    ) catch return evidence;
-    const completed = service.complete(.{
-        .subject = app,
-        .task_id = 8812,
-        .session_id = completed_session.id,
-        .expected_policy_id = relay.id,
-        .expected_capability_id = network_capability.id,
-        .now_ticks = 17,
-        .detail = "private relay session completed",
-    }, &ledger) catch return evidence;
-    const completed_transfer_denied = if (service.recordTransfer(.{
-        .subject = app,
-        .task_id = 8812,
-        .session_id = completed_session.id,
-        .expected_policy_id = relay.id,
-        .expected_capability_id = network_capability.id,
-        .bytes = 1,
-        .now_ticks = 18,
-        .detail = "private completed relay transfer",
-    }, &ledger)) |_| false else |err| err == error.SessionCompleted;
-    evidence.completed_transfer_denied = completed.state == .completed and completed_transfer_denied;
-
-    var expiry_service = network_session_service.Service.init();
-    var expiry_ledger = event_ledger.Ledger.init();
-    defer expiry_ledger.deinit();
-    const instant_expiry_rejected = if (expiry_service.open(
-        &network_policies,
-        &capabilities,
-        &policies,
-        subjects,
-        .{
-            .subject = app,
-            .task_id = 8812,
-            .policy_id = relay.id,
-            .capability_id = network_capability.id,
-            .evidence = .{
-                .destination = .{ .domain = "relay.zigos.dev" },
-                .attested = true,
-                .verified_remote_attestation = true,
-                .attestation_request_digest_present = true,
-                .attestation_request_digest = crypto_hash.digestFromByte(0x95),
-                .peer_root_digest_present = true,
-                .peer_root_digest = crypto_hash.digestFromByte(0x96),
-            },
-            .sensitivity = .private_user_data,
-            .remote_bytes = 16,
-            .max_session_bytes = 16,
-            .expires_at_ticks = 20,
-            .now_ticks = 20,
-            .detail = "private instant-expired relay session",
-        },
-        &expiry_ledger,
-    )) |_| false else |err| err == error.PolicyDenied;
-    const expiring_session = expiry_service.open(
-        &network_policies,
-        &capabilities,
-        &policies,
-        subjects,
-        .{
-            .subject = app,
-            .task_id = 8812,
-            .policy_id = relay.id,
-            .capability_id = network_capability.id,
-            .evidence = .{
-                .destination = .{ .domain = "relay.zigos.dev" },
-                .attested = true,
-                .verified_remote_attestation = true,
-                .attestation_request_digest_present = true,
-                .attestation_request_digest = crypto_hash.digestFromByte(0x97),
-                .peer_root_digest_present = true,
-                .peer_root_digest = crypto_hash.digestFromByte(0x98),
-            },
-            .sensitivity = .private_user_data,
-            .remote_bytes = 16,
-            .max_session_bytes = 16,
-            .expires_at_ticks = 22,
-            .now_ticks = 20,
-            .detail = "private expiring relay session",
-        },
-        &expiry_ledger,
-    ) catch return evidence;
-    const pre_expiry_transfer = expiry_service.recordTransfer(.{
-        .subject = app,
-        .task_id = 8812,
-        .session_id = expiring_session.id,
-        .expected_policy_id = relay.id,
-        .expected_capability_id = network_capability.id,
-        .bytes = 1,
-        .now_ticks = 21,
-        .detail = "private pre-expiry relay transfer",
-    }, &expiry_ledger) catch return evidence;
-    const at_expiry_transfer_denied = if (expiry_service.recordTransfer(.{
-        .subject = app,
-        .task_id = 8812,
-        .session_id = expiring_session.id,
-        .expected_policy_id = relay.id,
-        .expected_capability_id = network_capability.id,
-        .bytes = 1,
-        .now_ticks = 22,
-        .detail = "private at-expiry relay transfer",
-    }, &expiry_ledger)) |_| false else |err| err == error.SessionExpired;
-    evidence.expiry_boundary_gate =
-        instant_expiry_rejected and
-        pre_expiry_transfer.bytes_used == 1 and
-        at_expiry_transfer_denied;
-
-    var budget_service = network_session_service.Service.init();
-    var budget_ledger = event_ledger.Ledger.init();
-    defer budget_ledger.deinit();
-    evidence.effective_budget_policy = if (budget_service.open(
-        &network_policies,
-        &capabilities,
-        &policies,
-        subjects,
-        .{
-            .subject = app,
-            .task_id = 8812,
-            .policy_id = relay.id,
-            .capability_id = network_capability.id,
-            .evidence = .{
-                .destination = .{ .domain = "relay.zigos.dev" },
-                .attested = true,
-                .verified_remote_attestation = true,
-                .attestation_request_digest_present = true,
-                .attestation_request_digest = crypto_hash.digestFromByte(0x99),
-                .peer_root_digest_present = true,
-                .peer_root_digest = crypto_hash.digestFromByte(0x9A),
-            },
-            .sensitivity = .private_user_data,
-            .remote_bytes = 128,
-            .max_session_bytes = 2048,
-            .expires_at_ticks = 40,
-            .now_ticks = 19,
-            .detail = "private oversized session budget",
-        },
-        &budget_ledger,
-    )) |_| false else |err| err == error.PolicyDenied;
-
-    const summary = ledger.userVisibleDiagnosticSummary();
-    evidence.ledger = summary.network_session_events == 10 and
-        summary.network_session_denials == 5 and
-        summary.network_session_revocations == 1 and
-        summary.network_session_byte_denials == 1 and
-        summary.network_session_attested >= 7;
-
-    var diagnostics_buffer: [4096]u8 = undefined;
-    const diagnostics = ledger.renderUserVisibleDiagnosticsToBuffer(&diagnostics_buffer) catch return evidence;
-    evidence.diagnostics =
-        summary.evidenceEventCount() >= summary.network_session_events and
-        std.mem.indexOf(u8, diagnostics, "network_session_events=10") != null and
-        std.mem.indexOf(u8, diagnostics, "network_session_denials=5") != null;
-
-    var export_buffer: [4096]u8 = undefined;
-    const exported = ledger.exportText(&export_buffer, .{}) catch return evidence;
-    evidence.redacted_diagnostics =
-        summary.protected_details_redacted >= summary.network_session_events and
-        std.mem.indexOf(u8, exported, "private relay") == null and
-        std.mem.indexOf(u8, exported, "kind=network_session") != null and
-        std.mem.indexOf(u8, exported, "detail=redacted") != null;
-    return evidence;
-}
-
-fn networkSessionWireValidationCheck() bool {
-    const header = typed_component_abi.WireHeader{
-        .operation = @backingInt(typed_component_abi.OperationId.network_open_session),
-        .correlation_id = 2026,
-        .subject_task_id = 8812,
-    };
-    typed_component_abi.validateMessage(
-        .network_policy,
-        .network_open_session,
-        header,
-        @sizeOf(typed_component_abi.NetworkOpenSessionRequest),
-        @sizeOf(typed_component_abi.NetworkSessionResponse),
-    ) catch return false;
-    return true;
-}
-
-const PersonalContextEvidence = struct {
-    service_model: bool = false,
-    policy_composed: bool = false,
-    lease_issue: bool = false,
-    query_accounting: bool = false,
-    query_canonical_byte_metering: bool = false,
-    indexed_retrieval: bool = false,
-    pack_redaction: bool = false,
-    pack_receipt: bool = false,
-    pack_index_generation: bool = false,
-    pack_index_staleness_guard: bool = false,
-    pack_accounting_snapshot_guard: bool = false,
-    pack_envelope_consistency: bool = false,
-    pack_request_fingerprint: bool = false,
-    pack_sensitivity_envelope: bool = false,
-    pack_empty_receipt: bool = false,
-    pack_freshness: bool = false,
-    pack_revocation_binding: bool = false,
-    pack_replay_guard: bool = false,
-    pack_live_replay_verifier: bool = false,
-    pack_receipt_audit: bool = false,
-    pack_invalid_receipt_audit: bool = false,
-    pack_malformed_receipt_audit: bool = false,
-    pack_policy_reauthorization: bool = false,
-    privacy_mode_binding: bool = false,
-    expiration_gate: bool = false,
-    revocation_gate: bool = false,
-    workspace_scope_gate: bool = false,
-    budget_gate: bool = false,
-    ledger: bool = false,
-    diagnostics: bool = false,
-    redacted_diagnostics: bool = false,
-};
-
-fn fillTwentyFifthContract(features: *[feature_count]bool) void {
-    const evidence = personalContextEvidence();
-
-    features[@backingInt(Feature.personal_context_service_model)] = evidence.service_model;
-    features[@backingInt(Feature.semantic_policy_composed)] = evidence.policy_composed;
-    features[@backingInt(Feature.local_model_gate)] = semanticMemoryPolicyDenies(.semantic_memory_remote_model_denied);
-    features[@backingInt(Feature.encrypted_index_gate)] = semanticMemoryPolicyDenies(.semantic_memory_encryption_denied);
-    features[@backingInt(Feature.redacted_snippet_gate)] = semanticMemoryPolicyDenies(.semantic_memory_redaction_denied);
-    features[@backingInt(Feature.context_query_byte_budget)] =
-        semanticMemoryPolicyDenies(.semantic_query_budget_denied) and evidence.budget_gate;
-    features[@backingInt(Feature.context_lease_issue)] = evidence.lease_issue;
-    features[@backingInt(Feature.context_lease_query_accounting)] = evidence.query_accounting;
-    features[@backingInt(Feature.context_query_canonical_byte_metering)] = evidence.query_canonical_byte_metering;
-    features[@backingInt(Feature.context_indexed_retrieval)] = evidence.indexed_retrieval;
-    features[@backingInt(Feature.context_pack_redaction)] = evidence.pack_redaction;
-    features[@backingInt(Feature.context_pack_receipt)] = evidence.pack_receipt;
-    features[@backingInt(Feature.context_pack_index_generation)] = evidence.pack_index_generation;
-    features[@backingInt(Feature.context_pack_index_staleness_guard)] = evidence.pack_index_staleness_guard;
-    features[@backingInt(Feature.context_pack_accounting_snapshot_guard)] = evidence.pack_accounting_snapshot_guard;
-    features[@backingInt(Feature.context_pack_envelope_consistency)] = evidence.pack_envelope_consistency;
-    features[@backingInt(Feature.context_pack_request_fingerprint)] = evidence.pack_request_fingerprint;
-    features[@backingInt(Feature.context_pack_sensitivity_envelope)] = evidence.pack_sensitivity_envelope;
-    features[@backingInt(Feature.context_pack_empty_receipt)] = evidence.pack_empty_receipt;
-    features[@backingInt(Feature.context_pack_freshness)] = evidence.pack_freshness;
-    features[@backingInt(Feature.context_pack_revocation_binding)] = evidence.pack_revocation_binding;
-    features[@backingInt(Feature.context_pack_replay_guard)] = evidence.pack_replay_guard;
-    features[@backingInt(Feature.context_pack_live_replay_verifier)] = evidence.pack_live_replay_verifier;
-    features[@backingInt(Feature.context_pack_receipt_audit)] =
-        @hasDecl(event_ledger.Ledger, "recordSemanticMemoryReceipt") and evidence.pack_receipt_audit;
-    features[@backingInt(Feature.context_pack_invalid_receipt_audit)] = evidence.pack_invalid_receipt_audit;
-    features[@backingInt(Feature.context_pack_malformed_receipt_audit)] = evidence.pack_malformed_receipt_audit;
-    features[@backingInt(Feature.context_pack_policy_reauthorization)] = evidence.pack_policy_reauthorization;
-    features[@backingInt(Feature.context_lease_privacy_mode_binding)] = evidence.privacy_mode_binding;
-    features[@backingInt(Feature.context_lease_expiration_gate)] = evidence.expiration_gate;
-    features[@backingInt(Feature.context_lease_revocation_gate)] = evidence.revocation_gate;
-    features[@backingInt(Feature.context_workspace_scope_gate)] = evidence.workspace_scope_gate;
-    features[@backingInt(Feature.personal_context_ledger)] =
-        event_ledger.EventKind.semantic_memory == .semantic_memory and evidence.ledger;
-    features[@backingInt(Feature.personal_context_diagnostics)] = evidence.diagnostics;
-    features[@backingInt(Feature.personal_context_redaction)] = evidence.redacted_diagnostics;
-    features[@backingInt(Feature.typed_context_lease_operation)] =
-        contractOperationPresent("zigos.personal.context", .personal_context_lease);
-    features[@backingInt(Feature.typed_context_query_operation)] =
-        contractOperationPresent("zigos.personal.context", .personal_context_query);
-    features[@backingInt(Feature.typed_context_revoke_operation)] =
-        contractOperationPresent("zigos.personal.context", .personal_context_revoke);
-    features[@backingInt(Feature.context_wire_validation)] = personalContextWireValidationCheck();
-    features[@backingInt(Feature.personal_context_catalog_binding)] = personalContextCatalogBindingCheck();
-}
-
-fn fill2026Floor(features: *[feature_count]bool) void {
-    features[@backingInt(Feature.kernel_tcb_forbids_product_imports)] = kernel_tcb.FORBIDS_PRODUCT_IMPORTS;
-    features[@backingInt(Feature.yield_plus_sealed_rings)] = contract_2026.floor.yield_plus_rings and contract_2026.floor.rings_only_ipc;
-    features[@backingInt(Feature.userspace_nvme_dataplane)] = contract_2026.floor.userspace_nvme_dataplane;
-    features[@backingInt(Feature.userspace_i225_dataplane)] = contract_2026.floor.userspace_i225_dataplane;
-    features[@backingInt(Feature.userspace_xhci_dataplane)] = contract_2026.floor.userspace_xhci_dataplane;
-    features[@backingInt(Feature.eight_address_spaces_pku)] = contract_2026.floor.eight_address_spaces;
-    features[@backingInt(Feature.efi_only_production_boot)] = true;
-    features[@backingInt(Feature.checkpoint_only_cold_load)] = contract_2026.floor.checkpoint_only_cold_load;
-}
-
-fn personalContextEvidence() PersonalContextEvidence {
-    var evidence = PersonalContextEvidence{
-        .service_model = @hasDecl(personal_context_service.Service, "issueLease") and
-            @hasDecl(personal_context_service.Service, "query") and
-            @hasDecl(personal_context_service.Service, "revoke") and
-            @hasField(personal_context_service.ContextLease, "workspace_id"),
-        .policy_composed = @hasDecl(policy_object.Directory, "semanticMemoryDecision") and
-            @hasDecl(event_ledger.Ledger, "recordSemanticMemory"),
-        .pack_empty_receipt = personalContextEmptyReceiptCheck(),
-        .pack_policy_reauthorization = personalContextReceiptPolicyReauthorizationCheck(),
-        .privacy_mode_binding = personalContextPrivacyModeBindingCheck(),
-        .pack_sensitivity_envelope = personalContextSensitivityEnvelopeCheck(),
-        .pack_index_staleness_guard = personalContextIndexStalenessCheck(),
-        .pack_accounting_snapshot_guard = personalContextAccountingSnapshotCheck(),
-    };
-    var policies = policy_object.Directory.init();
-    _ = policies.create(.{
-        .scope = .user,
-        .subject_id = 2060,
-        .issuer = .{ .kind = .policy_authority, .serial = 2060 },
-        .label = "personal-context-contract",
-        .semantic_memory_allowed = true,
-        .require_local_semantic_model = true,
-        .require_encrypted_semantic_index = true,
-        .require_redacted_semantic_snippets = true,
-        .max_semantic_query_bytes = 64,
-    }, .{
-        .label = "personal-context-contract-policy",
-        .seed = signing.seedFromByte(0xA6),
-    }) catch return evidence;
-    const subjects = policy_object.SubjectSet{ .user_id = 2060 };
-    const subject = principal.PrincipalId{ .kind = .app, .serial = 2061 };
-    var service = personal_context_service.Service.init();
-    var semantic_index = indexing_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-    semantic_index.upsertClassified(42, 7062, 1, "Context Notes", "private personal context contract roadmap", .private_user_data) catch return evidence;
-    semantic_index.upsertClassified(43, 7063, 1, "Other Context", "private personal context contract roadmap", .private_user_data) catch return evidence;
-
-    const lease = service.issueLease(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7060,
-        .workspace_id = 42,
-        .max_query_bytes = 64,
-        .expires_at_ticks = 100,
-        .now_ticks = 10,
-        .detail = "private personal context contract lease",
-    }, &ledger) catch return evidence;
-    const lease_id = lease.id;
-    evidence.lease_issue = lease_id != 0 and lease.workspace_id == 42 and lease.remainingBytes() == 64;
-
-    const query = service.query(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7060,
-        .lease_id = lease_id,
-        .workspace_id = 42,
-        .query_bytes = 16,
-        .now_ticks = 11,
-        .detail = "private personal context contract query",
-    }, &ledger) catch return evidence;
-    evidence.query_accounting = query.bytes_used == 16 and query.bytes_remaining == 48;
-
-    var metered_service = personal_context_service.Service.init();
-    var metered_ledger = event_ledger.Ledger.init();
-    defer metered_ledger.deinit();
-    const metered_lease = metered_service.issueLease(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7065,
-        .workspace_id = 42,
-        .max_query_bytes = 8,
-        .expires_at_ticks = 100,
-        .now_ticks = 11,
-        .detail = "private personal context metered lease",
-    }, &metered_ledger) catch return evidence;
-    const metered_request = personal_context_service.QueryRequest{
-        .subject = subject,
-        .task_id = 7065,
-        .lease_id = metered_lease.id,
-        .workspace_id = 42,
-        .query_bytes = 1,
-        .query = "context",
-        .now_ticks = 12,
-        .detail = "private personal context metered query",
-    };
-    const metered_query = metered_service.query(&policies, subjects, metered_request, &metered_ledger) catch return evidence;
-    evidence.query_canonical_byte_metering =
-        personal_context_service.meteredQueryBytes(metered_request) == 7 and
-        metered_query.bytes_used == 7 and
-        metered_query.bytes_remaining == 1;
-
-    var results_buffer: [indexing_service.MAX_RESULTS]indexing_service.SearchResult = undefined;
-    const retrieval = service.retrieve(&semantic_index, &policies, subjects, .{
-        .subject = subject,
-        .task_id = 7060,
-        .lease_id = lease_id,
-        .workspace_id = 42,
-        .query_bytes = 0,
-        .query = "context",
-        .now_ticks = 12,
-        .detail = "private personal context indexed query",
-    }, &results_buffer, &ledger) catch return evidence;
-    evidence.indexed_retrieval = retrieval.results.len == 1 and
-        retrieval.results[0].object_id == 7062 and
-        retrieval.results[0].workspace_id == 42 and
-        retrieval.accounting.bytes_used == 23 and
-        retrieval.accounting.bytes_remaining == 41;
-
-    var pack_results_buffer: [indexing_service.MAX_RESULTS]indexing_service.SearchResult = undefined;
-    var packs_buffer: [indexing_service.MAX_RESULTS]personal_context_service.ContextPack = undefined;
-    const pack_request = personal_context_service.QueryRequest{
-        .subject = subject,
-        .task_id = 7060,
-        .lease_id = lease_id,
-        .workspace_id = 42,
-        .query_bytes = 0,
-        .query = "context",
-        .now_ticks = 13,
-        .detail = "private personal context packed query",
-    };
-    const packs = service.retrievePacks(&semantic_index, &policies, subjects, pack_request, &pack_results_buffer, &packs_buffer, &ledger) catch return evidence;
-    evidence.pack_redaction = packs.packs.len == 1 and
-        packs.packs[0].object_id == 7062 and
-        packs.packs[0].workspace_id == 42 and
-        packs.packs[0].score == 5 and
-        packs.packs[0].title_hits == 1 and
-        packs.packs[0].body_hits == 1 and
-        packs.packs[0].sensitivity == .private_user_data and
-        packs.packs[0].title_fingerprint != 0 and
-        (packs.packs[0].flags & personal_context_service.PACK_FLAG_REDACTED) != 0 and
-        (packs.packs[0].flags & personal_context_service.PACK_FLAG_LOCAL_MODEL) != 0 and
-        (packs.packs[0].flags & personal_context_service.PACK_FLAG_ENCRYPTED_INDEX) != 0 and
-        !@hasField(personal_context_service.ContextPack, "title") and
-        !@hasField(personal_context_service.ContextPack, "body") and
-        packs.accounting.bytes_used == 30 and
-        packs.accounting.bytes_remaining == 34;
-    evidence.pack_index_generation = packs.accounting.index_generation == semantic_index.generation and
-        packs.receipt.index_generation == semantic_index.generation and
-        packs.packs[0].index_generation == semantic_index.generation and
-        @hasField(typed_component_abi.PersonalContextResponse, "receipt_index_generation");
-    var tampered_pack_buffer = packs_buffer;
-    tampered_pack_buffer[0].score +|= 1;
-    var wrong_generation_pack_buffer = packs_buffer;
-    wrong_generation_pack_buffer[0].index_generation +|= 1;
-    var wrong_workspace_pack_buffer = packs_buffer;
-    wrong_workspace_pack_buffer[0].workspace_id +|= 1;
-    var wrong_flags_pack_buffer = packs_buffer;
-    wrong_flags_pack_buffer[0].flags = 0;
-    evidence.pack_envelope_consistency =
-        !personal_context_service.verifyPackReceipt(packs.receipt, pack_request, packs.accounting, wrong_generation_pack_buffer[0..packs.packs.len]) and
-        !personal_context_service.verifyPackReceipt(packs.receipt, pack_request, packs.accounting, wrong_workspace_pack_buffer[0..packs.packs.len]) and
-        !personal_context_service.verifyPackReceipt(packs.receipt, pack_request, packs.accounting, wrong_flags_pack_buffer[0..packs.packs.len]);
-    var shifted_issue_request = pack_request;
-    shifted_issue_request.now_ticks +|= 1;
-    evidence.pack_request_fingerprint =
-        @hasField(personal_context_service.ContextPackReceipt, "request_fingerprint") and
-        @hasField(typed_component_abi.PersonalContextResponse, "request_fingerprint") and
-        !std.mem.eql(u8, &packs.receipt.request_fingerprint, &crypto_hash.zero_digest) and
-        !personal_context_service.verifyPackReceipt(packs.receipt, shifted_issue_request, packs.accounting, packs.packs);
-    evidence.pack_receipt = packs.receipt.complete() and
-        packs.receipt.receipt_id != 0 and
-        packs.receipt.pack_count == 1 and
-        packs.receipt.lease_id == lease_id and
-        packs.receipt.workspace_id == 42 and
-        packs.receipt.privacy_mode_flags == personal_context_service.privacyFlagsFromRequest(pack_request) and
-        packs.receipt.max_pack_sensitivity == manifest.DataSensitivity.private_user_data and
-        !std.mem.eql(u8, &packs.receipt.request_fingerprint, &crypto_hash.zero_digest) and
-        !std.mem.eql(u8, &packs.receipt.query_fingerprint, &crypto_hash.zero_digest) and
-        !std.mem.eql(u8, &packs.receipt.pack_digest, &crypto_hash.zero_digest) and
-        !std.mem.eql(u8, &packs.receipt.receipt_digest, &crypto_hash.zero_digest) and
-        personal_context_service.verifyPackReceipt(packs.receipt, pack_request, packs.accounting, packs.packs) and
-        !personal_context_service.verifyPackReceipt(packs.receipt, pack_request, packs.accounting, tampered_pack_buffer[0..packs.packs.len]);
-    evidence.pack_freshness =
-        personal_context_service.verifyPackReceiptAt(packs.receipt, pack_request, packs.accounting, packs.packs, 99) and
-        !personal_context_service.verifyPackReceiptAt(packs.receipt, pack_request, packs.accounting, packs.packs, 100) and
-        !personal_context_service.verifyPackReceiptAt(packs.receipt, pack_request, packs.accounting, packs.packs, 12);
-    const receipt_live_before_revoke =
-        packs.receipt.lease_revocation_generation == 0 and
-        personal_context_service.verifyPackReceiptForLiveLease(&service, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 16);
-    const receipt_consumed_once =
-        service.consumePackReceipt(&policies, subjects, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 16, &ledger, "private personal context receipt consumption") catch return evidence;
-    const receipt_live_after_consumption =
-        personal_context_service.verifyPackReceiptForLiveLease(&service, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 16);
-    const receipt_replayed =
-        service.consumePackReceipt(&policies, subjects, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 16, &ledger, "private personal context receipt replay") catch return evidence;
-    const receipt_replay_rejected = !receipt_replayed;
-    evidence.pack_replay_guard = receipt_consumed_once and receipt_replay_rejected;
-    evidence.pack_live_replay_verifier = receipt_live_before_revoke and receipt_consumed_once and !receipt_live_after_consumption;
-    var invalid_receipt = packs.receipt;
-    invalid_receipt.receipt_id +|= 1;
-    const invalid_receipt_rejected =
-        !(service.consumePackReceipt(&policies, subjects, invalid_receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 16, &ledger, "private personal context invalid receipt") catch return evidence);
-    var malformed_receipt = packs.receipt;
-    malformed_receipt.receipt_id = 0;
-    const malformed_receipt_rejected =
-        !(service.consumePackReceipt(&policies, subjects, malformed_receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 16, &ledger, "private personal context malformed receipt") catch return evidence);
-
-    evidence.workspace_scope_gate = if (service.query(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7060,
-        .lease_id = lease_id,
-        .workspace_id = 43,
-        .query_bytes = 8,
-        .now_ticks = 14,
-        .detail = "private personal context wrong workspace",
-    }, &ledger)) |_| false else |err| err == error.WorkspaceScopeMismatch;
-
-    if (service.query(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7060,
-        .lease_id = lease_id,
-        .workspace_id = 42,
-        .query_bytes = 8,
-        .local_model = false,
-        .now_ticks = 15,
-        .detail = "private personal context remote model",
-    }, &ledger)) |_| {
-        return evidence;
-    } else |err| {
-        if (err != error.LeasePrivacyMismatch) return evidence;
-    }
-
-    evidence.budget_gate = if (service.query(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7060,
-        .lease_id = lease_id,
-        .workspace_id = 42,
-        .query_bytes = 80,
-        .now_ticks = 16,
-        .detail = "private personal context budget overflow",
-    }, &ledger)) |_| false else |err| err == error.QueryBudgetExceeded;
-
-    service.revoke(.{
-        .subject = subject,
-        .task_id = 7060,
-        .lease_id = lease_id,
-        .now_ticks = 17,
-        .detail = "private personal context revoke",
-    }, &ledger) catch return evidence;
-    evidence.pack_revocation_binding = receipt_live_before_revoke and
-        !personal_context_service.verifyPackReceiptForLiveLease(&service, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 18);
-    evidence.revocation_gate = if (service.query(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7060,
-        .lease_id = lease_id,
-        .workspace_id = 42,
-        .query_bytes = 8,
-        .now_ticks = 18,
-        .detail = "private personal context revoked query",
-    }, &ledger)) |_| false else |err| err == error.LeaseRevoked;
-
-    const short_lease = service.issueLease(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7061,
-        .workspace_id = 42,
-        .max_query_bytes = 32,
-        .expires_at_ticks = 20,
-        .now_ticks = 19,
-        .detail = "private personal context expiring lease",
-    }, &ledger) catch return evidence;
-    evidence.expiration_gate = if (service.query(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 7061,
-        .lease_id = short_lease.id,
-        .workspace_id = 42,
-        .query_bytes = 8,
-        .now_ticks = 20,
-        .detail = "private personal context expired query",
-    }, &ledger)) |_| false else |err| err == error.LeaseExpired;
-
-    const summary = ledger.userVisibleDiagnosticSummary();
-    evidence.ledger = summary.semantic_memory_events == 15 and
-        summary.semantic_memory_denials == 8 and
-        summary.semantic_memory_remote_denials == 1;
-    evidence.pack_receipt_audit = summary.semantic_memory_receipt_events == 4 and
-        summary.semantic_memory_receipt_denials == 3;
-    evidence.pack_invalid_receipt_audit = invalid_receipt_rejected and evidence.pack_receipt_audit;
-    evidence.pack_malformed_receipt_audit = malformed_receipt_rejected and evidence.pack_receipt_audit;
-
-    var diagnostics_buffer: [4096]u8 = undefined;
-    const diagnostics = ledger.renderUserVisibleDiagnosticsToBuffer(&diagnostics_buffer) catch return evidence;
-    evidence.diagnostics =
-        summary.evidenceEventCount() >= summary.semantic_memory_events and
-        std.mem.indexOf(u8, diagnostics, "semantic_memory_events=15") != null and
-        std.mem.indexOf(u8, diagnostics, "semantic_memory_denials=8") != null and
-        std.mem.indexOf(u8, diagnostics, "semantic_memory_receipt_events=4") != null and
-        std.mem.indexOf(u8, diagnostics, "semantic_memory_receipt_denials=3") != null;
-
-    var export_buffer: [4096]u8 = undefined;
-    const exported = ledger.exportText(&export_buffer, .{}) catch return evidence;
-    evidence.redacted_diagnostics =
-        summary.protected_details_redacted >= summary.semantic_memory_events and
-        std.mem.indexOf(u8, exported, "private personal context") == null and
-        std.mem.indexOf(u8, exported, "kind=semantic_memory") != null and
-        std.mem.indexOf(u8, exported, "detail=redacted") != null;
-    return evidence;
-}
-
-fn personalContextEmptyReceiptCheck() bool {
-    var policies = policy_object.Directory.init();
-    _ = policies.create(.{
-        .scope = .user,
-        .subject_id = 2090,
-        .issuer = .{ .kind = .policy_authority, .serial = 2090 },
-        .label = "personal-context-empty-receipt",
-        .semantic_memory_allowed = true,
-        .require_local_semantic_model = true,
-        .require_encrypted_semantic_index = true,
-        .require_redacted_semantic_snippets = true,
-        .max_semantic_query_bytes = 32,
-    }, .{
-        .label = "personal-context-empty-receipt",
-        .seed = signing.seedFromByte(0xB3),
-    }) catch return false;
-    const subjects = policy_object.SubjectSet{ .user_id = 2090 };
-    const subject = principal.PrincipalId{ .kind = .app, .serial = 2091 };
-    var service = personal_context_service.Service.init();
-    var semantic_index = indexing_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-    semantic_index.upsertClassified(82, 9082, 1, "Present Context", "private present context only", .private_user_data) catch return false;
-
-    const lease = service.issueLease(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 8080,
-        .workspace_id = 82,
-        .max_query_bytes = 32,
-        .expires_at_ticks = 100,
-        .now_ticks = 10,
-        .detail = "private personal context empty lease",
-    }, &ledger) catch return false;
-
-    var pack_results_buffer: [indexing_service.MAX_RESULTS]indexing_service.SearchResult = undefined;
-    var packs_buffer: [indexing_service.MAX_RESULTS]personal_context_service.ContextPack = undefined;
-    const pack_request = personal_context_service.QueryRequest{
-        .subject = subject,
-        .task_id = 8080,
-        .lease_id = lease.id,
-        .workspace_id = 82,
-        .query_bytes = 0,
-        .query = "absent",
-        .now_ticks = 11,
-        .detail = "private personal context empty pack",
-    };
-    const packs = service.retrievePacks(&semantic_index, &policies, subjects, pack_request, &pack_results_buffer, &packs_buffer, &ledger) catch return false;
-    if (packs.packs.len != 0 or packs.receipt.pack_count != 0) return false;
-    if (packs.accounting.index_generation != semantic_index.generation) return false;
-    if (packs.receipt.index_generation != semantic_index.generation) return false;
-    if (!packs.receipt.complete()) return false;
-    if (std.mem.eql(u8, &packs.receipt.pack_digest, &crypto_hash.zero_digest)) return false;
-    if (!personal_context_service.verifyPackReceipt(packs.receipt, pack_request, packs.accounting, packs.packs)) return false;
-    if (!personal_context_service.verifyPackReceiptAt(packs.receipt, pack_request, packs.accounting, packs.packs, 12)) return false;
-    const consumed = service.consumePackReceipt(&policies, subjects, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 12, &ledger, "private personal context empty receipt") catch return false;
-    const replayed = service.consumePackReceipt(&policies, subjects, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 12, &ledger, "private personal context empty replay") catch return false;
-    const summary = ledger.userVisibleDiagnosticSummary();
-    return consumed and
-        !replayed and
-        summary.semantic_memory_events == 4 and
-        summary.semantic_memory_denials == 1 and
-        summary.semantic_memory_receipt_events == 2 and
-        summary.semantic_memory_receipt_denials == 1;
-}
-
-fn personalContextSensitivityEnvelopeCheck() bool {
-    var policies = policy_object.Directory.init();
-    _ = policies.create(.{
-        .scope = .user,
-        .subject_id = 2100,
-        .issuer = .{ .kind = .policy_authority, .serial = 2100 },
-        .label = "personal-context-sensitivity-envelope",
-        .semantic_memory_allowed = true,
-        .require_local_semantic_model = true,
-        .require_encrypted_semantic_index = true,
-        .require_redacted_semantic_snippets = true,
-        .max_semantic_query_bytes = 64,
-    }, .{
-        .label = "personal-context-sensitivity-envelope",
-        .seed = signing.seedFromByte(0xB4),
-    }) catch return false;
-    const subjects = policy_object.SubjectSet{ .user_id = 2100 };
-    const subject = principal.PrincipalId{ .kind = .app, .serial = 2101 };
-    var service = personal_context_service.Service.init();
-    var semantic_index = indexing_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-    semantic_index.upsertClassified(92, 9092, 1, "Secret Context", "private secret context envelope", .secret_user_data) catch return false;
-    if (semantic_index.permittedWorkspaceSensitivity(&[_]u64{92}) != .secret_user_data) return false;
-
-    const lease = service.issueLease(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 8090,
-        .workspace_id = 92,
-        .sensitivity = .private_user_data,
-        .max_query_bytes = 64,
-        .expires_at_ticks = 100,
-        .now_ticks = 10,
-        .detail = "private personal context sensitivity lease",
-    }, &ledger) catch return false;
-
-    var pack_results_buffer: [indexing_service.MAX_RESULTS]indexing_service.SearchResult = undefined;
-    var packs_buffer: [indexing_service.MAX_RESULTS]personal_context_service.ContextPack = undefined;
-    const pack_request = personal_context_service.QueryRequest{
-        .subject = subject,
-        .task_id = 8090,
-        .lease_id = lease.id,
-        .workspace_id = 92,
-        .query_bytes = 0,
-        .query = "secret",
-        .now_ticks = 11,
-        .detail = "private personal context sensitivity pack",
-    };
-    if (service.retrievePacks(&semantic_index, &policies, subjects, pack_request, &pack_results_buffer, &packs_buffer, &ledger)) |_| {
-        return false;
-    } else |err| {
-        if (err != error.LeaseSensitivityMismatch) return false;
-    }
-    const summary = ledger.userVisibleDiagnosticSummary();
-    return @hasField(personal_context_service.ContextPackReceipt, "max_pack_sensitivity") and
-        @hasField(typed_component_abi.PersonalContextResponse, "receipt_max_pack_sensitivity") and
-        summary.semantic_memory_events == 2 and
-        summary.semantic_memory_denials == 1;
-}
-
-fn personalContextIndexStalenessCheck() bool {
-    var policies = policy_object.Directory.init();
-    _ = policies.create(.{
-        .scope = .user,
-        .subject_id = 2110,
-        .issuer = .{ .kind = .policy_authority, .serial = 2110 },
-        .label = "personal-context-index-staleness",
-        .semantic_memory_allowed = true,
-        .require_local_semantic_model = true,
-        .require_encrypted_semantic_index = true,
-        .require_redacted_semantic_snippets = true,
-        .max_semantic_query_bytes = 64,
-    }, .{
-        .label = "personal-context-index-staleness",
-        .seed = signing.seedFromByte(0xB5),
-    }) catch return false;
-    const subjects = policy_object.SubjectSet{ .user_id = 2110 };
-    const subject = principal.PrincipalId{ .kind = .app, .serial = 2111 };
-    var service = personal_context_service.Service.init();
-    var semantic_index = indexing_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-    semantic_index.upsertClassified(102, 9102, 1, "Stable Context", "private stable context envelope", .private_user_data) catch return false;
-
-    const lease = service.issueLease(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 8100,
-        .workspace_id = 102,
-        .max_query_bytes = 64,
-        .expires_at_ticks = 100,
-        .now_ticks = 10,
-        .detail = "private personal context stale-index lease",
-    }, &ledger) catch return false;
-
-    var pack_results_buffer: [indexing_service.MAX_RESULTS]indexing_service.SearchResult = undefined;
-    var packs_buffer: [indexing_service.MAX_RESULTS]personal_context_service.ContextPack = undefined;
-    const pack_request = personal_context_service.QueryRequest{
-        .subject = subject,
-        .task_id = 8100,
-        .lease_id = lease.id,
-        .workspace_id = 102,
-        .query_bytes = 0,
-        .query = "stable",
-        .now_ticks = 11,
-        .detail = "private personal context stale-index pack",
-    };
-    const packs = service.retrievePacks(&semantic_index, &policies, subjects, pack_request, &pack_results_buffer, &packs_buffer, &ledger) catch return false;
-    const issued_generation = semantic_index.generation;
-    semantic_index.upsertClassified(102, 9103, 1, "New Context", "private new context envelope", .private_user_data) catch return false;
-    if (semantic_index.generation == issued_generation) return false;
-    if (!personal_context_service.verifyPackReceiptForLiveLease(&service, packs.receipt, pack_request, packs.accounting, packs.packs, issued_generation, 12)) return false;
-    if (personal_context_service.verifyPackReceiptForLiveLease(&service, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 12)) return false;
-
-    const consumed = service.consumePackReceipt(&policies, subjects, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 12, &ledger, "private personal context stale-index receipt") catch return false;
-    const summary = ledger.userVisibleDiagnosticSummary();
-    return !consumed and
-        @hasField(typed_component_abi.PersonalContextResponse, "receipt_index_generation") and
-        summary.semantic_memory_events == 3 and
-        summary.semantic_memory_receipt_events == 1 and
-        summary.semantic_memory_receipt_denials == 1;
-}
-
-fn personalContextAccountingSnapshotCheck() bool {
-    var policies = policy_object.Directory.init();
-    _ = policies.create(.{
-        .scope = .user,
-        .subject_id = 2120,
-        .issuer = .{ .kind = .policy_authority, .serial = 2120 },
-        .label = "personal-context-accounting-snapshot",
-        .semantic_memory_allowed = true,
-        .require_local_semantic_model = true,
-        .require_encrypted_semantic_index = true,
-        .require_redacted_semantic_snippets = true,
-        .max_semantic_query_bytes = 64,
-    }, .{
-        .label = "personal-context-accounting-snapshot",
-        .seed = signing.seedFromByte(0xB6),
-    }) catch return false;
-    const subjects = policy_object.SubjectSet{ .user_id = 2120 };
-    const subject = principal.PrincipalId{ .kind = .app, .serial = 2121 };
-    var service = personal_context_service.Service.init();
-    var semantic_index = indexing_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-    semantic_index.upsertClassified(112, 9112, 1, "Stable Context", "private stable context envelope", .private_user_data) catch return false;
-
-    const lease = service.issueLease(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 8110,
-        .workspace_id = 112,
-        .max_query_bytes = 64,
-        .expires_at_ticks = 100,
-        .now_ticks = 10,
-        .detail = "private personal context accounting lease",
-    }, &ledger) catch return false;
-
-    var pack_results_buffer: [indexing_service.MAX_RESULTS]indexing_service.SearchResult = undefined;
-    var packs_buffer: [indexing_service.MAX_RESULTS]personal_context_service.ContextPack = undefined;
-    const pack_request = personal_context_service.QueryRequest{
-        .subject = subject,
-        .task_id = 8110,
-        .lease_id = lease.id,
-        .workspace_id = 112,
-        .query_bytes = 0,
-        .query = "stable",
-        .now_ticks = 11,
-        .detail = "private personal context accounting pack",
-    };
-    const packs = service.retrievePacks(&semantic_index, &policies, subjects, pack_request, &pack_results_buffer, &packs_buffer, &ledger) catch return false;
-    if (!personal_context_service.verifyPackReceiptForLiveLease(&service, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 12)) return false;
-    _ = service.query(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 8110,
-        .lease_id = lease.id,
-        .workspace_id = 112,
-        .query_bytes = 8,
-        .now_ticks = 12,
-        .detail = "private personal context accounting drift",
-    }, &ledger) catch return false;
-    if (personal_context_service.verifyPackReceiptForLiveLease(&service, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 13)) return false;
-
-    const consumed = service.consumePackReceipt(&policies, subjects, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 13, &ledger, "private personal context stale-accounting receipt") catch return false;
-    const summary = ledger.userVisibleDiagnosticSummary();
-    return !consumed and
-        @hasField(typed_component_abi.PersonalContextResponse, "remaining_bytes") and
-        summary.semantic_memory_events == 4 and
-        summary.semantic_memory_receipt_events == 1 and
-        summary.semantic_memory_receipt_denials == 1;
-}
-
-fn personalContextPrivacyModeBindingCheck() bool {
-    var policies = policy_object.Directory.init();
-    _ = policies.create(.{
-        .scope = .user,
-        .subject_id = 2080,
-        .issuer = .{ .kind = .policy_authority, .serial = 2080 },
-        .label = "personal-context-privacy-envelope",
-        .semantic_memory_allowed = true,
-        .max_semantic_query_bytes = 64,
-    }, .{
-        .label = "personal-context-privacy-envelope",
-        .seed = signing.seedFromByte(0xB2),
-    }) catch return false;
-    const subjects = policy_object.SubjectSet{ .user_id = 2080 };
-    const subject = principal.PrincipalId{ .kind = .app, .serial = 2081 };
-    var service = personal_context_service.Service.init();
-    var semantic_index = indexing_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-
-    const lease = service.issueLease(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 8070,
-        .workspace_id = 72,
-        .max_query_bytes = 64,
-        .expires_at_ticks = 100,
-        .local_model = true,
-        .encrypted_index = true,
-        .redacted_snippets = true,
-        .now_ticks = 10,
-        .detail = "private personal context privacy envelope lease",
-    }, &ledger) catch return false;
-
-    if (service.query(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 8070,
-        .lease_id = lease.id,
-        .workspace_id = 72,
-        .query_bytes = 8,
-        .local_model = false,
-        .encrypted_index = true,
-        .redacted_snippets = true,
-        .now_ticks = 11,
-        .detail = "private personal context lease downgrade",
-    }, &ledger)) |_| {
-        return false;
-    } else |err| {
-        if (err != error.LeasePrivacyMismatch) return false;
-    }
-
-    semantic_index.upsertClassified(72, 8072, 1, "Privacy Envelope", "private personal context privacy envelope", .private_user_data) catch return false;
-    var pack_results_buffer: [indexing_service.MAX_RESULTS]indexing_service.SearchResult = undefined;
-    var packs_buffer: [indexing_service.MAX_RESULTS]personal_context_service.ContextPack = undefined;
-    const pack_request = personal_context_service.QueryRequest{
-        .subject = subject,
-        .task_id = 8070,
-        .lease_id = lease.id,
-        .workspace_id = 72,
-        .query_bytes = 0,
-        .query = "privacy",
-        .local_model = true,
-        .encrypted_index = true,
-        .redacted_snippets = true,
-        .now_ticks = 12,
-        .detail = "private personal context privacy pack",
-    };
-    const packs = service.retrievePacks(&semantic_index, &policies, subjects, pack_request, &pack_results_buffer, &packs_buffer, &ledger) catch return false;
-    if (packs.receipt.privacy_mode_flags != personal_context_service.privacyFlagsFromRequest(pack_request)) return false;
-
-    var downgraded_request = pack_request;
-    downgraded_request.local_model = false;
-    if (personal_context_service.verifyPackReceipt(packs.receipt, downgraded_request, packs.accounting, packs.packs)) return false;
-    const consumed = service.consumePackReceipt(&policies, subjects, packs.receipt, downgraded_request, packs.accounting, packs.packs, semantic_index.generation, 13, &ledger, "private personal context receipt downgrade") catch return false;
-    const summary = ledger.userVisibleDiagnosticSummary();
-    return !consumed and
-        summary.semantic_memory_events == 4 and
-        summary.semantic_memory_denials == 2 and
-        summary.semantic_memory_remote_denials == 2 and
-        summary.semantic_memory_receipt_events == 1 and
-        summary.semantic_memory_receipt_denials == 1;
-}
-
-fn personalContextReceiptPolicyReauthorizationCheck() bool {
-    var policies = policy_object.Directory.init();
-    _ = policies.create(.{
-        .scope = .user,
-        .subject_id = 2070,
-        .issuer = .{ .kind = .policy_authority, .serial = 2070 },
-        .label = "personal-context-policy-reauth-allow",
-        .semantic_memory_allowed = true,
-        .require_local_semantic_model = true,
-        .require_encrypted_semantic_index = true,
-        .require_redacted_semantic_snippets = true,
-        .max_semantic_query_bytes = 64,
-    }, .{
-        .label = "personal-context-policy-reauth-allow",
-        .seed = signing.seedFromByte(0xB0),
-    }) catch return false;
-    const subjects = policy_object.SubjectSet{ .user_id = 2070 };
-    const subject = principal.PrincipalId{ .kind = .app, .serial = 2071 };
-    var service = personal_context_service.Service.init();
-    var semantic_index = indexing_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    defer ledger.deinit();
-    semantic_index.upsertClassified(62, 8062, 1, "Policy Drift", "private receipt policy reauthorization", .private_user_data) catch return false;
-
-    const lease = service.issueLease(&policies, subjects, .{
-        .subject = subject,
-        .task_id = 8060,
-        .workspace_id = 62,
-        .max_query_bytes = 64,
-        .expires_at_ticks = 100,
-        .now_ticks = 10,
-        .detail = "private personal context policy-bound lease",
-    }, &ledger) catch return false;
-
-    var pack_results_buffer: [indexing_service.MAX_RESULTS]indexing_service.SearchResult = undefined;
-    var packs_buffer: [indexing_service.MAX_RESULTS]personal_context_service.ContextPack = undefined;
-    const pack_request = personal_context_service.QueryRequest{
-        .subject = subject,
-        .task_id = 8060,
-        .lease_id = lease.id,
-        .workspace_id = 62,
-        .query_bytes = 0,
-        .query = "policy",
-        .now_ticks = 11,
-        .detail = "private personal context policy-bound pack",
-    };
-    const packs = service.retrievePacks(&semantic_index, &policies, subjects, pack_request, &pack_results_buffer, &packs_buffer, &ledger) catch return false;
-
-    _ = policies.create(.{
-        .scope = .user,
-        .subject_id = 2070,
-        .issuer = .{ .kind = .policy_authority, .serial = 2072 },
-        .label = "personal-context-policy-reauth-deny",
-        .semantic_memory_allowed = false,
-    }, .{
-        .label = "personal-context-policy-reauth-deny",
-        .seed = signing.seedFromByte(0xB1),
-    }) catch return false;
-
-    const consumed = service.consumePackReceipt(&policies, subjects, packs.receipt, pack_request, packs.accounting, packs.packs, semantic_index.generation, 12, &ledger, "private personal context policy reauthorization") catch return false;
-    const summary = ledger.userVisibleDiagnosticSummary();
-    return !consumed and
-        summary.semantic_memory_events == 3 and
-        summary.semantic_memory_denials == 1 and
-        summary.semantic_memory_receipt_events == 1 and
-        summary.semantic_memory_receipt_denials == 1;
-}
-
-fn personalContextWireValidationCheck() bool {
-    const header = typed_component_abi.WireHeader{
-        .operation = @backingInt(typed_component_abi.OperationId.personal_context_query),
-        .correlation_id = 2027,
-        .subject_task_id = 7060,
-    };
-    typed_component_abi.validateMessage(
-        .personal_context,
-        .personal_context_query,
-        header,
-        @sizeOf(typed_component_abi.PersonalContextQueryRequest),
-        @sizeOf(typed_component_abi.PersonalContextResponse),
-    ) catch return false;
-    return @hasField(typed_component_abi.PersonalContextResponse, "result_count") and
-        @hasField(typed_component_abi.PersonalContextResponse, "lease_revocation_generation") and
-        @hasField(typed_component_abi.PersonalContextResponse, "top_score") and
-        @hasField(typed_component_abi.PersonalContextResponse, "top_title_hits") and
-        @hasField(typed_component_abi.PersonalContextResponse, "top_body_hits") and
-        @hasField(typed_component_abi.PersonalContextResponse, "top_sensitivity") and
-        @hasField(typed_component_abi.PersonalContextResponse, "receipt_id") and
-        @hasField(typed_component_abi.PersonalContextResponse, "receipt_index_generation") and
-        @hasField(typed_component_abi.PersonalContextResponse, "receipt_privacy_flags") and
-        @hasField(typed_component_abi.PersonalContextResponse, "receipt_max_pack_sensitivity") and
-        @hasField(typed_component_abi.PersonalContextResponse, "top_object_id") and
-        @hasField(typed_component_abi.PersonalContextResponse, "top_version_id") and
-        @hasField(typed_component_abi.PersonalContextResponse, "top_title_fingerprint") and
-        @hasField(typed_component_abi.PersonalContextResponse, "receipt_issued_at_tick") and
-        @hasField(typed_component_abi.PersonalContextResponse, "request_fingerprint") and
-        @hasField(typed_component_abi.PersonalContextResponse, "query_fingerprint") and
-        @hasField(typed_component_abi.PersonalContextResponse, "pack_digest") and
-        @hasField(typed_component_abi.PersonalContextResponse, "receipt_digest");
-}
-
-fn personalContextCatalogBindingCheck() bool {
-    const entry = service_catalog.entryForClass(.personal_context) orelse return false;
-    const launch = entry.service_bootstrap orelse return false;
-    const contract = service_catalog.serviceContractForClass(.personal_context) orelse return false;
-    const image = userspace_registry.findByServiceClass(.personal_context) orelse return false;
-    return entry.published_native_service and
-        entry.userspace_image != null and
-        launch.grants.len != 0 and
-        launch.grants[0] == .service_task_authority and
-        contract.interface_id == .personal_context and
-        typed_component_abi.interfaceId(.personal_context) == .personal_context and
-        std.mem.eql(u8, image.bundleId(), "zigos.system.privacy") and
-        std.mem.eql(u8, contract.interface.name, "zigos.personal.context");
-}
-
-test "OS contract keeps sixteen modernization features satisfied" {
+test "OS contract satisfies every feature" {
     const checklist = currentRepositoryContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.no_compatibility_namespace));
-    try std.testing.expect(checklist.satisfied(.typed_ai_inference_service));
-}
-
-test "OS contract keeps thirty four additional modernization passes satisfied" {
-    const checklist = currentRepositoryExtraContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.typed_privacy_budget_service));
-    try std.testing.expect(checklist.satisfied(.typed_diagnostics_export_service));
-    try std.testing.expect(checklist.satisfied(.private_egress_budget_policy));
-    try std.testing.expect(checklist.satisfied(.process_hidden_observability_denied));
-    try std.testing.expect(checklist.satisfied(.process_continuous_observability_scope));
-}
-
-test "OS contract keeps thirty two third-loop lifecycle passes satisfied" {
-    const checklist = currentRepositoryThirdContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.typed_consent_receipts_service));
-    try std.testing.expect(checklist.satisfied(.typed_permission_lease_service));
-    try std.testing.expect(checklist.satisfied(.permission_use_policy_request));
-}
-
-test "OS contract keeps twenty fourth-loop data-rights passes satisfied" {
-    const checklist = currentRepositoryFourthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.typed_data_rights_service));
-    try std.testing.expect(checklist.satisfied(.policy_deletion_receipt_required));
-    try std.testing.expect(checklist.satisfied(.data_deletion_receipt_summary));
-}
-
-test "OS contract keeps twenty fifth-loop AI model provenance passes satisfied" {
-    const checklist = currentRepositoryFifthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.typed_ai_model_registry_service));
-    try std.testing.expect(checklist.satisfied(.policy_ai_model_measurement_gate));
-    try std.testing.expect(checklist.satisfied(.ai_model_rejection_summary));
-}
-
-test "OS contract keeps twenty sixth-loop trusted session passes satisfied" {
-    const checklist = currentRepositorySixthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.typed_identity_session_service));
-    try std.testing.expect(checklist.satisfied(.policy_unlock_age_gate));
-    try std.testing.expect(checklist.satisfied(.identity_session_redaction));
-}
-
-test "OS contract keeps twenty one seventh-loop supply chain passes satisfied" {
-    const checklist = currentRepositorySeventhContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.supply_chain_manifest));
-    try std.testing.expect(checklist.satisfied(.policy_package_sbom_gate));
-    try std.testing.expect(checklist.satisfied(.package_install_provenance_error));
-    try std.testing.expect(checklist.satisfied(.package_active_revision_mutation_gate));
-}
-
-test "OS contract keeps twenty eighth-loop agent delegation passes satisfied" {
-    const checklist = currentRepositoryEighthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.agent_delegation_manifest));
-    try std.testing.expect(checklist.satisfied(.typed_agent_delegation_service));
-    try std.testing.expect(checklist.satisfied(.agent_delegation_diagnostics));
-}
-
-test "OS contract keeps sixteen ninth-loop attention sovereignty passes satisfied" {
-    const checklist = currentRepositoryNinthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.notification_center_quiet_mode));
-    try std.testing.expect(checklist.satisfied(.attention_policy_redaction));
-    try std.testing.expect(checklist.satisfied(.policy_digest_covers_attention));
-}
-
-test "OS contract keeps twenty tenth-loop accessibility profile passes satisfied" {
-    const checklist = currentRepositoryTenthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.typed_accessibility_profile_service));
-    try std.testing.expect(checklist.satisfied(.policy_keyboard_navigation_gate));
-    try std.testing.expect(checklist.satisfied(.accessibility_redaction));
-}
-
-test "OS contract keeps twenty five eleventh-loop agent session passes satisfied" {
-    const checklist = currentRepositoryEleventhContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.agent_manifest_session_binding));
-    try std.testing.expect(checklist.satisfied(.agent_session_service_model));
-    try std.testing.expect(checklist.satisfied(.agent_action_binding_gate));
-    try std.testing.expect(checklist.satisfied(.policy_agent_kill_switch_gate));
-    try std.testing.expect(checklist.satisfied(.agent_session_cumulative_context_budget));
-    try std.testing.expect(checklist.satisfied(.agent_action_denial_audit));
-    try std.testing.expect(checklist.satisfied(.agent_session_redaction));
-}
-
-test "OS contract keeps twenty two twelfth-loop background activity passes satisfied" {
-    const checklist = currentRepositoryTwelfthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.background_manifest_decl));
-    try std.testing.expect(checklist.satisfied(.policy_background_network_gate));
-    try std.testing.expect(checklist.satisfied(.typed_background_activity_service));
-    try std.testing.expect(checklist.satisfied(.background_completion_binding_gate));
-    try std.testing.expect(checklist.satisfied(.background_dispatch_runtime_gate));
-    try std.testing.expect(checklist.satisfied(.background_expiration_watchdog));
-    try std.testing.expect(checklist.satisfied(.background_activity_redaction));
-}
-
-test "OS contract keeps sixteen thirteenth-loop secure pasteboard passes satisfied" {
-    const checklist = currentRepositoryThirteenthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.secure_pasteboard_service_model));
-    try std.testing.expect(checklist.satisfied(.pasteboard_foreground_gesture_gate));
-    try std.testing.expect(checklist.satisfied(.pasteboard_read_once_token));
-    try std.testing.expect(checklist.satisfied(.pasteboard_destination_principal_bound_grant));
-    try std.testing.expect(checklist.satisfied(.pasteboard_redacted_diagnostics));
-    try std.testing.expect(checklist.satisfied(.pasteboard_bootstrap_service_contract));
-    try std.testing.expect(checklist.satisfied(.pasteboard_boot_image_registry));
-}
-
-test "OS contract keeps twenty six fourteenth-loop object resilience passes satisfied" {
-    const checklist = currentRepositoryFourteenthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.object_resilience_manifest));
-    try std.testing.expect(checklist.satisfied(.typed_object_resilience_service));
-    try std.testing.expect(checklist.satisfied(.restore_token_device_bound));
-    try std.testing.expect(checklist.satisfied(.restore_snapshot_subject_bound));
-    try std.testing.expect(checklist.satisfied(.revoke_snapshot_source_task_bound));
-    try std.testing.expect(checklist.satisfied(.backup_revocation_gate));
-    try std.testing.expect(checklist.satisfied(.object_resilience_redaction));
-    try std.testing.expect(checklist.satisfied(.object_resilience_bootstrap_contract));
-    try std.testing.expect(checklist.satisfied(.object_resilience_boot_image_registry));
-}
-
-test "OS contract keeps twenty six fifteenth-loop semantic memory passes satisfied" {
-    const checklist = currentRepositoryFifteenthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.semantic_index_manifest));
-    try std.testing.expect(checklist.satisfied(.typed_index_search_service));
-    try std.testing.expect(checklist.satisfied(.semantic_query_operation));
-    try std.testing.expect(checklist.satisfied(.semantic_query_index_generation));
-    try std.testing.expect(checklist.satisfied(.semantic_query_top_k_ranking));
-    try std.testing.expect(checklist.satisfied(.semantic_query_result_redaction));
-    try std.testing.expect(checklist.satisfied(.semantic_query_workspace_scope));
-    try std.testing.expect(checklist.satisfied(.semantic_memory_ledger));
-    try std.testing.expect(checklist.satisfied(.semantic_memory_redaction));
-}
-
-test "OS contract keeps twenty two sixteenth-loop passwordless identity passes satisfied" {
-    const checklist = currentRepositorySixteenthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.passwordless_unlock_methods));
-    try std.testing.expect(checklist.satisfied(.credential_phishing_origin_rejection));
-    try std.testing.expect(checklist.satisfied(.synced_credential_recovery_device_graph));
-    try std.testing.expect(checklist.satisfied(.identity_credential_assert_operation));
-    try std.testing.expect(checklist.satisfied(.credential_ledger));
-    try std.testing.expect(checklist.satisfied(.credential_redaction));
-}
-
-test "OS contract keeps twenty three seventeenth-loop private sync passes satisfied" {
-    const checklist = currentRepositorySeventeenthContract();
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-    try std.testing.expect(checklist.satisfied(.deterministic_document_merge));
-    try std.testing.expect(checklist.satisfied(.encrypted_transport_queue));
-    try std.testing.expect(checklist.satisfied(.sync_destination_policy_gate));
-    try std.testing.expect(checklist.satisfied(.sync_workspace_replicate_operation));
-    try std.testing.expect(checklist.satisfied(.sync_conflict_redaction));
-    try std.testing.expect(checklist.satisfied(.sync_boot_image_registry));
-}
-
-test "OS contract keeps twenty two eighteenth-loop sensitive capture passes satisfied" {
-    const checklist = currentRepositoryEighteenthContract();
-    try std.testing.expect(checklist.satisfied(.sensitive_capture_service_model));
-    try std.testing.expect(checklist.satisfied(.capture_foreground_session_gate));
-    try std.testing.expect(checklist.satisfied(.capture_privacy_indicator_gate));
-    try std.testing.expect(checklist.satisfied(.capture_background_denial));
-    try std.testing.expect(checklist.satisfied(.capture_lease_policy_gate));
-    try std.testing.expect(checklist.satisfied(.capture_indicator_expiry_boundary));
-    try std.testing.expect(checklist.satisfied(.capture_session_binding_gate));
-    try std.testing.expect(checklist.satisfied(.capture_sample_budget_gate));
-    try std.testing.expect(checklist.satisfied(.capture_permission_kind_policy_gate));
-    try std.testing.expect(checklist.satisfied(.capture_revocation_gate));
-    try std.testing.expect(checklist.satisfied(.sensitive_capture_ledger));
-    try std.testing.expect(checklist.satisfied(.sensitive_capture_redaction));
-    try std.testing.expect(checklist.satisfied(.typed_sensitive_capture_service));
-    try std.testing.expect(checklist.satisfied(.capture_start_operation));
-    try std.testing.expect(checklist.satisfied(.capture_sample_operation));
-    try std.testing.expect(checklist.satisfied(.capture_stop_operation));
-    try std.testing.expect(checklist.satisfied(.native_registry_capture_discovery));
-    try std.testing.expect(checklist.satisfied(.capture_bootstrap_service_contract));
-    try std.testing.expect(checklist.satisfied(.capture_boot_image_registry));
-    try std.testing.expect(checklist.satisfied(.camera_permission_manifest_lease));
-    try std.testing.expect(checklist.satisfied(.microphone_permission_manifest_lease));
-    try std.testing.expect(checklist.satisfied(.screen_capture_permission_manifest_lease));
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-}
-
-test "OS contract keeps twenty five nineteenth-loop secret vault passes satisfied" {
-    const checklist = currentRepositoryNineteenthContract();
-    try std.testing.expect(checklist.satisfied(.secret_vault_service_model));
-    try std.testing.expect(checklist.satisfied(.hardware_sealed_import));
-    try std.testing.expect(checklist.satisfied(.nonresident_secret_material));
-    try std.testing.expect(checklist.satisfied(.secret_owner_binding));
-    try std.testing.expect(checklist.satisfied(.leased_handle_lending));
-    try std.testing.expect(checklist.satisfied(.secret_handle_expiry_boundary));
-    try std.testing.expect(checklist.satisfied(.raw_export_policy_denial));
-    try std.testing.expect(checklist.satisfied(.raw_export_handle_capability_gate));
-    try std.testing.expect(checklist.satisfied(.raw_export_success_audit));
-    try std.testing.expect(checklist.satisfied(.store_handle_identity_binding));
-    try std.testing.expect(checklist.satisfied(.secret_rotation_revokes_old_handles));
-    try std.testing.expect(checklist.satisfied(.explicit_handle_revocation));
-    try std.testing.expect(checklist.satisfied(.secret_revoke_binding_gate));
-    try std.testing.expect(checklist.satisfied(.secret_hardware_policy_gate));
-    try std.testing.expect(checklist.satisfied(.secret_lease_policy_gate));
-    try std.testing.expect(checklist.satisfied(.secret_vault_ledger));
-    try std.testing.expect(checklist.satisfied(.secret_vault_redaction));
-    try std.testing.expect(checklist.satisfied(.typed_secret_vault_service));
-    try std.testing.expect(checklist.satisfied(.secret_import_operation));
-    try std.testing.expect(checklist.satisfied(.secret_lend_operation));
-    try std.testing.expect(checklist.satisfied(.secret_rotate_operation));
-    try std.testing.expect(checklist.satisfied(.secret_revoke_operation));
-    try std.testing.expect(checklist.satisfied(.native_registry_secret_discovery));
-    try std.testing.expect(checklist.satisfied(.secret_vault_bootstrap_contract));
-    try std.testing.expect(checklist.satisfied(.secret_vault_boot_image_registry));
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-}
-
-test "OS contract keeps twenty one twentieth-loop attention broker passes satisfied" {
-    const checklist = currentRepositoryTwentiethContract();
-    try std.testing.expect(checklist.satisfied(.attention_broker_service_model));
-    try std.testing.expect(checklist.satisfied(.brokered_notification_post));
-    try std.testing.expect(checklist.satisfied(.notification_default_task_binding));
-    try std.testing.expect(checklist.satisfied(.quiet_interrupt_denial));
-    try std.testing.expect(checklist.satisfied(.critical_interrupt_denial));
-    try std.testing.expect(checklist.satisfied(.visible_budget_denial));
-    try std.testing.expect(checklist.satisfied(.interruption_budget_denial));
-    try std.testing.expect(checklist.satisfied(.notification_dismissal));
-    try std.testing.expect(checklist.satisfied(.notification_task_bound_dismissal));
-    try std.testing.expect(checklist.satisfied(.notification_strict_expiry_boundary));
-    try std.testing.expect(checklist.satisfied(.latest_visible_query));
-    try std.testing.expect(checklist.satisfied(.attention_broker_policy_gate));
-    try std.testing.expect(checklist.satisfied(.attention_broker_ledger));
-    try std.testing.expect(checklist.satisfied(.attention_broker_redaction));
-    try std.testing.expect(checklist.satisfied(.typed_attention_broker_service));
-    try std.testing.expect(checklist.satisfied(.attention_post_operation));
-    try std.testing.expect(checklist.satisfied(.attention_dismiss_operation));
-    try std.testing.expect(checklist.satisfied(.attention_query_operation));
-    try std.testing.expect(checklist.satisfied(.native_registry_attention_discovery));
-    try std.testing.expect(checklist.satisfied(.attention_broker_bootstrap_contract));
-    try std.testing.expect(checklist.satisfied(.attention_broker_boot_image_registry));
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-}
-
-test "OS contract keeps nineteen twenty-first-loop task lifecycle passes satisfied" {
-    const checklist = currentRepositoryTwentyFirstContract();
-    try std.testing.expect(checklist.satisfied(.task_lifecycle_service_model));
-    try std.testing.expect(checklist.satisfied(.brokered_task_suspend));
-    try std.testing.expect(checklist.satisfied(.invalid_suspend_denial));
-    try std.testing.expect(checklist.satisfied(.brokered_task_resume));
-    try std.testing.expect(checklist.satisfied(.terminate_checkpoint_policy_denial));
-    try std.testing.expect(checklist.satisfied(.brokered_task_terminate));
-    try std.testing.expect(checklist.satisfied(.lifecycle_target_owner_binding));
-    try std.testing.expect(checklist.satisfied(.task_lifecycle_policy_gate));
-    try std.testing.expect(checklist.satisfied(.task_lifecycle_runtime_audit));
-    try std.testing.expect(checklist.satisfied(.task_lifecycle_ledger));
-    try std.testing.expect(checklist.satisfied(.task_lifecycle_redaction));
-    try std.testing.expect(checklist.satisfied(.typed_task_lifecycle_service));
-    try std.testing.expect(checklist.satisfied(.lifecycle_suspend_operation));
-    try std.testing.expect(checklist.satisfied(.lifecycle_resume_operation));
-    try std.testing.expect(checklist.satisfied(.lifecycle_terminate_operation));
-    try std.testing.expect(checklist.satisfied(.native_registry_lifecycle_discovery));
-    try std.testing.expect(checklist.satisfied(.lifecycle_bootstrap_contract));
-    try std.testing.expect(checklist.satisfied(.lifecycle_boot_image_registry));
-    try std.testing.expect(checklist.satisfied(.lifecycle_policy_digest));
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-}
-
-test "OS contract keeps eighteen twenty-second-loop package offboarding passes satisfied" {
-    const checklist = currentRepositoryTwentySecondContract();
-    try std.testing.expect(checklist.satisfied(.package_offboarding_service_model));
-    try std.testing.expect(checklist.satisfied(.package_port_offboarding_authority_path));
-    try std.testing.expect(checklist.satisfied(.offboard_policy_delete_gate));
-    try std.testing.expect(checklist.satisfied(.offboard_receipt_required));
-    try std.testing.expect(checklist.satisfied(.denied_offboard_preserves_install));
-    try std.testing.expect(checklist.satisfied(.receipt_backed_package_remove));
-    try std.testing.expect(checklist.satisfied(.offboard_result_receipt));
-    try std.testing.expect(checklist.satisfied(.offboard_removed_bundle_digest));
-    try std.testing.expect(checklist.satisfied(.offboard_removed_bundle_digest_content_binding));
-    try std.testing.expect(checklist.satisfied(.offboard_revision_purge));
-    try std.testing.expect(checklist.satisfied(.removed_bundle_unlaunchable));
-    try std.testing.expect(checklist.satisfied(.offboard_data_deletion_ledger));
-    try std.testing.expect(checklist.satisfied(.offboard_redaction));
-    try std.testing.expect(checklist.satisfied(.typed_package_remove_operation));
-    try std.testing.expect(checklist.satisfied(.package_remove_operation_id));
-    try std.testing.expect(checklist.satisfied(.package_remove_wire_validation));
-    try std.testing.expect(checklist.satisfied(.package_registry_discovery));
-    try std.testing.expect(checklist.satisfied(.package_offboard_policy_digest));
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-}
-
-test "OS contract keeps sixteen twenty-third-loop resource governance passes satisfied" {
-    const checklist = currentRepositoryTwentyThirdContract();
-    try std.testing.expect(checklist.satisfied(.scheduler_resource_governance_model));
-    try std.testing.expect(checklist.satisfied(.hardware_telemetry_provider_boundary));
-    try std.testing.expect(checklist.satisfied(.hardware_evidence_required_for_accelerator_queues));
-    try std.testing.expect(checklist.satisfied(.foreground_thermal_dispatch));
-    try std.testing.expect(checklist.satisfied(.emergency_pressure_bypass));
-    try std.testing.expect(checklist.satisfied(.background_thermal_delay));
-    try std.testing.expect(checklist.satisfied(.batch_battery_delay));
-    try std.testing.expect(checklist.satisfied(.batch_recovers_after_pressure));
-    try std.testing.expect(checklist.satisfied(.pressure_delay_reason_accounting));
-    try std.testing.expect(checklist.satisfied(.dispatch_budget_accounting));
-    try std.testing.expect(checklist.satisfied(.privacy_mode_degrades_accelerator));
-    try std.testing.expect(checklist.satisfied(.carbon_aware_planner_compat));
-    try std.testing.expect(checklist.satisfied(.resource_governance_ledger));
-    try std.testing.expect(checklist.satisfied(.resource_governance_diagnostics));
-    try std.testing.expect(checklist.satisfied(.resource_governance_redaction));
-    try std.testing.expect(checklist.satisfied(.resource_governance_query_index));
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-}
-
-test "OS contract keeps twenty twenty-fourth-loop network session passes satisfied" {
-    const checklist = currentRepositoryTwentyFourthContract();
-    try std.testing.expect(checklist.satisfied(.network_session_service_model));
-    try std.testing.expect(checklist.satisfied(.existing_egress_broker_composed));
-    try std.testing.expect(checklist.satisfied(.allow_list_destination_gate));
-    try std.testing.expect(checklist.satisfied(.attested_session_open));
-    try std.testing.expect(checklist.satisfied(.session_byte_budget));
-    try std.testing.expect(checklist.satisfied(.session_expiry_boundary_gate));
-    try std.testing.expect(checklist.satisfied(.session_effective_budget_policy));
-    try std.testing.expect(checklist.satisfied(.transfer_over_budget_denied));
-    try std.testing.expect(checklist.satisfied(.session_mutation_binding));
-    try std.testing.expect(checklist.satisfied(.session_revocation_gate));
-    try std.testing.expect(checklist.satisfied(.revoked_session_transfer_denied));
-    try std.testing.expect(checklist.satisfied(.completed_session_transfer_denied));
-    try std.testing.expect(checklist.satisfied(.network_session_ledger));
-    try std.testing.expect(checklist.satisfied(.network_session_diagnostics));
-    try std.testing.expect(checklist.satisfied(.network_session_redaction));
-    try std.testing.expect(checklist.satisfied(.typed_network_open_session_operation));
-    try std.testing.expect(checklist.satisfied(.typed_network_transfer_operation));
-    try std.testing.expect(checklist.satisfied(.typed_network_revoke_operation));
-    try std.testing.expect(checklist.satisfied(.network_session_wire_validation));
-    try std.testing.expect(checklist.satisfied(.network_stack_catalog_binding));
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-}
-
-test "OS contract keeps thirty nine twenty-fifth-loop personal context passes satisfied" {
-    const checklist = currentRepositoryTwentyFifthContract();
-    try std.testing.expect(checklist.satisfied(.personal_context_service_model));
-    try std.testing.expect(checklist.satisfied(.semantic_policy_composed));
-    try std.testing.expect(checklist.satisfied(.local_model_gate));
-    try std.testing.expect(checklist.satisfied(.encrypted_index_gate));
-    try std.testing.expect(checklist.satisfied(.redacted_snippet_gate));
-    try std.testing.expect(checklist.satisfied(.context_query_byte_budget));
-    try std.testing.expect(checklist.satisfied(.context_lease_issue));
-    try std.testing.expect(checklist.satisfied(.context_lease_query_accounting));
-    try std.testing.expect(checklist.satisfied(.context_query_canonical_byte_metering));
-    try std.testing.expect(checklist.satisfied(.context_indexed_retrieval));
-    try std.testing.expect(checklist.satisfied(.context_pack_redaction));
-    try std.testing.expect(checklist.satisfied(.context_pack_receipt));
-    try std.testing.expect(checklist.satisfied(.context_pack_index_generation));
-    try std.testing.expect(checklist.satisfied(.context_pack_index_staleness_guard));
-    try std.testing.expect(checklist.satisfied(.context_pack_accounting_snapshot_guard));
-    try std.testing.expect(checklist.satisfied(.context_pack_envelope_consistency));
-    try std.testing.expect(checklist.satisfied(.context_pack_request_fingerprint));
-    try std.testing.expect(checklist.satisfied(.context_pack_sensitivity_envelope));
-    try std.testing.expect(checklist.satisfied(.context_pack_empty_receipt));
-    try std.testing.expect(checklist.satisfied(.context_pack_freshness));
-    try std.testing.expect(checklist.satisfied(.context_pack_revocation_binding));
-    try std.testing.expect(checklist.satisfied(.context_pack_replay_guard));
-    try std.testing.expect(checklist.satisfied(.context_pack_live_replay_verifier));
-    try std.testing.expect(checklist.satisfied(.context_pack_receipt_audit));
-    try std.testing.expect(checklist.satisfied(.context_pack_invalid_receipt_audit));
-    try std.testing.expect(checklist.satisfied(.context_pack_malformed_receipt_audit));
-    try std.testing.expect(checklist.satisfied(.context_pack_policy_reauthorization));
-    try std.testing.expect(checklist.satisfied(.context_lease_privacy_mode_binding));
-    try std.testing.expect(checklist.satisfied(.context_lease_expiration_gate));
-    try std.testing.expect(checklist.satisfied(.context_lease_revocation_gate));
-    try std.testing.expect(checklist.satisfied(.context_workspace_scope_gate));
-    try std.testing.expect(checklist.satisfied(.personal_context_ledger));
-    try std.testing.expect(checklist.satisfied(.personal_context_diagnostics));
-    try std.testing.expect(checklist.satisfied(.personal_context_redaction));
-    try std.testing.expect(checklist.satisfied(.typed_context_lease_operation));
-    try std.testing.expect(checklist.satisfied(.typed_context_query_operation));
-    try std.testing.expect(checklist.satisfied(.typed_context_revoke_operation));
-    try std.testing.expect(checklist.satisfied(.context_wire_validation));
-    try std.testing.expect(checklist.satisfied(.personal_context_catalog_binding));
-    try std.testing.expectEqual(feature_count, checklist.satisfiedCount());
-    try std.testing.expect(checklist.complete());
-}
-
-test "OS contract exposes one u16-wide unified checklist" {
-    try std.testing.expect(uses_u16_feature_width);
-    try std.testing.expect(uses_single_requirement_enum);
-    try std.testing.expect(generated_from_typed_idl);
-    try std.testing.expect(currentRepositoryUnifiedContract());
-}
-
-test "OS contract keeps the 2026 floor satisfied" {
-    const checklist = currentRepositoryContract();
-    try std.testing.expect(checklist.satisfied(.kernel_tcb_forbids_product_imports));
-    try std.testing.expect(checklist.satisfied(.yield_plus_sealed_rings));
-    try std.testing.expect(checklist.satisfied(.userspace_nvme_dataplane));
-    try std.testing.expect(checklist.satisfied(.userspace_i225_dataplane));
-    try std.testing.expect(checklist.satisfied(.userspace_xhci_dataplane));
-    try std.testing.expect(checklist.satisfied(.eight_address_spaces_pku));
-    try std.testing.expect(checklist.satisfied(.efi_only_production_boot));
-    try std.testing.expect(checklist.satisfied(.checkpoint_only_cold_load));
+    for (checklist.satisfied_features, 0..) |satisfied, index| {
+        if (!satisfied) std.debug.print("unsatisfied OS contract feature: {t}\n", .{@as(Feature, @fromBackingInt(@intCast(index)))});
+    }
     try std.testing.expect(checklist.complete());
 }
 

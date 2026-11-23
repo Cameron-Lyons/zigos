@@ -12,7 +12,6 @@ const sync_service = @import("../sync/sync_service.zig");
 const workspace = @import("../storage/workspace.zig");
 
 pub const MAX_BREAK_GLASS_REASON_BYTES: usize = 160;
-pub const DERIVES_ACTION_COUNT_FROM_SLICE = true;
 pub const ENTRY_SESSION_SIZE_CEILING_BYTES: usize = 48;
 
 pub const RecoveryReport = struct {
@@ -383,13 +382,6 @@ fn validateUniqueRecoveryActions(actions: []const RecoveryAction) EntryError!voi
             if (action == other) return error.DuplicateRecoveryAction;
         }
     }
-}
-
-test "recovery entry sessions derive action count from their authoritative slice" {
-    try std.testing.expect(DERIVES_ACTION_COUNT_FROM_SLICE);
-    try std.testing.expect(!@hasField(EntrySession, "action_count"));
-    try std.testing.expect(@hasDecl(EntrySession, "actionCount"));
-    try std.testing.expect(@sizeOf(EntrySession) <= ENTRY_SESSION_SIZE_CEILING_BYTES);
 }
 
 test "recovery environment verifies reinstalls restores repairs and rotates" {

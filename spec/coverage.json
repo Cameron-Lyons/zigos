@@ -78,16 +78,6 @@
     "20. One-sentence summary"
   ],
   "one_sentence_summary": "Zigos is a capability-based, local-first, multi-device operating system with an immutable core, versioned object storage, strong sandboxing, explicit identity, and first-class support for modern accelerators.",
-  "floor_2026": [
-    "kernel_tcb_forbids_product_imports",
-    "yield_plus_sealed_rings",
-    "userspace_nvme_dataplane",
-    "userspace_i225_dataplane",
-    "userspace_xhci_dataplane",
-    "eight_address_spaces_pku",
-    "efi_only_production_boot",
-    "checkpoint_only_cold_load"
-  ],
   "sections": [
     {
       "id": "1",
@@ -222,8 +212,8 @@
           "name": "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit"
         },
         {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service can use a provisioned hardware-backed root for visible remote requests"
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation binds verifier policy enrollment PCR and nonce with one use"
         }
       ],
       "requirements": [
@@ -1004,8 +994,8 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service does not count hidden requests and detects tampering"
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation binds verifier policy enrollment PCR and nonce with one use"
         },
         {
           "file": "src/native/platform/os_identity.zig",
@@ -1270,34 +1260,6 @@
         "src/native/task/tpm_worker_lease.zig"
       ],
       "negative_tests": [
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service can use a provisioned hardware-backed root for visible remote requests"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service rejects emulator and unauthenticated measured roots for remote attestations"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation verification rejects measured state and statement tampering"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation response cannot be relabeled for another verifier policy"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation signatures bind every request restriction and actual verifier metadata"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation rejects malformed bounded records before hashing or signing"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation signing and provisioning failures leave committed state unchanged"
-        },
         {
           "file": "src/native/platform/tpm_attestation.zig",
           "name": "TPM remote attestation binds verifier policy enrollment PCR and nonce with one use"
@@ -2198,13 +2160,12 @@
     "REQ-POLICY-OBJECTS": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/policy/policy_object.zig",
-        "src/native/services/agent_delegation_service.zig"
+        "src/native/policy/policy_object.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/services/agent_delegation_service.zig",
-          "name": "agent delegation service kill switch revokes stale generations and blocks reuse"
+          "file": "src/native/policy/policy_object.zig",
+          "name": "policy directory gates agent delegation budgets confirmation and audit"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",

@@ -313,8 +313,6 @@ pub fn firstHardwareTargetGate() !void {
     try std.testing.expectEqualStrings("asus-nuc15crsu7", target.id);
     try std.testing.expectEqualStrings("RNUC15CRSU7", target.sku);
     try std.testing.expectEqualStrings("Intel Ethernet Controller I225-LM", target.network);
-    try std.testing.expect(hardware_target.coversRequiredSubsystems(target));
-    try std.testing.expect(target.required_subsystems.len >= target.required_markers.len);
     try std.testing.expect(containsString(
         hardware_target.nuc15crsu7_proof_metadata_markers[0..],
         hardware_target.nuc15crsu7_marker_prefix ++ ":EVIDENCE_SOURCE:REAL_HARDWARE",

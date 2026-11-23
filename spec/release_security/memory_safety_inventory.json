@@ -2038,20 +2038,6 @@
       ]
     },
     {
-      "path": "src/native/platform/attestation_service.zig",
-      "categories": [
-        "pointer-cast"
-      ],
-      "owner": "attestation-owner",
-      "review_state": "release-reviewed",
-      "mitigations": [
-        "provider context casts are confined to attestation provider adapters"
-      ],
-      "tests": [
-        "zig build host-tests"
-      ]
-    },
-    {
       "path": "src/native/platform/measured_boot.zig",
       "categories": [
         "pointer-cast"

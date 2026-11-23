@@ -3,17 +3,21 @@ const spec_support = @import("support.zig");
 const base_boot_selector = @import("../../native/platform/base_boot_selector.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
+const elf_image_inspector = @import("../../native/task/elf_image_inspector.zig");
+const embedded_file = @import("../../native/task/embedded_file.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const immutable_base = @import("../../native/platform/immutable_base.zig");
 const measured_boot = @import("../../native/platform/measured_boot.zig");
 const object_store = @import("../../native/storage/object_store.zig");
 const recovery_environment = @import("../../native/platform/recovery_environment.zig");
+const signing = @import("../../native/core/signing.zig");
 const supervisor = @import("../../native/session/supervisor.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
 const sync_service = @import("../../native/sync/sync_service.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const units = @import("../../native/core/units.zig");
 const update_health = @import("../../native/platform/update_health.zig");
+const userspace_boot_registry = @import("../../native/task/userspace_boot_registry.zig");
 
 const LEDGER_EXPORT_BUFFER_BYTES: usize = units.kibibytes(2);
 
@@ -139,7 +143,76 @@ pub fn baseImageStaysSignedMeasuredAtomicAndRollbackCapable() !void {
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.policy));
     try std.testing.expectEqual(@as(usize, 1), boot.countKind(.driver_set));
     try std.testing.expect(!std.mem.allEqual(u8, &boot.root_digest, 0));
-    try measured_boot.generatedProductionArtifactManifestMatchesUserspaceArchive();
+    try generatedProductionArtifactManifestMatchesUserspaceArchive();
+}
+
+fn generatedUserspaceArchiveMatchesManifest(manifest: *const measured_boot.BuildArtifactManifest) bool {
+    const generated_archive = @import("userspace_archive");
+    if (manifest.countKind(.userspace_image) != generated_archive.artifacts.len) return false;
+    for (generated_archive.artifacts, 0..) |artifact, artifact_index| {
+        const spec = userspace_boot_registry.specAt(artifact_index) orelse return false;
+        if (!generatedArtifactMatchesManifest(manifest, spec, artifact)) return false;
+    }
+    return true;
+}
+
+fn generatedArtifactMatchesManifest(manifest: *const measured_boot.BuildArtifactManifest, spec: anytype, artifact: anytype) bool {
+    userspace_boot_registry.validateGeneratedArtifact(artifact) catch return false;
+    const file = embedded_file.File.fromChunkedArtifact(artifact);
+    if (!file.isPresent()) return false;
+    if (artifact.file_size_bytes != file.byte_len) return false;
+
+    const digest = file.sha256() orelse return false;
+    if (!std.mem.eql(u8, &digest, &artifact.file_sha256)) return false;
+    if (!measured_boot.buildArtifactDigestMatches(manifest, .userspace_image, spec.bundleId(), &digest)) return false;
+
+    const inspection = elf_image_inspector.inspectFile(file) catch return false;
+    return artifact.entry_point == inspection.entry_point and
+        artifact.bootstrap_mailbox_address == inspection.bootstrap_mailbox_address and
+        artifact.segment_count == inspection.executable_image.segment_count;
+}
+
+fn firstUserspaceImageIndex(manifest: *const measured_boot.BuildArtifactManifest) ?usize {
+    for (manifest.entries[0..manifest.entry_count], 0..) |entry, index| {
+        if (entry.kind == .userspace_image) return index;
+    }
+    return null;
+}
+
+fn generatedProductionArtifactManifestMatchesUserspaceArchive() !void {
+    const generated_manifest = @import("production_artifact_manifest");
+    const generated_archive = @import("userspace_archive");
+
+    var manifest: measured_boot.BuildArtifactManifest = undefined;
+    @memset(std.mem.asBytes(&manifest), 0xa5);
+    try measured_boot.buildArtifactManifestFromGeneratedInto(&manifest, generated_manifest);
+    try std.testing.expect(manifest.hasRequiredShape());
+    try std.testing.expectEqual(generated_archive.artifacts.len, manifest.countKind(.userspace_image));
+    try std.testing.expect(generatedUserspaceArchiveMatchesManifest(&manifest));
+
+    var stale_digest = manifest;
+    const stale_index = firstUserspaceImageIndex(&stale_digest) orelse return error.ManifestMismatch;
+    stale_digest.entries[stale_index].digest[0] ^= 0x33;
+    try std.testing.expect(stale_digest.hasRequiredShape());
+    try std.testing.expect(!generatedUserspaceArchiveMatchesManifest(&stale_digest));
+
+    var missing_entry = manifest;
+    std.mem.copyForwards(
+        measured_boot.BuildArtifactEntry,
+        missing_entry.entries[stale_index .. missing_entry.entry_count - 1],
+        missing_entry.entries[stale_index + 1 .. missing_entry.entry_count],
+    );
+    missing_entry.entry_count -= 1;
+    missing_entry.entries[missing_entry.entry_count] = measured_boot.BuildArtifactManifest.init(0).entries[0];
+    try std.testing.expect(!generatedUserspaceArchiveMatchesManifest(&missing_entry));
+
+    var stale_metadata = generated_archive.artifacts[0];
+    stale_metadata.entry_point +%= 0x1000;
+    const first_spec = userspace_boot_registry.specAt(0) orelse return error.ManifestMismatch;
+    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, first_spec, stale_metadata));
+
+    const wrong_spec = userspace_boot_registry.specAt(1) orelse return error.ManifestMismatch;
+    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, wrong_spec, generated_archive.artifacts[0]));
 }
 
 pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {

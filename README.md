@@ -1759,7 +1759,7 @@ key enrollment, manufacturer/EK certification, release-policy approval of PCR
 values, and PCR-bound secret policies
 remain open; a valid signature alone does not establish those trust decisions.
 
-The attestation service now has a separate TPM response path. The verifier owns
+The attestation service answers remote requests with TPM quotes. The verifier owns
 the enrolled device/key/generation and approved PCR value, generates a fresh
 32-byte nonce, and binds the complete request and PCR expectation into the
 quote's signed extraData. Responses contain only bounded TPM evidence. Acceptance
@@ -1802,15 +1802,9 @@ completed delivery, then retries successfully with the same challenge. Native
 provisioning must supply the enrolled key, encrypted blob, parent pin and
 revocable authorization; the worker installs no default credentials.
 
-Remote attestation service signatures bind the complete verifier request and
-the provider's actual metadata digest through a domain-separated context.
-Changing policy, key restrictions, revocations, or metadata invalidates the
-signature, and standalone statements cannot be repackaged as remote responses.
-The response remains 616 bytes. Verification checks bounded lengths and canonical
-unused fields before hashing, then checks the signature once against the trusted
-root. Failed signing and provisioning leave committed service state unchanged.
-Verified service-identity connections also require the signed device identity to
-match the selected peer before opening a connection.
+TPM quotes are the only remote attestation evidence. Verified service-identity
+connections also require the enrolled device identity to match the selected
+peer before opening a connection.
 
 `zig build unified-efi-qemu-test` checks firmware authorization of
 the complete EFI image, rejection of changes to either embedded payload, and

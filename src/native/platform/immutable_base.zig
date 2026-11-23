@@ -10,7 +10,6 @@ const storage_service = @import("../storage/storage_service.zig");
 pub const MAX_SYSTEM_IMAGES: usize = 2;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const state_workspace_label = "system-base";
-pub const COMPACT_IMMUTABLE_BASE_METADATA = true;
 pub const SYSTEM_IMAGE_SIZE_CEILING_BYTES: usize = 160;
 pub const BOOT_SELECTION_SIZE_CEILING_BYTES: usize = 120;
 pub const MANAGER_SIZE_CEILING_BYTES: usize = 424;
