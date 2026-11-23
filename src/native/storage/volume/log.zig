@@ -14,6 +14,7 @@ pub const RecordKind = enum(u8) {
     blob_state = 6,
     chunk_state = 7,
     segment_boundary = 8,
+    workspace_delta = 9,
 };
 
 pub const RecordHeader = struct {

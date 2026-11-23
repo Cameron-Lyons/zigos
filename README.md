@@ -1225,17 +1225,28 @@ committed set is reconstructed from the selected root's version watermark;
 failed barriers retain dirty state, and retries or cold replay require no
 separate durability cache. Workspace-only and clean saves avoid reconstructing
 that set.
-Volume root format 7 uses seed-zero XXH64 for root and log corruption checksums.
+Volume root format 8 uses seed-zero XXH64 for root and log corruption checksums.
 A volume with no current-format root is refused on load and save without
 rewriting the image; there is no automatic migration. SHA-256 content addresses
-and signed metadata remain the authentication boundary.
+and signed metadata remain the authentication boundary. Workspace summaries in
+the root record the persisted mutation count and a fingerprint of the
+workspace's identity, owner, label and logged mutations. While the live record
+still begins with that fingerprinted prefix, an append logs only its newer
+mutations plus its share grants and recoverable deletes; replay applies such a
+delta only to its exact base and rejects the root unless the result hashes like
+the committed summary. Mutation-log compaction, reseeding, another writer's
+root or any other change to the prefix falls back to a whole-workspace record.
+Backend saves reuse the root and last log sector they committed while no other
+write or attachment reached the device, so an unbatched checkpoint reads
+nothing and writes the appended log as whole sectors in one transfer.
 Object hashing and blob replay initialize each live chunk reference and Merkle
 node before use, avoiding redundant clears of their local scratch arrays.
 Stored record tails retain canonical zeros; content addresses and signatures
 retain their exact bytes.
 The fixed object and workspace tables are the storage capacity limits; saves
-refuse any live slot whose counts could not be encoded. Attached byte transfers
-reject overflowing or out-of-image ranges before calling the device backend.
+refuse any live slot whose counts could not be encoded. Attached byte reads and
+log writes reject overflowing or out-of-image ranges before calling the device
+backend.
 Workspace path and object indexes close affected probe chains after deletion,
 so repeated directory edits leave no tombstones. Object sync positions a
 verified chunk cursor at each transport range rather than visiting every

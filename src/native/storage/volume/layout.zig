@@ -16,9 +16,11 @@ pub const data_region_bytes: usize = data_region_sectors * sector_size;
 pub const alternate_data_region_offset: u32 = @intCast(data_region_bytes);
 
 pub const root_magic = "ZG4LOG1";
-// Version 7: seed-zero XXH64 root and log checksums; checkpoints are the log
+// Version 8: seed-zero XXH64 root and log checksums; checkpoints are the log
 // record bodies behind a count header, without derived version or chunk fields.
-pub const root_format_version: u16 = 7;
+// Workspace summaries carry the persisted mutation count and log fingerprint
+// that workspace_delta records extend instead of rewriting the whole workspace.
+pub const root_format_version: u16 = 8;
 pub const USES_CHECKPOINT_ONLY_COLD_LOAD = true;
 pub const max_replay_log_records: u16 = 512;
 pub const max_log_segments: u16 = 64;

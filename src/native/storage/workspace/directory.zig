@@ -1850,7 +1850,18 @@ fn materializeEntriesAtGeneration(
 ) Error!usize {
     clearEntries(out);
     var out_count: usize = 0;
-    const mutations = workspace.mutation_log.entriesConst()[0..workspace.counts.entry_mutation_count];
+    try applyMutationBatches(out, &out_count, workspace.mutation_log.entriesConst()[0..workspace.counts.entry_mutation_count], generation);
+    return out_count;
+}
+
+/// Applies logged mutations to a replayed workspace's sorted entries, exactly
+/// as its commits and replacements published them. Derived indexes are left
+/// for the caller to rebuild once replay finishes.
+pub fn replayEntryMutations(workspace: *WorkspaceRecord, mutations: []const EntryMutation) Error!void {
+    try applyMutationBatches(workspace.path_index.entries(), &workspace.counts.entry_count, mutations, std.math.maxInt(u32));
+}
+
+fn applyMutationBatches(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: anytype, mutations: []const EntryMutation, through_generation: u32) Error!void {
     var batch_start: usize = 0;
     while (batch_start < mutations.len) {
         const batch_generation = mutations[batch_start].generation;
@@ -1858,21 +1869,20 @@ fn materializeEntriesAtGeneration(
         while (batch_end < mutations.len and mutations[batch_end].generation == batch_generation) : (batch_end += 1) {}
         const batch = mutations[batch_start..batch_end];
         batch_start = batch_end;
-        if (batch_generation > generation) continue;
+        if (batch_generation > through_generation) continue;
 
         // A generation publishes one complete transaction. Its sorted log may
         // put additions before deletions even when the final directory fits.
         for (batch) |mutation| {
             if (!isDeleteTombstone(mutation.entry)) continue;
-            const index = findEntryIndex(out[0..out_count], mutation.entry.pathSlice()) orelse return error.EntryNotFound;
-            removeEntry(out, &out_count, index);
+            const index = findEntryIndex(entries[0..count.*], mutation.entry.pathSlice()) orelse return error.EntryNotFound;
+            removeEntry(entries, count, index);
         }
         for (batch) |mutation| {
             if (isDeleteTombstone(mutation.entry)) continue;
-            _ = try insertSortedEntry(out, &out_count, mutation.entry);
+            _ = try insertSortedEntry(entries, count, mutation.entry);
         }
     }
-    return out_count;
 }
 
 /// Returns false, touching nothing, when the target equals the current entries.

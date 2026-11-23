@@ -47,6 +47,7 @@ pub const Directory = directory.Directory;
 
 pub const emptyWorkspaceRecord = directory.emptyWorkspaceRecord;
 pub const pathHash = directory.pathHash;
+pub const replayEntryMutations = directory.replayEntryMutations;
 pub const shareGrantPrincipalKey = directory.shareGrantPrincipalKey;
 pub const shareGrantSlotIndex = directory.shareGrantSlotIndex;
 pub const workspaceRootAddress = directory.workspaceRootAddress;

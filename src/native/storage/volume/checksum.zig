@@ -1,6 +1,6 @@
 const std = @import("std");
 
-// Root format 7 binds the log and root checksums to seed-zero XXH64. These
+// Since root format 7, log and root checksums are seed-zero XXH64. These
 // detect accidental corruption; signed metadata and SHA-256 content addresses
 // remain the authentication boundary. Four independent lanes avoid FNV's
 // byte-at-a-time dependency across large checkpoints.

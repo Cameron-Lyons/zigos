@@ -7,7 +7,7 @@ const volume_layout = @import("layout.zig");
 const workspace = @import("../workspace.zig");
 
 pub const Error = volume_errors.Error;
-pub const ROOT_STATE_SIZE_CEILING_BYTES: usize = 256;
+pub const ROOT_STATE_SIZE_CEILING_BYTES: usize = 320;
 
 const CursorWriter = binary_cursor.Writer(Error, error.NoSpaceLeft);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptImage);
@@ -21,6 +21,8 @@ comptime {
 pub const WorkspaceSummary = struct {
     id: u64 = 0,
     generation: u32 = 0,
+    mutation_count: u16 = 0,
+    log_hash: u64 = 0,
     state_hash: u64 = 0,
 };
 
@@ -124,12 +126,6 @@ pub fn readBackendRoot(volume: anytype, sector_index: u32) Error!LoadedRoot {
     };
 }
 
-pub fn writeBackendRoot(volume: anytype, sector_index: u32, root: RootState) Error!void {
-    @memset(volume.sector_buffer[0..], 0);
-    try encodeRoot(volume.sector_buffer[0..], root);
-    if (!volume_backend.writeAttachedRange(volume, sector_index, volume.sector_buffer[0..])) return error.DeviceWriteFailed;
-}
-
 pub fn encodeRoot(buffer: []u8, root: RootState) Error!void {
     var writer = CursorWriter{ .buffer = buffer };
     try writer.writeBytes(volume_layout.root_magic);
@@ -148,6 +144,8 @@ pub fn encodeRoot(buffer: []u8, root: RootState) Error!void {
     for (root.workspace_summaries[0..@as(usize, root.workspace_summary_count)]) |summary| {
         try writer.writeU64(summary.id);
         try writer.writeU32(summary.generation);
+        try writer.writeU16(summary.mutation_count);
+        try writer.writeU64(summary.log_hash);
         try writer.writeU64(summary.state_hash);
     }
     const checksum = volume_hashing.checksumBytes(buffer[0..writer.offset]);
@@ -180,8 +178,11 @@ pub fn parseRoot(buffer: []const u8) Error!RootState {
         root.workspace_summaries[index] = .{
             .id = try reader.readU64(),
             .generation = try reader.readU32(),
+            .mutation_count = try reader.readU16(),
+            .log_hash = try reader.readU64(),
             .state_hash = try reader.readU64(),
         };
+        if (root.workspace_summaries[index].mutation_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) return error.CorruptImage;
     }
     if (root.data_offset != 0 and root.data_offset != volume_layout.alternate_data_region_offset) return error.CorruptImage;
     if (root.log_bytes > volume_layout.data_region_bytes) return error.CorruptImage;
@@ -196,8 +197,8 @@ pub fn parseRoot(buffer: []const u8) Error!RootState {
 
 test "storage root summary metadata stays compact" {
     try std.testing.expectEqual(u8, @FieldType(RootState, "workspace_summary_count"));
-    try std.testing.expectEqual(@as(usize, 256), @sizeOf(RootState));
-    try std.testing.expectEqual(@as(usize, 264), @sizeOf(LoadedRoot));
+    try std.testing.expectEqual(@as(usize, 320), @sizeOf(RootState));
+    try std.testing.expectEqual(@as(usize, 328), @sizeOf(LoadedRoot));
 }
 
 test "storage roots bind the checksum and reject other format versions" {

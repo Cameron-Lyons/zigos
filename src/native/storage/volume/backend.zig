@@ -1,3 +1,4 @@
+const std = @import("std");
 const volume_layout = @import("layout.zig");
 
 pub const Backend = struct {
@@ -34,34 +35,6 @@ pub fn clearAttachedVolume(volume: anytype) bool {
         if (!writeAttachedRange(volume, sector_index, volume.sector_buffer[0..])) return false;
     }
     return flushAttached(volume);
-}
-
-pub const WriteError = error{ ImageTooSmall, DeviceReadFailed, DeviceWriteFailed };
-
-pub fn writeAttachedBytes(volume: anytype, offset: usize, bytes: []const u8) WriteError!void {
-    if (!withinImageRange(offset, bytes.len)) return error.ImageTooSmall;
-    var remaining = bytes.len;
-    var cursor: usize = 0;
-    while (remaining > 0) {
-        const absolute_offset = offset + cursor;
-        const sector_index = absolute_offset / volume_layout.sector_size;
-        const sector_offset = absolute_offset % volume_layout.sector_size;
-
-        if (sector_offset == 0 and remaining >= volume_layout.sector_size) {
-            const run_sectors = remaining / volume_layout.sector_size;
-            const run_len = run_sectors * volume_layout.sector_size;
-            if (!writeAttachedRange(volume, @intCast(sector_index), bytes[cursor .. cursor + run_len])) return error.DeviceWriteFailed;
-            cursor += run_len;
-            remaining -= run_len;
-        } else {
-            const chunk_len = @min(remaining, volume_layout.sector_size - sector_offset);
-            if (!readAttachedRange(volume, @intCast(sector_index), volume.sector_buffer[0..])) return error.DeviceReadFailed;
-            @memcpy(volume.sector_buffer[sector_offset .. sector_offset + chunk_len], bytes[cursor .. cursor + chunk_len]);
-            if (!writeAttachedRange(volume, @intCast(sector_index), volume.sector_buffer[0..])) return error.DeviceWriteFailed;
-            cursor += chunk_len;
-            remaining -= chunk_len;
-        }
-    }
 }
 
 pub fn readAttachedBytes(volume: anytype, offset: usize, buffer: []u8) bool {
@@ -101,7 +74,29 @@ pub fn readAttachedRange(volume: anytype, start_lba: u64, buffer: []u8) bool {
     };
 }
 
+/// Advances on both sides of every attached-device write and on every attach,
+/// clear or reset of any Volume, so a write still in flight when another
+/// Volume records its view retires that view once it completes. A Volume
+/// trusts its cached save root only while the epoch it recorded after its own
+/// last write is still current. Raw writers that bypass this file
+/// (driver-port scratch and boot sectors) stay beyond
+/// `required_device_sectors`, outside every volume root and log region.
+var device_epoch: std.atomic.Value(u64) = .init(0);
+
+/// How far one `writeAttachedRange` call advances the device epoch.
+pub const write_epoch_span: u64 = 2;
+
+pub fn deviceEpoch() u64 {
+    return device_epoch.load(.acquire);
+}
+
+pub fn advanceDeviceEpoch() void {
+    _ = device_epoch.fetchAdd(1, .acq_rel);
+}
+
 pub fn writeAttachedRange(volume: anytype, start_lba: u64, buffer: []const u8) bool {
+    advanceDeviceEpoch();
+    defer advanceDeviceEpoch();
     return switch (volume.attached_backend_kind) {
         .none => false,
         .generic, .nvme_pci => volume.attached_backend_write(start_lba, buffer.ptr, buffer.len),
@@ -122,10 +117,9 @@ pub fn flushAttached(volume: anytype) bool {
 
 const TransferSpy = if (@import("builtin").is_test) struct {
     var reads: usize = 0;
-    var writes: usize = 0;
     var last_lba: u64 = 0;
     var last_length: usize = 0;
-    var written: [volume_layout.sector_size]u8 = undefined;
+    var epoch_during_write: u64 = 0;
 
     const Volume = struct {
         sector_buffer: [volume_layout.sector_size]u8 = undefined,
@@ -136,7 +130,6 @@ const TransferSpy = if (@import("builtin").is_test) struct {
 
     fn reset() void {
         reads = 0;
-        writes = 0;
         last_lba = 0;
         last_length = 0;
     }
@@ -149,18 +142,22 @@ const TransferSpy = if (@import("builtin").is_test) struct {
         return true;
     }
 
-    fn write(start_lba: u64, buffer: [*]const u8, length: usize) callconv(.c) bool {
-        writes += 1;
-        last_lba = start_lba;
-        last_length = length;
-        if (length > written.len) return false;
-        @memcpy(written[0..length], buffer[0..length]);
+    fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+        epoch_during_write = deviceEpoch();
         return true;
     }
 } else struct {};
 
-test "attached volume byte ranges reject overflow and out-of-image requests before I/O" {
-    const std = @import("std");
+test "attached writes advance the device epoch on both sides of the transfer" {
+    var volume = TransferSpy.Volume{};
+    const before = deviceEpoch();
+    try std.testing.expect(writeAttachedRange(&volume, 0, volume.sector_buffer[0..]));
+    // A view recorded while the write is in flight is retired when it lands.
+    try std.testing.expectEqual(before +% 1, TransferSpy.epoch_during_write);
+    try std.testing.expectEqual(before +% write_epoch_span, deviceEpoch());
+}
+
+test "attached volume byte reads reject overflow and out-of-image requests before I/O" {
     var volume = TransferSpy.Volume{};
     var bytes: [8]u8 = @splat(0xa5);
     TransferSpy.reset();
@@ -172,21 +169,16 @@ test "attached volume byte ranges reject overflow and out-of-image requests befo
         .{ .offset = volume_layout.image_bytes - 1, .length = 2 },
     }) |request| {
         try std.testing.expect(!readAttachedBytes(&volume, request.offset, bytes[0..request.length]));
-        try std.testing.expectError(error.ImageTooSmall, writeAttachedBytes(&volume, request.offset, bytes[0..request.length]));
         try std.testing.expectEqualSlices(u8, &@as([8]u8, @splat(0xa5)), &bytes);
         try std.testing.expectEqual(@as(usize, 0), TransferSpy.reads);
-        try std.testing.expectEqual(@as(usize, 0), TransferSpy.writes);
     }
     for ([_]usize{ 0, volume_layout.image_bytes }) |offset| {
         try std.testing.expect(readAttachedBytes(&volume, offset, bytes[0..0]));
-        try writeAttachedBytes(&volume, offset, bytes[0..0]);
     }
     try std.testing.expectEqual(@as(usize, 0), TransferSpy.reads);
-    try std.testing.expectEqual(@as(usize, 0), TransferSpy.writes);
 }
 
-test "attached volume exact-end partial and full-block transfers retain neighboring bytes" {
-    const std = @import("std");
+test "attached volume exact-end partial and full-block reads stay within the image" {
     var volume = TransferSpy.Volume{};
     var bytes: [volume_layout.sector_size]u8 = @splat(0x5a);
     TransferSpy.reset();
@@ -194,24 +186,11 @@ test "attached volume exact-end partial and full-block transfers retain neighbor
     try std.testing.expectEqual(@as(u8, 0xff), bytes[0]);
     try std.testing.expectEqual(@as(u64, volume_layout.required_device_sectors - 1), TransferSpy.last_lba);
     try std.testing.expectEqual(volume_layout.sector_size, TransferSpy.last_length);
-    bytes[0] = 0x5a;
-    try writeAttachedBytes(&volume, volume_layout.image_bytes - 1, bytes[0..1]);
-    try std.testing.expectEqual(@as(usize, 2), TransferSpy.reads);
-    try std.testing.expectEqual(@as(usize, 1), TransferSpy.writes);
-    for (TransferSpy.written[0 .. volume_layout.sector_size - 1], 0..) |byte, index| {
-        try std.testing.expectEqual(@as(u8, @truncate(index)), byte);
-    }
-    try std.testing.expectEqual(@as(u8, 0x5a), TransferSpy.written[volume_layout.sector_size - 1]);
 
     TransferSpy.reset();
-    const offset = volume_layout.image_bytes - volume_layout.sector_size;
-    try std.testing.expect(readAttachedBytes(&volume, offset, &bytes));
+    try std.testing.expect(readAttachedBytes(&volume, volume_layout.image_bytes - volume_layout.sector_size, &bytes));
     for (bytes, 0..) |byte, index| try std.testing.expectEqual(@as(u8, @truncate(index)), byte);
-    @memset(&bytes, 0x6b);
-    try writeAttachedBytes(&volume, offset, &bytes);
     try std.testing.expectEqual(@as(usize, 1), TransferSpy.reads);
-    try std.testing.expectEqual(@as(usize, 1), TransferSpy.writes);
     try std.testing.expectEqual(@as(u64, volume_layout.required_device_sectors - 1), TransferSpy.last_lba);
     try std.testing.expectEqual(volume_layout.sector_size, TransferSpy.last_length);
-    try std.testing.expectEqualSlices(u8, &bytes, &TransferSpy.written);
 }

@@ -21,7 +21,6 @@ const latest_mutations = @import("latest_mutations.zig");
 const overlay_model = @import("overlay.zig");
 const overlay_sessions = @import("overlay_sessions.zig");
 const replication_ops = @import("replication.zig");
-const replication_model = @import("replication_model.zig");
 const sync_semantics = @import("semantics.zig");
 
 pub const MAX_WORKSPACE_POLICIES = state_support.MAX_WORKSPACE_POLICIES;
@@ -40,7 +39,6 @@ pub const OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_
 pub const OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 69_408;
 pub const REPLICATION_SUMMARY_SIZE_CEILING_BYTES = state_support.REPLICATION_SUMMARY_SIZE_CEILING_BYTES;
-pub const PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES = replication_model.PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES;
 pub const ServiceConfig = overlay_model.ServiceConfig;
 pub const TransportMode = state_support.TransportMode;
 pub const SyncSemantic = state_support.SyncSemantic;
@@ -59,14 +57,11 @@ pub const ConflictReviewDecision = state_support.ConflictReviewDecision;
 pub const ConflictReviewRecord = state_support.ConflictReviewRecord;
 pub const DatabaseContract = state_support.DatabaseContract;
 pub const ReplicationSummary = state_support.ReplicationSummary;
-pub const PeerReplicationRequest = replication_model.PeerReplicationRequest;
-pub const PeerReplicationResult = replication_model.PeerReplicationResult;
 pub const TransportFrame = sync_adapters.TransportFrame;
 pub const TransportFrameRequest = sync_adapters.QueueFrameRequest;
 pub const Error = state_support.Error;
 pub const AuthorityContext = service_authority.Context;
 pub const AuthorityError = service_authority.Error;
-pub const PeerReplicationError = AuthorityError || Error || sync_transport.Error;
 
 const DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES: usize = 160;
 

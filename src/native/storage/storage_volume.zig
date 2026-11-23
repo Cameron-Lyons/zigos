@@ -67,6 +67,7 @@ pub const Volume = struct {
     attached_backend_flush: *const fn () callconv(.c) bool = volume_backend.unattachedFlush,
     attached_backend_kind: volume_backend.AttachedBackendKind = .none,
     workspace_state_hashes: WorkspaceStateHashCache = .{},
+    save_cache: SaveCache = .{},
 
     pub fn init() Volume {
         return .{};
@@ -92,6 +93,7 @@ pub const Volume = struct {
 
     pub fn reset(self: *Volume) bool {
         if (self.attachmentBusy()) return false;
+        self.dropDeviceView();
         self.releaseIoLogWorkspace();
         @memset(self.sector_buffer[0..], 0);
         self.attached_backend_present = false;
@@ -139,6 +141,7 @@ pub const Volume = struct {
         kind: volume_backend.AttachedBackendKind,
     ) bool {
         if (self.attachmentBusy() or (kind == .nvme_pci and dataplane_handoff.operationBusy())) return false;
+        self.dropDeviceView();
         self.attached_backend_present = true;
         self.attached_backend_sector_count = sector_count;
         self.attached_backend_read = read;
@@ -150,6 +153,7 @@ pub const Volume = struct {
 
     pub fn clearAttachedBackend(self: *Volume) bool {
         if (self.attachmentBusy()) return false;
+        self.dropDeviceView();
         self.attached_backend_present = false;
         self.attached_backend_sector_count = 0;
         self.attached_backend_read = volume_backend.unattachedRead;
@@ -171,6 +175,17 @@ pub const Volume = struct {
 
     pub fn adoptAttachedBackendFrom(self: *Volume, source: *const Volume) bool {
         if (self.attachmentBusy() or source.attachmentBusy()) return false;
+        // Readopting the same device keeps the cache; the shared device epoch
+        // already covers any write or reattachment through another Volume.
+        if (self.attached_backend_present != source.attached_backend_present or
+            self.attached_backend_sector_count != source.attached_backend_sector_count or
+            self.attached_backend_read != source.attached_backend_read or
+            self.attached_backend_write != source.attached_backend_write or
+            self.attached_backend_flush != source.attached_backend_flush or
+            self.attached_backend_kind != source.attached_backend_kind)
+        {
+            self.save_cache.invalidate();
+        }
         self.attached_backend_present = source.attached_backend_present;
         self.attached_backend_sector_count = source.attached_backend_sector_count;
         self.attached_backend_read = source.attached_backend_read;
@@ -184,12 +199,33 @@ pub const Volume = struct {
         if (self.attachmentBusy()) return false;
         if (!self.beginOperation()) return false;
         defer self.endOperation();
+        self.dropDeviceView();
         return volume_backend.clearAttachedVolume(self);
+    }
+
+    // Any change of attachment or device contents through this Volume retires
+    // every cached save root, including those of other Volumes on the device.
+    fn dropDeviceView(self: *Volume) void {
+        self.save_cache.invalidate();
+        volume_backend.advanceDeviceEpoch();
+    }
+
+    // Keeps the cache epoch only while no other write reached the device since
+    // this Volume last observed it, including while this callback suspended.
+    fn writeOwnedRange(self: *Volume, start_lba: u64, bytes: []const u8) Error!void {
+        const before = volume_backend.deviceEpoch();
+        const observed = if (self.save_cache.epoch) |epoch| epoch == before else false;
+        const written = volume_backend.writeAttachedRange(self, start_lba, bytes);
+        const expected = before +% volume_backend.write_epoch_span;
+        self.save_cache.epoch = if (observed and volume_backend.deviceEpoch() == expected) expected else null;
+        if (!written) return error.DeviceWriteFailed;
     }
 
     pub fn loadFromVolume(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory) bool {
         if (!self.beginOperation()) return false;
         defer self.endOperation();
+        // A load rereads the device, so the next save does too.
+        self.save_cache.invalidate();
         if (!self.hasAttachedDevice()) return false;
         if (self.attached_backend_sector_count < required_device_sectors) return false;
 
@@ -202,8 +238,19 @@ pub const Volume = struct {
         if (!self.hasAttachedDevice()) return .{ .generation = 0, .snapshot_current = false };
         if (self.attached_backend_sector_count < required_device_sectors) return error.ImageTooSmall;
 
-        const selection = try selectBackendSaveRoot(self);
-        return saveIncremental(self, selection.current, selection.force_compaction, store, workspaces, BackendWriteFns{ .volume = self });
+        const cache = &self.save_cache;
+        const selection = if (cache.usable()) cache.selection.? else selection: {
+            // Drop the stale view first, so a failed reread leaves nothing to
+            // trust. A write that lands while a root read suspends leaves the
+            // epoch behind, so this save then cannot republish the cache.
+            cache.invalidate();
+            cache.epoch = volume_backend.deviceEpoch();
+            break :selection try selectBackendSaveRoot(self);
+        };
+        // Only a completed save republishes the root; a failed one rereads.
+        cache.selection = null;
+        const writer = BackendWriteFns{ .volume = self, .cached_tail = if (cache.tail_valid) &cache.tail else null };
+        return saveIncremental(self, selection.current, selection.force_compaction, store, workspaces, writer);
     }
 
     pub fn saveToImage(self: *Volume, image: []u8, store: *object_store.Store, workspaces: *workspace.Directory) Error!PersistResult {
@@ -286,6 +333,28 @@ const SaveRootSelection = struct {
     }
 };
 
+// What the last completed backend save left on the device, so the next save
+// reads neither root sector nor the partial log sector it appends to. It is
+// trusted only while the shared device epoch still equals `epoch`.
+const SaveCache = struct {
+    epoch: ?u64 = null,
+    selection: ?SaveRootSelection = null,
+    tail_valid: bool = false,
+    // The sector holding the committed log end, zero past that end.
+    tail: [sector_size]u8 = @as([sector_size]u8, @splat(0)),
+
+    fn usable(self: *const SaveCache) bool {
+        const epoch = self.epoch orelse return false;
+        return self.selection != null and epoch == volume_backend.deviceEpoch();
+    }
+
+    fn invalidate(self: *SaveCache) void {
+        self.epoch = null;
+        self.selection = null;
+        self.tail_valid = false;
+    }
+};
+
 pub fn attachBackend(backend: Backend) bool {
     return default_volume.attachBackend(backend);
 }
@@ -346,6 +415,7 @@ const DirtySnapshot = struct {
 
 const BackendWriteFns = struct {
     volume: *Volume,
+    cached_tail: ?*const [sector_size]u8,
 };
 
 const ImageWriteFns = struct {
@@ -376,9 +446,12 @@ fn saveIncremental(
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
         state_hashes.invalidate(workspace_id.raw());
     }
+    // Deltas start after the committed head of the log's last sector, so the
+    // backend writes them as whole sectors without moving any bytes.
+    const append_head_len: usize = if (current) |loaded| loaded.root.log_bytes % sector_size else 0;
     const delta = if (current) |loaded|
         if (can_append)
-            try tryBuildAppendDelta(io_log_buffer, loaded.root, store, workspaces, state_hashes)
+            try tryBuildAppendDelta(io_log_buffer[append_head_len..], loaded.root, store, workspaces, state_hashes)
         else
             null
     else
@@ -386,6 +459,8 @@ fn saveIncremental(
 
     if (can_append and delta != null and delta.?.bytes_len == 0) {
         if (started_dirty) try flushWrites(writer);
+        // The device is unchanged, so the root this save started from stands.
+        publishSaveRoot(writer, current.?, false, null);
         return .{ .generation = current_generation, .snapshot_current = dirty_snapshot.acknowledge(store, workspaces) };
     }
 
@@ -400,10 +475,11 @@ fn saveIncremental(
         next_root.compacted_generation = current.?.root.compacted_generation;
         const next_root_sector = volume_root_slot.nextRootSector(current);
 
-        try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, io_log_buffer[0..delta.?.bytes_len]);
+        const tail = try writeLog(writer, data_start_byte + data_offset + current.?.root.log_bytes, io_log_buffer, append_head_len, delta.?.bytes_len);
         try flushWrites(writer);
         try writeRoot(writer, next_root_sector, next_root);
         try flushWrites(writer);
+        publishSaveRoot(writer, .{ .sector_index = next_root_sector, .root = next_root }, false, tail);
         return .{ .generation = next_generation, .snapshot_current = dirty_snapshot.acknowledge(store, workspaces) };
     }
 
@@ -428,11 +504,24 @@ fn saveIncremental(
     // Synchronize a possibly visible prior failed root before switching its
     // alternate log region, after capturing all payload and root metadata.
     if (current != null and !can_append) try flushWrites(writer);
-    try writeBytes(writer, data_start_byte + next_data_offset, io_log_buffer[0..checkpoint_log_len]);
+    const tail = try writeLog(writer, data_start_byte + next_data_offset, io_log_buffer, 0, checkpoint_log_len);
     try flushWrites(writer);
     try writeRoot(writer, next_root_sector, next_root);
     try flushWrites(writer);
+    // Without a prior root the save wrote sector 0 and cannot vouch for a
+    // damaged sector 1, so the next save still compacts over it.
+    publishSaveRoot(writer, .{ .sector_index = next_root_sector, .root = next_root }, current == null and force_compaction, tail);
     return .{ .generation = next_generation, .snapshot_current = dirty_snapshot.acknowledge(store, workspaces) };
+}
+
+fn publishSaveRoot(writer: anytype, root: LoadedRoot, force_compaction: bool, tail: ?*const [sector_size]u8) void {
+    if (@TypeOf(writer) != BackendWriteFns) return;
+    const cache = &writer.volume.save_cache;
+    cache.selection = .{ .current = root, .force_compaction = force_compaction };
+    if (tail) |sector| {
+        @memcpy(&cache.tail, sector);
+        cache.tail_valid = true;
+    }
 }
 
 fn selectImageSaveRoot(image: []const u8) Error!SaveRootSelection {
@@ -598,13 +687,36 @@ fn loadBackendRootCandidate(
     workspaces.clearDirty();
 }
 
-fn writeBytes(writer: anytype, offset: usize, bytes: []const u8) Error!void {
+// Writes the `len` log bytes at `buffer[head_len..]` to absolute byte
+// `offset`, where `head_len` is the offset within its sector. The backend
+// writes whole sectors in one transfer: the committed head comes from the
+// cached tail or one device read, and the rest of the last sector is zeroed,
+// which replay never reads because the root bounds log_bytes. Returns that
+// last sector for the save cache.
+fn writeLog(writer: anytype, offset: usize, buffer: []u8, head_len: usize, len: usize) Error!?*const [sector_size]u8 {
+    std.debug.assert(len != 0 and offset % sector_size == head_len);
     switch (@TypeOf(writer)) {
         ImageWriteFns => {
-            if (offset + bytes.len > writer.image.len) return error.ImageTooSmall;
-            @memcpy(writer.image[offset .. offset + bytes.len], bytes);
+            if (offset > writer.image.len or len > writer.image.len - offset) return error.ImageTooSmall;
+            @memcpy(writer.image[offset..][0..len], buffer[head_len..][0..len]);
+            return null;
         },
-        BackendWriteFns => try volume_backend.writeAttachedBytes(writer.volume, offset, bytes),
+        BackendWriteFns => {
+            const start = offset - head_len;
+            const span = std.mem.alignForward(usize, head_len + len, sector_size);
+            if (span > buffer.len or start > image_bytes or span > image_bytes - start) return error.ImageTooSmall;
+            const start_lba = start / sector_size;
+            if (head_len != 0) {
+                const head = writer.cached_tail orelse head: {
+                    if (!volume_backend.readAttachedRange(writer.volume, start_lba, writer.volume.sector_buffer[0..])) return error.DeviceReadFailed;
+                    break :head &writer.volume.sector_buffer;
+                };
+                @memcpy(buffer[0..head_len], head[0..head_len]);
+            }
+            @memset(buffer[head_len + len .. span], 0);
+            try writer.volume.writeOwnedRange(start_lba, buffer[0..span]);
+            return buffer[span - sector_size ..][0..sector_size];
+        },
         else => @compileError("unsupported incremental writer"),
     }
 }
@@ -612,7 +724,12 @@ fn writeBytes(writer: anytype, offset: usize, bytes: []const u8) Error!void {
 fn writeRoot(writer: anytype, sector_index: u32, root: RootState) Error!void {
     switch (@TypeOf(writer)) {
         ImageWriteFns => try volume_root_slot.writeImageRoot(writer.image, sector_index, root),
-        BackendWriteFns => try volume_root_slot.writeBackendRoot(writer.volume, sector_index, root),
+        BackendWriteFns => {
+            const sector = &writer.volume.sector_buffer;
+            @memset(sector, 0);
+            try volume_root_slot.encodeRoot(sector, root);
+            try writer.volume.writeOwnedRange(sector_index, sector);
+        },
         else => @compileError("unsupported root writer"),
     }
 }
@@ -627,17 +744,19 @@ fn flushWrites(writer: anytype) Error!void {
     }
 }
 
+const WorkspaceHashes = volume_hashing.WorkspaceHashes;
+
 const WorkspaceStateHashCache = struct {
     ids: [workspace.MAX_WORKSPACES]u64 = @as([workspace.MAX_WORKSPACES]u64, @splat(0)),
-    hashes: [workspace.MAX_WORKSPACES]u64 = @as([workspace.MAX_WORKSPACES]u64, @splat(0)),
+    hashes: [workspace.MAX_WORKSPACES]WorkspaceHashes = @as([workspace.MAX_WORKSPACES]WorkspaceHashes, @splat(.{ .state = 0, .log = 0 })),
     count: usize = 0,
 
-    fn getOrCompute(self: *WorkspaceStateHashCache, record: *const workspace.WorkspaceRecord) u64 {
+    fn getOrCompute(self: *WorkspaceStateHashCache, record: *const workspace.WorkspaceRecord) WorkspaceHashes {
         const id = record.id.raw();
         for (self.ids[0..self.count], 0..) |cached_id, index| {
             if (cached_id == id) return self.hashes[index];
         }
-        const hash = volume_hashing.workspaceStateHash(record);
+        const hash = volume_hashing.workspaceHashes(record);
         if (self.count < self.ids.len) {
             self.ids[self.count] = id;
             self.hashes[self.count] = hash;
@@ -653,7 +772,7 @@ const WorkspaceStateHashCache = struct {
             self.ids[index] = self.ids[self.count];
             self.hashes[index] = self.hashes[self.count];
             self.ids[self.count] = 0;
-            self.hashes[self.count] = 0;
+            self.hashes[self.count] = .{ .state = 0, .log = 0 };
             return;
         }
     }
@@ -731,10 +850,14 @@ fn buildDeltaLog(
 
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
         const workspace_record = workspaces.findConst(workspace_id) orelse continue;
-        const summary = findWorkspaceSummary(root, workspace_record.id.raw());
-        const state_hash = state_hashes.getOrCompute(workspace_record);
-        if (summary) |persisted| {
+        const state_hash = state_hashes.getOrCompute(workspace_record).state;
+        if (findWorkspaceSummary(root, workspace_record.id.raw())) |persisted| {
             if (persisted.generation == workspace_record.generation and persisted.state_hash == state_hash) continue;
+            if (workspaceDeltaApplies(persisted, workspace_record)) {
+                try appendWorkspaceDeltaRecord(&writer, workspace_record, persisted);
+                record_count += 1;
+                continue;
+            }
         }
         try appendWorkspaceRecord(&writer, workspace_record);
         record_count += 1;
@@ -815,10 +938,13 @@ fn buildRootState(
     };
     for (&workspaces.workspaces.slots) |*slot| {
         if (!persistableWorkspaceSlot(slot)) continue;
+        const hashes = state_hashes.getOrCompute(&slot.workspace);
         root.workspace_summaries[root.workspace_summary_count] = .{
             .id = slot.workspace.id.raw(),
             .generation = slot.workspace.generation,
-            .state_hash = state_hashes.getOrCompute(&slot.workspace),
+            .mutation_count = @intCast(slot.workspace.counts.entry_mutation_count),
+            .log_hash = hashes.log,
+            .state_hash = hashes.state,
         };
         root.workspace_summary_count += 1;
     }
@@ -881,6 +1007,7 @@ fn replayValidatedLog(self: *Volume, store: *object_store.Store, workspaces: *wo
     self.workspace_state_hashes.reset();
     var reader = CursorReader{ .buffer = log };
     var replayed_id_bounds = ReplayIdBounds{};
+    var delta_workspaces: std.bit_set.Integer(workspace.MAX_WORKSPACES) = .empty;
     while (reader.offset < reader.buffer.len) {
         const header = try volume_log.readRecordHeader(&reader);
         var record = CursorReader{ .buffer = try reader.readSlice(header.payload_len) };
@@ -892,15 +1019,34 @@ fn replayValidatedLog(self: *Volume, store: *object_store.Store, workspaces: *wo
             .blob_state => try applyBlobRecord(store, &record),
             .version_state => replayed_id_bounds.noteVersion(try applyVersionRecord(store, &record)),
             .workspace_state => replayed_id_bounds.noteWorkspace(try applyWorkspaceRecord(workspaces, &record)),
+            .workspace_delta => {
+                const workspace_id = try applyWorkspaceDelta(workspaces, &record);
+                replayed_id_bounds.noteWorkspace(workspace_id);
+                delta_workspaces.set(workspaces.workspaces.slotIndexOf(ids.workspace(workspace_id)).?);
+            },
             .snapshot_state => replayed_id_bounds.noteSnapshot(try applySnapshotRecord(workspaces, &record)),
         }
         if (!record.eof()) return error.CorruptImage;
     }
     if (!replayed_id_bounds.fitRoot(root)) return error.CorruptImage;
-    // Later records replace whole workspaces, so derived indexes are rebuilt
-    // once per live workspace after the last record rather than per record.
+    // Later records replace or extend workspaces, so derived indexes are
+    // rebuilt once per live workspace after the last record rather than per
+    // record.
     for (&workspaces.workspaces.slots) |*slot| {
         if (slot.in_use) workspaces.indexReplayedWorkspaceEntries(&slot.workspace);
+    }
+    // A delta reconstructs entries from logged mutations, so the result must
+    // match the committed summary exactly rather than being trusted.
+    var deltas = delta_workspaces.iterator(.{});
+    while (deltas.next()) |slot_index| {
+        const replayed = &workspaces.workspaces.slots[slot_index].workspace;
+        const summary = findWorkspaceSummary(root, replayed.id.raw()) orelse return error.CorruptImage;
+        if (summary.generation != replayed.generation or
+            summary.mutation_count != replayed.counts.entry_mutation_count or
+            summary.state_hash != volume_hashing.workspaceStateHash(replayed))
+        {
+            return error.CorruptImage;
+        }
     }
 
     store.next_object_id = root.next_object_id;
@@ -941,6 +1087,38 @@ fn appendVersionPayloadChunks(
 fn appendWorkspaceRecord(writer: *CursorWriter, record: *const workspace.WorkspaceRecord) Error!void {
     const header_offset = try volume_log.beginRecord(writer, .workspace_state);
     try encodeWorkspaceBody(writer, record);
+    try volume_log.finishRecord(writer, header_offset);
+}
+
+// A delta extends the persisted mutation log, so it applies only while the
+// live record still begins with exactly what the summary fingerprinted: the
+// same identity, owner, label and mutation prefix, from which the persisted
+// entries follow. Anything else that rewrote that prefix, such as compaction,
+// reseeding or another writer's root, takes a whole record. Replay accepts
+// only appended mutations newer than the base.
+fn workspaceDeltaApplies(persisted: WorkspaceSummary, record: *const workspace.WorkspaceRecord) bool {
+    const count: usize = record.counts.entry_mutation_count;
+    const base: usize = persisted.mutation_count;
+    if (record.generation < persisted.generation or count < base) return false;
+    if (base != count and record.mutation_log.entriesConst()[base].generation <= persisted.generation) return false;
+    return volume_hashing.workspaceLogHash(record, base) == persisted.log_hash;
+}
+
+// The share table and recoverable deletes are small and rewritten whole; the
+// mutation log only grows.
+fn appendWorkspaceDeltaRecord(writer: *CursorWriter, record: *const workspace.WorkspaceRecord, persisted: WorkspaceSummary) Error!void {
+    const header_offset = try volume_log.beginRecord(writer, .workspace_delta);
+    try writer.writeU64(record.id.raw());
+    try writer.writeU32(persisted.generation);
+    try writer.writeU16(persisted.mutation_count);
+    try writer.writeU32(record.generation);
+    const appended = record.mutation_log.entriesConst()[persisted.mutation_count..record.counts.entry_mutation_count];
+    try writer.writeU16(@intCast(appended.len));
+    for (appended) |mutation| {
+        try writer.writeU32(mutation.generation);
+        try writeEntry(writer, mutation.entry);
+    }
+    try encodeWorkspaceSharesAndDeletes(writer, record);
     try volume_log.finishRecord(writer, header_offset);
 }
 
@@ -1013,6 +1191,10 @@ fn encodeWorkspaceBody(writer: *CursorWriter, record: *const workspace.Workspace
         try writer.writeU32(mutation.generation);
         try writeEntry(writer, mutation.entry);
     }
+    try encodeWorkspaceSharesAndDeletes(writer, record);
+}
+
+fn encodeWorkspaceSharesAndDeletes(writer: *CursorWriter, record: *const workspace.WorkspaceRecord) Error!void {
     try writer.writeU16(@intCast(record.counts.share_grant_count));
     if (record.counts.share_grant_count != 0) {
         const share_table = record.share_table.dataConst();
@@ -1127,13 +1309,11 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, reader: *CursorReader)
 
     const previous_entry_count = slot.workspace.counts.entry_count;
     const previous_mutation_count = slot.workspace.counts.entry_mutation_count;
-    const previous_share_grant_count = slot.workspace.counts.share_grant_count;
     const previous_staged_entry_count = slot.workspace.staging.staged_entry_count;
     const previous_mutation_tail = @min(
         previous_mutation_count + previous_staged_entry_count,
         workspace.MAX_WORKSPACE_ENTRY_MUTATIONS,
     );
-    const previous_deleted_count = slot.workspace.counts.deleted_count;
     slot.workspace.id = workspace_id;
     slot.workspace.owner = try readPrincipal(reader);
     readTextInto(reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
@@ -1172,57 +1352,82 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, reader: *CursorReader)
             mutation.* = .{};
         }
     }
-    slot.workspace.counts.share_grant_count = try readBoundedCount(workspace.WorkspaceShareGrantCount, reader, workspace.MAX_SHARE_GRANTS);
-    if (slot.workspace.counts.share_grant_count != 0) {
-        slot.workspace.share_table.ensureBacking() catch {
-            if (existing_slot == null) {
-                slot.workspace.mutation_log.releaseBacking();
-                slot.workspace.path_index.releaseEntryBacking();
-                std.debug.assert(workspaces.workspaces.remove(workspace_id));
-            }
-            return error.NoSpaceLeft;
-        };
-        const share_table = slot.workspace.share_table.data();
-        for (0..slot.workspace.counts.share_grant_count) |grant_index| {
-            share_table.share_grants[grant_index] = try readShareGrant(reader);
+    readWorkspaceSharesAndDeletes(&slot.workspace, reader) catch |err| {
+        if (err == error.NoSpaceLeft and existing_slot == null) {
+            slot.workspace.mutation_log.releaseBacking();
+            slot.workspace.path_index.releaseEntryBacking();
+            slot.workspace.share_table.releaseBacking();
+            std.debug.assert(workspaces.workspaces.remove(workspace_id));
         }
-        if (slot.workspace.counts.share_grant_count < previous_share_grant_count) {
-            for (share_table.share_grants[slot.workspace.counts.share_grant_count..previous_share_grant_count]) |*grant| {
-                grant.* = .{ .principal_id = .{ .kind = .service, .serial = 0 } };
-            }
-        }
-    } else if (previous_share_grant_count != 0) {
-        slot.workspace.share_table.releaseBacking();
-    }
-    slot.workspace.counts.deleted_count = try readBoundedCount(workspace.RecoverableDeleteCount, reader, workspace.MAX_RECOVERABLE_DELETES);
-    if (slot.workspace.counts.deleted_count != 0) {
-        slot.workspace.recoverable_deletes.ensureBacking() catch {
-            if (existing_slot == null) {
-                slot.workspace.mutation_log.releaseBacking();
-                slot.workspace.path_index.releaseEntryBacking();
-                slot.workspace.share_table.releaseBacking();
-                std.debug.assert(workspaces.workspaces.remove(workspace_id));
-            }
-            return error.NoSpaceLeft;
-        };
-    }
-    if (slot.workspace.counts.deleted_count != 0) {
-        const deleted_entries = slot.workspace.recoverable_deletes.entries();
-        for (0..slot.workspace.counts.deleted_count) |entry_index| {
-            deleted_entries[entry_index] = try readEntry(reader);
-        }
-        if (slot.workspace.counts.deleted_count < previous_deleted_count) {
-            for (deleted_entries[slot.workspace.counts.deleted_count..previous_deleted_count]) |*entry| {
-                entry.* = .{};
-            }
-        }
-    } else if (previous_deleted_count != 0) {
-        slot.workspace.recoverable_deletes.releaseBacking();
-    }
+        return err;
+    };
 
     slot.workspace.staging.transaction_open = false;
     slot.workspace.staging.staged_entry_count = 0;
     slot.workspace.staging.staged_effective_entry_count = 0;
+    return workspace_id.raw();
+}
+
+fn readWorkspaceSharesAndDeletes(record: *workspace.WorkspaceRecord, reader: *CursorReader) Error!void {
+    const previous_share_grant_count = record.counts.share_grant_count;
+    const previous_deleted_count = record.counts.deleted_count;
+    record.counts.share_grant_count = try readBoundedCount(workspace.WorkspaceShareGrantCount, reader, workspace.MAX_SHARE_GRANTS);
+    if (record.counts.share_grant_count != 0) {
+        try record.share_table.ensureBacking();
+        const share_table = record.share_table.data();
+        for (0..record.counts.share_grant_count) |grant_index| {
+            share_table.share_grants[grant_index] = try readShareGrant(reader);
+        }
+        if (record.counts.share_grant_count < previous_share_grant_count) {
+            for (share_table.share_grants[record.counts.share_grant_count..previous_share_grant_count]) |*grant| {
+                grant.* = .{ .principal_id = .{ .kind = .service, .serial = 0 } };
+            }
+        }
+    } else if (previous_share_grant_count != 0) {
+        record.share_table.releaseBacking();
+    }
+    record.counts.deleted_count = try readBoundedCount(workspace.RecoverableDeleteCount, reader, workspace.MAX_RECOVERABLE_DELETES);
+    if (record.counts.deleted_count != 0) {
+        try record.recoverable_deletes.ensureBacking();
+        const deleted_entries = record.recoverable_deletes.entries();
+        for (0..record.counts.deleted_count) |entry_index| {
+            deleted_entries[entry_index] = try readEntry(reader);
+        }
+        if (record.counts.deleted_count < previous_deleted_count) {
+            for (deleted_entries[record.counts.deleted_count..previous_deleted_count]) |*entry| {
+                entry.* = .{};
+            }
+        }
+    } else if (previous_deleted_count != 0) {
+        record.recoverable_deletes.releaseBacking();
+    }
+}
+
+// Applies a delta only to the exact persisted state it was built against.
+fn applyWorkspaceDelta(workspaces: *workspace.Directory, reader: *CursorReader) Error!u64 {
+    const workspace_id = ids.workspace(try reader.readU64());
+    const record = &(workspaces.workspaces.get(workspace_id) orelse return error.CorruptImage).workspace;
+    const base_generation = try reader.readU32();
+    const base_mutation_count: usize = try reader.readU16();
+    if (record.generation != base_generation or record.counts.entry_mutation_count != base_mutation_count) return error.CorruptImage;
+    const generation = try reader.readU32();
+    if (generation < base_generation) return error.CorruptImage;
+    const appended_count: usize = try reader.readU16();
+    if (appended_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS - base_mutation_count) return error.CorruptImage;
+    const appended = record.mutation_log.entries()[base_mutation_count..][0..appended_count];
+    var previous_generation = base_generation +| 1;
+    for (appended) |*mutation| {
+        mutation.* = .{ .generation = try reader.readU32(), .entry = try readEntry(reader) };
+        if (mutation.generation < previous_generation or mutation.generation > generation) return error.CorruptImage;
+        previous_generation = mutation.generation;
+    }
+    if (appended_count != 0) {
+        try record.path_index.ensureEntryBacking();
+        workspace.replayEntryMutations(record, appended) catch return error.CorruptImage;
+    }
+    record.counts.entry_mutation_count = @intCast(base_mutation_count + appended_count);
+    record.generation = generation;
+    try readWorkspaceSharesAndDeletes(record, reader);
     return workspace_id.raw();
 }
 

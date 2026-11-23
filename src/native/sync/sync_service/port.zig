@@ -1,4 +1,3 @@
-const std = @import("std");
 const capability = @import("../../kernel_api/capability.zig");
 const device_graph = @import("../device_graph.zig");
 const network_policy = @import("../network_policy.zig");
@@ -10,14 +9,11 @@ const state_support = @import("../sync_state_support.zig");
 const sync_adapters = @import("../sync_adapters.zig");
 const sync_transport = @import("../sync_transport.zig");
 const storage_service = @import("../../storage/storage_service.zig");
-const transport_frames = @import("transport_frames.zig");
 const workspace = @import("../../storage/workspace.zig");
 
-pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
 pub const Error = state_support.Error;
 pub const AuthorityContext = service_authority.Context;
 pub const AuthorityError = service_authority.Error;
-pub const PeerReplicationError = AuthorityError || Error || sync_transport.Error;
 pub const TransportMode = state_support.TransportMode;
 pub const WorkspacePolicyRequest = state_support.WorkspacePolicyRequest;
 pub const WorkspacePolicy = state_support.WorkspacePolicy;
@@ -32,8 +28,6 @@ pub const OverlaySession = @import("overlay.zig").OverlaySession;
 pub const OverlaySessionUse = @import("overlay.zig").OverlaySessionUse;
 pub const OverlayRelayFrameRequest = @import("overlay.zig").OverlayRelayFrameRequest;
 pub const OverlayRelayFrameResult = @import("overlay.zig").OverlayRelayFrameResult;
-pub const PeerReplicationRequest = @import("replication_model.zig").PeerReplicationRequest;
-pub const PeerReplicationResult = @import("replication_model.zig").PeerReplicationResult;
 
 pub fn SyncPortWith(comptime ServiceType: type) type {
     return struct {
@@ -264,59 +258,6 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             return self.service.replicateWorkspace(store, workspace_id, from_device, to_device, transport);
         }
 
-        pub fn replicateWorkspaceToPeer(
-            self: *Self,
-            authority: AuthorityContext,
-            peer: *Self,
-            peer_authority: AuthorityContext,
-            request: PeerReplicationRequest,
-        ) PeerReplicationError!PeerReplicationResult {
-            _ = try self.requireSyncAuthority(authority);
-            _ = try peer.requireSyncAuthority(peer_authority);
-            try self.validatePeerReplicationRequest(request);
-
-            const starting_frame_id = self.service.latestTransportFrameId();
-            const summary = try self.service.replicateWorkspace(
-                request.source_storage,
-                request.workspace_id,
-                request.from_device,
-                request.to_device,
-                request.transport,
-            );
-
-            var result = PeerReplicationResult{ .summary = summary };
-            var frames: [MAX_TRANSPORT_FRAMES]TransportFrame = undefined;
-            const frame_count = self.service.copyTransportFramesForSince(
-                request.workspace_id,
-                request.to_device,
-                starting_frame_id,
-                frames[0..],
-            );
-            transport_frames.sortById(frames[0..frame_count]);
-
-            var acked_ids: [MAX_TRANSPORT_FRAMES]u64 = undefined;
-            var acked_count: usize = 0;
-
-            peer.service.beginReplicationBatch();
-            errdefer peer.service.cancelReplicationBatch();
-            for (frames[0..frame_count]) |frame| {
-                const delivery = try self.replicateFramePayloadToPeer(peer, request, frame);
-                result.accepted_frame_count += 1;
-                result.persisted_object_count += 1;
-                result.payload_bytes += @intCast(delivery.payload_len);
-                acked_ids[acked_count] = frame.id;
-                acked_count += 1;
-                if (delivery.used_booted_relay_service) {
-                    result.used_booted_relay_service = true;
-                    result.relay_delivery_count += @intCast(delivery.relay_delivery_count);
-                }
-            }
-            try peer.service.endReplicationBatch();
-
-            _ = try self.service.ackOutboundTransportFrames(acked_ids[0..acked_count]);
-            return result;
-        }
-
         pub fn acceptTransportFrame(
             self: *Self,
             authority: AuthorityContext,
@@ -422,36 +363,6 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             );
         }
 
-        fn validatePeerReplicationRequest(
-            self: *Self,
-            request: PeerReplicationRequest,
-        ) PeerReplicationError!void {
-            try self.service.ensureTrustedDevices(request.from_device, request.to_device);
-            const policy = self.service.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
-            try self.service.authorizeTransport(policy, request.transport, null);
-            try self.authorizeWorkspaceAnyShare(request.source_storage, policy, request.to_device, request.transport, request.tick);
-            if (request.transport != .relay_assisted) return;
-
-            const relay_service = request.relay_service orelse return error.TransportDenied;
-            if (!std.mem.eql(u8, relay_service.relayDomainSlice(), policy.relayDomainSlice())) {
-                return error.EgressDenied;
-            }
-            const network_capabilities = request.network_capabilities orelse return error.TransportDenied;
-            const relay_policy_id = policy.relay_policy_id orelse return error.TransportDenied;
-
-            var broker = self.service.egressBroker(network_capabilities);
-            var transport = sync_transport.Harness.init();
-            var session = try transport.openRelay(&broker, .{
-                .task_id = self.service.task_id,
-                .principal_id = self.service.owner,
-                .capability_id = request.relay_capability_id,
-                .policy_id = relay_policy_id,
-                .evidence = .{ .destination = .{ .domain = policy.relayDomainSlice() } },
-                .now_ticks = request.tick,
-            }, request.from_device, request.to_device, policy.relayDomainSlice());
-            defer session.deinit();
-        }
-
         fn authorizeWorkspaceAnyShare(
             self: *Self,
             store: *const storage_service.Service,
@@ -492,149 +403,6 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
                 .device_to_device => .local_only,
                 .relay_assisted => .relay_assisted,
             };
-        }
-
-        const PeerFrameDelivery = struct {
-            payload_len: usize,
-            relay_delivery_count: usize = 0,
-            used_booted_relay_service: bool,
-        };
-
-        fn replicateFramePayloadToPeer(
-            self: *Self,
-            peer: *Self,
-            request: PeerReplicationRequest,
-            frame: TransportFrame,
-        ) PeerReplicationError!PeerFrameDelivery {
-            const source_version = request.source_storage.version(frame.version_id) orelse return error.VersionNotFound;
-            const payload = request.source_storage.versionPayload(source_version) catch |err| switch (err) {
-                error.PayloadRequiresStreaming => try request.source_storage.versionPayloadInto(
-                    source_version,
-                    request.payload_buffer orelse return error.PayloadRequiresStreaming,
-                ),
-                else => return err,
-            };
-            var used_booted_relay_service = false;
-            var relay_delivery_count: usize = 0;
-
-            if (request.transport == .relay_assisted) {
-                relay_delivery_count = try self.relayVersionPayloadToPeer(request, source_version);
-                used_booted_relay_service = true;
-            }
-
-            const parent_version_id = if (request.target_storage.resolve(frame.workspace_id, frame.pathSlice())) |current|
-                if (current.object_id.raw() == frame.object_id) current.version_id else null
-            else |err| switch (err) {
-                error.EntryNotFound => null,
-                else => return err,
-            };
-            if (frame.semantic == .transactional_contract) {
-                try self.replicateDatabaseContractMetadataToPeer(peer, frame.workspace_id, frame.pathSlice());
-            }
-            const persisted = try request.target_storage.putVersion(.{
-                .preferred_object_id = object_store.ids.object(frame.object_id),
-                .object_type = source_version.object_type,
-                .payload = payload,
-                .metadata = source_version.metadata,
-                .parent_version_id = parent_version_id,
-            });
-            try request.target_storage.beginTransaction(frame.workspace_id);
-            try request.target_storage.stagePut(
-                frame.workspace_id,
-                frame.pathSlice(),
-                persisted.object_id,
-                persisted.version_id,
-                source_version.object_type,
-            );
-            const generation = try request.target_storage.commit(frame.workspace_id, request.tick);
-
-            _ = try peer.service.acceptTransportFrame(request.target_storage, .{
-                .source_frame_id = frame.id,
-                .workspace_id = frame.workspace_id,
-                .object_id = persisted.object_id.raw(),
-                .version_id = persisted.version_id.raw(),
-                .source_device = frame.source_device,
-                .target_device = frame.target_device,
-                .transport = frame.transport,
-                .semantic = frame.semantic,
-                .encrypted = frame.encrypted,
-                .workspace_generation = generation,
-                .path = frame.pathSlice(),
-            });
-            return .{
-                .payload_len = payload.len,
-                .relay_delivery_count = relay_delivery_count,
-                .used_booted_relay_service = used_booted_relay_service,
-            };
-        }
-
-        fn relayVersionPayloadToPeer(
-            self: *Self,
-            request: PeerReplicationRequest,
-            source_version: *const object_store.VersionRecord,
-        ) PeerReplicationError!usize {
-            var cursor = try request.source_storage.versionChunkCursor(source_version);
-            var delivery_count: usize = 0;
-            var chunk_count: usize = 0;
-            while (try cursor.next()) |chunk| {
-                delivery_count += try self.relayPayloadToPeer(request, chunk.bytes);
-                chunk_count += 1;
-            }
-            if (chunk_count == 0) delivery_count += try self.relayPayloadToPeer(request, "");
-            return delivery_count;
-        }
-
-        fn relayPayloadToPeer(
-            self: *Self,
-            request: PeerReplicationRequest,
-            payload: []const u8,
-        ) PeerReplicationError!usize {
-            if (payload.len == 0) {
-                return try self.relayPayloadChunkToPeer(request, payload);
-            }
-
-            var offset: usize = 0;
-            var delivery_count: usize = 0;
-            while (offset < payload.len) {
-                const end = @min(offset + sync_transport.MAX_NATIVE_PAYLOAD_BYTES, payload.len);
-                delivery_count += try self.relayPayloadChunkToPeer(request, payload[offset..end]);
-                offset = end;
-            }
-            return delivery_count;
-        }
-
-        fn relayPayloadChunkToPeer(
-            self: *Self,
-            request: PeerReplicationRequest,
-            payload: []const u8,
-        ) PeerReplicationError!usize {
-            const relay_service = request.relay_service orelse return error.TransportDenied;
-            const network_capabilities = request.network_capabilities orelse return error.TransportDenied;
-            const relay_result = try self.service.sendOverlayRelayFrameViaService(network_capabilities, relay_service, .{
-                .workspace_id = request.workspace_id,
-                .from_device = request.from_device,
-                .to_device = request.to_device,
-                .usage = .sync_replication,
-                .relay_capability_id = request.relay_capability_id,
-                .payload = payload,
-                .signer = request.signer,
-                .tick = request.tick,
-            });
-            if (!relay_result.delivered or relay_result.delivered_len != payload.len) {
-                return error.RelayDeliveryMissing;
-            }
-            _ = try self.service.closeOverlaySession(relay_result.overlay_session_id, request.tick);
-            return 1;
-        }
-
-        fn replicateDatabaseContractMetadataToPeer(
-            self: *Self,
-            peer: *Self,
-            workspace_id: u64,
-            path: []const u8,
-        ) PeerReplicationError!void {
-            const contract = self.service.findDatabaseContractForPath(workspace_id, path) orelse return error.DatabaseContractNotFound;
-            _ = try peer.service.importDatabaseContract(contract);
         }
     };
 }

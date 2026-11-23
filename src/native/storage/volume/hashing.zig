@@ -3,23 +3,42 @@ const principal = @import("../../core/principal.zig");
 const workspace = @import("../workspace.zig");
 pub const checksumBytes = @import("checksum.zig").checksumBytes;
 
-/// Change detector for a persisted workspace summary: seed-zero XXH64 over
-/// every persisted field, framed so adjacent fields cannot alias.
-pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) u64 {
+/// What a root summary records about one workspace.
+pub const WorkspaceHashes = struct {
+    /// Change detector over every persisted field.
+    state: u64,
+    /// `workspaceLogHash` over the whole mutation log.
+    log: u64,
+};
+
+/// Fingerprints what a workspace_delta record leaves unwritten: the
+/// workspace's identity, owner and label and its first `mutation_count`
+/// logged mutations, from which its entries follow.
+pub fn workspaceLogHash(record: *const workspace.WorkspaceRecord, mutation_count: usize) u64 {
     var hasher = StateHasher{};
-    hasher.bytes("workspace-state");
+    hasher.bytes("workspace-log");
     hasher.int(u64, record.id.raw());
     hasher.principalId(record.owner);
     hasher.bytes(record.labelSlice());
-    hasher.int(u32, record.generation);
-    hasher.int(u16, @intCast(record.counts.entry_count));
-    hasher.bytes(&record.path_index.root_address);
-
-    hasher.int(u16, @intCast(record.counts.entry_mutation_count));
-    for (record.mutation_log.entriesConst()[0..record.counts.entry_mutation_count]) |mutation| {
+    hasher.int(u16, @intCast(mutation_count));
+    for (record.mutation_log.entriesConst()[0..mutation_count]) |mutation| {
         hasher.int(u32, mutation.generation);
         hasher.entry(mutation.entry);
     }
+    return hasher.state.final();
+}
+
+/// Seed-zero XXH64 over every persisted field, framed so adjacent fields
+/// cannot alias. The log fingerprint stands in for the fields it covers, so
+/// one pass over the mutation log yields both hashes.
+pub fn workspaceHashes(record: *const workspace.WorkspaceRecord) WorkspaceHashes {
+    const log = workspaceLogHash(record, record.counts.entry_mutation_count);
+    var hasher = StateHasher{};
+    hasher.bytes("workspace-state");
+    hasher.int(u64, log);
+    hasher.int(u32, record.generation);
+    hasher.int(u16, @intCast(record.counts.entry_count));
+    hasher.bytes(&record.path_index.root_address);
 
     hasher.int(u16, @intCast(record.counts.share_grant_count));
     if (record.counts.share_grant_count != 0) {
@@ -33,7 +52,11 @@ pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) u64 {
     for (record.recoverable_deletes.entriesConst(record.counts.deleted_count)) |deleted| {
         hasher.entry(deleted);
     }
-    return hasher.state.final();
+    return .{ .state = hasher.state.final(), .log = log };
+}
+
+pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) u64 {
+    return workspaceHashes(record).state;
 }
 
 const StateHasher = struct {
