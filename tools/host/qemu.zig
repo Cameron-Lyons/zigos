@@ -122,9 +122,6 @@ const Harness = struct {
     cpu_override: ?[]const u8 = null,
     cache_override: ?[]const u8 = null,
     write_cache_override: ?[]const u8 = null,
-    // Only the full kernel entry smoke treats baseline rejection as an early
-    // unsupported target. Deliberate negative CPU proofs keep their own markers.
-    reject_cpu_baseline: bool = false,
 
     fn binary(self: Harness) []const u8 {
         return env(self.ctx, "QEMU_BIN", "qemu-system-x86_64");
@@ -259,15 +256,7 @@ const Harness = struct {
         while (try child.poll()) {
             const bytes = try readOptional(ctx, path);
             defer ctx.allocator.free(bytes);
-            // Serial emits the marker and feature name in separate writes.
-            // Once rejection arrives, do not accept another marker or stop the
-            // child until its complete reason is available (or it exits/times out).
-            const cpu_rejection = if (self.reject_cpu_baseline) entryCpuRejection(bytes) else null;
-            if (cpu_rejection) |reason| if (reason.len != 0) {
-                child.stop(ctx, process.grace(ctx));
-                return reportEntryCpuRejection(ctx, bytes, reason, path);
-            };
-            if (cpu_rejection == null and (log.contains(bytes, marker) or (if (failure_marker) |failure| log.contains(bytes, failure) else false))) {
+            if (log.contains(bytes, marker) or (if (failure_marker) |failure| log.contains(bytes, failure) else false)) {
                 if (store != null) {
                     const seconds = std.fmt.parseFloat(f64, env(ctx, "QEMU_MARKER_STOP_DELAY", "1")) catch return error.InvalidArguments;
                     if (!std.math.isFinite(seconds) or seconds < 0 or seconds > 86400) return error.InvalidArguments;
@@ -283,10 +272,6 @@ const Harness = struct {
             try process.pause(ctx, 1000);
         }
         const bytes = try readOptional(ctx, path);
-        if (self.reject_cpu_baseline) {
-            if (entryCpuRejection(bytes)) |reason|
-                return reportEntryCpuRejection(ctx, bytes, reason, path);
-        }
         if (bytes.len == 0 or !log.contains(bytes, marker)) {
             dump(ctx, bytes);
             dump(ctx, try readOptional(ctx, qemu_log));
@@ -338,13 +323,11 @@ pub fn run(ctx: *common.Context, command: []const u8, input: []const []const u8)
         return;
     }
     if (std.mem.eql(u8, command, "run-uefi-boot-test")) return uefiBoot(harness, args);
-    if (std.mem.eql(u8, command, "run-long-mode-entry-smoke")) return entrySmoke(harness, args, true);
     if (std.mem.eql(u8, command, "run-native-crypto-smoke")) return nativeCryptoSmoke(harness, args);
     if (std.mem.eql(u8, command, "run-high-half-smoke")) return highHalfSmoke(harness, args);
     if (std.mem.eql(u8, command, "run-mapping-xstate-smoke")) return mappingXstateSmoke(harness, args);
     if (std.mem.eql(u8, command, "run-ap-cache-rejection-smoke")) return apCacheRejectionSmoke(harness, args);
     if (std.mem.eql(u8, command, "run-smp-cache-enabled-match-smoke")) return smpCacheEnabledMatchSmoke(harness, args);
-    if (std.mem.eql(u8, command, "run-x86-64-kernel-smoke")) return entrySmoke(harness, args, false);
     if (std.mem.eql(u8, command, "capture-kernel-benchmark")) return benchmark(harness, args);
     if (std.mem.eql(u8, command, "run-kernel-recovery")) return recovery(harness, args);
     if (std.mem.eql(u8, command, "run-zigos-native-smoke")) return nativeSmoke(harness, args);
@@ -383,52 +366,8 @@ fn uefiBoot(h: Harness, args: []const []const u8) !void {
     try h.forSeconds(args[0], args[1], try process.seconds(h.ctx, "UEFI_BOOT_TEST_SECONDS", "20"), h.memory());
     const bytes = try h.ctx.read(args[1]);
     try healthy(h.ctx, bytes, "FAIL");
-    try checkGroup(h.ctx, bytes, &.{ "BOOT:START", try fmt(h.ctx, "BOOT:ROLE:{s}", .{args[2]}), "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY", "ZIGOS:CPU:NX:ENABLED", "ZIGOS:CPU:PGE:ENABLED", "ZIGOS:CPU:SYSCALL:ENABLED", "ZIGOS:CPU:PCID:READY", "ZIGOS:KERNEL:W_X:ENFORCED", "Welcome to Zigos", "Initializing GDT", "BOOT:CORE_READY" });
+    try checkGroup(h.ctx, bytes, &.{ "BOOT:START", try fmt(h.ctx, "BOOT:ROLE:{s}", .{args[2]}), "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY", "ZIGOS:CPU:NX:ENABLED", "ZIGOS:CPU:PGE:ENABLED", "ZIGOS:CPU:NATIVE_ENTRY:READY", "ZIGOS:CPU:PCID:READY", "ZIGOS:KERNEL:W_X:ENFORCED", "Welcome to Zigos", "Initializing GDT", "BOOT:CORE_READY" });
     try h.ctx.print("UEFI boot test passed. Log: {s}\n", .{args[1]});
-}
-
-// null means no complete rejection marker; an empty reason means the marker
-// arrived but the separately written diagnostic line has not completed yet.
-fn entryCpuRejection(bytes: []const u8) ?[]const u8 {
-    const rejected = "ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED";
-    const reason_prefix = "Unsupported CPU: missing ";
-    var remaining = bytes;
-    var observed = false;
-    while (std.mem.indexOfScalar(u8, remaining, '\n')) |end| {
-        const raw = remaining[0..end];
-        const line = if (std.mem.endsWith(u8, raw, "\r")) raw[0 .. raw.len - 1] else raw;
-        if (std.mem.eql(u8, line, rejected)) observed = true;
-        if (observed and std.mem.startsWith(u8, line, reason_prefix) and line.len > reason_prefix.len)
-            return line;
-        remaining = remaining[end + 1 ..];
-    }
-    return if (observed) "" else null;
-}
-
-fn reportEntryCpuRejection(ctx: *common.Context, bytes: []const u8, reason: []const u8, path: []const u8) anyerror {
-    dump(ctx, bytes);
-    if (reason.len != 0) {
-        ctx.warn("QEMU target unsupported: {s}. Log: {s}\n", .{ reason, path }) catch {};
-    } else {
-        ctx.warn("QEMU target unsupported: CPU baseline rejected without a complete feature diagnostic. Log: {s}\n", .{path}) catch {};
-    }
-    return error.UnsupportedCpuTarget;
-}
-
-fn entrySmoke(h: Harness, args: []const []const u8, long_mode: bool) !void {
-    try require(args, 2);
-    const ready = if (long_mode) "ZIGOS:ARCH:X86_64:LONG_MODE_ENTRY:READY" else "ZIGOS:USERSPACE:RESUME:OK";
-    var configured = h;
-    configured.boot_iso = args[0];
-    configured.reject_cpu_baseline = !long_mode;
-    try configured.until(null, args[1], ready, if (long_mode) "ZIGOS:ARCH:X86_64:LONG_MODE_ENTRY:FAIL" else null, try process.seconds(h.ctx, if (long_mode) "ZIGOS_LONG_MODE_ENTRY_SECONDS" else "ZIGOS_X86_64_KERNEL_SECONDS", "30"), if (long_mode) "128M" else h.memory(), &.{});
-    const bytes = try h.ctx.read(args[1]);
-    if (long_mode) {
-        try absentGroup(h.ctx, bytes, &.{"ZIGOS:ARCH:X86_64:LONG_MODE_ENTRY:FAIL"});
-    } else {
-        try checkGroup(h.ctx, bytes, &.{ "BOOT:START", "BOOT:PROFILE:zigos_native", "BOOT:ROLE:production", "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY", "ZIGOS:CPU:NX:ENABLED", "ZIGOS:CPU:PGE:ENABLED", "ZIGOS:CPU:SYSCALL:ENABLED", "ZIGOS:CPU:PCID:READY", "ZIGOS:ARCH:X86_64:PAGING:READY", "ZIGOS:KERNEL:W_X:ENFORCED", "BOOT:CORE_READY", "ZIGOS:USERSPACE:ARTIFACTS:READY", "ZIGOS:USERSPACE:EXEC_PROBE:OK" });
-    }
-    try h.ctx.print("{s} smoke test passed. Log: {s}\n", .{ if (long_mode) "Long-mode entry" else "x86-64 kernel and userspace launch", args[1] });
 }
 
 const native_crypto_proofs = [_][]const u8{
@@ -676,7 +615,7 @@ fn benchmark(h: Harness, args: []const []const u8) !void {
     if (args.len > 2 and args[2].len > 0) try remove(h.ctx, args[2]);
     const bytes = try captureKernel(h, args[1], try process.seconds(h.ctx, "ZIGOS_BENCHMARK_SECONDS", "300"));
     try healthy(h.ctx, bytes, "BENCH:FAIL");
-    try checkGroup(h.ctx, bytes, &.{ "BOOT:START", "BOOT:PROFILE:benchmark", "BOOT:ROLE:verification", "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY", "ZIGOS:CPU:NX:ENABLED", "ZIGOS:CPU:PGE:ENABLED", "ZIGOS:CPU:SYSCALL:ENABLED", "ZIGOS:CPU:PCID:READY", "ZIGOS:KERNEL:W_X:ENFORCED", "BOOT:CORE_READY", "BENCH:START", "BENCH:QUALITY_SUMMARY", "BENCH:SUMMARY", "BENCH:PASS" });
+    try checkGroup(h.ctx, bytes, &.{ "BOOT:START", "BOOT:PROFILE:benchmark", "BOOT:ROLE:verification", "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY", "ZIGOS:CPU:NX:ENABLED", "ZIGOS:CPU:PGE:ENABLED", "ZIGOS:CPU:NATIVE_ENTRY:READY", "ZIGOS:CPU:PCID:READY", "ZIGOS:KERNEL:W_X:ENFORCED", "BOOT:CORE_READY", "BENCH:START", "BENCH:QUALITY_SUMMARY", "BENCH:SUMMARY", "BENCH:PASS" });
     try absentGroup(h.ctx, bytes, &.{"BENCH:ENV:"});
     const accelerator = h.accelerator();
     const label = if (std.mem.eql(u8, accelerator, "kvm") or std.mem.startsWith(u8, accelerator, "kvm,")) "kvm" else if (accelerator.len == 0 or std.mem.eql(u8, accelerator, "tcg") or std.mem.startsWith(u8, accelerator, "tcg,")) "tcg" else return error.UnsupportedAccelerator;
@@ -765,38 +704,25 @@ fn measurementComparison(ctx: *common.Context, first: []const u8, second: []cons
     return fmt(ctx, "\n=== MEASURED BOOT COMPARISON ===\nMEASURED_BOOT:BOOT1_ROOT {s}\nMEASURED_BOOT:BOOT2_ROOT {s}\nMEASURED_BOOT:ROOT_COMPARE {s}\n", .{ root1, root2, comparison });
 }
 
-fn measurements(ctx: *common.Context, kernel: []const u8, directory: []const u8, bootloader: []const u8, production: bool) ![]const u8 {
-    var dir = try std.Io.Dir.cwd().openDir(ctx.io, directory, .{ .iterate = true });
-    defer dir.close(ctx.io);
-    var names: Args = .empty;
-    var iterator = dir.iterate();
-    while (try iterator.next(ctx.io)) |entry| {
-        if (entry.kind != .file or !std.mem.startsWith(u8, entry.name, "userspace-") or !std.mem.endsWith(u8, entry.name, ".elf")) continue;
-        if (production and (std.mem.eql(u8, entry.name, "userspace-notes-daily.elf") or std.mem.eql(u8, entry.name, "userspace-transport-probe.elf") or
-            std.mem.eql(u8, entry.name, "userspace-termination-probe.elf") or std.mem.eql(u8, entry.name, "userspace-service-client.elf") or
-            std.mem.eql(u8, entry.name, "userspace-mmu-isolation-proof.elf"))) continue;
-        try names.append(ctx.allocator, try ctx.allocator.dupe(u8, entry.name));
-    }
-    std.mem.sort([]const u8, names.items, {}, struct {
-        fn less(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.lessThan(u8, a, b);
-        }
-    }.less);
+/// Hashes exactly the kernel, bootloader source and userspace images the build
+/// passed for this boot, so stale files in an install directory cannot count.
+fn measurements(ctx: *common.Context, kernel: []const u8, bootloader: []const u8, userspace: []const []const u8) ![]const u8 {
     var result = try fmt(ctx, "\n=== BUILD ARTIFACT MEASUREMENTS ===\nMEASURED_BOOT:BUILD_ARTIFACT bootloader source={s} sha256={s}\nMEASURED_BOOT:BUILD_ARTIFACT kernel path={s} sha256={s}\n", .{ bootloader, try ctx.sha256File(bootloader), kernel, try ctx.sha256File(kernel) });
-    const root = try std.process.currentPathAlloc(ctx.io, ctx.allocator);
-    const root_prefix = try fmt(ctx, "{s}/", .{root});
-    for (names.items) |name| {
-        const path = try fmt(ctx, "{s}/{s}", .{ directory, name });
-        const relative = if (std.mem.startsWith(u8, path, root_prefix)) path[root_prefix.len..] else path;
-        result = try fmt(ctx, "{s}MEASURED_BOOT:BUILD_ARTIFACT userspace path={s} sha256={s}\n", .{ result, relative, try ctx.sha256File(path) });
+    for (userspace) |path| {
+        result = try fmt(ctx, "{s}MEASURED_BOOT:BUILD_ARTIFACT userspace path={s} sha256={s}\n", .{ result, path, try ctx.sha256File(path) });
     }
     return result;
 }
 
+/// Arguments: KERNEL LOG STORE MODE BOOTLOADER_SOURCE EXPECTED_USERSPACE_COUNT USERSPACE_ELF...
+/// The build derives the expected count from the smoke mode and the image list
+/// from the kernel role, so a role/mode mismatch cannot measure the wrong set.
 fn nativeSmoke(h: Harness, args: []const []const u8) !void {
-    try require(args, 3);
+    try require(args, 7);
     const ctx = h.ctx;
-    const mode = std.meta.stringToEnum(SmokeMode, arg(args, 3, "full")) orelse return error.InvalidArguments;
+    const mode = std.meta.stringToEnum(SmokeMode, args[3]) orelse return error.InvalidArguments;
+    const userspace = args[6..];
+    if (userspace.len != std.fmt.parseInt(usize, args[5], 10) catch return error.InvalidArguments) return error.ArtifactMeasurementCountMismatch;
     const group = mode.group();
     const validation_marker = group[group.len - 1];
     const limit = try process.seconds(ctx, "ZIGOS_NATIVE_SECONDS", "420");
@@ -843,9 +769,8 @@ fn nativeSmoke(h: Harness, args: []const []const u8) !void {
         try restartProof(ctx, second, true);
     }
     if (std.mem.eql(u8, try log.bootInstance(first), try log.bootInstance(second))) return error.ReusedBootInstance;
-    const combined = try fmt(ctx, "{s}\n=== COLD REBOOT ===\n{s}{s}{s}", .{ first, second, try measurementComparison(ctx, first, second), try measurements(ctx, args[0], arg(args, 4, "zig-out/bin"), arg(args, 5, "src/boot/efi_stub.zig"), mode == .production) });
+    const combined = try fmt(ctx, "{s}\n=== COLD REBOOT ===\n{s}{s}{s}", .{ first, second, try measurementComparison(ctx, first, second), try measurements(ctx, args[0], args[4], userspace) });
     try ctx.write(args[1], combined);
-    if (log.countContaining(combined, "MEASURED_BOOT:BUILD_ARTIFACT userspace path=") != @as(usize, if (mode == .production) 8 else 13)) return error.ArtifactMeasurementCountMismatch;
     if (mode == .production) {
         try absentGroup(ctx, combined, &markers.production_forbidden);
         var negative = h;
@@ -1188,22 +1113,6 @@ fn tpm2(h: Harness, args: []const []const u8) !void {
     }
 }
 
-fn copyTree(ctx: *common.Context, source: []const u8, destination: []const u8) !void {
-    try ctx.mkdir(destination);
-    var directory = try std.Io.Dir.cwd().openDir(ctx.io, source, .{ .iterate = true });
-    defer directory.close(ctx.io);
-    var iterator = directory.iterate();
-    while (try iterator.next(ctx.io)) |entry| {
-        const input = try fmt(ctx, "{s}/{s}", .{ source, entry.name });
-        const output = try fmt(ctx, "{s}/{s}", .{ destination, entry.name });
-        switch (entry.kind) {
-            .directory => try copyTree(ctx, input, output),
-            .file => try ctx.copy(input, output),
-            else => return error.UnexpectedStagingEntry,
-        }
-    }
-}
-
 fn unifiedCase(initial: Harness, directory: []const u8, temporary: []const u8, name: []const u8, vars: []const u8, expected: []const u8, banks: ?[]const u8) !void {
     var h = initial;
     h.vars_override = vars;
@@ -1277,13 +1186,12 @@ fn unifiedEfi(initial: Harness, args: []const []const u8) !void {
     try unifiedCase(h, directory, work, "tampered-cmdline", authorized, "rejected", null);
     const sidecars = try fmt(ctx, "{s}/sidecars.staging", .{directory});
     try ctx.removeTree(sidecars);
-    try copyTree(ctx, try fmt(ctx, "{s}/original.staging", .{directory}), sidecars);
     const kernel = try fmt(ctx, "{s}/kernel.elf", .{directory});
     const cmdline = try fmt(ctx, "{s}/cmdline.txt", .{directory});
     try ctx.write(kernel, "invalid ELF\n");
     try ctx.write(cmdline, "untrusted_external_options\n");
     try images.writeEsp(ctx, try fmt(ctx, "{s}/esp.img", .{sidecars}), try images.sourceDateEpoch(ctx.envDefault("SOURCE_DATE_EPOCH", "315532800")), &.{
-        .{ .path = "EFI/BOOT/BOOTX64.EFI", .data = try ctx.read(try fmt(ctx, "{s}/EFI/BOOT/BOOTX64.EFI", .{sidecars})) },
+        .{ .path = "EFI/BOOT/BOOTX64.EFI", .data = try ctx.read(try fmt(ctx, "{s}/original.efi", .{directory})) },
         .{ .path = "boot/kernel.elf", .data = try ctx.read(kernel) },
         .{ .path = "boot/cmdline.txt", .data = try ctx.read(cmdline) },
     });
@@ -1410,29 +1318,17 @@ test "Mapping xstate smoke waits for subprocess exit and rejects proof-only time
     try std.testing.expectError(error.InvalidArguments, mappingXstateSmoke(harness, &.{ "fixture.iso", serial, "unknown" }));
 }
 
-test "entry smoke CPU rejection preserves complete exact feature diagnostics" {
-    const marker = "ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED";
-    try std.testing.expectEqualStrings("Unsupported CPU: missing xsaves", entryCpuRejection("BOOT:START\n" ++ marker ++ "\nUnsupported CPU: missing xsaves\n").?);
-    try std.testing.expectEqualStrings("Unsupported CPU: missing fred", entryCpuRejection(marker ++ "\r\nUnsupported CPU: missing fred\r\n").?);
-    try std.testing.expectEqualStrings("", entryCpuRejection(marker ++ "\nUnsupported CPU: missing xsa").?);
-    try std.testing.expectEqualStrings("Unsupported CPU: missing xsaves", entryCpuRejection(marker ++ "\nUnsupported CPU: missing xsaves\nZIGOS:USERSPACE:RESUME:OK\n").?);
-    try std.testing.expectEqualStrings("", entryCpuRejection(marker ++ "\n").?);
-    for ([_][]const u8{
-        marker,
-        "prefix " ++ marker ++ "\nUnsupported CPU: missing xsaves\n",
-        marker ++ " forged\nUnsupported CPU: missing xsaves\n",
-        "ZIGOS:CPU:BASELINE:MODERN_X86_64:READY\nUnsupported CPU: missing xsaves\n",
-        "Unsupported CPU: missing xsaves\n",
-        "ZIGOS:USERSPACE:RESUME:OK\n",
-    }) |bytes| try std.testing.expect(entryCpuRejection(bytes) == null);
+test {
+    std.testing.refAllDecls(log);
+    std.testing.refAllDecls(process);
 }
 
-test "entry smoke waits for exact reason stops unsupported target before deadline and reaps child" {
+test "harness stops at the validation marker before its deadline and reaps the process group" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var environment = std.process.Environ.Map.init(arena.allocator());
     var ctx: common.Context = .{ .allocator = arena.allocator(), .io = std.testing.io, .environ = &environment };
-    const temporary = try ctx.tempDir("zigos-entry-smoke-test");
+    const temporary = try ctx.tempDir("zigos-harness-marker-test");
     defer ctx.removeTree(temporary) catch {};
     const binary = try fmt(&ctx, "{s}/qemu", .{temporary});
     const firmware = try fmt(&ctx, "{s}/firmware", .{temporary});
@@ -1445,9 +1341,7 @@ test "entry smoke waits for exact reason stops unsupported target before deadlin
         \\    shift
         \\done
         \\printf '%s\n' "$$"
-        \\printf '%s\n' 'BOOT:START' 'ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED' 'ZIGOS:USERSPACE:RESUME:OK' > "$serial"
-        \\/bin/sleep 1
-        \\printf '%s\n' 'Unsupported CPU: missing xsaves' >> "$serial"
+        \\printf '%s\n' 'BOOT:START' 'ZIGOS:TEST:READY' > "$serial"
         \\exec /bin/sleep 30
         \\
     );
@@ -1456,26 +1350,17 @@ test "entry smoke waits for exact reason stops unsupported target before deadlin
     try executable.setPermissions(ctx.io, .fromMode(0o700));
     try environment.put("QEMU_BIN", binary);
     try environment.put("QEMU_STOP_GRACE_SECONDS", "1");
-    try environment.put("ZIGOS_X86_64_KERNEL_SECONDS", "20");
-    const harness: Harness = .{ .ctx = &ctx, .boot_iso = null, .code_override = firmware, .vars_override = firmware, .cpu_override = "fixture" };
+    const harness: Harness = .{ .ctx = &ctx, .boot_iso = "fixture.iso", .code_override = firmware, .vars_override = firmware, .cpu_override = "fixture" };
     const start = std.Io.Timestamp.now(ctx.io, .awake);
-    try std.testing.expectError(error.UnsupportedCpuTarget, entrySmoke(harness, &.{ "fixture.iso", serial }, false));
-    const elapsed = process.elapsed(&ctx, start);
-    try std.testing.expect(elapsed >= 1000 and elapsed < 5000);
-    const bytes = try ctx.read(serial);
-    try std.testing.expect(log.exact(bytes, "Unsupported CPU: missing xsaves"));
-    try std.testing.expect(log.exact(bytes, "ZIGOS:USERSPACE:RESUME:OK"));
+    try harness.until(null, serial, "ZIGOS:TEST:READY", null, 20, "128M", &.{});
+    try std.testing.expect(process.elapsed(&ctx, start) < 5000);
     const pid_text = std.mem.trim(u8, try ctx.read(try fmt(&ctx, "{s}.qemu.log", .{stem(serial)})), "\r\n");
     const pid = try std.fmt.parseInt(std.posix.pid_t, pid_text, 10);
     const group_result = std.c.kill(-pid, @fromBackingInt(@intCast(0)));
-    const group_error = std.posix.errno(group_result);
     try std.testing.expect(group_result < 0);
-    try std.testing.expectEqual(std.posix.E.SRCH, group_error);
-}
-
-test {
-    std.testing.refAllDecls(log);
-    std.testing.refAllDecls(process);
+    try std.testing.expectEqual(std.posix.E.SRCH, std.posix.errno(group_result));
+    try std.testing.expectError(error.ArtifactMeasurementCountMismatch, nativeSmoke(harness, &.{ "kernel.elf", serial, "store.img", "full", "efi_stub.zig", "2", "userspace-a.elf" }));
+    try std.testing.expectError(error.InvalidArguments, nativeSmoke(harness, &.{ "kernel.elf", serial, "store.img", "full", "efi_stub.zig", "1" }));
 }
 
 test "AP cache evidence requires actual ordered unique control rejection and enabled records" {

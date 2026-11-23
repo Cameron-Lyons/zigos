@@ -46,8 +46,6 @@ pub export fn native_crypto_probe_main() callconv(.c) noreturn {
     if (!model.verify(&inputs, &outputs)) fail("XSTATE");
     serialWrite("ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:XSTATE_X87_XMM_YMM_128:PASS\n");
     serialWrite("ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:PASS\n");
-    // Retain the entry marker for tools that also inspect long-mode readiness.
-    serialWrite("ZIGOS:ARCH:X86_64:LONG_MODE_ENTRY:READY\n");
     exitQemu(QEMU_SUCCESS);
 }
 
@@ -132,7 +130,7 @@ fn serialWrite(bytes: []const u8) void {
 fn fail(reason: []const u8) noreturn {
     serialWrite("ZIGOS:ARCH:X86_64:NATIVE_CRYPTO:FAIL ");
     serialWrite(reason);
-    serialWrite("\nZIGOS:ARCH:X86_64:LONG_MODE_ENTRY:FAIL\n");
+    serialWrite("\n");
     exitQemu(QEMU_FAILURE);
 }
 

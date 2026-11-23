@@ -34,14 +34,20 @@ SECTIONS
         *(.rodata.cst*)
         *(.rodata.str*)
         *(.rodata.*)
-        *(.eh_frame)
-        *(.eh_frame.*)
-        *(.gcc_except_table)
-        *(.gcc_except_table.*)
         . = ALIGN(4K);
         __kernel_rodata_end = .;
     } :readonly
     __kernel_measure_end = .;
+
+    /* Panics walk frame pointers; nothing consumes unwind tables, so they
+       must not enter the measured image. */
+    /DISCARD/ :
+    {
+        *(.eh_frame)
+        *(.eh_frame.*)
+        *(.gcc_except_table)
+        *(.gcc_except_table.*)
+    }
 
     .zigos_userspace_archive ALIGN(4K) : AT(ADDR(.zigos_userspace_archive) - __kernel_image_bias)
     {

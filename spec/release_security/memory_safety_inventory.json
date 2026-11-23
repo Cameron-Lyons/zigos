@@ -136,7 +136,7 @@
       ],
       "tests": [
         "zig build host-tests",
-        "zig build kernel-x86_64-compile-check",
+        "zig build kernel",
         "zig build high-half-entry-check",
         "zig build release-security-check"
       ]
@@ -318,8 +318,7 @@
       "tests": [
         "zig build host-tests",
         "zig build spec-tests",
-        "zig build kernel",
-        "zig build x86_64-architecture-compile-check"
+        "zig build kernel"
       ]
     },
     {
@@ -931,7 +930,7 @@
         "The sole parent-pointer recovery is confined to the host-only fragmented-reader fixture: its callback receives the address of that fixture's embedded std.Io.Reader, and fixture backing remains live through synchronous bounded reads. Runtime Ethernet frames must contain 14 through 65536 bytes before entering fixed per-direction storage; exact 104-byte confirmation matching precedes every metadata access, and retry comparisons use one owned immutable copy. Only the upstream forwarding task mutates confirmation state and writes its log. Concurrent forwarding tasks drain or cancel before borrowed loss state, log writers, buffers and streams are released; timed connect and accept races also drain and close sockets that completed during cancellation."
       ],
       "tests": [
-        "zig build qemu-peer-relay-tests",
+        "zig build host-tool-tests",
         "zig build prod-readiness",
         "zig build release-security-check"
       ]
@@ -980,7 +979,7 @@
       ],
       "tests": [
         "zig build host-tests",
-        "zig build x86_64-userspace-launch-check"
+        "zig build zigos-native-production-smoke-test"
       ]
     },
     {
@@ -995,7 +994,7 @@
         "the 16-byte gate and unaligned 10-byte IDTR layouts are compile-time asserted, and handler addresses are split into fixed-width fields before the centralized IDT load"
       ],
       "tests": [
-        "zig build kernel-x86_64-compile-check"
+        "zig build kernel"
       ]
     },
     {
@@ -1027,8 +1026,8 @@
         "Cold stack writes use volatile alignment-one TSS operands. Ownership admission decodes the actual supplied SGDT/STR against the selected initialized GDT and busy TSS base, full limit, access/reserved fields, exact emergency IST and disabled I/O bitmap. Postwrite checks read actual selected RSP0 and retained IST. Hosted hostile descriptor tests and the isolated CPU 1 independent SGDT/STR oracle cover owner isolation; automatic hardware stack selection remains separate evidence."
       ],
       "tests": [
-        "zig build kernel-x86_64-compile-check",
-        "zig build x86_64-userspace-launch-check",
+        "zig build kernel",
+        "zig build zigos-native-production-smoke-test",
         "zig build zigos-native-smoke-test"
       ]
     },
@@ -1049,8 +1048,8 @@
         "The checked cold stack transaction captures and masks IF, authenticates actual GS and selected loaded TSS, rejects any live continuation or mismatched published mode before writing, clears READY before TSS/FRED changes, and rechecks exact owner, GS, CR4, TSS and all FRED controls before GS-top and saved-mode publication. Preflight denial has no writes and restores IF; committed failure leaves IF=0/READY clear and the public wrapper really CLI/HLTs. Non-FRED mode reads and writes no FRED MSRs. BSP bootstrap authenticates RDPID and actual APIC BSP before native state indexing, replacing inherited TSC_AUX safely. The 17 actual-core hosted tests pass in each mode; the CPU 1 CPL0 independent busy-TSS/GS readback proves metadata binding with FRED disabled, not native user admission."
       ],
       "tests": [
-        "zig build kernel-x86_64-compile-check",
-        "zig build x86_64-userspace-launch-check",
+        "zig build kernel",
+        "zig build zigos-native-production-smoke-test",
         "zig build host-tests"
       ]
     },
@@ -1068,7 +1067,7 @@
       ],
       "tests": [
         "zig build host-tests",
-        "zig build kernel-x86_64-compile-check",
+        "zig build kernel",
         "zig build high-half-entry-check"
       ]
     },
@@ -1100,7 +1099,7 @@
       "tests": [
         "zig build host-tests",
         "zig build spec-tests",
-        "zig build x86_64-userspace-launch-check",
+        "zig build zigos-native-production-smoke-test",
         "zig build kernel"
       ]
     },
@@ -1186,7 +1185,7 @@
       ],
       "tests": [
         "zig build kernel",
-        "zig build x86_64-userspace-launch-check"
+        "zig build zigos-native-production-smoke-test"
       ]
     },
     {
@@ -1227,8 +1226,7 @@
       ],
       "tests": [
         "zig build kernel",
-        "zig build kernel-x86_64-compile-check",
-        "zig build x86_64-userspace-launch-check",
+        "zig build zigos-native-production-smoke-test",
         "zig build host-tests",
         "zig build spec-tests"
       ]
@@ -1266,37 +1264,7 @@
       ],
       "tests": [
         "zig build kernel",
-        "zig build x86_64-architecture-compile-check",
-        "zig build x86_64-userspace-launch-check"
-      ]
-    },
-    {
-      "path": "src/arch/x86_compile_check.zig",
-      "categories": [
-        "packed-abi"
-      ],
-      "owner": "arch-owner",
-      "review_state": "release-reviewed",
-      "mitigations": [
-        "compile-only descriptor fixture is never linked into or executed by a boot image"
-      ],
-      "tests": [
-        "zig build x86_64-architecture-compile-check"
-      ]
-    },
-    {
-      "path": "src/arch/x86_64/long_mode_probe.zig",
-      "categories": [
-        "inline-assembly",
-        "port-io"
-      ],
-      "owner": "arch-owner",
-      "review_state": "release-reviewed",
-      "mitigations": [
-        "the probe uses only fixed COM1 and QEMU-exit ports after an assembly-built 128 MiB identity map, validates the Multiboot2 handoff, and never joins a production image"
-      ],
-      "tests": [
-        "zig build x86_64-long-mode-entry-check"
+        "zig build zigos-native-production-smoke-test"
       ]
     },
     {
@@ -1328,7 +1296,6 @@
       ],
       "tests": [
         "zig build kernel",
-        "zig build kernel-x86_64-compile-check",
         "zig build host-tests"
       ]
     },
@@ -1369,7 +1336,7 @@
       "tests": [
         "zig build host-tests",
         "zig build high-half-entry-check",
-        "zig build kernel-x86_64-compile-check"
+        "zig build kernel"
       ]
     },
     {
@@ -1604,8 +1571,8 @@
       ],
       "tests": [
         "zig build host-tests",
-        "zig build kernel-x86_64-compile-check",
-        "zig build x86_64-userspace-launch-check",
+        "zig build kernel",
+        "zig build zigos-native-production-smoke-test",
         "zig build zigos-native-smoke-test",
         "zig build high-half-entry-check"
       ]
@@ -1626,7 +1593,7 @@
       ],
       "tests": [
         "zig build host-tests",
-        "zig build kernel-x86_64-compile-check",
+        "zig build kernel",
         "zig build high-half-entry-check"
       ]
     },
@@ -1642,7 +1609,6 @@
       ],
       "tests": [
         "zig build kernel",
-        "zig build kernel-x86_64-compile-check",
         "zig build zigos-native-smoke-test"
       ]
     },
@@ -1713,7 +1679,7 @@
         "zig build host-tests",
         "zig build spec-tests",
         "zig build kernel",
-        "zig build x86_64-userspace-launch-check"
+        "zig build zigos-native-production-smoke-test"
       ]
     },
     {
@@ -1766,7 +1732,7 @@
       ],
       "tests": [
         "zig build kernel",
-        "zig build x86_64-userspace-launch-check"
+        "zig build zigos-native-production-smoke-test"
       ]
     },
     {
@@ -1878,7 +1844,7 @@
         "zig build host-tests",
         "zig build spec-tests",
         "zig build kernel",
-        "zig build x86_64-userspace-launch-check"
+        "zig build zigos-native-production-smoke-test"
       ]
     },
     {
@@ -1929,7 +1895,7 @@
       "tests": [
         "zig build host-tests",
         "zig build kernel",
-        "zig build x86_64-userspace-launch-check"
+        "zig build zigos-native-production-smoke-test"
       ]
     },
     {
@@ -2432,7 +2398,7 @@
         "zig build host-tests",
         "zig build spec-tests",
         "zig build kernel",
-        "zig build x86_64-userspace-launch-check",
+        "zig build zigos-native-production-smoke-test",
         "zig build zigos-native-smoke-test",
         "zig build high-half-entry-check"
       ]
@@ -2850,7 +2816,7 @@
         "zig build host-tests",
         "zig build spec-tests",
         "zig build kernel",
-        "zig build x86_64-userspace-launch-check",
+        "zig build zigos-native-production-smoke-test",
         "zig build zigos-native-smoke-test"
       ]
     },

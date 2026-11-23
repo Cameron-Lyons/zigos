@@ -118,6 +118,7 @@ pub fn kernelMain() void {
     } else {
         common.printBootMarker(boot_markers.cpu_syscall_enabled);
     }
+    common.printBootMarker(boot_markers.cpu_native_entry_ready);
     init_devices.init();
     console.print("Delegating device dataplanes to userspace driver claims.\n");
     common.printBootMarker(boot_markers.kernel_dataplane_userspace);

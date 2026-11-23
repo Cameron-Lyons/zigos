@@ -1085,8 +1085,8 @@ YMM registers within a fixed 832-byte save image. The baseline-compiled UEFI stu
 checks real CPUID features and the exact YMM save geometry before entering native
 code. Every bootstrap and secondary CPU entry repeats admission, establishes
 XCR0 and resets x87/MXCSR controls before its first compiled instruction; explicit emulator boots retain these
-gates. Build configuration accepts exactly
-`-Dcpu=x86_64_v3+aes+pclmul+sha`. AVX-512 and AMX require a larger task-state
+gates. The build pins the kernel instruction floor to
+`x86_64_v3+aes+pclmul+sha`. AVX-512 and AMX require a larger task-state
 contract before generated code can use them. Hosted alignment and
 dispatch regressions pass; the full assembly
 roundtrip explicitly skips hosts without OSXSAVE or enabled YMM state.
@@ -1889,7 +1889,7 @@ zig build native-store-image
 zig build run
 ```
 
-`run` and `run-zigos-native` attach `build/native-store.img`. Build targets that
+`run` attaches `build/native-store.img`. Build targets that
 boot or package the system depend on the generated userspace archive from the
 registry before they consume the kernel artifact.
 
@@ -1923,10 +1923,11 @@ zig build iso-verification
 ```
 
 The published `zig-out/bin/kernel-zigos-native.elf` is the exact ELF embedded
-in the production EFI image. It retains static symbols for the role gate while
-omitting non-loadable debug sections. The full diagnostic ELF is installed at
-`zig-out/kernel-debug/kernel-zigos-native.elf` under the same role gate; use it
-with `llvm-addr2line` for source locations, or a debugger for type information.
+in the production EFI image, produced by one whole-kernel LTO link. It retains
+static symbols for the role gate while omitting non-loadable debug sections.
+`zig build kernel-debug` links the full diagnostic ELFs into
+`zig-out/kernel-debug/`; use them with `llvm-addr2line` for source locations,
+or a debugger for type information.
 Optimized EFI images
 omit host-specific debugging metadata before packaging or signing.
 
@@ -2184,15 +2185,15 @@ The remaining data and test helpers also use the native host utility:
   prepares the firmware-authentication fixtures.
 - `zig build tool -- qemu-peer-relay --upstream-port PORT --drop-confirmations 2`
   runs the bounded localhost relay used by the two-node proof.
-- `zig build qemu-peer-relay-tests` runs its framing and live socket
-  tests; the two-node QEMU build gate runs them before starting the VMs.
+- `zig build host-tool-tests` runs its framing and live socket tests.
 
 ## Repository Map
 
 - `src/main.zig`: kernel entry/export surface and typed native syscall dispatch.
 - `src/arch/`: architecture-specific assembly, syscall entry glue, and linker
   scripts.
-- `src/boot/`: boot assembly and GRUB config used by kernel and ISO builds.
+- `src/boot/`: boot assembly, EFI loader and command lines used by kernel and
+  ISO builds.
 - `src/kernel/`: low-level boot, interrupt, timer, memory, driver, network, and
   utility code.
 - `src/kernel/boot/profiles/`: native, recovery, and benchmark boot profiles.

@@ -22,16 +22,19 @@ Use the pinned toolchain and repo entrypoints:
   for all media dates. Pass any `SOURCE_DATE_EPOCH` value explicitly through
   this option so epoch changes invalidate Zig's cached build configuration.
   Keep the same epoch for both builds when checking reproducibility.
-- The published production kernel and embedded EFI payload share one ELF with
-  static symbols retained and debug sections removed. Full source-line and type
-  information is installed at `zig-out/kernel-debug/kernel-zigos-native.elf`;
-  use that file with `llvm-addr2line` when diagnosing kernel return addresses.
+- Every published kernel is the exact ELF embedded in its EFI payload: one
+  whole-kernel LTO link with static symbols retained and debug sections removed.
+  `zig build kernel-debug` adds a second link with full source-line and type
+  information under `zig-out/kernel-debug/`; use those files with
+  `llvm-addr2line` when diagnosing kernel return addresses.
+- Host tests and build checkers default to Debug whatever `-Doptimize` selects
+  for the kernel, keeping runtime safety checks; `-Dtest-optimize` overrides it.
 
 ## Verification Matrix
 
 | Command | Use it when |
 | --- | --- |
-| `zig build verify` | You want the default local gate: lint, kernel build, host tests, spec tests, and production-readiness checks. |
+| `zig build verify` | You want the default local gate: lint, kernel build, host tests, spec tests, production-readiness checks and the QEMU architecture probes. |
 | `zig build -Dverify-smoke=true -Dverify-benchmark=true verify` | You want `verify` plus the QEMU native smoke and benchmark gates. |
 | `zig build lint` | You only need local lint checks: Zig formatting, optional zlint, and optional actionlint. |
 | `zig build fmt-check` | You only need tracked Zig formatting checks. |
@@ -40,14 +43,15 @@ Use the pinned toolchain and repo entrypoints:
 | `zig build test-roots` | You need to confirm every test-bearing Zig file under `src/` and `tools/` is reachable from a build test root. |
 | `zig build hardware-proof-checker-test` | You changed the RNUC15CRSU7 proof-bundle checker or bundle contract. |
 | `zig build kernel` | You need the production native kernel and embedded userspace archive. |
-| `zig build kernel-zigos-native` | You need the production native bootstrap kernel. |
-| `zig build kernel-zigos-native-verification` | You need the native kernel with synthetic proof and fault workloads. |
+| `zig build kernel-zigos-native-verification` | You need the native kernel with synthetic proof workloads; negative smokes select its injected faults through the authenticated command line. |
+| `zig build kernel-debug` | You need every kernel with complete DWARF in `zig-out/kernel-debug/`. |
 | `zig build kernel-role-check` | You changed native boot composition and need to prove verification code and state are absent from production. |
 | `zig build kernel-recovery` | You need the freestanding recovery kernel profile. |
 | `zig build kernel-benchmark` | You need the benchmark kernel profile. |
 | `zig build host-tests` | You need host coverage; this includes the root host suite, userspace runtime tests, native host-tool tests, authenticated release-tool fixtures, and test-root reachability. |
+| `zig build -Doptimize=fast arch-probes` | You touched architecture entry, SMP, xstate or cache policy and need every isolated QEMU architecture probe: native crypto, upper-half entry, positive Mapping xstate, AP cache rejection and SMP cache match. |
 | `zig build -Doptimize=fast native-crypto-check` | Execute AVX2 arithmetic, hardware AES, SHA-256, GHASH and storage XXH64 known answers plus firmware floating-point control reset and 128 x87/XMM/YMM owner roundtrips in QEMU. Requires exact ordered evidence for every primitive. This isolated standard-XSAVE proof runs on TCG; production XSAVES, PKRU, FRED and physical preemption still require their own hardware evidence. |
-| `zig build host-tool-tests` | You changed native file/media, QEMU process/log, release, or hardware utilities. |
+| `zig build host-tool-tests` | You changed native file/media, QEMU process/log/peer relay, release, or hardware utilities. |
 | `zig build release-tool-fixture-test` | You changed release generation/publication or signer arguments and need the real independent verifier with disposable fixture keys. |
 | `zig build tool -- COMMAND [ARGUMENTS]` | Run one of the native utilities; use `--help` to list commands. |
 | `zig build spec-tests` | You need the spec coverage gate, its checker tests, and native spec tests without QEMU. |
@@ -59,10 +63,10 @@ Use the pinned toolchain and repo entrypoints:
 | `zig build spec-conformance` | You need spec coverage, native spec tests, the two-boot native smoke path, and the recovery QEMU proof. |
 | `zig build zigos-native-production-smoke-test` | You need production cold boots, persistence, and firmware framebuffer scanout. |
 | `zig build zigos-native-smoke-test` | You need production boot coverage plus the verification cold-reboot and negative-smoke suite. |
-| `zig build driver-restart-qemu-test` | You touched userspace driver restart, broker rebinding, or crash recovery paths. |
+| `zig build driver-restart-qemu-test` | You touched userspace driver restart, broker rebinding, or crash recovery paths and want only that single-boot subset of the full smoke. |
 | `zig build recovery-qemu-test` | You touched recovery-mode boot, repair, or break-glass flows. |
-| `zig build uefi-qemu-test` | You touched the production ISO, GRUB, or UEFI handoff. |
-| `zig build uefi-verification-qemu-test` | You touched the verification ISO or first-hardware-target proof media. |
+| `zig build uefi-qemu-test` | You touched the production ISO or UEFI handoff and the host CPU passes hardware admission (FRED, CET, LASS and an architectural TSC rate); QEMU CPU models are rejected. |
+| `zig build uefi-verification-qemu-test` | You touched the verification ISO or first-hardware-target proof media; it has the same hardware admission requirement. |
 | `zig build high-half-entry-check` | You touched high entry, AP ownership, lease mailboxes, copied syscall brokerage, trap provisioning or remote TLB/cache maintenance. Requires 32 exact ordered records from the isolated 16-CPU CPL0 guest. |
 | `zig build benchmark` | You touched performance-sensitive kernel or native-service paths. |
 | `zig build frame-allocator-benchmark` | Measure physical-page allocator reuse, sparse-memory searches, contiguous runs, and bounded exhaustion on the host without QEMU. Uses `fast` and reports the median of five samples. |
@@ -91,7 +95,6 @@ Use the pinned toolchain and repo entrypoints:
 | `zig build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-manifest-finalize` | The eight generated files and two independent reproducibility files are complete, and you are ready to candidate-verify, atomically publish, and statefully verify the exact top-level manifest. |
 | `zig build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-bundle-check` | You supplied the signer, independently pinned verifier, and persistent rollback state and need the full phase-A candidate ceremony after preflight. |
 | `zig build -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-bundle-verify-existing` | You need to verify an existing frozen bundle with an independently pinned verifier and no generation or signing step. |
-| `zig build release-bundle-fixture-test` | You changed release trust, exact-set, path-containment, or rollback behavior and need the credential-free attack fixtures. |
 | `zig build verify-release-cli` | You need a local development/test build of the verifier; public verification still requires an independently distributed binary and pin, and this host tool is not a signed OS target. |
 | `zig build reproducible-build-check` | You need a two-build digest comparison for release artifacts in isolated tracked-workspace copies. |
 | `zig build native-store-image` | You need to build or preserve the native storage image used by run targets. |

@@ -1,24 +1,36 @@
 const std = @import("std");
-const options = @import("build_options");
 const x86 = @import("../x86.zig");
 const cache_policy = @import("../cache_policy.zig");
 const cpu_features = @import("../cpu_features.zig");
 const bridge = @import("../../kernel/smp/trampoline.zig");
+const handoff = @import("../../kernel/boot/handoff.zig");
 const support = @import("ap_cache_probe_support.zig");
 
 const PAGE_BYTES: usize = 4096;
 const Snapshot = cache_policy.BootstrapMtrrSnapshot;
-const CASE_LABEL: []const u8 = switch (options.ap_cache_fault) {
-    .none => "CONTROL",
-    .version => "VERSION",
-    .default_reserved => "DEFAULT_RESERVED",
-    .mask_reserved => "MASK_RESERVED",
+
+const Fault = enum {
+    none,
+    version,
+    default_reserved,
+    mask_reserved,
+
+    fn label(self: Fault) []const u8 {
+        return switch (self) {
+            .none => "CONTROL",
+            .version => "VERSION",
+            .default_reserved => "DEFAULT_RESERVED",
+            .mask_reserved => "MASK_RESERVED",
+        };
+    }
 };
 
 extern var smp_trampoline_start: u8;
 extern var smp_trampoline_cpu: u64;
 
 var high_entry: u32 = 0;
+// Published by the BSP before SIPI; the AP only reads it.
+var fault: Fault = .none;
 
 pub fn panic(_: []const u8, _: ?*std.lang.StackTrace, _: ?usize) noreturn {
     support.fail("panic");
@@ -26,6 +38,7 @@ pub fn panic(_: []const u8, _: ?*std.lang.StackTrace, _: ?usize) noreturn {
 
 pub export fn kernel_main() callconv(.c) noreturn {
     support.initializeBsp();
+    fault = selectedFault();
     // Keep the normal production bridge, physical root and retained stack.
     // Only this isolated image modifies the already copied immutable policy.
     const trampoline = support.prepareBridge(&unexpectedHighEntry);
@@ -33,16 +46,32 @@ pub export fn kernel_main() callconv(.c) noreturn {
     injectFault(snapshot);
     publishPage(trampoline);
     support.prepareAp();
-    support.serialWrite("ZIGOS:ARCH:X86_64:AP_CACHE:" ++ CASE_LABEL ++ ":ARMED\n");
+    support.serialWrite("ZIGOS:ARCH:X86_64:AP_CACHE:");
+    support.serialWrite(fault.label());
+    support.serialWrite(":ARMED\n");
     support.launchPhysical(trampoline.physical);
     // A rejected AP has no high-entry acknowledgement or ownership release.
     // Retain the SIPI page and stack until the emulator terminates this image.
-    if (options.ap_cache_fault == .none) support.retainAndHalt();
+    if (fault == .none) support.retainAndHalt();
     const sentinel: *volatile u32 = &high_entry;
     while (true) {
         if (@atomicLoad(u32, sentinel, .acquire) != 0) support.fail("UNEXPECTED_HIGH_ENTRY");
         asm volatile ("pause");
     }
+}
+
+/// Each boot image selects exactly one case through its firmware-authenticated
+/// command line. A missing or ambiguous selection fails before the AP is armed.
+fn selectedFault() Fault {
+    const info = handoff.capturedInfo() orelse support.fail("fault handoff");
+    var selected: ?Fault = null;
+    inline for (comptime std.enums.values(Fault)) |candidate| {
+        if (handoff.commandLineHasFlag(info, "ap_cache_fault_" ++ @tagName(candidate))) {
+            if (selected != null) support.fail("ambiguous fault selection");
+            selected = candidate;
+        }
+    }
+    return selected orelse support.fail("missing fault selection");
 }
 
 fn snapshotBytes(trampoline: bridge.Trampoline) []u8 {
@@ -60,7 +89,7 @@ fn injectFault(snapshot: []u8) void {
     const version = @offsetOf(Snapshot, "version");
     if (std.mem.readInt(u32, snapshot[version..][0..4], .little) !=
         cache_policy.BOOTSTRAP_MTRR_VERSION) support.fail("uncorrupted snapshot version");
-    switch (options.ap_cache_fault) {
+    switch (fault) {
         .none => {},
         .version => std.mem.writeInt(u32, snapshot[version..][0..4], 0, .little),
         .default_reserved => {
@@ -97,7 +126,7 @@ fn unexpectedHighEntry(cpu_index: u64) callconv(.c) noreturn {
     const sentinel: *volatile u32 = &high_entry;
     @atomicStore(u32, sentinel, 1, .release);
     if (cpu_index != 1) support.fail("unexpected AP index");
-    if (options.ap_cache_fault == .none) {
+    if (fault == .none) {
         support.pass("CONTROL_HIGH_ENTRY");
         support.finish();
     }

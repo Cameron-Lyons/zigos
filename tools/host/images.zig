@@ -2,14 +2,14 @@ const std = @import("std");
 const common = @import("common.zig");
 const fat = @import("fat.zig");
 
-/// Size of the FAT16 EFI system partition embedded in boot media.
-pub const esp_size_mib = 40;
+/// El Torito records the boot image size as a 16-bit count of 512-byte sectors.
+const el_torito_max_bytes = std.math.maxInt(u16) * 512;
 
 pub fn run(ctx: *common.Context, command: []const u8, args: []const []const u8) !void {
     if (std.mem.eql(u8, command, "clean-build")) return clean(ctx, args);
     if (std.mem.eql(u8, command, "build-native-store")) return store(ctx, args);
     if (std.mem.eql(u8, command, "build-efi-iso")) return efiIso(ctx, args);
-    if (std.mem.eql(u8, command, "build-grub-iso")) return grubIso(ctx, args);
+    if (std.mem.eql(u8, command, "build-cmdline")) return cmdline(ctx, args);
     if (std.mem.eql(u8, command, "test-production-boot-log-checker")) {
         try productionLogFixtures();
         return ctx.print("Production boot log checker self-test: PASS\n", .{});
@@ -21,10 +21,6 @@ pub fn run(ctx: *common.Context, command: []const u8, args: []const []const u8) 
     if (std.mem.eql(u8, command, "check-efi-image")) {
         try validateEfi(bytes);
         return ctx.print("EFI PE/COFF image header validated: {s}\n", .{args[0]});
-    }
-    if (std.mem.eql(u8, command, "check-multiboot2-image")) {
-        try validateElf(bytes);
-        return ctx.print("ELF64 long-mode kernel image validated: {s}\n", .{args[0]});
     }
     if (std.mem.eql(u8, command, "check-production-boot-log")) {
         try validateProductionBootLog(bytes);
@@ -81,12 +77,6 @@ pub fn validateEfi(bytes: []const u8) !void {
     if (bytes.len < 64 or !std.mem.eql(u8, bytes[0..2], "MZ")) return error.InvalidMzHeader;
     const pe_offset = std.mem.readInt(u32, bytes[60..64], .little);
     if (pe_offset > bytes.len or bytes.len - pe_offset < 4 or !std.mem.eql(u8, bytes[pe_offset..][0..4], "PE\x00\x00")) return error.InvalidPeHeader;
-}
-
-pub fn validateElf(bytes: []const u8) !void {
-    if (bytes.len < 64 or !std.mem.eql(u8, bytes[0..4], "\x7fELF") or bytes[4] != 2) return error.ExpectedElf64;
-    if (bytes[5] != 1 or bytes[6] != 1 or std.mem.readInt(u16, bytes[18..20], .little) != 62) return error.ExpectedX86_64;
-    if (std.mem.readInt(u32, bytes[20..24], .little) != 1 or std.mem.readInt(u16, bytes[52..54], .little) != 64) return error.InvalidElfHeader;
 }
 
 pub fn validateProductionBootLog(bytes: []const u8) !void {
@@ -189,63 +179,44 @@ fn efiIso(ctx: *common.Context, args: []const []const u8) !void {
     const epoch = try sourceDateEpoch(common.arg(args, 3, ctx.envDefault("SOURCE_DATE_EPOCH", "315532800")));
     try ctx.environ.put("SOURCE_DATE_EPOCH", try ctx.fmt("{d}", .{epoch}));
     try ctx.environ.put("TZ", "UTC");
-    try validateEfi(try ctx.read(args[0]));
+    const image = try ctx.read(args[0]);
+    try validateEfi(image);
     if (try ctx.findExecutable("xorriso") == null) return error.MissingMediaTool;
     try prepareStaging(ctx, args[2], &.{args[0]});
-    const staged = try ctx.fmt("{s}/EFI/BOOT/BOOTX64.EFI", .{args[2]});
-    try ctx.copy(args[0], staged);
-    const efi_file = try std.Io.Dir.cwd().openFile(ctx.io, staged, .{});
-    defer efi_file.close(ctx.io);
-    try efi_file.setPermissions(ctx.io, .fromMode(0o644));
+    // Optical firmware boots the El Torito ESP; the ISO9660 copy keeps media
+    // that are copied file-by-file onto a USB stick bootable.
+    try ctx.write(try ctx.fmt("{s}/EFI/BOOT/BOOTX64.EFI", .{args[2]}), image);
     try ctx.parent(args[1]);
-    try writeEsp(ctx, try ctx.fmt("{s}/esp.img", .{args[2]}), epoch, &.{.{ .path = "EFI/BOOT/BOOTX64.EFI", .data = try ctx.read(staged) }});
-    try ctx.run(&.{ "xorriso", "-as", "mkisofs", "-R", "-J", "-uid", "0", "-gid", "0", "-e", "esp.img", "-no-emul-boot", "--set_all_file_dates", try ctx.fmt("={d}", .{epoch}), "-o", args[1], args[2] });
+    try writeEsp(ctx, try ctx.fmt("{s}/esp.img", .{args[2]}), epoch, &.{.{ .path = "EFI/BOOT/BOOTX64.EFI", .data = image }});
+    // Rationalized Rock Ridge (-r) records root ownership and fixed modes, so
+    // the media bytes do not depend on the builder's umask.
+    try ctx.run(&.{ "xorriso", "-as", "mkisofs", "-r", "-J", "-e", "esp.img", "-no-emul-boot", "--set_all_file_dates", try ctx.fmt("={d}", .{epoch}), "-o", args[1], args[2] });
     try validateElTorito(try checkedReport(ctx, &.{ "xorriso", "-indev", args[1], "-report_el_torito", "plain" }));
     try ctx.print("Validated x86-64 UEFI native boot media: {s}\n", .{args[1]});
 }
 
-/// Writes a deterministic FAT16 EFI system partition image holding `files`.
+/// Writes a deterministic FAT16 EFI system partition image holding `files`,
+/// sized from its contents so El Torito records the exact sector count.
 pub fn writeEsp(ctx: *common.Context, path: []const u8, epoch: u64, files: []const fat.File) !void {
+    const size = fat.imageBytes(files);
+    if (size > el_torito_max_bytes) return error.EspTooLarge;
     try ctx.parent(path);
-    try fat.writeImage(ctx.io, ctx.allocator, path, esp_size_mib, "ZIGOS", epoch, files);
+    try fat.writeImage(ctx.io, ctx.allocator, path, size, "ZIGOS", epoch, files);
 }
 
-fn grubIso(ctx: *common.Context, args: []const []const u8) !void {
-    try common.requireArgs(args, 3, 5);
-    const config = common.arg(args, 3, "src/boot/grub-x86_64-kernel.cfg");
-    const stub = common.arg(args, 4, "");
-    if (!ctx.exists(config) or !ctx.exists(stub)) return error.MissingGrubInput;
-    var rescue: ?[]const u8 = ctx.env("GRUB_MKRESCUE");
-    if (rescue == null or rescue.?.len == 0) {
-        rescue = try ctx.findExecutable("x86_64-elf-grub-mkrescue");
-        if (rescue == null) rescue = try ctx.findExecutable("grub-mkrescue");
+/// Writes BASE's command line plus FLAG tokens to OUTPUT as one line, so one
+/// linked kernel can boot several authenticated images that differ only there.
+fn cmdline(ctx: *common.Context, args: []const []const u8) !void {
+    if (args.len < 3) return error.InvalidArguments;
+    var line: std.ArrayList(u8) = .empty;
+    try line.appendSlice(ctx.allocator, std.mem.trim(u8, try ctx.read(args[0]), " \t\r\n"));
+    for (args[2..]) |flag| {
+        if (flag.len == 0 or std.mem.indexOfAny(u8, flag, " \t\r\n") != null) return error.InvalidArguments;
+        if (line.items.len != 0) try line.append(ctx.allocator, ' ');
+        try line.appendSlice(ctx.allocator, flag);
     }
-    const executable = rescue orelse return error.MissingGrubMkrescue;
-    var module_dir: ?[]const u8 = ctx.env("GRUB_MODULE_DIR");
-    if (module_dir == null or module_dir.?.len == 0) {
-        const path = (try ctx.findExecutable(executable)) orelse return error.MissingGrubMkrescue;
-        const bin = std.mem.indexOf(u8, path, "/bin/") orelse path.len;
-        const candidate = try ctx.fmt("{s}/lib/x86_64-elf/grub/x86_64-efi", .{path[0..bin]});
-        for ([_][]const u8{ candidate, "/usr/lib/grub/x86_64-efi", "/usr/lib64/grub/x86_64-efi", "/usr/share/grub/x86_64-efi" }) |directory| {
-            if (ctx.exists(try ctx.fmt("{s}/modinfo.sh", .{directory}))) {
-                module_dir = directory;
-                break;
-            }
-        }
-    }
-    const modules = module_dir orelse return error.MissingGrubEfiModules;
-    if (!ctx.exists(try ctx.fmt("{s}/modinfo.sh", .{modules}))) return error.MissingGrubEfiModules;
-    for ([_][]const u8{ "xorriso", "mformat" }) |name| if (try ctx.findExecutable(name) == null) return error.MissingMediaTool;
-    try prepareStaging(ctx, args[2], &.{ args[0], config, stub });
-    try ctx.copy(args[0], try ctx.fmt("{s}/boot/kernel.elf", .{args[2]}));
-    try ctx.copy(config, try ctx.fmt("{s}/boot/grub/grub.cfg", .{args[2]}));
-    try ctx.copy(stub, try ctx.fmt("{s}/EFI/BOOT/BOOTX64.EFI", .{args[2]}));
-    try ctx.parent(args[1]);
-    try ctx.run(&.{ executable, "--directory", modules, "-o", args[1], args[2] });
-    try validateElTorito(try checkedReport(ctx, &.{ "xorriso", "-indev", args[1], "-report_el_torito", "plain" }));
-    const report = try checkedReport(ctx, &.{ "xorriso", "-report_about", "SORRY", "-indev", args[1], "-find", "/boot/grub/x86_64-efi", "-type", "d", "-exec", "echo", "--" });
-    if (std.mem.indexOf(u8, report, "'/boot/grub/x86_64-efi'") == null) return error.MissingGrubEfiModules;
-    try ctx.print("Validated x86-64 UEFI boot media: {s}\n", .{args[1]});
+    try line.append(ctx.allocator, '\n');
+    try ctx.write(args[1], line.items);
 }
 
 const valid_log = "BOOT:ROLE:production\nZIGOS:STORAGE:CHECKPOINT:FINAL enabled=true dirty=false generation=3 error=none\nZIGOS:TASK:SESSION_READY\nZIGOS:NATIVE:READY\n";

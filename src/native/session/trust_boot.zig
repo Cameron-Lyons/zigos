@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const native_util = @import("../core/util.zig");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const config = @import("../../kernel/config.zig");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
@@ -152,7 +153,7 @@ pub const TrustBoot = struct {
         if (boot_candidate.slot_index != 1) return false;
         if (!persistPersistentBaseSelector(&selector)) return false;
 
-        if (smokeFaultModeIs("rollback_slot_failure")) {
+        if (config.smokeFaultIs(.rollback_slot_failure)) {
             base_manager.slots[0].measurement[0] ^= 0xA5;
             const rejected_rollback = base_manager.finalizeActivation(.{ .network_ok = false }, 74) catch return false;
             const rejected_selector = selector.finalizeBoot(.{ .network_ok = false }, false, 74) catch return false;
@@ -418,7 +419,7 @@ pub const TrustBoot = struct {
         var boot = measured.finalize();
         if (builtin.target.os.tag == .freestanding) {
             const handoff = measured_boot.MeasurementSnapshot.fromBootRecord(&boot) catch return false;
-            if (smokeFaultModeIs("tampered_artifact_manifest")) {
+            if (config.smokeFaultIs(.tampered_artifact_manifest)) {
                 var tampered_manifest = signed_manifest;
                 tampered_manifest.manifest.entries[0].digest[0] ^= 0x5A;
                 if (measured_boot.verifyMeasurementSnapshot(
@@ -488,7 +489,7 @@ pub const TrustBoot = struct {
         const bootloader_measurement_digest = bootDescriptorDigest() catch {
             return failGeneratedArtifactManifest("bootloader_measurement_digest");
         };
-        if (smokeFaultModeIs("tampered_bootloader_measurement")) {
+        if (config.smokeFaultIs(.tampered_bootloader_measurement)) {
             var tampered_measurement_digest = bootloader_measurement_digest;
             tampered_measurement_digest[0] ^= 0x7B;
             if (measured_boot.buildArtifactDigestMatches(
@@ -946,12 +947,6 @@ test "production policy measurement excludes runtime resource grants" {
     try std.testing.expect(capabilityTargetAffectsProductionPolicy(.policy));
 }
 
-fn smokeFaultModeIs(comptime mode_name: []const u8) bool {
-    if (builtin.target.os.tag != .freestanding) return false;
-    const config = @import("../../kernel/config.zig");
-    return std.mem.eql(u8, @tagName(config.smokeFaultMode()), mode_name);
-}
-
 const ArtifactManifestSigningBackend = struct {
     seed: signing.Seed,
 
@@ -1002,38 +997,15 @@ fn signProductionArtifactManifest(
 }
 
 const DirectArtifactTamperFixture = struct {
-    mode_name: []const u8,
     kind: measured_boot.MeasurementKind,
     marker: []const u8,
 };
 
-const direct_artifact_tamper_fixtures = [_]DirectArtifactTamperFixture{
-    .{
-        .mode_name = "tampered_kernel",
-        .kind = .kernel,
-        .marker = boot_markers.platform_artifact_kernel_tamper_rejected,
-    },
-    .{
-        .mode_name = "tampered_userspace_image",
-        .kind = .critical_service,
-        .marker = boot_markers.platform_artifact_userspace_image_tamper_rejected,
-    },
-    .{
-        .mode_name = "tampered_policy",
-        .kind = .policy,
-        .marker = boot_markers.platform_artifact_policy_tamper_rejected,
-    },
-    .{
-        .mode_name = "tampered_driver_set",
-        .kind = .driver_set,
-        .marker = boot_markers.platform_artifact_driver_set_tamper_rejected,
-    },
-};
-
-fn directArtifactTamperFixture() ?DirectArtifactTamperFixture {
-    inline for (direct_artifact_tamper_fixtures) |fixture| {
-        if (smokeFaultModeIs(fixture.mode_name)) return fixture;
-    }
+inline fn directArtifactTamperFixture() ?DirectArtifactTamperFixture {
+    if (config.smokeFaultIs(.tampered_kernel)) return .{ .kind = .kernel, .marker = boot_markers.platform_artifact_kernel_tamper_rejected };
+    if (config.smokeFaultIs(.tampered_userspace_image)) return .{ .kind = .critical_service, .marker = boot_markers.platform_artifact_userspace_image_tamper_rejected };
+    if (config.smokeFaultIs(.tampered_policy)) return .{ .kind = .policy, .marker = boot_markers.platform_artifact_policy_tamper_rejected };
+    if (config.smokeFaultIs(.tampered_driver_set)) return .{ .kind = .driver_set, .marker = boot_markers.platform_artifact_driver_set_tamper_rejected };
     return null;
 }
 

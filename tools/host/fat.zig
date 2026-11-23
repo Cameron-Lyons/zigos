@@ -36,6 +36,12 @@ const attr_archive = 0x20;
 const end_of_chain: u16 = 0xFFFF;
 const min_fat16_clusters = 4085;
 const max_fat16_clusters = 65524;
+const mib = 1024 * 1024;
+/// 4 MiB of 512-byte clusters keeps the smallest volume above the FAT16
+/// cluster minimum.
+const minimum_image_bytes = 4 * mib;
+/// Both FAT copies and the root directory of a volume El Torito can describe.
+const metadata_reserve_bytes = 512 * 1024;
 
 const Geometry = struct {
     total_sectors: u32,
@@ -281,17 +287,28 @@ pub fn buildImage(
     return image;
 }
 
-/// Writes a FAT16 image of `size_mib` MiB holding `files` to `path`.
+/// Smallest whole-MiB volume that holds `files` with at least 1 MiB to spare.
+/// Each path separator reserves a cluster for a parent directory.
+pub fn imageBytes(files: []const File) usize {
+    var used: usize = metadata_reserve_bytes + mib;
+    for (files) |file| {
+        used += std.mem.alignForward(usize, file.data.len, sector_size);
+        used += sector_size * std.mem.count(u8, file.path, "/");
+    }
+    return @max(minimum_image_bytes, std.mem.alignForward(usize, used, mib));
+}
+
+/// Writes a FAT16 image of `total_bytes` holding `files` to `path`.
 pub fn writeImage(
     io: std.Io,
     allocator: std.mem.Allocator,
     path: []const u8,
-    size_mib: usize,
+    total_bytes: usize,
     label: []const u8,
     epoch_seconds: u64,
     files: []const File,
 ) !void {
-    const image = try buildImage(allocator, size_mib * 1024 * 1024, label, epoch_seconds, files);
+    const image = try buildImage(allocator, total_bytes, label, epoch_seconds, files);
     defer allocator.free(image);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = image });
 }
@@ -360,6 +377,26 @@ test "builds a deterministic FAT16 ESP with nested directories" {
     // Both FAT copies match.
     const fat_bytes = @as(usize, geo.fat_sectors) * sector_size;
     try std.testing.expectEqualSlices(u8, fat[0..fat_bytes], fat[fat_bytes..][0..fat_bytes]);
+}
+
+test "sizes the volume from its contents with FAT16 geometry and slack" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(usize, minimum_image_bytes), imageBytes(&.{}));
+    const small = [_]File{.{ .path = "EFI/BOOT/BOOTX64.EFI", .data = "x" }};
+    try std.testing.expectEqual(@as(usize, minimum_image_bytes), imageBytes(&small));
+    const empty = try buildImage(allocator, imageBytes(&small), "ZIGOS", 0, &small);
+    allocator.free(empty);
+
+    const payload = try allocator.alloc(u8, 9 * mib + 123);
+    defer allocator.free(payload);
+    @memset(payload, 0xA5);
+    const files = [_]File{.{ .path = "EFI/BOOT/BOOTX64.EFI", .data = payload }};
+    const size = imageBytes(&files);
+    try std.testing.expectEqual(@as(usize, 11 * mib), size);
+    const geo = try geometry(size);
+    try std.testing.expect(geo.clusters * geo.cluster_bytes() >= payload.len + mib);
+    const image = try buildImage(allocator, size, "ZIGOS", 0, &files);
+    allocator.free(image);
 }
 
 test "rejects names outside 8.3 and duplicate paths" {

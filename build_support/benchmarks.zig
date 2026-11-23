@@ -63,11 +63,7 @@ pub fn addHostBenchmarks(b: *std.Build) void {
             .optimize = .fast,
         });
         if (benchmark.boot_options) {
-            const options = b.addOptions();
-            options.addOption(shared.BootProfile, "boot_profile", .zigos_native);
-            options.addOption(shared.KernelRole, "kernel_role", .production);
-            options.addOption(shared.SmokeFaultMode, "smoke_fault_mode", .none);
-            imported_module.addOptions("build_options", options);
+            imported_module.addOptions("build_options", shared.kernelOptions(b, .zigos_native, .production));
         }
         for (benchmark.imports) |dependency| {
             imported_module.addImport(dependency.name, b.createModule(.{
@@ -101,11 +97,7 @@ pub fn addSyscallDispatchBenchmark(b: *std.Build, userspace_images: @import("use
     module.addImport("userspace_wire", wire.userspace_wire);
     module.addImport("userspace_archive", userspace_images.production_archive_module);
     module.addImport("production_artifact_manifest", userspace_images.production_manifest_module);
-    const options = b.addOptions();
-    options.addOption(shared.BootProfile, "boot_profile", .zigos_native);
-    options.addOption(shared.KernelRole, "kernel_role", .production);
-    options.addOption(shared.SmokeFaultMode, "smoke_fault_mode", .none);
-    module.addOptions("build_options", options);
+    module.addOptions("build_options", shared.kernelOptions(b, .zigos_native, .production));
     const tool = b.createModule(.{
         .root_source_file = b.path("tools/benchmark_syscall_dispatch.zig"),
         .target = target,

@@ -14,14 +14,14 @@ const ci = @import("ci.zig");
 const usage =
     \\Usage: zig build tool -- COMMAND [ARGUMENTS]
     \\
-    \\Media:    clean-build, build-native-store, build-efi-iso, build-grub-iso,
-    \\          check-efi-image, check-multiboot2-image, check-production-boot-log,
+    \\Media:    clean-build, build-native-store, build-efi-iso, build-cmdline,
+    \\          check-efi-image, check-production-boot-log,
     \\          test-production-boot-log-checker, prepare-unified-efi-test
     \\Source:   fmt-check, lint-zig, lint-actions, generate-unicode
     \\Host:     setup-deps, ci-verify-toolchain, ci-init-jj, ci-enable-kvm,
     \\          ci-setup-efi-tools, ci-install-linters, ci-render-summary
-    \\QEMU:     qemu-harness, qemu-peer-relay, run-zigos-native-smoke, run-uefi-boot-test,
-    \\          run-x86-64-kernel-smoke, run-long-mode-entry-smoke, run-native-crypto-smoke,
+    \\QEMU:     qemu-harness, qemu-peer-relay, run-headless-qemu, run-with-qemu-boot-iso,
+    \\          run-zigos-native-smoke, run-uefi-boot-test, run-native-crypto-smoke,
     \\          run-high-half-smoke, run-mapping-xstate-smoke, run-ap-cache-rejection-smoke,
     \\          run-smp-cache-enabled-match-smoke, run-storage-durability-qemu,
     \\          run-sync-two-node-qemu, run-tpm2-qemu, run-unified-efi-qemu,
@@ -55,7 +55,7 @@ fn dispatch(ctx: *common.Context, command: []const u8, args: []const []const u8)
     if (std.mem.eql(u8, command, "generate-unicode")) return unicode.run(ctx, args);
     if (std.mem.eql(u8, command, "prepare-unified-efi-test")) return efi_fixture.run(ctx, args);
     if (std.mem.eql(u8, command, "qemu-peer-relay")) return relay.run(ctx, args);
-    if (std.mem.eql(u8, command, "clean-build") or std.mem.startsWith(u8, command, "build-") or std.mem.eql(u8, command, "check-efi-image") or std.mem.eql(u8, command, "check-multiboot2-image") or std.mem.eql(u8, command, "check-production-boot-log") or std.mem.eql(u8, command, "test-production-boot-log-checker")) return images.run(ctx, command, args);
+    if (std.mem.eql(u8, command, "clean-build") or std.mem.startsWith(u8, command, "build-") or std.mem.eql(u8, command, "check-efi-image") or std.mem.eql(u8, command, "check-production-boot-log") or std.mem.eql(u8, command, "test-production-boot-log-checker")) return images.run(ctx, command, args);
     if (std.mem.startsWith(u8, command, "lint-") or std.mem.eql(u8, command, "fmt-check")) return checks.run(ctx, command, args);
     if (std.mem.eql(u8, command, "qemu-harness") or std.mem.startsWith(u8, command, "run-") or std.mem.eql(u8, command, "capture-kernel-benchmark")) return qemu.run(ctx, command, args);
     if (std.mem.indexOf(u8, command, "nuc15crsu7") != null) return hardware.run(ctx, command, args);

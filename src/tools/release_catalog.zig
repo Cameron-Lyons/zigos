@@ -47,14 +47,6 @@ pub const forbidden_verification_paths = [_][]const u8{
     "build/os-verification.iso",
     "zig-out/bin/kernel-benchmark.elf",
     "zig-out/bin/kernel-recovery.elf",
-    "zig-out/bin/kernel-zigos-native-rollback-slot-failure.elf",
-    "zig-out/bin/kernel-zigos-native-storage-durability.elf",
-    "zig-out/bin/kernel-zigos-native-tampered-artifact-manifest.elf",
-    "zig-out/bin/kernel-zigos-native-tampered-bootloader-measurement.elf",
-    "zig-out/bin/kernel-zigos-native-tampered-driver-set.elf",
-    "zig-out/bin/kernel-zigos-native-tampered-kernel.elf",
-    "zig-out/bin/kernel-zigos-native-tampered-policy.elf",
-    "zig-out/bin/kernel-zigos-native-tampered-userspace-image.elf",
     "zig-out/bin/kernel-zigos-native-verification.elf",
     "zig-out/bin/userspace-mmu-isolation-proof.elf",
     "zig-out/bin/userspace-notes-daily.elf",
@@ -224,8 +216,8 @@ comptime {
     if (release_evidence_names.len != 10) {
         @compileError("release evidence catalog must contain exactly ten files");
     }
-    if (forbidden_verification_paths.len != 17) {
-        @compileError("forbidden verification catalog must contain exactly 17 artifacts");
+    if (forbidden_verification_paths.len != 9) {
+        @compileError("forbidden verification catalog must contain exactly nine artifacts");
     }
 
     assertSafeSortedUnique("production base target catalog", production_base_target_paths, .path);
@@ -299,7 +291,7 @@ test "forbidden verification artifacts are explicit and disjoint" {
     try requireExactForbiddenVerificationPaths(&forbidden_verification_paths);
     try std.testing.expect(isForbiddenVerificationPath("build/os-verification.iso"));
     try std.testing.expect(isForbiddenVerificationPath(
-        "zig-out/bin/kernel-zigos-native-tampered-kernel.elf",
+        "zig-out/bin/kernel-zigos-native-verification.elf",
     ));
     try std.testing.expect(!isForbiddenVerificationPath("zig-out/bin/kernel-zigos-native.elf"));
 }

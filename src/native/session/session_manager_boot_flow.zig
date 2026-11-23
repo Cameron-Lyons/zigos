@@ -938,7 +938,7 @@ pub const SessionManager = struct {
     }
 
     pub fn boot(self: *SessionManager) void {
-        if (smokeFaultModeIs("storage_durability")) {
+        if (@import("../../kernel/config.zig").smokeFaultIs(.storage_durability)) {
             self.bootStorageDurabilityProof();
             return;
         }
@@ -1646,12 +1646,6 @@ fn printNumber(value: u64) void {
 
 fn bootFailureCode(err: anyerror) u32 {
     return @truncate(native_util.fnv1a64(@errorName(err)));
-}
-
-fn smokeFaultModeIs(comptime mode_name: []const u8) bool {
-    if (builtin.target.os.tag != .freestanding) return false;
-    const config = @import("../../kernel/config.zig");
-    return std.mem.eql(u8, @tagName(config.smokeFaultMode()), mode_name);
 }
 
 test "session reset execution preflight preserves owned services until durable transport drains" {

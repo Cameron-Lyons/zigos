@@ -17,6 +17,8 @@ pub const cpu_umip_enabled = "ZIGOS:CPU:UMIP:ENABLED";
 pub const cpu_pge_enabled = "ZIGOS:CPU:PGE:ENABLED";
 pub const cpu_syscall_enabled = "ZIGOS:CPU:SYSCALL:ENABLED";
 pub const cpu_fred_enabled = "ZIGOS:CPU:FRED:ENABLED";
+/// Printed after either FRED or SYSCALL entry is armed.
+pub const cpu_native_entry_ready = "ZIGOS:CPU:NATIVE_ENTRY:READY";
 pub const cpu_pcid_enabled = "ZIGOS:CPU:PCID:ENABLED";
 pub const cpu_pcid_software_fallback = "ZIGOS:CPU:PCID:SOFTWARE_FALLBACK";
 pub const cpu_pcid_ready = "ZIGOS:CPU:PCID:READY";

@@ -23,11 +23,8 @@ pub fn addTestArtifacts(
     else
         null;
     const wire_modules = native_modules.addTargetWireModules(b, test_target, optimize);
-    const test_modules = native_modules.addUserspaceRuntimeHostTestModules(b, optimize);
-    const kernel_options = b.addOptions();
-    kernel_options.addOption(shared.BootProfile, "boot_profile", .zigos_native);
-    kernel_options.addOption(shared.KernelRole, "kernel_role", .production);
-    kernel_options.addOption(shared.SmokeFaultMode, "smoke_fault_mode", .none);
+    const userspace_runtime = native_modules.addUserspaceRuntimeHostTestModule(b, optimize);
+    const kernel_options = shared.kernelOptions(b, .zigos_native, .production);
 
     const host_tests_module = b.createModule(.{
         .root_source_file = b.path("src/native_host_test.zig"),
@@ -65,7 +62,7 @@ pub fn addTestArtifacts(
 
     const userspace_runtime_tests = b.addTest(.{
         .name = "userspace-runtime-tests",
-        .root_module = test_modules.runtime,
+        .root_module = userspace_runtime,
     });
 
     return .{

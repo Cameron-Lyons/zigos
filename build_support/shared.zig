@@ -11,30 +11,25 @@ pub const KernelRole = enum {
     verification,
 };
 
-pub const SmokeFaultMode = enum {
-    none,
-    tampered_artifact_manifest,
-    tampered_bootloader_measurement,
-    tampered_kernel,
-    tampered_userspace_image,
-    tampered_policy,
-    tampered_driver_set,
-    rollback_slot_failure,
-    storage_durability,
-};
+/// The `build_options` module every kernel, probe and kernel-logic test imports.
+pub fn kernelOptions(b: *std.Build, boot_profile: BootProfile, kernel_role: KernelRole) *std.Build.Step.Options {
+    const options = b.addOptions();
+    options.addOption(BootProfile, "boot_profile", boot_profile);
+    options.addOption(KernelRole, "kernel_role", kernel_role);
+    return options;
+}
 
 pub const KernelArtifact = struct {
-    compile_step: *std.Build.Step.Compile,
+    /// The stripped ELF that firmware measures, published to zig-out/bin.
     output_file: std.Build.LazyPath,
-    boot_payload: std.Build.LazyPath,
     install_step: *std.Build.Step,
-    debug_install_step: *std.Build.Step,
     output_path: std.Build.LazyPath,
     kernel_role: KernelRole,
-    bootloader_source_path: []const u8,
     qemu_boot_iso_path: std.Build.LazyPath,
 };
 
+pub const bootloader_source_path = "src/boot/efi_stub.zig";
+pub const qemu_cmdline_path = "src/boot/cmdline-qemu.txt";
 pub const native_store_image_path = "build/native-store.img";
 pub const native_store_smoke_image_path = "build/native-store-smoke.img";
 pub const native_store_spec_image_path = "build/native-store-spec.img";

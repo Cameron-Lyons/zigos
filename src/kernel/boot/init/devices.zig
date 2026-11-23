@@ -86,9 +86,8 @@ pub fn init() void {
         handoff.commandLineHasFlag(info, "model_inventory")
     else
         false;
-    device_inventory.setModelDeviceInventory(
-        shouldEnableModelDeviceInventory(model_via_cmdline),
-    );
+    // Missing hardware is an unavailable device, never implicit model consent.
+    device_inventory.setModelDeviceInventory(model_via_cmdline);
     if (!device_inventory.recordForClass(.compositor_policy).detected) {
         device_inventory.registerDetected(.compositor_policy, 0xC0DE_9001, .platform_policy, false);
     }
@@ -128,19 +127,6 @@ pub fn startGraphicsDataplane() bool {
     registerFramebufferWindow(device_id);
     graphics_started = true;
     return true;
-}
-
-fn shouldEnableModelDeviceInventory(model_via_cmdline: bool) bool {
-    // Missing hardware is an unavailable device, never implicit model consent.
-    return config.smokeFaultMode() != .none or model_via_cmdline;
-}
-
-test "absent hardware does not implicitly enable modeled device inventory" {
-    device_inventory.reset();
-    defer device_inventory.reset();
-    try std.testing.expect(!device_inventory.recordForClass(.network_adapter).detected);
-    try std.testing.expect(!shouldEnableModelDeviceInventory(false));
-    try std.testing.expect(shouldEnableModelDeviceInventory(true));
 }
 
 noinline fn reportHardwareFailure(

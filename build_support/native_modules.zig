@@ -5,23 +5,8 @@ pub const WireModules = struct {
     userspace_wire: *std.Build.Module,
 };
 
-pub const UserspaceRuntimeModules = struct {
-    wire: WireModules,
-    abi: *std.Build.Module,
-    bootstrap_mailbox: *std.Build.Module,
-    service_protocol: *std.Build.Module,
-    runtime: *std.Build.Module,
-};
-
 pub fn addWireModules(b: *std.Build) WireModules {
     return addWireModulesFor(b, null, null);
-}
-
-pub fn addHostWireModules(
-    b: *std.Build,
-    optimize: std.lang.Optimize,
-) WireModules {
-    return addTargetWireModules(b, b.graph.host, optimize);
 }
 
 pub fn addTargetWireModules(
@@ -54,28 +39,28 @@ fn addWireModulesFor(
     };
 }
 
-pub fn addUserspaceRuntimeModules(
+pub fn addUserspaceRuntimeModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
-) UserspaceRuntimeModules {
-    return addUserspaceRuntimeModulesFor(b, null, null, target, optimize);
+) *std.Build.Module {
+    return addUserspaceRuntimeModuleFor(b, null, null, target, optimize);
 }
 
-pub fn addUserspaceRuntimeHostTestModules(
+pub fn addUserspaceRuntimeHostTestModule(
     b: *std.Build,
     optimize: std.lang.Optimize,
-) UserspaceRuntimeModules {
-    return addUserspaceRuntimeModulesFor(b, b.graph.host, optimize, b.graph.host, optimize);
+) *std.Build.Module {
+    return addUserspaceRuntimeModuleFor(b, b.graph.host, optimize, b.graph.host, optimize);
 }
 
-fn addUserspaceRuntimeModulesFor(
+fn addUserspaceRuntimeModuleFor(
     b: *std.Build,
     support_target: ?std.Build.ResolvedTarget,
     support_optimize: ?std.lang.Optimize,
     runtime_target: std.Build.ResolvedTarget,
     runtime_optimize: std.lang.Optimize,
-) UserspaceRuntimeModules {
+) *std.Build.Module {
     const wire = addWireModulesFor(b, support_target, support_optimize);
     const abi = b.createModule(.{
         .root_source_file = b.path("src/native/core/abi.zig"),
@@ -94,13 +79,7 @@ fn addUserspaceRuntimeModulesFor(
         .optimize = runtime_optimize,
     });
     addRuntimeImports(runtime, abi, bootstrap_mailbox, service_protocol);
-    return .{
-        .wire = wire,
-        .abi = abi,
-        .bootstrap_mailbox = bootstrap_mailbox,
-        .service_protocol = service_protocol,
-        .runtime = runtime,
-    };
+    return runtime;
 }
 
 fn addServiceProtocolModule(

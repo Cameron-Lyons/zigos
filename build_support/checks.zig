@@ -20,10 +20,8 @@ pub fn addCheckSteps(
     zig_test_roots_step.dependOn(&zig_test_roots_cmd.step);
 
     const host_tests_step = b.step("host-tests", "Run host-side unit tests for native logic and userspace runtime");
-    const host_tool_tests = host_tools.addTests(b);
-    b.step("host-tool-tests", "Test native file, release, hardware and QEMU utilities").dependOn(&host_tool_tests.step);
-    const relay_tests = host_tools.addRelayTests(b);
-    b.step("qemu-peer-relay-tests", "Test QEMU relay framing, confirmation loss and live socket cleanup").dependOn(&relay_tests.step);
+    const host_tool_tests = host_tools.addTests(b, optimize);
+    b.step("host-tool-tests", "Test native file, release, hardware, QEMU and peer relay utilities").dependOn(&host_tool_tests.step);
     host_tests_step.dependOn(&host_tool_tests.step);
     host_tests_step.dependOn(&zig_test_roots_cmd.step);
     host_tests_step.dependOn(&test_artifacts.run_host_tests.step);
@@ -182,7 +180,7 @@ pub fn addVerifyStep(
     verify_smoke: bool,
     verify_benchmark: bool,
 ) *std.Build.Step {
-    const verify_step = b.step("verify", "Run local CI-aligned checks: lint, kernel build, host tests, spec tests, and production-readiness checks; pass -Dverify-smoke=true and/or -Dverify-benchmark=true for QEMU gates");
+    const verify_step = b.step("verify", "Run local CI-aligned checks: lint, kernel build, host tests, spec tests, production-readiness checks and the QEMU architecture probes; pass -Dverify-smoke=true and/or -Dverify-benchmark=true for the native smoke and benchmark");
     verify_step.dependOn(checks.lint);
     verify_step.dependOn(kernel_step);
     verify_step.dependOn(checks.host_tests);
