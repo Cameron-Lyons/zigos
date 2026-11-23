@@ -1,5 +1,4 @@
 const std = @import("std");
-const contract = @import("../session/contract.zig");
 const component_abi_schema = @import("../services/component_abi_schema.zig");
 const id_index = @import("../core/id_index.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -21,7 +20,7 @@ pub const FLAG_MMU_PROOF_PROBE = userspace_flags.FLAG_MMU_PROOF_PROBE;
 pub const FLAG_NX_PROOF_PROBE = userspace_flags.FLAG_NX_PROOF_PROBE;
 pub const FLAG_GP_PROOF_PROBE = userspace_flags.FLAG_GP_PROOF_PROBE;
 
-pub const SERVICE_CLASS_COUNT: usize = @typeInfo(contract.ServiceClass).@"enum".field_names.len;
+pub const SERVICE_CLASS_COUNT: usize = @typeInfo(service_catalog.ServiceClass).@"enum".field_names.len;
 pub const ServiceClassSlotIndex = u8;
 pub const RuntimeBundleIdLength = u6;
 pub const RuntimeRoleTag = u16;
@@ -50,7 +49,7 @@ pub const AddressSpaceGroup = enum(u8) {
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
-    for (@typeInfo(contract.ServiceClass).@"enum".field_values, 0..) |field, class_index| {
+    for (@typeInfo(service_catalog.ServiceClass).@"enum".field_values, 0..) |field, class_index| {
         if (field != class_index) {
             @compileError("service classes must remain dense for direct userspace registry lookup");
         }
@@ -166,7 +165,7 @@ pub const BuildImageSpec = struct {
     image: ImageSpec,
     artifact_name: []const u8,
     source_path: []const u8,
-    service_class: ?contract.ServiceClass = null,
+    service_class: ?service_catalog.ServiceClass = null,
     service_kind: userspace_mailbox.ServiceKind = .generic,
 };
 
@@ -188,7 +187,7 @@ pub const StandaloneImageSpec = struct {
     contract_flags: u32 = 0,
 };
 
-fn serviceBuildImageSpec(comptime class: contract.ServiceClass, comptime component_class: ComponentClass) BuildImageSpec {
+fn serviceBuildImageSpec(comptime class: service_catalog.ServiceClass, comptime component_class: ComponentClass) BuildImageSpec {
     const entry = service_catalog.entryForClass(class).?;
     const catalog_image = entry.userspace_image.?;
     const publisher = Publisher.fromName(catalog_image.publisher) orelse
@@ -460,7 +459,7 @@ fn indexInCatalog(
     return spec_index;
 }
 
-pub fn addressSpaceGroupForServiceClass(class: contract.ServiceClass) ?AddressSpaceGroup {
+pub fn addressSpaceGroupForServiceClass(class: service_catalog.ServiceClass) ?AddressSpaceGroup {
     return switch (class) {
         .session_manager,
         .policy_mediation,
@@ -556,7 +555,7 @@ pub fn stackTopForBundle(bundle_id: []const u8) u64 {
     return userspace_layout.stackTopForSlot(slot);
 }
 
-pub fn findByServiceClass(class: contract.ServiceClass) ?*const ImageSpec {
+pub fn findByServiceClass(class: service_catalog.ServiceClass) ?*const ImageSpec {
     const spec_index = publicServiceClassSlot(service_class_slots[serviceClassIndex(class)]) orelse return null;
     if (spec_index >= production_boot_image_specs.len) {
         native_util.impossibleByInvariant("boot service class index points outside registry specs");
@@ -601,8 +600,8 @@ fn debugAssertBundleIndexMissAbsent(specs: []const ImageSpec, bundle_id: []const
 
 fn buildServiceClassSlots() ServiceClassSlots {
     var slots = emptyServiceClassSlots();
-    inline for (@typeInfo(contract.ServiceClass).@"enum".field_values) |field| {
-        const class: contract.ServiceClass = @fromBackingInt(@intCast(field));
+    inline for (@typeInfo(service_catalog.ServiceClass).@"enum".field_values) |field| {
+        const class: service_catalog.ServiceClass = @fromBackingInt(@intCast(field));
         if (addressSpaceGroupForServiceClass(class)) |group| {
             setServiceClassSlot(&slots, class, @backingInt(group));
         }
@@ -614,14 +613,14 @@ fn emptyServiceClassSlots() ServiceClassSlots {
     return @as([SERVICE_CLASS_COUNT]ServiceClassSlotIndex, @splat(NO_SERVICE_CLASS_SLOT));
 }
 
-fn setServiceClassSlot(slots: *ServiceClassSlots, class: contract.ServiceClass, spec_index: usize) void {
+fn setServiceClassSlot(slots: *ServiceClassSlots, class: service_catalog.ServiceClass, spec_index: usize) void {
     if (spec_index >= NO_SERVICE_CLASS_SLOT) @compileError("userspace service class slot exceeds compact range");
     const class_index = serviceClassIndex(class);
     if (slots[class_index] != NO_SERVICE_CLASS_SLOT) @compileError("userspace registry contains duplicate service classes");
     slots[class_index] = @intCast(spec_index);
 }
 
-fn serviceClassIndex(class: contract.ServiceClass) usize {
+fn serviceClassIndex(class: service_catalog.ServiceClass) usize {
     return @backingInt(class);
 }
 
@@ -629,7 +628,7 @@ fn publicServiceClassSlot(slot: ServiceClassSlotIndex) ?usize {
     return if (slot == NO_SERVICE_CLASS_SLOT) null else slot;
 }
 
-fn buildImageByServiceClass(class: contract.ServiceClass) ?*const BuildImageSpec {
+fn buildImageByServiceClass(class: service_catalog.ServiceClass) ?*const BuildImageSpec {
     const spec_index = publicServiceClassSlot(service_class_slots[serviceClassIndex(class)]) orelse return null;
     return &production_build_image_specs[spec_index];
 }

@@ -10,8 +10,7 @@ const service_authority = @import("../../native/services/service_authority.zig")
 const service_registry = @import("../../native/services/service_registry.zig");
 const secure_pasteboard = @import("../../native/services/secure_pasteboard.zig");
 const secret_vault_service = @import("../../native/services/secret_vault_service.zig");
-const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
-const userspace_service_ipc = @import("../../native/services/userspace_service_ipc.zig");
+const userspace_service_ipc = @import("../fixtures/userspace_service_ipc.zig");
 
 test "service host tests import native service modules" {
     std.testing.refAllDecls(@import("../../native/services/identity_enrollment.zig"));
@@ -41,6 +40,5 @@ test "service host tests import native service modules" {
     std.testing.refAllDecls(service_registry);
     std.testing.refAllDecls(secure_pasteboard);
     std.testing.refAllDecls(secret_vault_service);
-    std.testing.refAllDecls(typed_component_abi);
     std.testing.refAllDecls(userspace_service_ipc);
 }

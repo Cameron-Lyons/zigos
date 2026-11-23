@@ -1,18 +1,18 @@
 const std = @import("std");
-const abi = @import("../core/abi.zig");
-const ids = @import("../core/ids.zig");
-const capability = @import("../kernel_api/capability.zig");
-const component_abi_schema = @import("component_abi_schema.zig");
-const component_port = @import("../kernel_api/component_port.zig");
-const endpoint = @import("../kernel_api/endpoint.zig");
-const native_kernel = @import("../kernel_api/native_kernel.zig");
-const principal = @import("../core/principal.zig");
-const shared_memory = @import("../kernel_api/shared_memory.zig");
-const syscall_surface = @import("../kernel_api/syscall_surface.zig");
-const units = @import("../core/units.zig");
-const generated_image_fixtures = if (@import("builtin").is_test) @import("../task/generated_image_fixtures.zig") else struct {};
-const task_runtime = @import("../task/task_runtime.zig");
-const service_protocol = @import("../task/userspace_service_protocol.zig");
+const abi = @import("../../native/core/abi.zig");
+const ids = @import("../../native/core/ids.zig");
+const capability = @import("../../native/kernel_api/capability.zig");
+const component_abi_schema = @import("../../native/services/component_abi_schema.zig");
+const component_port = @import("../../native/kernel_api/component_port.zig");
+const endpoint = @import("../../native/kernel_api/endpoint.zig");
+const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
+const principal = @import("../../native/core/principal.zig");
+const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
+const syscall_surface = @import("../../native/kernel_api/syscall_surface.zig");
+const units = @import("../../native/core/units.zig");
+const generated_image_fixtures = if (@import("builtin").is_test) @import("../../native/task/generated_image_fixtures.zig") else struct {};
+const task_runtime = @import("../../native/task/task_runtime.zig");
+const service_protocol = @import("../../native/task/userspace_service_protocol.zig");
 
 pub const ServiceKind = service_protocol.ServiceKind;
 

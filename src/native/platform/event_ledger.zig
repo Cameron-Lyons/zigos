@@ -1,7 +1,7 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
-const contract = @import("../session/contract.zig");
+const service_catalog = @import("../session/service_catalog.zig");
 const denial_explanation = @import("../policy/denial_explanation.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const immutable_base = @import("immutable_base.zig");
@@ -204,7 +204,7 @@ pub const Event = struct {
     workspace_id: u64 = 0,
     related_id: u64 = 0,
     detail_code: u32 = 0,
-    service_class: contract.ServiceClass = .task_runtime,
+    service_class: service_catalog.ServiceClass = .task_runtime,
     permission_kind: ?manifest.PermissionKind = null,
     allowed: bool = false,
     denial_reason: abi.DenialReason = .none,
@@ -253,7 +253,7 @@ const EventInput = struct {
     workspace_id: u64 = 0,
     related_id: u64 = 0,
     detail_code: u32 = 0,
-    service_class: contract.ServiceClass = .task_runtime,
+    service_class: service_catalog.ServiceClass = .task_runtime,
     permission_kind: ?manifest.PermissionKind = null,
     allowed: bool = false,
     denial_reason: abi.DenialReason = .none,
@@ -616,7 +616,7 @@ pub const Ledger = struct {
 
     pub fn recordProcessCrash(
         self: *Ledger,
-        service_class: contract.ServiceClass,
+        service_class: service_catalog.ServiceClass,
         service_subject: principal.PrincipalId,
         tick: u64,
         code: u32,
@@ -634,7 +634,7 @@ pub const Ledger = struct {
 
     pub fn recordDriverRestart(
         self: *Ledger,
-        service_class: contract.ServiceClass,
+        service_class: service_catalog.ServiceClass,
         service_subject: principal.PrincipalId,
         device_capability_id: u64,
         tick: u64,
@@ -2193,7 +2193,7 @@ const PersistentEventRecord = extern struct {
         event.workspace_id = self.workspace_id;
         event.related_id = self.related_id;
         event.detail_code = self.detail_code;
-        event.service_class = std.enums.fromInt(contract.ServiceClass, self.service_class) orelse return error.CorruptState;
+        event.service_class = std.enums.fromInt(service_catalog.ServiceClass, self.service_class) orelse return error.CorruptState;
         event.permission_kind = if (self.permission_kind == permission_kind_none)
             null
         else

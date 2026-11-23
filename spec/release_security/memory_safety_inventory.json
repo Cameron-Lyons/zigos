@@ -2120,7 +2120,7 @@
       ]
     },
     {
-      "path": "src/native/services/userspace_service_ipc.zig",
+      "path": "src/tests/fixtures/userspace_service_ipc.zig",
       "categories": [
         "pointer-int-conversion"
       ],
@@ -2314,7 +2314,7 @@
       "review_state": "release-reviewed",
       "mitigations": [
         "provider context casts are confined to scheduler provider adapters",
-        "Claims retain their exact shared-table owner and object generation, engine, queue owner, broker task and queue generation through cancellation. Release and whole-task retirement preflight matching completion and every target pin before mutation; pending work keeps engines and backing owned. Cancelled drains release only completion-qualified claims, queue replacement cannot strand active work, and owner teardown requires no active claims. Hosted integration exercises real Runtime termination and Kernel resource retirement with owned dirty frame backing; hardware DMA completion remains unverified."
+        "The planner holds no claims, shared-memory references or queue state; engine claims and zero-copy attachments are owned by the userspace scheduler and the shared-memory table."
       ],
       "tests": [
         "zig build host-tests"
@@ -2328,7 +2328,7 @@
       "owner": "scheduler-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "Host-only callbacks cast the aligned stack-owned FrameOwner, validate one exact physical run, and reject duplicate allocation or foreign byte access. Release asserts complete erasure before restoring capacity. Actual Runtime termination invokes the real Kernel retirement hook; pending queue completion keeps frame ownership and the original generational pin intact, and matching completion releases it exactly once. The test imports Kernel only from the src-root hosted aggregator so archive inspection does not acquire kernel dependencies."
+        "Host-only callbacks cast the aligned stack-owned FrameOwner, validate one exact physical run, and reject duplicate allocation or foreign byte access. Release asserts complete erasure before restoring capacity. Actual Runtime termination invokes the real Kernel retirement hook; an attached accelerator keeps frame ownership and the original generational pin intact, and detach releases it exactly once. The test imports Kernel only from the src-root hosted aggregator so archive inspection does not acquire kernel dependencies."
       ],
       "tests": [
         "zig build host-tests"

@@ -3,7 +3,7 @@ const spec_support = @import("support.zig");
 const accelerator_scheduler = @import("../../native/task/accelerator_scheduler.zig");
 const background_dispatch = @import("../../native/task/background_dispatch.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
-const contract = @import("../../native/session/contract.zig");
+const service_catalog = @import("../../native/session/service_catalog.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const humane_permissions = @import("../../native/policy/humane_permissions.zig");
 const indexing_service = @import("../../kernel/boot/benchmark/models/indexing_service.zig");
@@ -655,7 +655,7 @@ pub fn structuredServicesAndDiagnosticsStayRedacted() !void {
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqual(@as(u64, 500), results[0].object_id);
 
-    var scheduler = accelerator_scheduler.Controller.init();
+    const scheduler = accelerator_scheduler.Controller.init();
     var notifications = notification_center.Center.init();
     var media = media_print_service.Service.init();
     const source = spec_support.app(70);
@@ -677,17 +677,16 @@ pub fn structuredServicesAndDiagnosticsStayRedacted() !void {
         .printer_identity = "printer://lobby",
         .visibility = .user,
     }, &scheduler, &notifications, 21);
-    _ = try media.complete(export_job.id, &scheduler, &notifications, 30);
-    _ = try media.complete(print_job.id, &scheduler, &notifications, 31);
+    _ = try media.complete(export_job.id, &notifications, 30);
+    _ = try media.complete(print_job.id, &notifications, 31);
 
     try std.testing.expectEqual(accelerator_scheduler.Engine.media, export_job.engine);
     try std.testing.expectEqual(media_print_service.JobState.completed, print_job.state);
     try std.testing.expectEqual(notification_center.Reason.print_complete, notifications.latestVisible(31).?.reason);
-    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 
     var ledger = event_ledger.Ledger.init();
     try ledger.recordPermissionDecision(spec_support.user(8), 503, .screen_capture, false, .policy_denied, 31, "screen capture blocked", true);
-    try ledger.recordDriverRestart(contract.ServiceClass.media_print_helpers, spec_support.service(71), 9, 32, "printer helper restart");
+    try ledger.recordDriverRestart(service_catalog.ServiceClass.media_print_helpers, spec_support.service(71), 9, 32, "printer helper restart");
     try ledger.recordSyncConflict(spec_support.user(8), 11, 33, "documents/itinerary.md conflict", true);
     try ledger.recordSuspiciousAppBehavior(spec_support.app(8), 503, 34, 0xBAD1, "clipboard scrape then network", true);
     var export_buffer: [DIAGNOSTIC_EXPORT_BUFFER_BYTES]u8 = undefined;

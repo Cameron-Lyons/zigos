@@ -35,17 +35,6 @@ pub const InterfaceKey = enum(u8) {
     index_search,
     sync_replication,
     media_print,
-    ai_inference,
-    ai_model_registry,
-    privacy_budget,
-    diagnostics_export,
-    consent_receipts,
-    permission_lease,
-    data_rights,
-    identity_session,
-    agent_delegation,
-    accessibility_profile,
-    background_activity,
     secure_pasteboard,
     object_resilience,
     sensitive_capture,
@@ -69,24 +58,13 @@ pub const InterfaceId = enum(u16) {
     index_search = 0x100B,
     sync_replication = 0x100C,
     media_print = 0x100D,
-    ai_inference = 0x100E,
-    ai_model_registry = 0x100F,
-    privacy_budget = 0x1010,
-    diagnostics_export = 0x1011,
-    consent_receipts = 0x1012,
-    permission_lease = 0x1013,
-    data_rights = 0x1014,
-    identity_session = 0x1015,
-    agent_delegation = 0x1016,
-    accessibility_profile = 0x1017,
-    background_activity = 0x1018,
-    secure_pasteboard = 0x1019,
-    object_resilience = 0x101A,
-    sensitive_capture = 0x101B,
-    secret_vault = 0x101C,
-    attention_broker = 0x101D,
-    task_lifecycle = 0x101E,
-    personal_context = 0x101F,
+    secure_pasteboard = 0x100E,
+    object_resilience = 0x100F,
+    sensitive_capture = 0x1010,
+    secret_vault = 0x1011,
+    attention_broker = 0x1012,
+    task_lifecycle = 0x1013,
+    personal_context = 0x1014,
 };
 
 pub const OperationId = enum(u16) {
@@ -104,71 +82,36 @@ pub const OperationId = enum(u16) {
     package_update = 0x0602,
     package_rollback = 0x0603,
     package_remove = 0x0604,
-    ai_authorize = 0x0701,
-    ai_run_local = 0x0702,
-    ai_model_register = 0x0D01,
-    ai_model_attest = 0x0D02,
-    ai_model_revoke = 0x0D03,
-    privacy_authorize_egress = 0x0801,
-    privacy_query_budget = 0x0802,
-    diagnostics_prepare_export = 0x0901,
-    diagnostics_share_remote = 0x0902,
-    consent_record = 0x0A01,
-    consent_revoke = 0x0A02,
-    permission_lease_issue = 0x0B01,
-    permission_lease_renew = 0x0B02,
-    permission_lease_expire = 0x0B03,
-    data_export_prepare = 0x0C01,
-    data_delete_request = 0x0C02,
-    data_delete_receipt = 0x0C03,
-    identity_session_authorize = 0x0E01,
-    identity_session_step_up = 0x0E02,
-    identity_session_revoke = 0x0E03,
-    identity_credential_register = 0x0E04,
-    identity_credential_assert = 0x0E05,
-    identity_credential_recover = 0x0E06,
-    identity_credential_revoke = 0x0E07,
-    agent_authorize = 0x0F01,
-    agent_record_action = 0x0F02,
-    agent_revoke = 0x0F03,
-    agent_bind_session = 0x0F04,
-    agent_kill_switch = 0x0F05,
-    accessibility_profile_get = 0x1001,
-    accessibility_profile_apply = 0x1002,
-    accessibility_profile_audit = 0x1003,
-    background_authorize = 0x1101,
-    background_record = 0x1102,
-    background_complete = 0x1103,
-    pasteboard_offer = 0x1201,
-    pasteboard_read = 0x1202,
-    pasteboard_revoke = 0x1203,
-    object_backup_prepare = 0x1301,
-    object_restore_authorize = 0x1302,
-    object_backup_revoke = 0x1303,
-    index_upsert = 0x1401,
-    index_query = 0x1402,
-    semantic_index_query = 0x1403,
-    sync_device_enroll = 0x1501,
-    sync_workspace_replicate = 0x1502,
-    sync_conflict_review = 0x1503,
-    sync_conflict_resolve = 0x1504,
-    sync_transport_frame = 0x1505,
-    capture_start = 0x1601,
-    capture_sample = 0x1602,
-    capture_stop = 0x1603,
-    secret_import = 0x1701,
-    secret_lend = 0x1702,
-    secret_rotate = 0x1703,
-    secret_revoke = 0x1704,
-    attention_post = 0x1801,
-    attention_dismiss = 0x1802,
-    attention_query = 0x1803,
-    lifecycle_suspend = 0x1901,
-    lifecycle_resume = 0x1902,
-    lifecycle_terminate = 0x1903,
-    personal_context_lease = 0x1A01,
-    personal_context_query = 0x1A02,
-    personal_context_revoke = 0x1A03,
+    pasteboard_offer = 0x0701,
+    pasteboard_read = 0x0702,
+    pasteboard_revoke = 0x0703,
+    object_backup_prepare = 0x0801,
+    object_restore_authorize = 0x0802,
+    object_backup_revoke = 0x0803,
+    index_upsert = 0x0901,
+    index_query = 0x0902,
+    semantic_index_query = 0x0903,
+    sync_device_enroll = 0x0A01,
+    sync_workspace_replicate = 0x0A02,
+    sync_conflict_review = 0x0A03,
+    sync_conflict_resolve = 0x0A04,
+    sync_transport_frame = 0x0A05,
+    capture_start = 0x0B01,
+    capture_sample = 0x0B02,
+    capture_stop = 0x0B03,
+    secret_import = 0x0C01,
+    secret_lend = 0x0C02,
+    secret_rotate = 0x0C03,
+    secret_revoke = 0x0C04,
+    attention_post = 0x0D01,
+    attention_dismiss = 0x0D02,
+    attention_query = 0x0D03,
+    lifecycle_suspend = 0x0E01,
+    lifecycle_resume = 0x0E02,
+    lifecycle_terminate = 0x0E03,
+    personal_context_lease = 0x0F01,
+    personal_context_query = 0x0F02,
+    personal_context_revoke = 0x0F03,
 };
 
 const InterfaceSpec = struct {
@@ -201,17 +144,6 @@ pub const interface_specs = [_]InterfaceSpec{
     iface(.index_search, "zigos.index.search"),
     iface(.sync_replication, "zigos.sync.replication"),
     iface(.media_print, "zigos.media.print"),
-    iface(.ai_inference, "zigos.ai.inference"),
-    iface(.ai_model_registry, "zigos.ai.model.registry"),
-    iface(.privacy_budget, "zigos.privacy.budget"),
-    iface(.diagnostics_export, "zigos.diagnostics.export"),
-    iface(.consent_receipts, "zigos.consent.receipts"),
-    iface(.permission_lease, "zigos.permission.lease"),
-    iface(.data_rights, "zigos.data.rights"),
-    iface(.identity_session, "zigos.identity.session"),
-    iface(.agent_delegation, "zigos.agent.delegation"),
-    iface(.accessibility_profile, "zigos.accessibility.profile"),
-    iface(.background_activity, "zigos.background.activity"),
     iface(.secure_pasteboard, "zigos.secure.pasteboard"),
     iface(.object_resilience, "zigos.object.resilience"),
     iface(.sensitive_capture, "zigos.sensitive.capture"),
@@ -236,15 +168,15 @@ fn op(
     comptime interface: InterfaceKey,
     comptime id: OperationId,
     comptime name: []const u8,
-    comptime Request: type,
-    comptime Response: type,
+    comptime RequestWire: type,
+    comptime ResponseWire: type,
 ) OperationSpec {
     return .{
         .id = id,
         .interface = interface,
         .name = name,
-        .Request = Request,
-        .Response = Response,
+        .Request = RequestWire,
+        .Response = ResponseWire,
     };
 }
 
@@ -271,41 +203,6 @@ pub const operation_specs = [_]OperationSpec{
     op(.package_install, .package_update, "update", wire.PackageUpdateRequestWire, wire.PackageLifecycleResponseWire),
     op(.package_install, .package_rollback, "rollback", wire.PackageRollbackRequestWire, wire.PackageLifecycleResponseWire),
     op(.package_install, .package_remove, "remove", wire.PackageRemoveRequestWire, wire.PackageLifecycleResponseWire),
-    op(.ai_inference, .ai_authorize, "authorize", wire.AiAuthorizeRequestWire, wire.AiAuthorizeResponseWire),
-    op(.ai_inference, .ai_run_local, "run_local", wire.AiRunLocalRequestWire, wire.AiRunLocalResponseWire),
-    op(.ai_model_registry, .ai_model_register, "register", wire.AiModelRegisterRequestWire, wire.AiModelRegistryResponseWire),
-    op(.ai_model_registry, .ai_model_attest, "attest", wire.AiModelAttestRequestWire, wire.AiModelRegistryResponseWire),
-    op(.ai_model_registry, .ai_model_revoke, "revoke", wire.AiModelRevokeRequestWire, wire.AiModelRegistryResponseWire),
-    op(.privacy_budget, .privacy_authorize_egress, "authorize_egress", wire.PrivacyAuthorizeEgressRequestWire, wire.PrivacyAuthorizeEgressResponseWire),
-    op(.privacy_budget, .privacy_query_budget, "query_budget", wire.PrivacyQueryBudgetRequestWire, wire.PrivacyQueryBudgetResponseWire),
-    op(.diagnostics_export, .diagnostics_prepare_export, "prepare_export", wire.DiagnosticsPrepareExportRequestWire, wire.DiagnosticsExportResponseWire),
-    op(.diagnostics_export, .diagnostics_share_remote, "share_remote", wire.DiagnosticsShareRemoteRequestWire, wire.DiagnosticsExportResponseWire),
-    op(.consent_receipts, .consent_record, "record", wire.ConsentRecordRequestWire, wire.ConsentReceiptResponseWire),
-    op(.consent_receipts, .consent_revoke, "revoke", wire.ConsentRevokeRequestWire, wire.ConsentReceiptResponseWire),
-    op(.permission_lease, .permission_lease_issue, "issue", wire.PermissionLeaseIssueRequestWire, wire.PermissionLeaseResponseWire),
-    op(.permission_lease, .permission_lease_renew, "renew", wire.PermissionLeaseRenewRequestWire, wire.PermissionLeaseResponseWire),
-    op(.permission_lease, .permission_lease_expire, "expire", wire.PermissionLeaseExpireRequestWire, wire.PermissionLeaseResponseWire),
-    op(.data_rights, .data_export_prepare, "export_prepare", wire.DataExportPrepareRequestWire, wire.DataRightsResponseWire),
-    op(.data_rights, .data_delete_request, "delete_request", wire.DataDeleteRequestWire, wire.DataRightsResponseWire),
-    op(.data_rights, .data_delete_receipt, "delete_receipt", wire.DataDeleteReceiptRequestWire, wire.DataRightsResponseWire),
-    op(.identity_session, .identity_session_authorize, "authorize", wire.IdentitySessionAuthorizeRequestWire, wire.IdentitySessionResponseWire),
-    op(.identity_session, .identity_session_step_up, "step_up", wire.IdentitySessionStepUpRequestWire, wire.IdentitySessionResponseWire),
-    op(.identity_session, .identity_session_revoke, "revoke", wire.IdentitySessionRevokeRequestWire, wire.IdentitySessionResponseWire),
-    op(.identity_session, .identity_credential_register, "credential_register", wire.IdentityCredentialRegisterRequestWire, wire.IdentityCredentialResponseWire),
-    op(.identity_session, .identity_credential_assert, "credential_assert", wire.IdentityCredentialAssertRequestWire, wire.IdentityCredentialResponseWire),
-    op(.identity_session, .identity_credential_recover, "credential_recover", wire.IdentityCredentialRecoverRequestWire, wire.IdentityCredentialResponseWire),
-    op(.identity_session, .identity_credential_revoke, "credential_revoke", wire.IdentityCredentialRevokeRequestWire, wire.IdentityCredentialResponseWire),
-    op(.agent_delegation, .agent_authorize, "authorize", wire.AgentAuthorizeRequestWire, wire.AgentDelegationResponseWire),
-    op(.agent_delegation, .agent_record_action, "record_action", wire.AgentRecordActionRequestWire, wire.AgentDelegationResponseWire),
-    op(.agent_delegation, .agent_revoke, "revoke", wire.AgentRevokeRequestWire, wire.AgentDelegationResponseWire),
-    op(.agent_delegation, .agent_bind_session, "bind_session", wire.AgentBindSessionRequestWire, wire.AgentDelegationResponseWire),
-    op(.agent_delegation, .agent_kill_switch, "kill_switch", wire.AgentKillSwitchRequestWire, wire.AgentDelegationResponseWire),
-    op(.accessibility_profile, .accessibility_profile_get, "get_profile", wire.AccessibilityProfileGetRequestWire, wire.AccessibilityProfileResponseWire),
-    op(.accessibility_profile, .accessibility_profile_apply, "apply_profile", wire.AccessibilityProfileApplyRequestWire, wire.AccessibilityProfileResponseWire),
-    op(.accessibility_profile, .accessibility_profile_audit, "audit_profile", wire.AccessibilityProfileAuditRequestWire, wire.AccessibilityProfileResponseWire),
-    op(.background_activity, .background_authorize, "authorize", wire.BackgroundAuthorizeRequestWire, wire.BackgroundActivityResponseWire),
-    op(.background_activity, .background_record, "record", wire.BackgroundRecordRequestWire, wire.BackgroundActivityResponseWire),
-    op(.background_activity, .background_complete, "complete", wire.BackgroundCompleteRequestWire, wire.BackgroundActivityResponseWire),
     op(.attention_broker, .attention_post, "post", wire.AttentionPostRequestWire, wire.AttentionResponseWire),
     op(.attention_broker, .attention_dismiss, "dismiss", wire.AttentionDismissRequestWire, wire.AttentionResponseWire),
     op(.attention_broker, .attention_query, "query", wire.AttentionQueryRequestWire, wire.AttentionResponseWire),
@@ -338,11 +235,27 @@ pub const OperationDecl = struct {
 
 pub const MAX_OPERATIONS_PER_INTERFACE: usize = maxOperationsPerInterface();
 pub const OPERATION_DECL_SIZE_CEILING_BYTES: usize = 12;
-pub const INTERFACE_CONTRACT_SIZE_CEILING_BYTES: usize = 120;
+pub const INTERFACE_CONTRACT_SIZE_CEILING_BYTES: usize = 96;
 
 comptime {
     if (MAX_OPERATIONS_PER_INTERFACE > std.math.maxInt(u8)) {
         @compileError("component ABI operation capacity exceeds its compact count field");
+    }
+    // Golden service-registry wire layouts: a size change requires a VERSION bump.
+    const golden_layouts = .{
+        .{ WireHeader, 24 },
+        .{ wire.ServiceRegisterRequestWire, 48 },
+        .{ wire.ServiceRegisterResponseWire, 4 },
+        .{ wire.ServiceConnectionRequestWire, 32 },
+        .{ abi.ServiceConnectionDescriptor, 24 },
+    };
+    for (golden_layouts) |layout| {
+        if (@sizeOf(layout[0]) != layout[1]) {
+            @compileError(std.fmt.comptimePrint(
+                "component ABI wire layout {s} is {d} bytes, not {d}",
+                .{ @typeName(layout[0]), @sizeOf(layout[0]), layout[1] },
+            ));
+        }
     }
 }
 
@@ -388,11 +301,11 @@ pub fn interfaceId(comptime key: InterfaceKey) InterfaceId {
     return interfaceSpec(key).id;
 }
 
-pub fn requestType(comptime operation_id: OperationId) type {
+pub fn Request(comptime operation_id: OperationId) type {
     return operationSpec(operation_id).Request;
 }
 
-pub fn responseType(comptime operation_id: OperationId) type {
+pub fn Response(comptime operation_id: OperationId) type {
     return operationSpec(operation_id).Response;
 }
 
@@ -580,15 +493,10 @@ fn maxOperationsPerInterface() usize {
 }
 
 test "component ABI schema emits manifest interfaces and interface contracts" {
-    try std.testing.expectEqual(u8, @FieldType(InterfaceContract, "operation_count"));
     try std.testing.expectEqual(OPERATION_DECL_SIZE_CEILING_BYTES, @sizeOf(OperationDecl));
     try std.testing.expectEqual(INTERFACE_CONTRACT_SIZE_CEILING_BYTES, @sizeOf(InterfaceContract));
     try std.testing.expectEqual(interface_specs.len, manifest_interfaces.len);
-    try std.testing.expectEqual(interface_specs.len, INTERFACE_COUNT);
     try std.testing.expectEqualStrings("zigos.service.registry", interfaceDecl(.service_registry).name);
-    try std.testing.expectEqualStrings("zigos.service.network.policy", interfaceDecl(.network_policy).name);
-    try std.testing.expectEqualStrings("zigos.object.workspace", interfaceDecl(.object_workspace).name);
-    try std.testing.expectEqual(InterfaceId.service_registry, interfaceId(.service_registry));
     try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForDecl(interfaceDecl(.object_workspace)).?);
     try std.testing.expectEqual(InterfaceId.service_registry, contractFor(interfaceDecl(.service_registry).name).?.interface_id);
     try std.testing.expectEqual(@as(usize, 0), interfaceIndexForId(.task_runtime));
@@ -596,39 +504,64 @@ test "component ABI schema emits manifest interfaces and interface contracts" {
     const service_registry_contract = contractForId(.service_registry);
     try std.testing.expectEqual(OperationId.service_register, service_registry_contract.operation(.service_register).?.id);
     try std.testing.expect(service_registry_contract.operation(.network_open_session) == null);
-    try std.testing.expectEqual(
-        OperationId.identity_credential_revoke,
-        contractForId(.identity_session).operation(.identity_credential_revoke).?.id,
-    );
-    try std.testing.expect(contractFor("zigos.service.network.policy").?.operation(.network_open_session) != null);
-    try std.testing.expect(contractFor("zigos.index.search").?.operation(.semantic_index_query) != null);
-    try std.testing.expect(contractFor("zigos.sync.replication").?.operation(.sync_workspace_replicate) != null);
-    try std.testing.expect(contractFor(interfaceDecl(.package_install).name).?.operation(.package_rollback) != null);
-    try std.testing.expect(contractFor(interfaceDecl(.package_install).name).?.operation(.package_remove) != null);
-    try std.testing.expect(contractFor("zigos.ai.inference").?.operation(.ai_run_local) != null);
-    try std.testing.expect(contractFor("zigos.ai.model.registry").?.operation(.ai_model_attest) != null);
-    try std.testing.expect(contractFor("zigos.privacy.budget").?.operation(.privacy_authorize_egress) != null);
-    try std.testing.expect(contractFor("zigos.diagnostics.export").?.operation(.diagnostics_share_remote) != null);
-    try std.testing.expect(contractFor("zigos.consent.receipts").?.operation(.consent_record) != null);
-    try std.testing.expect(contractFor("zigos.permission.lease").?.operation(.permission_lease_issue) != null);
-    try std.testing.expect(contractFor("zigos.data.rights").?.operation(.data_delete_receipt) != null);
-    try std.testing.expect(contractFor("zigos.identity.session").?.operation(.identity_session_authorize) != null);
-    try std.testing.expect(contractFor("zigos.identity.session").?.operation(.identity_credential_assert) != null);
-    try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_authorize) != null);
-    try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_bind_session) != null);
-    try std.testing.expect(contractFor("zigos.agent.delegation").?.operation(.agent_kill_switch) != null);
-    try std.testing.expect(contractFor("zigos.accessibility.profile").?.operation(.accessibility_profile_apply) != null);
-    try std.testing.expect(contractFor("zigos.background.activity").?.operation(.background_authorize) != null);
-    try std.testing.expect(contractFor("zigos.attention.broker").?.operation(.attention_post) != null);
-    try std.testing.expect(contractFor("zigos.task.lifecycle").?.operation(.lifecycle_suspend) != null);
-    try std.testing.expect(contractFor("zigos.secure.pasteboard").?.operation(.pasteboard_offer) != null);
-    try std.testing.expect(contractFor("zigos.object.resilience").?.operation(.object_backup_prepare) != null);
-    try std.testing.expect(contractFor("zigos.sensitive.capture").?.operation(.capture_start) != null);
-    try std.testing.expect(contractFor("zigos.secret.vault").?.operation(.secret_import) != null);
-    try std.testing.expect(contractFor(interfaceDecl(.service_registry).name).?.contract_hash != 0);
-    try std.testing.expect(contractFor(interfaceDecl(.sync_replication).name).?.contract_hash != 0);
+    try std.testing.expect(contractForId(.package_install).operation(.package_remove) != null);
+    try std.testing.expect(contractForId(.secret_vault).operation(.secret_revoke) != null);
+    try std.testing.expect(contractForId(.personal_context).operation(.personal_context_revoke) != null);
 
+    for (&contracts) |*contract| {
+        try std.testing.expect(contract.contract_hash != 0);
+        for (contract.operations[0..contract.operation_count]) |decl| {
+            try std.testing.expectEqual(decl, contract.operation(decl.id).?);
+        }
+    }
     for (manifest_interfaces) |interface| {
         try validateInterface(interface);
     }
+}
+
+test "component ABI rejects incompatible interfaces and malformed messages" {
+    try std.testing.expectError(Error.UnknownInterface, validateInterface(.{ .name = "zigos.unknown" }));
+    try std.testing.expectError(Error.UnsupportedInterfaceVersion, validateInterface(.{
+        .name = "zigos.service.registry",
+        .version_major = 2,
+        .version_minor = 0,
+    }));
+    try std.testing.expectError(Error.UnsupportedInterfaceVersion, validateInterface(.{
+        .name = "zigos.service.registry",
+        .version_major = 1,
+        .version_minor = 1,
+    }));
+
+    var header = WireHeader{
+        .operation = @backingInt(OperationId.service_connect),
+        .correlation_id = 1,
+        .subject_task_id = 44,
+    };
+    const request_len = @sizeOf(Request(.service_connect));
+    const response_len = @sizeOf(Response(.service_connect));
+    try validateMessage(.service_registry, .service_connect, header, request_len, response_len);
+    try std.testing.expectError(Error.UnknownOperation, validateMessage(
+        .service_registry,
+        .network_open_session,
+        .{ .operation = @backingInt(OperationId.network_open_session), .correlation_id = 2, .subject_task_id = 44 },
+        @sizeOf(Request(.network_open_session)),
+        @sizeOf(Response(.network_open_session)),
+    ));
+    try std.testing.expectError(Error.UnknownOperation, validateMessage(
+        .service_registry,
+        .service_register,
+        header,
+        @sizeOf(Request(.service_register)),
+        @sizeOf(Response(.service_register)),
+    ));
+    header.abi_version = VERSION - 1;
+    try std.testing.expectError(Error.UnsupportedAbiVersion, validateMessage(.service_registry, .service_connect, header, request_len, response_len));
+    header.abi_version = VERSION;
+    header.magic = 0;
+    try std.testing.expectError(Error.InvalidMagic, validateMessage(.service_registry, .service_connect, header, request_len, response_len));
+    header.magic = MAGIC;
+    try std.testing.expectError(Error.InvalidRequestLength, validateMessage(.service_registry, .service_connect, header, request_len - 1, response_len));
+    try std.testing.expectError(Error.InvalidResponseLength, validateMessage(.service_registry, .service_connect, header, request_len, response_len + 1));
+    header.subject_task_id = 0;
+    try std.testing.expectError(Error.SubjectTaskRequired, validateMessage(.service_registry, .service_connect, header, request_len, response_len));
 }

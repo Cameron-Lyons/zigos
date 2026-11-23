@@ -12,7 +12,6 @@ const policy_object = @import("../../native/policy/policy_object.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const signing = @import("../../native/core/signing.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
-const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
 const workspace = @import("../../native/storage/workspace.zig");
 
 const REVIEW_SUMMARY_BUFFER_BYTES: usize = 4096;
@@ -306,9 +305,6 @@ pub fn taskViewsAndNativeComponentsStayExplicit() !void {
 }
 
 pub fn agentSessionsStayBoundedAuditedAndRevocable() !void {
-    try std.testing.expect(typed_component_abi.contractFor("zigos.agent.delegation").?.operation(.agent_bind_session) != null);
-    try std.testing.expect(typed_component_abi.contractFor("zigos.agent.delegation").?.operation(.agent_kill_switch) != null);
-
     var policies = policy_object.Directory.init();
     _ = try policies.create(.{
         .scope = .organization,

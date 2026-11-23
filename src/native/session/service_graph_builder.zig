@@ -7,6 +7,7 @@ const native_util = @import("../core/util.zig");
 const package_service = @import("../services/package_service.zig");
 const session_contexts = @import("session_manager_contexts.zig");
 const session_service_bootstrap = @import("session_service_bootstrap.zig");
+const service_restart_proofs = @import("proofs/service_restart_proofs.zig");
 const session_support = @import("session_manager_support.zig");
 const supervisor_mod = @import("supervisor.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
@@ -114,7 +115,7 @@ pub const Builder = struct {
             return false;
         }
         if (comptime include_verification_evidence) {
-            if (!session_service_bootstrap.connectClient(
+            if (!service_restart_proofs.connectClient(
                 &env_snapshot,
                 &state_snapshot,
                 graph.kernel_port,
@@ -122,7 +123,7 @@ pub const Builder = struct {
             )) {
                 return false;
             }
-            if (!session_service_bootstrap.proveDriverCrashRestart(
+            if (!service_restart_proofs.proveDriverCrashRestart(
                 &env_snapshot,
                 &state_snapshot,
                 graph.kernel_port,

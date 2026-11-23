@@ -1,6 +1,6 @@
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
-const contract = @import("contract.zig");
+const service_catalog = @import("service_catalog.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
@@ -15,7 +15,7 @@ pub const DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES: usize = 24;
 pub const SERVICE_RECORD_SIZE_CEILING_BYTES: usize = 40;
 pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 1_840;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
-pub const SERVICE_CLASS_COUNT: usize = @typeInfo(contract.ServiceClass).@"enum".field_names.len;
+pub const SERVICE_CLASS_COUNT: usize = @typeInfo(service_catalog.ServiceClass).@"enum".field_names.len;
 pub const ServiceClassSlotIndex = indexed_arena.ReusableIndex(MAX_SERVICES);
 const NO_SERVICE_CLASS_SLOT = indexed_arena.reusableNoIndex(MAX_SERVICES);
 
@@ -23,7 +23,7 @@ comptime {
     if (MAX_DIAGNOSTICS > std.math.maxInt(u8)) {
         @compileError("supervisor diagnostic ring metadata exceeds u8 capacity");
     }
-    for (@typeInfo(contract.ServiceClass).@"enum".field_values, 0..) |field, class_index| {
+    for (@typeInfo(service_catalog.ServiceClass).@"enum".field_values, 0..) |field, class_index| {
         if (field != class_index) {
             @compileError("service classes must remain dense for direct supervisor lookup");
         }
@@ -39,14 +39,14 @@ pub const ServiceState = enum(u8) {
 
 pub const ServiceRecord = struct {
     id: u64,
-    class: contract.ServiceClass,
+    class: service_catalog.ServiceClass,
     owner: principal.PrincipalId,
     contract_endpoint_id: u64,
     state: ServiceState,
     restart_count: u16,
 
-    pub fn descriptor(self: *const ServiceRecord) contract.ServiceDescriptor {
-        return contract.serviceDescriptor(self.class) orelse
+    pub fn descriptor(self: *const ServiceRecord) service_catalog.ServiceDescriptor {
+        return service_catalog.serviceDescriptor(self.class) orelse
             native_util.impossibleByInvariant("registered supervisor services retain a schema descriptor");
     }
 
@@ -136,8 +136,8 @@ pub const Supervisor = struct {
         self.next_diagnostic_slot = 0;
     }
 
-    pub fn register(self: *Supervisor, class: contract.ServiceClass, owner: principal.PrincipalId) Error!*ServiceRecord {
-        if (contract.serviceDescriptor(class) == null) return error.UnknownServiceClass;
+    pub fn register(self: *Supervisor, class: service_catalog.ServiceClass, owner: principal.PrincipalId) Error!*ServiceRecord {
+        if (service_catalog.serviceDescriptor(class) == null) return error.UnknownServiceClass;
 
         const service_id = self.nextReservableServiceId() orelse return error.ServiceTableFull;
         const slot_index = self.service_arena.reserveIndex(service_id) orelse return error.ServiceTableFull;
@@ -160,7 +160,7 @@ pub const Supervisor = struct {
         return &slot.service;
     }
 
-    pub fn findByClass(self: *Supervisor, class: contract.ServiceClass) ?*ServiceRecord {
+    pub fn findByClass(self: *Supervisor, class: service_catalog.ServiceClass) ?*ServiceRecord {
         const slot_index = self.service_class_slots[serviceClassIndex(class)];
         if (slot_index == NO_SERVICE_CLASS_SLOT) return null;
         const slot = self.serviceSlotAt(slot_index, class) orelse return null;
@@ -173,7 +173,7 @@ pub const Supervisor = struct {
 
     pub fn allowsDriverAttachment(self: *const Supervisor, service_id: u64, device_class: driver_service.DeviceClass) bool {
         const service = self.findConst(service_id) orelse return false;
-        return contract.allowsDriverClass(service.class, device_class);
+        return service_catalog.allowsDriverClass(service.class, device_class);
     }
 
     pub fn markHealthy(self: *Supervisor, service_id: u64) bool {
@@ -285,7 +285,7 @@ pub const Supervisor = struct {
     ) !DriverHotSwapReport {
         const service = self.find(request.service_id) orelse return error.ServiceNotFound;
         if (!service.descriptor().restartable) return error.ServiceNotRestartable;
-        if (!contract.allowsDriverClass(service.class, request.device_class)) {
+        if (!service_catalog.allowsDriverClass(service.class, request.device_class)) {
             return error.DriverAttachmentDenied;
         }
         const previous = (directory.findByServiceAndClass(request.service_id, request.device_class) orelse return error.DriverNotFound).*;
@@ -436,7 +436,7 @@ pub const Supervisor = struct {
         return &slot.service;
     }
 
-    fn serviceSlotAt(self: *Supervisor, slot_index: usize, class: contract.ServiceClass) ?*ServiceSlot {
+    fn serviceSlotAt(self: *Supervisor, slot_index: usize, class: service_catalog.ServiceClass) ?*ServiceSlot {
         if (slot_index >= MAX_SERVICES) return null;
         const slot = &self.service_arena.slots[slot_index];
         if (!slot.in_use) return null;
@@ -449,7 +449,7 @@ fn serviceSlotId(slot: *const ServiceSlot) u64 {
     return slot.service.id;
 }
 
-fn serviceClassIndex(class: contract.ServiceClass) usize {
+fn serviceClassIndex(class: service_catalog.ServiceClass) usize {
     return @backingInt(class);
 }
 
@@ -526,8 +526,8 @@ test "supervisor registers services using the contract boundary map" {
     var supervisor = Supervisor.init();
     const service = try supervisor.register(.session_manager, .{ .kind = .service, .serial = 1 });
 
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, service.descriptor().boundary);
-    try std.testing.expectEqual(contract.UiPrivilege.session_surface, service.descriptor().isolation.ui);
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, service.descriptor().boundary);
+    try std.testing.expectEqual(service_catalog.UiPrivilege.session_surface, service.descriptor().isolation.ui);
     try std.testing.expectEqual(@as(u64, 1), service.id);
     try std.testing.expect(service.descriptor().restartable);
     try std.testing.expect(supervisor.markHealthy(service.id));
@@ -782,7 +782,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
     try std.testing.expectEqual(@as(u16, 1), compositor.restart_count);
     try std.testing.expectEqual(@as(u32, 2), graphics_driver.restart_generation);
     try std.testing.expectEqual(notification_center.Reason.driver_restart, notifications.latestVisible(20).?.reason);
-    try std.testing.expectEqual(contract.ServiceClass.compositor_ui_session, ledger.latestKind(.process_crash).?.service_class);
+    try std.testing.expectEqual(service_catalog.ServiceClass.compositor_ui_session, ledger.latestKind(.process_crash).?.service_class);
     try std.testing.expectEqual(graphics_authority.id, ledger.latestKind(.driver_restart).?.related_id);
     try std.testing.expectEqual(ServiceState.healthy, storage.state);
     try std.testing.expectEqual(@as(u32, 1), directory.findByService(storage.id).?.restart_generation);

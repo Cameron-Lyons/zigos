@@ -30,7 +30,6 @@ const package_digest = @import("../services/package_service_digest.zig");
 const package_service = @import("../services/package_service.zig");
 const secure_pasteboard = @import("../services/secure_pasteboard.zig");
 const secret_vault_service = @import("../services/secret_vault_service.zig");
-const typed_component_abi = @import("../services/typed_component_abi.zig");
 const component_abi_schema = @import("../services/component_abi_schema.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
@@ -3559,17 +3558,17 @@ fn packageOffboardingEvidence() PackageOffboardingEvidence {
 }
 
 fn packageRemoveWireValidationCheck() bool {
-    const header = typed_component_abi.WireHeader{
-        .operation = @backingInt(typed_component_abi.OperationId.package_remove),
+    const header = component_abi_schema.WireHeader{
+        .operation = @backingInt(component_abi_schema.OperationId.package_remove),
         .correlation_id = 2026,
         .subject_task_id = 7601,
     };
-    typed_component_abi.validateMessage(
+    component_abi_schema.validateMessage(
         .package_install,
         .package_remove,
         header,
-        @sizeOf(typed_component_abi.PackageRemoveRequest),
-        @sizeOf(typed_component_abi.PackageRemoveResponse),
+        @sizeOf(component_abi_schema.Request(.package_remove)),
+        @sizeOf(component_abi_schema.Response(.package_remove)),
     ) catch return false;
     return true;
 }

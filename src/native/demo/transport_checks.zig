@@ -8,7 +8,7 @@ const component_port = @import("../kernel_api/component_port.zig");
 const kernel_descriptors = @import("../kernel_api/native_kernel_descriptors.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
 const support = @import("../session/session_manager_support.zig");
-const typed_component_abi = @import("../services/typed_component_abi.zig");
+const component_abi_schema = @import("../services/component_abi_schema.zig");
 const units = @import("../core/units.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 
@@ -109,10 +109,10 @@ pub fn run(
     const storage_record = env.runtime.find(storage_task_desc.task_id) orelse
         native_util.impossibleByInvariant("storage task registered earlier in this bootstrap remains findable");
     env.service_directory.register(
-        state.services.storage_service.id,
+        state.services.get(.storage_object).id,
         storage_endpoint.endpoint.endpoint_id,
         storage_endpoint.capability_id,
-        typed_component_abi.interfaceId(.bootstrap_workspace),
+        component_abi_schema.interfaceId(.bootstrap_workspace),
         kernel_descriptors.serviceBindingFlags(storage_record),
     ) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:SERVICE_REGISTER:OK");
@@ -124,7 +124,7 @@ pub fn run(
         .label = "transport.probe",
         .flags = .{ .local_only = true },
     }, 4) catch |err| native_util.bootProofFailure("transport checks", err);
-    const storage_connection = env.service_directory.connect(typed_component_abi.interfaceId(.bootstrap_workspace)) catch |err| native_util.bootProofFailure("transport checks", err);
+    const storage_connection = env.service_directory.connect(component_abi_schema.interfaceId(.bootstrap_workspace)) catch |err| native_util.bootProofFailure("transport checks", err);
     _ = kernel_port.endpointConnect(.{
         .header = component_port.makeHeader(.endpoint_connect, transport_probe_task.task_id),
         .endpoint_capability_id = transport_probe_endpoint.capability_id,
@@ -225,7 +225,7 @@ pub fn run(
             .audit = .{
                 .policy_generation = 1,
                 .source_task_id = transport_probe_task.task_id,
-                .broker_service_id = state.services.policy_service.id,
+                .broker_service_id = state.services.get(.policy_mediation).id,
             },
         },
     }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
@@ -256,7 +256,7 @@ pub fn run(
             .audit = .{
                 .policy_generation = 1,
                 .source_task_id = transport_probe_task.task_id,
-                .broker_service_id = state.services.policy_service.id,
+                .broker_service_id = state.services.get(.policy_mediation).id,
             },
         },
     }, 7) catch |err| native_util.bootProofFailure("transport checks", err);

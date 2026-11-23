@@ -51,10 +51,8 @@ const demo_symbol_prefix = "native.demo.";
 const benchmark_symbol_prefix = "kernel.boot.benchmark.";
 const recovery_symbol_prefix = "kernel.boot.recovery_suite.";
 const verification_orchestration_symbol_prefixes = [_][]const u8{
-    "native.session.session_service_bootstrap.connectClient",
-    "native.session.session_service_bootstrap.proveDriverCrashRestart",
-    "native.session.trust_boot.TrustBoot.proveProductionAbImageRollback",
-    "native.session.trust_boot.TrustBoot.proveProductionPostActivationHealthChecks",
+    "native.session.proofs.service_restart_proofs.",
+    "native.session.proofs.base_activation_proof.",
     "native.session.proofs.tpm2_ownership_proof.",
     "native.session.proofs.identity_setup_proof.",
     "native.session.proofs.identity_request_proof.",

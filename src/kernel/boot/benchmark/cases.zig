@@ -16,7 +16,7 @@ pub const SLO_IRQ_TO_TASK = "slo.irq_to_task";
 pub const SLO_ENDPOINT_RTT = "slo.endpoint_rtt";
 pub const SLO_FOCUSED_INPUT = "slo.focused_input";
 
-pub fn benchmarkCases(handlers: anytype) [33]BenchmarkCase {
+pub fn benchmarkCases(handlers: anytype) [32]BenchmarkCase {
     return .{
         .{ .name = "capability.derive.workspace_object", .iterations = 40_000, .runIteration = handlers.capability_derive },
         .{ .name = "capability.mint_reuse_free_slot", .iterations = 4_000, .runIteration = handlers.capability_mint_reuse_free_slot },
@@ -31,7 +31,6 @@ pub fn benchmarkCases(handlers: anytype) [33]BenchmarkCase {
         .{ .name = "memory.heap_allocate_free", .iterations = 20_000, .operations_per_iteration = 2, .runIteration = handlers.heap_allocate_free },
         .{ .name = "memory.frame_allocate_release", .iterations = 20_000, .operations_per_iteration = 2, .runIteration = handlers.frame_allocate_release },
         .{ .name = "syscall.fast_entry_roundtrip", .iterations = 64_000, .operations_per_iteration = 64, .runIteration = handlers.syscall_fast_entry_roundtrip },
-        .{ .name = "accelerator_scheduler.claim_release", .iterations = 25_000, .runIteration = handlers.accelerator_claim_release },
         .{ .name = "storage.object.resolve_workspace_entry", .iterations = 40_000, .runIteration = handlers.file_bridge_resolve },
         .{ .name = "storage.workspace.commit_overlay", .iterations = 128, .runIteration = handlers.workspace_commit_overlay },
         .{ .name = "storage.volume.replay_segmented_log", .iterations = 24, .runIteration = handlers.storage_volume_replay_segmented_log },
@@ -54,7 +53,7 @@ pub fn benchmarkCases(handlers: anytype) [33]BenchmarkCase {
     };
 }
 
-pub fn qualityGateCases(handlers: anytype) [10]QualityGateCase {
+pub fn qualityGateCases(handlers: anytype) [9]QualityGateCase {
     return .{
         .{ .name = "battery_saver.batch_delay", .run = handlers.battery_saver_batch_delay },
         .{ .name = "thermal_critical.background_delay", .run = handlers.thermal_critical_background_delay },
@@ -63,7 +62,6 @@ pub fn qualityGateCases(handlers: anytype) [10]QualityGateCase {
         .{ .name = "starvation_resistance.min_dispatches_after_pressure", .run = handlers.starvation_resistance_after_pressure },
         .{ .name = "lower_class_service_debt.batch_tie_dispatch", .run = handlers.lower_class_service_debt_batch_tie_dispatch },
         .{ .name = "accelerator_claims.deadline_priority", .run = handlers.accelerator_claim_deadline_priority },
-        .{ .name = "brokered_accelerator_queue.completion_release", .run = handlers.brokered_accelerator_queue_completion_release },
         .{ .name = "background_throttling.delayed_dispatches", .run = handlers.background_throttling_delayed_dispatches },
         .{ .name = "latency_under_load.max_foreground_wait_ticks", .run = handlers.latency_under_load_max_wait_ticks },
     };

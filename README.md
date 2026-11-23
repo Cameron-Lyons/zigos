@@ -360,11 +360,9 @@ the first-target readiness track remains blocked on real hardware validation.
   Revocation retires CPU mappings first; accelerator pins retain the original
   object slot and backing until matching completion permits release. Pending
   pins consume the existing 24-object capacity, and session reset requires them
-  to drain before dropping owners. Scheduler claims bind the exact table, object,
-  broker and queue generation; cancellation keeps incomplete work owned. Media
-  jobs publish completion only after claim release and retry notice publication
-  without releasing twice. Full notification tables reject submissions before
-  reserving an accelerator claim.
+  to drain before dropping owners. Accelerator engine claims live only in the
+  userspace scheduler; the accelerator planner maps telemetry to an engine
+  without holding claims.
 - The first daily-driver slice is Notes/docs: signed native package install,
   workspace and document open, local permission review, object-scoped sharing,
   local-first sync, update rollback, recovery, and package removal are exercised

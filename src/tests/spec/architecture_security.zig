@@ -4,7 +4,7 @@ const spec_support = @import("support.zig");
 const abi = @import("../../native/core/abi.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const component_port = @import("../../native/kernel_api/component_port.zig");
-const contract = @import("../../native/session/contract.zig");
+const service_catalog = @import("../../native/session/service_catalog.zig");
 const device_graph = @import("../../native/sync/device_graph.zig");
 const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
@@ -23,8 +23,8 @@ const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const syscall_surface = @import("../../native/kernel_api/syscall_surface.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const task_runtime_service = @import("../../native/task/task_runtime_service.zig");
-const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
-const userspace_service_ipc = @import("../../native/services/userspace_service_ipc.zig");
+const component_abi_schema = @import("../../native/services/component_abi_schema.zig");
+const userspace_service_ipc = @import("../fixtures/userspace_service_ipc.zig");
 const userspace_loader = @import("../../native/task/userspace_loader.zig");
 const userspace_manifest_signing = @import("../../native/task/userspace_manifest_signing.zig");
 
@@ -227,22 +227,22 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
         .endpoint_capability_id = 1,
     });
 
-    try std.testing.expectEqual(@as(usize, 7), contract.kernel_tcb.len);
-    try std.testing.expectEqualStrings("ipc_transport", contract.tcbName(.ipc_transport));
-    try std.testing.expectEqualStrings("iommu_dma_isolation_hooks", contract.tcbName(.iommu_dma_isolation_hooks));
+    try std.testing.expectEqual(@as(usize, 7), service_catalog.kernel_tcb.len);
+    try std.testing.expectEqualStrings("ipc_transport", service_catalog.tcbName(.ipc_transport));
+    try std.testing.expectEqualStrings("iommu_dma_isolation_hooks", service_catalog.tcbName(.iommu_dma_isolation_hooks));
 
-    const runtime_descriptor = contract.serviceDescriptor(.task_runtime).?;
-    const network = contract.serviceDescriptor(.network_stack).?;
-    const storage = contract.serviceDescriptor(.storage_object).?;
-    const compositor = contract.serviceDescriptor(.compositor_ui_session).?;
-    const session = contract.serviceDescriptor(.session_manager).?;
-    const registry_service = contract.serviceDescriptor(.service_registry).?;
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, runtime_descriptor.boundary);
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, session.boundary);
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, registry_service.boundary);
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, network.boundary);
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, storage.boundary);
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, compositor.boundary);
+    const runtime_descriptor = service_catalog.serviceDescriptor(.task_runtime).?;
+    const network = service_catalog.serviceDescriptor(.network_stack).?;
+    const storage = service_catalog.serviceDescriptor(.storage_object).?;
+    const compositor = service_catalog.serviceDescriptor(.compositor_ui_session).?;
+    const session = service_catalog.serviceDescriptor(.session_manager).?;
+    const registry_service = service_catalog.serviceDescriptor(.service_registry).?;
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, runtime_descriptor.boundary);
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, session.boundary);
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, registry_service.boundary);
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, network.boundary);
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, storage.boundary);
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, compositor.boundary);
     try std.testing.expect(runtime_descriptor.restartable);
     try std.testing.expect(session.restartable);
     try std.testing.expect(registry_service.restartable);
@@ -250,15 +250,15 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(storage.restartable);
     try std.testing.expect(compositor.restartable);
     try std.testing.expect(runtime_descriptor.isolation.namespace_isolated);
-    try std.testing.expectEqual(contract.NetworkPrivilege.unrestricted_brokered, network.isolation.network);
-    try std.testing.expectEqual(contract.StoragePrivilege.object_store_authority, storage.isolation.storage);
-    try std.testing.expect(contract.allowsDriverClass(.network_stack, .network_adapter));
-    try std.testing.expect(contract.allowsDriverClass(.storage_object, .storage_controller));
-    try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .usb_controller));
-    try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .graphics_adapter));
-    try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .input_device));
-    try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .compositor_policy));
-    try std.testing.expect(contract.allowsDriverClass(.media_print_helpers, .audio_print_io));
+    try std.testing.expectEqual(service_catalog.NetworkPrivilege.unrestricted_brokered, network.isolation.network);
+    try std.testing.expectEqual(service_catalog.StoragePrivilege.object_store_authority, storage.isolation.storage);
+    try std.testing.expect(service_catalog.allowsDriverClass(.network_stack, .network_adapter));
+    try std.testing.expect(service_catalog.allowsDriverClass(.storage_object, .storage_controller));
+    try std.testing.expect(service_catalog.allowsDriverClass(.compositor_ui_session, .usb_controller));
+    try std.testing.expect(service_catalog.allowsDriverClass(.compositor_ui_session, .graphics_adapter));
+    try std.testing.expect(service_catalog.allowsDriverClass(.compositor_ui_session, .input_device));
+    try std.testing.expect(service_catalog.allowsDriverClass(.compositor_ui_session, .compositor_policy));
+    try std.testing.expect(service_catalog.allowsDriverClass(.media_print_helpers, .audio_print_io));
 
     try std.testing.expect(abi.opcode(.task_create) >= 0x100);
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
@@ -266,7 +266,7 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expectEqual(@as(usize, 23), @typeInfo(abi.NativeOperation).@"enum".field_names.len);
     try std.testing.expectEqual(@as(u16, 0x116), abi.opcode(.surface_present));
     try std.testing.expect(std.enums.fromInt(abi.NativeOperation, 0x117) == null);
-    const storage_interface_id = typed_component_abi.interfaceId(.object_workspace);
+    const storage_interface_id = component_abi_schema.interfaceId(.object_workspace);
     try registry.register(55, 101, 201, storage_interface_id, service_registry.REQUIRED_BINDING_FLAGS);
     const connection = try registry.connect(storage_interface_id);
     try std.testing.expectEqual(@as(u64, 55), connection.service_id);
@@ -697,11 +697,11 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         123,
         service_endpoint.endpoint.endpoint_id,
         service_endpoint.capability_id,
-        typed_component_abi.interfaceId(.object_workspace),
+        component_abi_schema.interfaceId(.object_workspace),
         kernel_descriptors.serviceBindingFlags(launched_record),
     );
 
-    const connection = try service_directory.connect(typed_component_abi.interfaceId(.object_workspace));
+    const connection = try service_directory.connect(component_abi_schema.interfaceId(.object_workspace));
     try std.testing.expectEqual(@as(u64, 123), connection.service_id);
 }
 

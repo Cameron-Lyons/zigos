@@ -99,3 +99,26 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
         session_authority_id,
     );
 }
+
+test "booted userspace service paths prove sync driver isolation and resource accounting" {
+    try bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting();
+}
+
+test "booted userspace service paths prove process isolation visible-entitlement gates" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+
+    session_manager.boot();
+
+    try syscalls.proveBootedProcessIsolationVisibleEntitlementGates(
+        session_manager.testing.runtimePtr(),
+        session_manager.system().capabilityTablePtr(),
+        session_manager.testing.findTask("sync-service").?,
+        session_manager.testing.findTask("workspace-storage").?,
+        session_manager.testing.findTask("compositor-session").?,
+    );
+}
+
+test "booted driver hot-swap and crash recovery rebind live brokered device authority" {
+    try driver_recovery.proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority();
+}

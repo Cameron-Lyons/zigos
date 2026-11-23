@@ -128,8 +128,6 @@ pub const service_boot_storage_rebind_ok = "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_RE
 pub const service_boot_storage_controller_revoke_rejected = "ZIGOS:SERVICE_BOOT:DRIVER:CONTROLLER_REVOKE_REJECTED";
 pub const service_boot_storage_republish_after_revoke_ok = "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_REPUBLISH_AFTER_REVOKE_OK";
 pub const service_boot_storage_io_after_restart_ok = "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_IO_AFTER_RESTART_OK";
-pub const service_boot_accelerator_queue_owned = "ZIGOS:SERVICE_BOOT:DRIVER:ACCELERATOR_QUEUE_OWNED";
-pub const service_boot_accelerator_completion_interrupt = "ZIGOS:SERVICE_BOOT:DRIVER:ACCELERATOR_COMPLETION_INTERRUPT";
 
 pub const storage_object_store_ready = "ZIGOS:STORAGE:OBJECT_STORE:READY";
 pub const storage_workspace_transaction_ok = "ZIGOS:STORAGE:WORKSPACE:TRANSACTION_OK";

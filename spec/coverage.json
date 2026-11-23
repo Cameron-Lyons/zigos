@@ -185,7 +185,7 @@
           "name": "syscall surface dispatches typed task creation requests"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ],
@@ -323,7 +323,7 @@
           "name": "sync port requires service-scoped authority before device graph mutation"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -400,7 +400,7 @@
           "name": "sync service persists platform-backed device key bindings across restart"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -448,7 +448,7 @@
           "name": "overlay sessions cover sync remote access private service publishing and encrypted relay"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ],
@@ -491,7 +491,7 @@
           "name": "compositor display framebuffer renders windows switching recovery and permission decisions"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -535,8 +535,8 @@
           "name": "spec 12.3 and 14.3 preserve responsiveness while native app updates stay explicit and reversible"
         },
         {
-          "file": "src/native/task/accelerator_scheduler.zig",
-          "name": "accelerator scheduler tracks exclusive engine claims and zero-copy attachments"
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler separates accelerator claim queues from cpu ready queues"
         },
         {
           "file": "src/native/platform/platform_policy_signals.zig",
@@ -567,7 +567,7 @@
           "name": "shared memory rejects stale task and accelerator descriptors after generation changes"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ],
@@ -594,7 +594,7 @@
           "name": "driver services require signed least-privilege device authority"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -935,19 +935,17 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/session/service_catalog.zig",
-        "src/native/session/contract.zig",
         "src/native/drivers/driver_service.zig",
-        "src/native/services/userspace_service_ipc.zig",
         "src/native/session/session_manager_boot_flow.zig",
         "src/native/session/service_graph_builder.zig",
         "src/native/session/session_service_bootstrap.zig",
-        "src/native/session/service_path_proofs.zig",
+        "src/native/session/proofs/service_path_proofs.zig",
         "src/kernel/net/link_port.zig",
         "src/kernel/boot/init/devices.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1062,20 +1060,19 @@
     "REQ-KERNEL-TYPE-AND-BOUNDARY": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/session/contract.zig",
         "src/native/kernel_api/native_kernel.zig",
         "src/native/kernel_api/syscall_surface.zig",
         "src/native/session/service_catalog.zig",
         "src/native/drivers/bootstrap_driver_port.zig",
         "src/native/drivers/network_driver_task.zig",
         "src/native/session/session_service_bootstrap.zig",
-        "src/native/session/service_path_proofs.zig",
+        "src/native/session/proofs/service_path_proofs.zig",
         "src/kernel/net/link_port.zig",
         "src/kernel/boot/init/devices.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -1091,11 +1088,11 @@
         "src/native/kernel_api/endpoint.zig",
         "src/native/kernel_api/shared_memory.zig",
         "src/native/kernel_api/native_kernel.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -1391,7 +1388,7 @@
         "src/native/kernel_api/native_kernel_access.zig",
         "src/native/kernel_api/syscall_surface.zig",
         "src/native/session/proofs/runtime_negative_proofs.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1415,7 +1412,7 @@
           "name": "runtime negative proofs reject modeled bypasses"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1424,10 +1421,8 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/services/component_abi_schema.zig",
-        "src/native/services/typed_component_abi.zig",
         "src/native/session/service_catalog.zig",
-        "src/native/task/userspace_verification_registry.zig",
-        "src/native/services/userspace_service_ipc.zig"
+        "src/native/task/userspace_verification_registry.zig"
       ],
       "negative_tests": [
         {
@@ -1435,11 +1430,11 @@
           "name": "component ABI schema emits manifest interfaces and interface contracts"
         },
         {
-          "file": "src/native/services/typed_component_abi.zig",
-          "name": "typed component ABI derives operation IDs, wire types, and validators from schema"
+          "file": "src/native/services/component_abi_schema.zig",
+          "name": "component ABI rejects incompatible interfaces and malformed messages"
         },
         {
-          "file": "src/native/services/userspace_service_ipc.zig",
+          "file": "src/tests/fixtures/userspace_service_ipc.zig",
           "name": "core userspace service startup protocols run through endpoint syscalls"
         }
       ]
@@ -1466,11 +1461,11 @@
         "src/native/storage/storage_service.zig",
         "src/native/services/package_service.zig",
         "src/native/sync/sync_service.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -1519,7 +1514,7 @@
         "src/native/task/userspace_executor.zig",
         "src/native/kernel_api/syscall_surface.zig",
         "src/native/session/proofs/runtime_negative_proofs.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1527,7 +1522,7 @@
           "name": "process isolation denies memory injection window clipboard and hook bypasses without visible entitlements"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove process isolation visible-entitlement gates"
         },
         {
@@ -1665,7 +1660,7 @@
         "src/native/sync/sync_adapters.zig",
         "src/native/sync/sync_service_test.zig",
         "src/native/sync/sync_transport_harness.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1673,7 +1668,7 @@
           "name": "sync service replicates payloads to peer storage through booted relay fallback"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1685,7 +1680,7 @@
         "src/native/sync/sync_service.zig",
         "src/native/sync/sync_adapters.zig",
         "src/native/sync/sync_service_test.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1697,7 +1692,7 @@
           "name": "sync service requires database contract before transactional workspace replication"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1728,7 +1723,7 @@
         "src/native/platform/attestation_service.zig",
         "src/native/platform/os_identity.zig",
         "src/native/drivers/network_driver_task.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1740,7 +1735,7 @@
           "name": "native sync transport rejects revoked trusted devices and unattested production sessions"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -1769,7 +1764,7 @@
         "src/native/sync/sync_transport_harness.zig",
         "src/native/sync/network_policy.zig",
         "src/native/drivers/network_driver_task.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1781,7 +1776,7 @@
           "name": "overlay sessions cover sync remote access private service publishing and encrypted relay"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1794,11 +1789,11 @@
         "src/native/platform/native_ux.zig",
         "src/native/platform/event_ledger.zig",
         "src/native/policy/permission_review_service.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1812,7 +1807,7 @@
         "src/native/platform/compositor_session.zig",
         "src/native/session/service_bootstrap.zig",
         "src/native/session/service_catalog.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1840,7 +1835,7 @@
           "name": "compositor display framebuffer rejects undersized surfaces"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1854,7 +1849,7 @@
         "src/native/platform/compositor_display.zig",
         "src/native/platform/compositor_session.zig",
         "src/native/platform/event_ledger.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1862,7 +1857,7 @@
           "name": "rendered permission review surface drives allow deny controls through compositor display and policy grants"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1886,7 +1881,7 @@
         "src/native/task/userspace_scheduler.zig",
         "src/native/platform/platform_policy_signals.zig",
         "src/native/task/task_runtime_model.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1906,8 +1901,8 @@
           "name": "userspace scheduler applies thermal and battery decisions to live dispatch"
         },
         {
-          "file": "src/native/task/accelerator_scheduler.zig",
-          "name": "accelerator scheduler tracks exclusive engine claims and zero-copy attachments"
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler separates accelerator claim queues from cpu ready queues"
         }
       ]
     },
@@ -1916,7 +1911,7 @@
       "enforcement_modules": [
         "src/native/kernel_api/shared_memory.zig",
         "src/native/task/accelerator_scheduler.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1924,7 +1919,7 @@
           "name": "shared memory rejects stale task and accelerator descriptors after generation changes"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1936,7 +1931,7 @@
         "src/native/task/accelerator_scheduler.zig",
         "src/native/task/userspace_scheduler.zig",
         "src/native/task/task_runtime_model.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1965,7 +1960,8 @@
         "src/native/drivers/device_inventory.zig",
         "src/native/session/service_catalog.zig",
         "src/native/session/session_service_bootstrap.zig",
-        "src/native/session/service_path_proofs.zig",
+        "src/native/session/proofs/service_restart_proofs.zig",
+        "src/native/session/proofs/service_path_proofs.zig",
         "src/native/drivers/bootstrap_driver_port.zig",
         "src/native/drivers/network_driver_task.zig",
         "src/kernel/net/link_port.zig",
@@ -1973,7 +1969,7 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -1991,11 +1987,11 @@
       "enforcement_modules": [
         "src/native/drivers/driver_service.zig",
         "src/native/kernel_api/device_broker.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -2016,11 +2012,11 @@
         "src/native/session/session_service_bootstrap.zig",
         "src/native/session/session_manager_boot_flow.zig",
         "src/native/platform/event_ledger.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted driver hot-swap and crash recovery rebind live brokered device authority"
         },
         {
@@ -2076,7 +2072,7 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/update_health.zig",
-        "src/native/session/service_path_proofs.zig",
+        "src/native/session/proofs/service_path_proofs.zig",
         "src/native/session/trust_boot.zig",
         "src/native_smoke_markers.zig",
         "tools/host/qemu.zig"
@@ -2087,7 +2083,7 @@
           "name": "update health failures trigger rollback for each required post-activation check"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {

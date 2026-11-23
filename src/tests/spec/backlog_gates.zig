@@ -47,7 +47,7 @@ const sync_adapters = @import("../../native/sync/sync_adapters.zig");
 const sync_service_test = @import("../../native/sync/sync_service_test.zig");
 const sync_transport = @import("../../native/sync/sync_transport.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
-const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
+const component_abi_schema = @import("../../native/services/component_abi_schema.zig");
 
 const COMPOSITOR_RENDER_BUFFER_BYTES: usize = 1024;
 const SYNC_ADAPTER_REPLAY_BUFFER_BYTES: usize = 96;
@@ -213,51 +213,51 @@ pub fn syncPrivateOverlayEndToEndGate() !void {
 }
 
 pub fn componentAbiDepthGate() !void {
-    const interface_id = typed_component_abi.InterfaceId.service_registry;
-    try std.testing.expectEqualStrings("zigos.object.workspace", typed_component_abi.Interface(.object_workspace).name);
-    try std.testing.expectEqualStrings("zigos.package.install", typed_component_abi.Interface(.package_install).name);
+    const interface_id = component_abi_schema.InterfaceId.service_registry;
+    try std.testing.expectEqualStrings("zigos.object.workspace", component_abi_schema.interfaceDecl(.object_workspace).name);
+    try std.testing.expectEqualStrings("zigos.package.install", component_abi_schema.interfaceDecl(.package_install).name);
 
-    var header = typed_component_abi.WireHeader{
-        .operation = @backingInt(typed_component_abi.OperationId.service_connect),
+    var header = component_abi_schema.WireHeader{
+        .operation = @backingInt(component_abi_schema.OperationId.service_connect),
         .correlation_id = 901,
         .subject_task_id = 77,
     };
-    try typed_component_abi.validateMessage(
+    try component_abi_schema.validateMessage(
         interface_id,
         .service_connect,
         header,
-        @sizeOf(typed_component_abi.ServiceConnectionRequest),
-        @sizeOf(typed_component_abi.ServiceConnectionResponse),
+        @sizeOf(component_abi_schema.Request(.service_connect)),
+        @sizeOf(component_abi_schema.Response(.service_connect)),
     );
 
     header.subject_task_id = 0;
-    try std.testing.expectError(error.SubjectTaskRequired, typed_component_abi.validateMessage(
+    try std.testing.expectError(error.SubjectTaskRequired, component_abi_schema.validateMessage(
         interface_id,
         .service_connect,
         header,
-        @sizeOf(typed_component_abi.ServiceConnectionRequest),
-        @sizeOf(typed_component_abi.ServiceConnectionResponse),
+        @sizeOf(component_abi_schema.Request(.service_connect)),
+        @sizeOf(component_abi_schema.Response(.service_connect)),
     ));
     header.subject_task_id = 77;
-    try std.testing.expectError(error.InvalidResponseLength, typed_component_abi.validateMessage(
+    try std.testing.expectError(error.InvalidResponseLength, component_abi_schema.validateMessage(
         interface_id,
         .service_connect,
         header,
-        @sizeOf(typed_component_abi.ServiceConnectionRequest),
-        @sizeOf(typed_component_abi.ServiceConnectionResponse) - 1,
+        @sizeOf(component_abi_schema.Request(.service_connect)),
+        @sizeOf(component_abi_schema.Response(.service_connect)) - 1,
     ));
 
-    const rollback_header = typed_component_abi.WireHeader{
-        .operation = @backingInt(typed_component_abi.OperationId.package_rollback),
+    const rollback_header = component_abi_schema.WireHeader{
+        .operation = @backingInt(component_abi_schema.OperationId.package_rollback),
         .correlation_id = 902,
         .subject_task_id = 78,
     };
-    try typed_component_abi.validateMessage(
+    try component_abi_schema.validateMessage(
         .package_install,
         .package_rollback,
         rollback_header,
-        @sizeOf(typed_component_abi.PackageRollbackRequest),
-        @sizeOf(typed_component_abi.PackageRollbackResponse),
+        @sizeOf(component_abi_schema.Request(.package_rollback)),
+        @sizeOf(component_abi_schema.Response(.package_rollback)),
     );
 
     var sim = native_app_sdk.simulator.Simulator.init();

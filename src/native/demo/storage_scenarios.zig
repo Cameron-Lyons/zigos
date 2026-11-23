@@ -1,7 +1,7 @@
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
-const contract = @import("../session/contract.zig");
+const service_catalog = @import("../session/service_catalog.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const native_util = @import("../core/util.zig");
 const object_store_mod = @import("../storage/object_store.zig");
@@ -218,7 +218,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
     const latest_notes_version_id = context.storage_service_instance.latestVersion(notes_object_id).?.id.raw();
     support.common.printBootMarker(boot_markers.storage_reload_latest_version_done);
 
-    if (contract.serviceDescriptor(.storage_object).?.boundary == .userspace_service and
+    if (service_catalog.serviceDescriptor(.storage_object).?.boundary == .userspace_service and
         context.storage_service_instance.latestVersion(notes_object_id) != null)
     {
         support.common.printBootMarker(boot_markers.storage_object_store_ready);

@@ -318,16 +318,6 @@ pub const ModeledInputSource = struct {
     }
 };
 
-var system_input_router: ?*input_router.Router = null;
-
-pub fn bindSystemInputRouter(router: *input_router.Router) void {
-    system_input_router = router;
-}
-
-pub fn clearSystemInputRouter() void {
-    system_input_router = null;
-}
-
 const TestHardwareReportFeed = struct {
     reports: [3]xhci.HardwareBootKeyboardReport = @as([3]xhci.HardwareBootKeyboardReport, @splat(.{})),
     cursor: usize = 0,
@@ -654,14 +644,12 @@ pub const Service = struct {
         runtime: *task_runtime.Runtime,
         scripted_inputs: []const []const u8,
     ) Service {
-        var service = Service{
+        return .{
             .service_id = service_id,
             .task_id = task_id,
             .runtime = runtime,
             .scripted_inputs = scripted_inputs,
         };
-        service.focused_input = system_input_router;
-        return service;
     }
 
     pub fn initConfigured(
@@ -1420,9 +1408,8 @@ test "permission input consumes only centrally routed events for its focused tas
         .input_proof = noTestHardwareInputProof,
     });
     router.bindCompositor(&compositor, 3);
-    bindSystemInputRouter(&router);
-    defer clearSystemInputRouter();
     var service = Service.init(1, 2, &runtime, &.{});
+    service.bindFocusedInput(&router);
     var modeled_input = try ModeledInputSource.initDefault();
     try modeled_input.enqueueTextCommand(
         modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
@@ -1430,7 +1417,6 @@ test "permission input consumes only centrally routed events for its focused tas
         "deny",
     );
     service.bindModeledInput(&modeled_input);
-    try std.testing.expect(service.focused_input != null);
     var command_buffer: [MAX_INPUT_LINE]u8 = undefined;
     var bundle = manifest_fixtures.notesBundle();
     bundle.requested_permissions = manifest_fixtures.notes_permissions[0..1];
@@ -1454,13 +1440,11 @@ test "hosted modeled xHCI reports still count when a focused router is bound" {
     var compositor_service = compositor_session.Service.initWithCheckpoint(17, 18, &runtime, &compositor, &checkpoint_store);
     var router = input_router.Router{};
     router.bindCompositor(&compositor, compositor_service.task_id);
-    bindSystemInputRouter(&router);
-    defer clearSystemInputRouter();
 
     var service = Service.init(17, 18, &runtime, &[_][]const u8{});
+    service.bindFocusedInput(&router);
     service.bindCompositorService(&compositor_service);
     service.bindModeledInput(&modeled_input);
-    try std.testing.expect(service.focused_input != null);
 
     const permissions = [_]manifest.PermissionRequest{
         .{

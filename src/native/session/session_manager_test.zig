@@ -1,5 +1,5 @@
 const std = @import("std");
-const contract = @import("contract.zig");
+const service_catalog = @import("service_catalog.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
 const abi = @import("../core/abi.zig");
 const component_port = @import("../kernel_api/component_port.zig");
@@ -11,7 +11,6 @@ const xhci = @import("../../kernel/drivers/xhci.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const principal = @import("../core/principal.zig");
-const service_contract = @import("service_contracts.zig");
 const session_demo_boot = @import("../demo/session_demo_boot.zig");
 const session_manager = @import("session_manager.zig");
 const signing = @import("../core/signing.zig");
@@ -241,8 +240,8 @@ test "boot assembles core services without running explicit scenarios" {
     const dispatcher = try session_manager.testing.backgroundDispatchPtr();
 
     try std.testing.expect(session_manager.testing.isInitialized());
-    try std.testing.expectEqual(contract.default_services.len, session_manager.testing.countServices());
-    try std.testing.expectEqual(service_contract.ordered_service_contracts.len, service_directory.bindingCount());
+    try std.testing.expectEqual(service_catalog.default_services.len, session_manager.testing.countServices());
+    try std.testing.expectEqual(service_catalog.ordered_service_contracts.len, service_directory.bindingCount());
     try std.testing.expectEqual(@as(usize, 20), session_manager.testing.countTasks());
     try std.testing.expectEqual(@as(usize, 20), session_manager.testing.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.suspended));
@@ -287,8 +286,8 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.audio_print_io).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.compositor_policy).?.restart_generation);
 
-    for (service_contract.ordered_service_contracts) |entry| {
-        const descriptor = service_contract.contractForClass(entry.class).?;
+    for (service_catalog.ordered_service_contracts) |entry| {
+        const descriptor = service_catalog.serviceContractForClass(entry.class).?;
         const connection = try service_directory.connect(descriptor.interface_id);
         try std.testing.expectEqual(supervisor.findByClass(entry.class).?.id, connection.service_id);
     }
@@ -496,8 +495,8 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     const dispatcher = try session_manager.testing.backgroundDispatchPtr();
 
     try std.testing.expect(session_manager.testing.isInitialized());
-    try std.testing.expectEqual(contract.default_services.len, session_manager.testing.countServices());
-    try std.testing.expectEqual(service_contract.ordered_service_contracts.len + 1, service_directory.bindingCount());
+    try std.testing.expectEqual(service_catalog.default_services.len, session_manager.testing.countServices());
+    try std.testing.expectEqual(service_catalog.ordered_service_contracts.len + 1, service_directory.bindingCount());
     try std.testing.expectEqual(@as(usize, 28), session_manager.testing.countTasks());
     try std.testing.expectEqual(@as(usize, 27), session_manager.testing.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), session_manager.testing.countTasksInState(.suspended));
@@ -540,7 +539,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.audio_print_io).?.restart_generation);
     try std.testing.expectEqual(@as(u32, 1), driver_directory.findByClass(.compositor_policy).?.restart_generation);
 
-    const service_classes = [_]contract.ServiceClass{
+    const service_classes = [_]service_catalog.ServiceClass{
         .package_install_update,
         .indexing_search,
         .media_print_helpers,
@@ -550,7 +549,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
         .secret_vault,
     };
     for (service_classes) |class| {
-        const descriptor = service_contract.contractForClass(class).?;
+        const descriptor = service_catalog.serviceContractForClass(class).?;
         const connection = try service_directory.connect(descriptor.interface_id);
         try std.testing.expectEqual(supervisor.findByClass(class).?.id, connection.service_id);
     }

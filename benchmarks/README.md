@@ -32,33 +32,6 @@ ReleaseFast build and KVM. All values are cycles per complete operation:
 
 The standard 50% regression allowance applies to both baselines.
 
-`accelerator_scheduler.claim_release` creates, claims, releases and revokes a
-64 KiB CPU/GPU shared-memory object on every iteration. Owned physical backing
-now allocates 16 frames, initializes all 64 KiB before publication, and securely
-erases all 64 KiB before returning the frames. The previous implementation only
-advanced a physical-address metadata cursor, so its 4138.79-cycle baseline and
-7200-cycle ceiling did not cover this memory lifecycle.
-
-The replacement baseline was captured on 2026-10-11 with pinned Zig 0.17.0
-`fast` and GitHub-hosted Ubuntu 24.04 KVM. Three consecutive invocations used
-the same revision, `95bd2fbc3d5178884a36de3ae969e13b2af2e52c`, in
-[CI run 38151161073](https://github.com/Cameron-Lyons/zigos/actions/runs/38151161073).
-Each invocation reports its best of three timed passes; calibration takes the
-slowest invocation. Every invocation reported all 34 cases and passed all 10
-quality gates. Values are cycles per complete create/claim/release/revoke:
-
-| Workload | Attempt 1 (centralus) | Attempt 2 (westus3) | Attempt 3 (westus2) | Baseline | Ceiling |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Backed accelerator lifecycle | 6865.38 | 8268.46 | 4481.98 | 8268.46 | 10000 |
-
-The standard 50% regression allowance remains; the 10000-cycle hard ceiling
-is tighter than that allowance and leaves about 21% above the slowest measured
-invocation. Allocation initialization and secure erasure remain part of the
-measured work. All quality gates remain enforced. Other workloads retained their existing baselines and
-ceilings at that calibration, including the heap and syscall workloads. Attempt 2 exceeded
-the heap allowance and attempt 3 exceeded the syscall allowance; these samples
-calibrate only the changed accelerator lifecycle.
-
 `syscall.fast_entry_roundtrip` now executes the upper-half runtime with per-CPU
 entry ownership and preserves x87, SSE and AVX/YMM state. Its xstate image grew
 from 576 to 832 bytes; the previous 800.10-cycle baseline covered the earlier

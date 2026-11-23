@@ -19,7 +19,6 @@ const native_service_registry = @import("../services/service_registry.zig");
 const native_util = @import("../core/util.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const principal = @import("../core/principal.zig");
-const permission_review_service = @import("../policy/permission_review_service.zig");
 const package_service = @import("../services/package_service.zig");
 const session_bootstrap = @import("session_bootstrap.zig");
 const session_contexts = @import("session_manager_contexts.zig");
@@ -163,7 +162,6 @@ pub const SessionManager = struct {
         if (!bootstrap_driver_port.reset()) @panic("trusted reset requires drained device submissions");
         session_service_bootstrap.resetBootedDataPlanes();
         self.kernel_context.resetPort();
-        permission_review_service.clearSystemInputRouter();
         self.input_router.deinit();
         // Retire object demand mappings while their executor spaces and
         // generational mapping handles are still owned by the scheduler.
@@ -1020,7 +1018,7 @@ pub const SessionManager = struct {
             return null;
         };
         self.packageServicePtr().bind(
-            state.services.package_service.id,
+            state.services.get(.package_install_update).id,
             state.ids.package_service,
         );
         const kernel_port = prepareKernelInterface(self, state.ids.policy_authority, state.session_task.id);
@@ -1052,11 +1050,10 @@ pub const SessionManager = struct {
         };
         var trust = self.trustBoot();
         if (comptime include_verification_evidence) {
-            if (!trust.proveProductionAbImageRollback(&graph)) {
-                self.failBoot();
-                return null;
-            }
-            if (!trust.proveProductionPostActivationHealthChecks(&graph)) {
+            const base_activation_proof = @import("proofs/base_activation_proof.zig");
+            if (!base_activation_proof.proveAbImageRollback(&trust, &graph) or
+                !base_activation_proof.provePostActivationHealthChecks(&trust, &graph))
+            {
                 self.failBoot();
                 return null;
             }
@@ -1088,7 +1085,6 @@ pub const SessionManager = struct {
             _ = self.recovery_context.review_compositor_session.openTaskView(compositor_task, "Zigos") catch return false;
         }
         if (!self.provisionSurfacePresentationCapabilities(0)) return false;
-        permission_review_service.bindSystemInputRouter(&self.input_router);
         common.printBootMarker(boot_markers.compositor_input_router_ready);
         common.printBootMarker(boot_markers.userspace_input_abi_ready);
         return true;
@@ -1210,7 +1206,7 @@ pub const SessionManager = struct {
 
     pub fn bindProductionStorageService(self: *SessionManager, graph: *const ServiceGraph) bool {
         self.native_store.bindProduction(
-            graph.state.services.storage_service.id,
+            graph.state.services.get(.storage_object).id,
             graph.service_bindings.bindingFor(.storage_object).task_id,
             graph.state.ids.storage_service,
             self.capabilityTablePtr(),
@@ -1238,7 +1234,6 @@ pub const SessionManager = struct {
         self.kernel_context.kernel_instance.clearSurfacePresentationReceiver();
         self.input_router.clearCompositor();
         self.surface_authority_scanned_lifecycle_generation = 0;
-        permission_review_service.clearSystemInputRouter();
         self.kernel_context.resetPort();
         clearRootKernelPort();
     }
@@ -1312,13 +1307,13 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState
     const services = try session_bootstrap.registerCoreServices(&self.service_graph_builder.supervisor, &self.runtime_context.runtime_service, ids);
 
     const session_task = launchNativeBootstrapService(self, ids, services, .session_manager) catch |err| {
-        self.recordBootFailure(services.session.id, 0, err);
+        self.recordBootFailure(services.get(.session_manager).id, 0, err);
         return err;
     };
     common.printBootMarker(boot_markers.policy_ready);
 
     const review_service_task = launchNativeBootstrapService(self, ids, services, .permission_review_ui) catch |err| {
-        self.recordBootFailure(services.review_service_record.id, 0, err);
+        self.recordBootFailure(services.get(.permission_review_ui).id, 0, err);
         return err;
     };
     grantNativeServiceTaskAuthority(
@@ -1329,22 +1324,22 @@ fn initializeBootstrapState(self: *SessionManager) BootstrapError!BootstrapState
         review_service_task,
         .permission_review_ui,
     ) catch |err| {
-        self.recordBootFailure(services.review_service_record.id, 0, err);
+        self.recordBootFailure(services.get(.permission_review_ui).id, 0, err);
         return err;
     };
     common.printBootMarker(boot_markers.permission_ui_service_ready);
     common.printBootMarker(boot_markers.permission_ui_service_task_ready);
 
     const session_capability = mintNativeBootstrapGrant(self, ids, services, session_task.id, .session_manager, .session_service_authority) catch |err| {
-        self.recordBootFailure(services.session.id, 0, err);
+        self.recordBootFailure(services.get(.session_manager).id, 0, err);
         return err;
     };
     const policy_capability = mintNativeBootstrapGrant(self, ids, services, session_task.id, .session_manager, .policy_mint_authority) catch |err| {
-        self.recordBootFailure(services.policy_service.id, 0, err);
+        self.recordBootFailure(services.get(.policy_mediation).id, 0, err);
         return err;
     };
     recordSessionTaskBootstrap(session_task, session_capability.id, policy_capability.id) catch |err| {
-        self.recordBootFailure(services.session.id, 0, err);
+        self.recordBootFailure(services.get(.session_manager).id, 0, err);
         return err;
     };
 
@@ -1373,7 +1368,7 @@ fn launchNativeBootstrapService(
         self.runtimePtr(),
         bundle_id,
         .{
-            .owner = session_bootstrap.ownerForServiceClass(ids, class) orelse return error.MissingBootstrapLaunch,
+            .owner = session_bootstrap.ownerForServiceClass(ids, class),
             .budget = launch.budget,
             .ui_surface_id = launch.ui_surface_id,
             .local_only = true,
@@ -1381,8 +1376,7 @@ fn launchNativeBootstrapService(
         },
         self.userspaceSchedulerPtr(),
     ) catch |err| {
-        const record = session_bootstrap.serviceRecordForClass(services, class) orelse return error.MissingBootstrapLaunch;
-        self.recordBootFailure(record.id, launch.tick, err);
+        self.recordBootFailure(services.get(class).id, launch.tick, err);
         return err;
     };
 }
@@ -1397,13 +1391,13 @@ fn mintNativeBootstrapGrant(
 ) BootstrapError!capability.Capability {
     if (!catalogDeclaresGrant(class, grant)) return error.MissingBootstrapGrant;
     const target: capability.CapabilityTarget = switch (grant) {
-        .session_service_authority => .{ .kind = .service, .id = services.session.id },
-        .policy_mint_authority => .{ .kind = .policy, .id = services.policy_service.id },
+        .session_service_authority => .{ .kind = .service, .id = services.get(.session_manager).id },
+        .policy_mint_authority => .{ .kind = .policy, .id = services.get(.policy_mediation).id },
         .service_task_authority => return error.MissingBootstrapGrant,
     };
     const broker_service_id = switch (grant) {
-        .session_service_authority => services.policy_service.id,
-        .policy_mint_authority => services.policy_service.id,
+        .session_service_authority => services.get(.policy_mediation).id,
+        .policy_mint_authority => services.get(.policy_mediation).id,
         .service_task_authority => unreachable,
     };
     return try self.capabilityTablePtr().mintBootRoot(.{
@@ -1437,7 +1431,7 @@ fn grantNativeServiceTaskAuthority(
     class: service_catalog.ServiceClass,
 ) BootstrapError!void {
     if (!catalogDeclaresGrant(class, .service_task_authority)) return error.MissingBootstrapGrant;
-    const service = session_bootstrap.serviceRecordForClass(services, class) orelse return error.MissingBootstrapGrant;
+    const service = services.get(class);
     const granted = try self.capabilityTablePtr().mintBootRoot(.{
         .holder = task.owner,
         .issuer = ids.policy_authority,

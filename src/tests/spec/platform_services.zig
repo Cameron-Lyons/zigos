@@ -5,7 +5,7 @@ const std = @import("std");
 const spec_support = @import("support.zig");
 const accelerator_scheduler = @import("../../native/task/accelerator_scheduler.zig");
 const attestation_service = @import("../../native/platform/attestation_service.zig");
-const contract = @import("../../native/session/contract.zig");
+const service_catalog = @import("../../native/session/service_catalog.zig");
 const denial_explanation = @import("../../native/policy/denial_explanation.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
@@ -188,19 +188,19 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try std.testing.expect(peer_decision.allowed);
     try std.testing.expect(peer_decision.identity_pinned);
 
-    var scheduler = accelerator_scheduler.Controller.init();
-    scheduler.configure(.{
+    var planner = accelerator_scheduler.Controller.init();
+    planner.configure(.{
         .privacy_mode = true,
         .gpu_available = true,
         .npu_available = true,
         .media_available = true,
     });
-    const inference = scheduler.plan(.{
+    const inference = planner.plan(.{
         .class = .background_light,
         .wants_npu = true,
         .privacy_sensitive = true,
     });
-    const media_export_plan = scheduler.plan(.{
+    const media_export_plan = planner.plan(.{
         .class = .media_export,
         .wants_gpu = true,
         .wants_media_engine = true,
@@ -217,17 +217,7 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     const zero_copy = try shared.createWithAccess(ids.task(foreground_task.id), shared_memory.PAGE_SIZE, .{
         .media = true,
     });
-    const engine_claim = try scheduler.claimWithSharedMemory(.{
-        .task_id = foreground_task.id,
-        .request = .{
-            .class = .media_export,
-            .wants_gpu = true,
-            .wants_media_engine = true,
-            .shared_memory_bytes = shared_memory.PAGE_SIZE,
-        },
-        .require_accelerator = true,
-        .shared_memory_object_id = zero_copy.id,
-    }, &shared);
+    try shared.attachAccelerator(zero_copy.id, .media);
     const background_task = try runtime.createTask(.{
         .owner = spec_support.app(92),
         .component_class = .app_component,
@@ -250,10 +240,8 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try std.testing.expectEqual(accelerator_scheduler.DecisionReason.privacy_mode, inference.reason);
     try std.testing.expectEqual(accelerator_scheduler.Engine.media, media_export_plan.engine);
     try std.testing.expect(media_export_plan.zero_copy_allowed);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.media, engine_claim.engine);
-    try std.testing.expect(engine_claim.zero_copy);
     try std.testing.expect(try shared.isAcceleratorAttached(zero_copy.id, .media));
-    try std.testing.expect(try scheduler.releaseClaim(engine_claim.id, &shared));
+    try std.testing.expect(try shared.detachAccelerator(zero_copy.id, .media));
     try std.testing.expect(!(try shared.isAcceleratorAttached(zero_copy.id, .media)));
     try std.testing.expectEqual(accelerator_scheduler.ResourceClass.foreground_interactive, foreground_task.resourceClass());
     try std.testing.expectEqual(accelerator_scheduler.ResourceClass.background_light, background_task.resourceClass());
@@ -355,8 +343,8 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
     try std.testing.expect(std.mem.indexOf(u8, exported, "blocked_help=\"Blocked: This app") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "service=storage_object") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "detail=storage driver restarted") != null);
-    try std.testing.expectEqual(contract.ServiceClass.storage_object, ledger.latestKind(.process_crash).?.service_class);
-    try std.testing.expectEqual(contract.ServiceClass.storage_object, ledger.latestKind(.driver_restart).?.service_class);
+    try std.testing.expectEqual(service_catalog.ServiceClass.storage_object, ledger.latestKind(.process_crash).?.service_class);
+    try std.testing.expectEqual(service_catalog.ServiceClass.storage_object, ledger.latestKind(.driver_restart).?.service_class);
 
     var checkpoint_store = storage_service.CheckpointStore{};
     if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");

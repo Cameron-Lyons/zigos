@@ -8,8 +8,8 @@ const units = @import("../../../../native/core/units.zig");
 
 pub const MAX_JOBS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 64;
-pub const JOB_RECORD_SIZE_CEILING_BYTES: usize = 208;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 3_352;
+pub const JOB_RECORD_SIZE_CEILING_BYTES: usize = 192;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 3_096;
 
 comptime {
     if (MAX_JOBS > std.math.maxInt(u8) or MAX_LABEL_BYTES > std.math.maxInt(u8)) {
@@ -55,7 +55,6 @@ pub const JobRecord = struct {
     visibility: Visibility,
     local_only: bool,
     engine: accelerator_scheduler.Engine,
-    claim_id: ?u64,
     notification_id: ?u64,
     label_len: u8,
     label: [MAX_LABEL_BYTES]u8,
@@ -77,7 +76,8 @@ pub const Error = error{
     LabelTooLong,
     PrinterIdentityTooLong,
     PrinterRequiresLocalOnly,
-} || accelerator_scheduler.Error || notification_center.Error;
+    AcceleratorRequired,
+} || notification_center.Error;
 
 pub const JobId = indexed_arena.GenerationalHandle("MediaPrintJob");
 
@@ -101,7 +101,7 @@ pub const Service = struct {
     pub fn submit(
         self: *Service,
         request: JobRequest,
-        scheduler: *accelerator_scheduler.Controller,
+        scheduler: *const accelerator_scheduler.Controller,
         notifications: *notification_center.Center,
         now_ticks: u64,
     ) Error!*JobRecord {
@@ -136,19 +136,12 @@ pub const Service = struct {
             if (!notifications.canPost(notice)) return error.NotificationTableFull;
         }
 
-        // The BSP owns both services. Claim admission is synchronous and does
-        // not yield or call notification code, so the exact notice admission
-        // above remains valid until publication after successful claim creation.
-        const claim = try scheduler.claim(.{
-            .task_id = request.task_id,
-            .request = schedulerRequest(request.kind),
-            .require_accelerator = request.kind == .media_export,
-        });
-        job.engine = claim.engine;
-        job.claim_id = claim.id;
+        const decision = scheduler.plan(schedulerRequest(request.kind));
+        if (request.kind == .media_export and decision.engine == .cpu) return error.AcceleratorRequired;
+        job.engine = decision.engine;
         if (notice_request) |notice| {
             const published = notifications.post(notice) catch |err|
-                native_util.impossibleByInvariantError("serialized media claim admission retains exact notification capacity", err);
+                native_util.impossibleByInvariantError("media submission retains its checked notification capacity", err);
             job.notification_id = published.id;
         }
 
@@ -165,19 +158,11 @@ pub const Service = struct {
     pub fn complete(
         self: *Service,
         job_id: u64,
-        scheduler: *accelerator_scheduler.Controller,
         notifications: *notification_center.Center,
         now_ticks: u64,
     ) Error!?u64 {
         const job = self.find(job_id) orelse return error.JobNotFound;
         if (job.state == .completed) return job.notification_id;
-        // Device completion and claim retirement precede success publication.
-        // If the notice table is full, retry only its publication: the proven
-        // complete claim has already relinquished its engine ownership.
-        if (job.claim_id) |claim_id| {
-            _ = try scheduler.releaseClaim(claim_id, null);
-            job.claim_id = null;
-        }
         if (job.visibility == .hidden) {
             self.markJobCompleted(job_id, job);
             return null;
@@ -325,7 +310,6 @@ fn zeroJob() JobRecord {
         .visibility = .hidden,
         .local_only = true,
         .engine = .cpu,
-        .claim_id = null,
         .notification_id = null,
         .label_len = 0,
         .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
@@ -337,12 +321,12 @@ fn zeroJob() JobRecord {
 test "media and print job metadata stays compact" {
     try std.testing.expectEqual(u8, @FieldType(JobRecord, "label_len"));
     try std.testing.expectEqual(u8, @FieldType(JobRecord, "printer_identity_len"));
-    try std.testing.expectEqual(@as(usize, 208), @sizeOf(JobRecord));
-    try std.testing.expectEqual(@as(usize, 3_352), @sizeOf(Service));
+    try std.testing.expectEqual(JOB_RECORD_SIZE_CEILING_BYTES, @sizeOf(JobRecord));
+    try std.testing.expectEqual(SERVICE_SIZE_CEILING_BYTES, @sizeOf(Service));
 }
 
 test "media print service uses scheduled engines and emits completion notifications" {
-    var scheduler = accelerator_scheduler.Controller.init();
+    const scheduler = accelerator_scheduler.Controller.init();
     var notifications = notification_center.Center.init();
     var service = Service.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 12 };
@@ -357,7 +341,6 @@ test "media print service uses scheduled engines and emits completion notificati
     }, &scheduler, &notifications, 10);
     try std.testing.expectEqual(accelerator_scheduler.Engine.media, export_job.engine);
     try std.testing.expectEqual(@as(?u64, notification_center.NotificationId.fromParts(0, 1).value), export_job.notification_id);
-    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
 
     const print_job = try service.submit(.{
         .kind = .print_document,
@@ -371,21 +354,19 @@ test "media print service uses scheduled engines and emits completion notificati
     }, &scheduler, &notifications, 11);
     try std.testing.expectEqualStrings("printer://office-1", print_job.printerIdentitySlice());
 
-    const completion_id = (try service.complete(print_job.id, &scheduler, &notifications, 20)).?;
+    const completion_id = (try service.complete(print_job.id, &notifications, 20)).?;
     try std.testing.expect(completion_id >= 3);
     try std.testing.expectEqual(JobState.completed, print_job.state);
     try std.testing.expectEqual(notification_center.Reason.print_complete, notifications.latestVisible(20).?.reason);
-    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
     const next_notification_sequence = notifications.next_notification_sequence;
-    try std.testing.expectEqual(@as(?u64, completion_id), try service.complete(print_job.id, &scheduler, &notifications, 21));
+    try std.testing.expectEqual(@as(?u64, completion_id), try service.complete(print_job.id, &notifications, 21));
     try std.testing.expectEqual(next_notification_sequence, notifications.next_notification_sequence);
     try std.testing.expectEqual(@as(usize, 1), service.completedJobCount());
-    _ = try service.complete(export_job.id, &scheduler, &notifications, 21);
-    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
+    _ = try service.complete(export_job.id, &notifications, 21);
 }
 
 test "media print service rejects remote printing and hidden jobs stay silent" {
-    var scheduler = accelerator_scheduler.Controller.init();
+    const scheduler = accelerator_scheduler.Controller.init();
     var notifications = notification_center.Center.init();
     var service = Service.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 13 };
@@ -417,7 +398,6 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
         .label = "local print",
         .printer_identity = too_long_printer[0..],
     }, &scheduler, &notifications, 7));
-    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
     try std.testing.expect(service.find(1) == null);
 
     const hidden = try service.submit(.{
@@ -430,16 +410,15 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
     }, &scheduler, &notifications, 8);
     try std.testing.expectEqual(JobId.fromParts(0, 1).value, hidden.id);
     try std.testing.expectEqual(@as(?u64, null), hidden.notification_id);
-    try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &scheduler, &notifications, 9));
+    try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &notifications, 9));
     try std.testing.expectEqual(@as(usize, 1), service.completedJobCount());
-    try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &scheduler, &notifications, 10));
+    try std.testing.expectEqual(@as(?u64, null), try service.complete(hidden.id, &notifications, 10));
     try std.testing.expectEqual(@as(usize, 1), service.completedJobCount());
     try std.testing.expectEqual(@as(usize, 0), notifications.activeCount(9));
-    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }
 
 test "media print service uses direct generational ids through bounded capacity" {
-    var scheduler = accelerator_scheduler.Controller.init();
+    const scheduler = accelerator_scheduler.Controller.init();
     var notifications = notification_center.Center.init();
     var service = Service.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 14 };
@@ -458,7 +437,6 @@ test "media print service uses direct generational ids through bounded capacity"
         try std.testing.expectEqual(@as(u32, 1), job_id.generation());
     }
     try std.testing.expectEqual(MAX_JOBS, service.jobCount());
-    try std.testing.expectEqual(@as(u16, MAX_JOBS), scheduler.activeClaimCount());
     try std.testing.expect(service.find(0) == null);
     try std.testing.expect(service.find(JobId.fromParts(MAX_JOBS, 1).value) == null);
     try std.testing.expectError(error.JobTableFull, service.submit(.{
@@ -469,11 +447,10 @@ test "media print service uses direct generational ids through bounded capacity"
         .label = "rejected full table print",
         .visibility = .hidden,
     }, &scheduler, &notifications, 21));
-    try std.testing.expectEqual(@as(u16, MAX_JOBS), scheduler.activeClaimCount());
 }
 
 test "media print service retains recent completions and recycles the oldest completed job" {
-    var scheduler = accelerator_scheduler.Controller.init();
+    const scheduler = accelerator_scheduler.Controller.init();
     var notifications = notification_center.Center.init();
     var service = Service.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 14 };
@@ -493,19 +470,17 @@ test "media print service retains recent completions and recycles the oldest com
         }, &scheduler, &notifications, 30 + job_index);
         job_ids[job_index] = job.id;
     }
-    try std.testing.expectEqual(@as(u16, MAX_JOBS), scheduler.activeClaimCount());
 
-    try std.testing.expectEqual(@as(?u64, null), try service.complete(job_ids[2], &scheduler, &notifications, 60));
-    try std.testing.expectEqual(@as(?u64, null), try service.complete(job_ids[0], &scheduler, &notifications, 61));
+    try std.testing.expectEqual(@as(?u64, null), try service.complete(job_ids[2], &notifications, 60));
+    try std.testing.expectEqual(@as(?u64, null), try service.complete(job_ids[0], &notifications, 61));
     for (job_ids[3..], 0..) |job_id, completion_index| {
-        try std.testing.expectEqual(@as(?u64, null), try service.complete(job_id, &scheduler, &notifications, 62 + completion_index));
+        try std.testing.expectEqual(@as(?u64, null), try service.complete(job_id, &notifications, 62 + completion_index));
     }
-    try std.testing.expectEqual(@as(?u64, null), try service.complete(job_ids[1], &scheduler, &notifications, 90));
+    try std.testing.expectEqual(@as(?u64, null), try service.complete(job_ids[1], &notifications, 90));
 
     try std.testing.expectEqual(@as(usize, MAX_JOBS), service.jobCount());
     try std.testing.expectEqual(@as(usize, MAX_JOBS), service.completedJobCount());
     try std.testing.expectEqual(job_ids[2], service.oldestCompletedJobId().?);
-    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
     const replacement = try service.submit(.{
         .kind = .print_document,
         .task_id = 200,
@@ -524,10 +499,8 @@ test "media print service retains recent completions and recycles the oldest com
     try std.testing.expectEqual(@as(usize, MAX_JOBS), service.jobCount());
     try std.testing.expectEqual(@as(usize, MAX_JOBS - 1), service.completedJobCount());
     try std.testing.expectEqual(job_ids[0], service.oldestCompletedJobId().?);
-    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
-    _ = try service.complete(replacement.id, &scheduler, &notifications, 100);
+    _ = try service.complete(replacement.id, &notifications, 100);
     try std.testing.expectEqual(@as(usize, MAX_JOBS), service.completedJobCount());
-    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
     try std.testing.expectEqual(job_ids[0], service.oldestCompletedJobId().?);
 
     const wrapped_replacement = try service.submit(.{
@@ -545,14 +518,13 @@ test "media print service retains recent completions and recycles the oldest com
     try std.testing.expect(service.find(job_ids[0]) == null);
     try std.testing.expectEqual(job_ids[3], service.oldestCompletedJobId().?);
     try std.testing.expectEqual(@as(usize, MAX_JOBS - 1), service.completedJobCount());
-    _ = try service.complete(wrapped_replacement.id, &scheduler, &notifications, 102);
+    _ = try service.complete(wrapped_replacement.id, &notifications, 102);
     try std.testing.expectEqual(@as(usize, MAX_JOBS), service.completedJobCount());
     try std.testing.expectEqual(job_ids[3], service.oldestCompletedJobId().?);
-    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 }
 
-test "media print service skips exhausted completions without losing FIFO order or claims" {
-    var scheduler = accelerator_scheduler.Controller.init();
+test "media print service skips exhausted completions without losing FIFO order" {
+    const scheduler = accelerator_scheduler.Controller.init();
     var notifications = notification_center.Center.init();
     var service = Service.init();
     const request = JobRequest{
@@ -565,14 +537,13 @@ test "media print service skips exhausted completions without losing FIFO order 
     };
     for (0..MAX_JOBS + 5) |_| {
         const job = try service.submit(request, &scheduler, &notifications, 20);
-        _ = try service.complete(job.id, &scheduler, &notifications, 21);
+        _ = try service.complete(job.id, &notifications, 21);
     }
     try std.testing.expectEqual(@as(u8, 5), service.completed_job_head);
     for (&service.jobs, 0..) |*job, index| job.id = JobId.fromParts(index, indexed_arena.MAX_HANDLE_GENERATION).value;
     const before = service;
     try std.testing.expectError(error.JobTableFull, service.submit(request, &scheduler, &notifications, 22));
     try std.testing.expectEqualDeep(before, service);
-    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
     try std.testing.expectEqual(@as(usize, 0), notifications.activeCount(22));
     service.jobs[7].id = JobId.fromParts(7, indexed_arena.MAX_HANDLE_GENERATION - 1).value;
 
@@ -590,13 +561,11 @@ test "media print service skips exhausted completions without losing FIFO order 
     const before_failure = service;
     try std.testing.expectError(error.NotificationTableFull, service.submit(visible, &scheduler, &notifications, 23));
     try std.testing.expectEqualDeep(before_failure, service);
-    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
 
     const last = try service.submit(request, &scheduler, &notifications, 24);
     const last_id = last.id;
     try std.testing.expectEqual(JobId.fromParts(7, indexed_arena.MAX_HANDLE_GENERATION).value, last_id);
     try std.testing.expect(service.find(JobId.fromParts(7, 1).value) == null);
-    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
     try std.testing.expectEqual(MAX_JOBS - 1, service.completedJobCount());
     var retained: usize = 0;
     for (0..MAX_JOBS) |offset| {
@@ -605,16 +574,15 @@ test "media print service skips exhausted completions without losing FIFO order 
         try std.testing.expectEqual(old_slot, service.completed_job_slots[(@as(usize, service.completed_job_head) + retained) % MAX_JOBS]);
         retained += 1;
     }
-    _ = try service.complete(last_id, &scheduler, &notifications, 25);
+    _ = try service.complete(last_id, &notifications, 25);
     try std.testing.expectEqual(MAX_JOBS, service.completedJobCount());
-    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
     const exhausted = service;
     try std.testing.expectError(error.JobTableFull, service.submit(request, &scheduler, &notifications, 26));
     try std.testing.expectEqualDeep(exhausted, service);
 }
 
 test "media print service visible completion waits for completion notification capacity" {
-    var scheduler = accelerator_scheduler.Controller.init();
+    const scheduler = accelerator_scheduler.Controller.init();
     var notifications = notification_center.Center.init();
     var service = Service.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 15 };
@@ -628,8 +596,6 @@ test "media print service visible completion waits for completion notification c
         .visibility = .task,
     }, &scheduler, &notifications, 30);
     try std.testing.expectEqual(JobState.running, job.state);
-    try std.testing.expect(job.claim_id != null);
-    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
 
     for (0..notification_center.MAX_NOTIFICATIONS - notifications.activeCount(30)) |index| {
         _ = try notifications.post(.{
@@ -641,116 +607,15 @@ test "media print service visible completion waits for completion notification c
         });
     }
 
-    try std.testing.expectError(error.NotificationTableFull, service.complete(job.id, &scheduler, &notifications, 31));
+    try std.testing.expectError(error.NotificationTableFull, service.complete(job.id, &notifications, 31));
     try std.testing.expectEqual(JobState.running, job.state);
-    try std.testing.expectEqual(@as(?u64, null), job.claim_id);
-    try std.testing.expectEqual(@as(u16, 0), scheduler.activeClaimCount());
     const completion_queue_before = service.completedJobCount();
     _ = try notifications.dismiss(notifications.latestVisible(31).?.id);
-    const completed_notice = (try service.complete(job.id, &scheduler, &notifications, 32)).?;
+    const completed_notice = (try service.complete(job.id, &notifications, 32)).?;
     try std.testing.expectEqual(JobState.completed, job.state);
     try std.testing.expectEqual(completion_queue_before + 1, service.completedJobCount());
     try std.testing.expectEqual(notification_center.Reason.print_complete, notifications.find(completed_notice).?.reason);
     const next_sequence = notifications.next_notification_sequence;
-    try std.testing.expectEqual(@as(?u64, completed_notice), try service.complete(job.id, &scheduler, &notifications, 33));
+    try std.testing.expectEqual(@as(?u64, completed_notice), try service.complete(job.id, &notifications, 33));
     try std.testing.expectEqual(next_sequence, notifications.next_notification_sequence);
-}
-
-test "media completion retains pending job without notices and publishes once after exact completion" {
-    var scheduler = accelerator_scheduler.Controller.init();
-    var notifications = notification_center.Center.init();
-    var service = Service.init();
-    try std.testing.expect(scheduler.configureBrokeredEngineQueue(.media, .{
-        .broker_task_id = 700,
-        .owner_task_id = 210,
-        .generation = 7,
-        .completion_sequence = 100,
-        .completion_interrupts_observed = 1,
-        .accepts_work = true,
-    }));
-    const job = try service.submit(.{
-        .kind = .media_export,
-        .task_id = 210,
-        .workspace_id = 9,
-        .source_principal = .{ .kind = .app, .serial = 15 },
-        .label = "pending media export",
-        .visibility = .task,
-    }, &scheduler, &notifications, 30);
-    const claim_id = job.claim_id.?;
-    const before = job.*;
-    const next_sequence = notifications.next_notification_sequence;
-    const notification_count = notifications.activeCount(30);
-    for (31..34) |tick| {
-        try std.testing.expectError(error.QueueCompletionMissing, service.complete(job.id, &scheduler, &notifications, tick));
-        try std.testing.expectEqualDeep(before, job.*);
-        try std.testing.expectEqual(next_sequence, notifications.next_notification_sequence);
-        try std.testing.expectEqual(notification_count, notifications.activeCount(tick));
-        try std.testing.expectEqual(@as(usize, 0), service.completedJobCount());
-        try std.testing.expect(scheduler.findActiveClaim(claim_id) != null);
-    }
-    try std.testing.expectError(error.EngineQueueGenerationMismatch, scheduler.completeBrokeredEngineQueue(.media, 210, 8, 101));
-    try scheduler.completeBrokeredEngineQueue(.media, 210, 7, 101);
-    const notice_id = (try service.complete(job.id, &scheduler, &notifications, 34)).?;
-    try std.testing.expectEqual(JobState.completed, job.state);
-    try std.testing.expectEqual(@as(?u64, null), job.claim_id);
-    try std.testing.expectEqual(notification_center.Reason.media_export_complete, notifications.find(notice_id).?.reason);
-    try std.testing.expectEqual(@as(usize, 1), service.completedJobCount());
-    try scheduler.requireQuiescent();
-    const published_sequence = notifications.next_notification_sequence;
-    try std.testing.expectEqual(@as(?u64, notice_id), try service.complete(job.id, &scheduler, &notifications, 35));
-    try std.testing.expectEqual(published_sequence, notifications.next_notification_sequence);
-}
-
-test "media submission rejects notice exhaustion before creating a pending hardware claim" {
-    var scheduler = accelerator_scheduler.Controller.init();
-    var notifications = notification_center.Center.init();
-    var service = Service.init();
-    try std.testing.expect(scheduler.configureBrokeredEngineQueue(.media, .{
-        .broker_task_id = 700,
-        .owner_task_id = 210,
-        .generation = 7,
-        .completion_sequence = 100,
-        .completion_interrupts_observed = 1,
-        .accepts_work = true,
-    }));
-    const request = JobRequest{
-        .kind = .media_export,
-        .task_id = 210,
-        .workspace_id = 9,
-        .source_principal = .{ .kind = .app, .serial = 15 },
-        .label = "bounded hardware export",
-        .visibility = .task,
-    };
-    for (0..notification_center.MAX_NOTIFICATIONS) |index| {
-        _ = try notifications.post(.{
-            .source = request.source_principal,
-            .reason = .policy_notice,
-            .urgency = .normal,
-            .task_id = 300 + index,
-            .detail = "filler notice",
-        });
-    }
-    const before_scheduler = scheduler;
-    const before_service = service;
-    const before_notifications = notifications;
-    try std.testing.expectError(error.NotificationTableFull, service.submit(request, &scheduler, &notifications, 30));
-    try std.testing.expectEqualDeep(before_scheduler, scheduler);
-    try std.testing.expectEqualDeep(before_service, service);
-    try std.testing.expectEqualDeep(before_notifications, notifications);
-    try scheduler.requireQuiescent();
-
-    _ = try notifications.dismiss(notifications.latestVisible(30).?.id);
-    const pending = try scheduler.claim(.{
-        .task_id = request.task_id,
-        .request = .{ .class = .media_export, .wants_media_engine = true },
-        .require_accelerator = true,
-    });
-    const notice_before_denied_claim = notifications;
-    try std.testing.expectError(error.EngineBusy, service.submit(request, &scheduler, &notifications, 31));
-    try std.testing.expectEqualDeep(notice_before_denied_claim, notifications);
-    try std.testing.expectEqualDeep(before_service, service);
-    try std.testing.expectEqual(@as(u16, 1), scheduler.activeClaimCount());
-    try scheduler.completeBrokeredEngineQueue(.media, request.task_id, 7, 101);
-    try std.testing.expect(try scheduler.releaseClaim(pending.id, null));
-    try scheduler.requireQuiescent();
 }

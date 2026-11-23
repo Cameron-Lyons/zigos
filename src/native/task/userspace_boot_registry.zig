@@ -1,5 +1,4 @@
 const builtin = @import("builtin");
-const contract = @import("../session/contract.zig");
 const embedded_file = @import("embedded_file.zig");
 const manifest = @import("../policy/manifest.zig");
 const service_catalog = @import("../session/service_catalog.zig");
@@ -87,7 +86,7 @@ pub fn validateGeneratedArtifact(artifact: anytype) Error!void {
     }
 }
 
-pub fn bundleIdForServiceClass(class: contract.ServiceClass) Error![]const u8 {
+pub fn bundleIdForServiceClass(class: service_catalog.ServiceClass) Error![]const u8 {
     return service_catalog.bundleIdForServiceClass(class) orelse error.UnsupportedServiceClass;
 }
 

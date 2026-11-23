@@ -1,12 +1,12 @@
 const std = @import("std");
 const abi = @import("../core/abi.zig");
-const typed_component_abi = @import("typed_component_abi.zig");
+const component_abi_schema = @import("component_abi_schema.zig");
 
-pub const MAX_BINDINGS: usize = typed_component_abi.INTERFACE_COUNT;
+pub const MAX_BINDINGS: usize = component_abi_schema.INTERFACE_COUNT;
 pub const REQUIRED_BINDING_FLAGS: u16 = abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER | abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE;
 pub const BINDING_SIZE_CEILING_BYTES: usize = 24;
-pub const REGISTRY_SIZE_CEILING_BYTES: usize = 744;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 752;
+pub const REGISTRY_SIZE_CEILING_BYTES: usize = 480;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 488;
 
 pub const BootstrapEndpoint = struct {
     task_id: u64,
@@ -62,14 +62,14 @@ pub const Service = struct {
         service_id: u64,
         endpoint_id: u64,
         endpoint_capability_id: u64,
-        interface_id: typed_component_abi.InterfaceId,
+        interface_id: component_abi_schema.InterfaceId,
         flags: u16,
     ) Error!void {
         try validateBootstrap(self.bootstrap_state);
         return self.registry.register(service_id, endpoint_id, endpoint_capability_id, interface_id, flags);
     }
 
-    pub fn connect(self: *const Service, interface_id: typed_component_abi.InterfaceId) Error!abi.ServiceConnectionDescriptor {
+    pub fn connect(self: *const Service, interface_id: component_abi_schema.InterfaceId) Error!abi.ServiceConnectionDescriptor {
         try validateBootstrap(self.bootstrap_state);
         return self.registry.connect(interface_id);
     }
@@ -110,14 +110,14 @@ pub const Registry = struct {
         service_id: u64,
         endpoint_id: u64,
         endpoint_capability_id: u64,
-        interface_id: typed_component_abi.InterfaceId,
+        interface_id: component_abi_schema.InterfaceId,
         flags: u16,
     ) Error!void {
         if (service_id == 0 or endpoint_id == 0 or endpoint_capability_id == 0) {
             return error.InvalidBindingEndpoint;
         }
         if (flags != REQUIRED_BINDING_FLAGS) return error.InvalidServiceFlags;
-        const slot_index = typed_component_abi.interfaceIndexForId(interface_id);
+        const slot_index = component_abi_schema.interfaceIndexForId(interface_id);
         const binding = &self.bindings[slot_index];
         if (binding.service_id != 0) return error.DuplicateInterface;
 
@@ -128,7 +128,7 @@ pub const Registry = struct {
         };
     }
 
-    pub fn connect(self: *const Registry, interface_id: typed_component_abi.InterfaceId) Error!abi.ServiceConnectionDescriptor {
+    pub fn connect(self: *const Registry, interface_id: component_abi_schema.InterfaceId) Error!abi.ServiceConnectionDescriptor {
         const binding = self.find(interface_id) orelse return error.InterfaceNotFound;
 
         return .{
@@ -146,8 +146,8 @@ pub const Registry = struct {
         return count;
     }
 
-    fn find(self: *const Registry, interface_id: typed_component_abi.InterfaceId) ?*const Binding {
-        const slot_index = typed_component_abi.interfaceIndexForId(interface_id);
+    fn find(self: *const Registry, interface_id: component_abi_schema.InterfaceId) ?*const Binding {
+        const slot_index = component_abi_schema.interfaceIndexForId(interface_id);
         const binding = &self.bindings[slot_index];
         if (binding.service_id == 0) return null;
         return binding;
@@ -169,16 +169,16 @@ fn zeroBinding() Binding {
 }
 
 test "service registry stores one direct slot per typed interface" {
-    try std.testing.expectEqual(typed_component_abi.INTERFACE_COUNT, MAX_BINDINGS);
+    try std.testing.expectEqual(component_abi_schema.INTERFACE_COUNT, MAX_BINDINGS);
     try std.testing.expectEqual(REGISTRY_SIZE_CEILING_BYTES, @sizeOf(Registry));
     try std.testing.expectEqual(SERVICE_SIZE_CEILING_BYTES, @sizeOf(Service));
     try std.testing.expectEqual(
         @as(usize, 0),
-        typed_component_abi.interfaceIndexForId(.task_runtime),
+        component_abi_schema.interfaceIndexForId(.task_runtime),
     );
     try std.testing.expectEqual(
         MAX_BINDINGS - 1,
-        typed_component_abi.interfaceIndexForId(.personal_context),
+        component_abi_schema.interfaceIndexForId(.personal_context),
     );
 }
 
@@ -239,43 +239,43 @@ test "service registry rejects invalid endpoints flags and duplicate typed ids" 
 
 test "service registry binds independent exact interface slots" {
     var registry = Registry.init();
-    try registry.register(91, 191, 291, .ai_inference, REQUIRED_BINDING_FLAGS);
-    try registry.register(92, 192, 292, .privacy_budget, REQUIRED_BINDING_FLAGS);
-    try registry.register(93, 193, 293, .diagnostics_export, REQUIRED_BINDING_FLAGS);
-    try registry.register(94, 194, 294, .consent_receipts, REQUIRED_BINDING_FLAGS);
-    try registry.register(95, 195, 295, .permission_lease, REQUIRED_BINDING_FLAGS);
+    try registry.register(91, 191, 291, .index_search, REQUIRED_BINDING_FLAGS);
+    try registry.register(92, 192, 292, .sync_replication, REQUIRED_BINDING_FLAGS);
+    try registry.register(93, 193, 293, .media_print, REQUIRED_BINDING_FLAGS);
+    try registry.register(94, 194, 294, .secure_pasteboard, REQUIRED_BINDING_FLAGS);
+    try registry.register(95, 195, 295, .secret_vault, REQUIRED_BINDING_FLAGS);
 
-    try std.testing.expectEqual(@as(u64, 91), (try registry.connect(.ai_inference)).service_id);
-    try std.testing.expectEqual(@as(u64, 92), (try registry.connect(.privacy_budget)).service_id);
-    try std.testing.expectEqual(@as(u64, 93), (try registry.connect(.diagnostics_export)).service_id);
-    try std.testing.expectEqual(@as(u64, 94), (try registry.connect(.consent_receipts)).service_id);
-    try std.testing.expectEqual(@as(u64, 95), (try registry.connect(.permission_lease)).service_id);
+    try std.testing.expectEqual(@as(u64, 91), (try registry.connect(.index_search)).service_id);
+    try std.testing.expectEqual(@as(u64, 92), (try registry.connect(.sync_replication)).service_id);
+    try std.testing.expectEqual(@as(u64, 93), (try registry.connect(.media_print)).service_id);
+    try std.testing.expectEqual(@as(u64, 94), (try registry.connect(.secure_pasteboard)).service_id);
+    try std.testing.expectEqual(@as(u64, 95), (try registry.connect(.secret_vault)).service_id);
     try std.testing.expectEqual(@as(usize, 5), registry.bindingCount());
 }
 
 test "service registry rejects internal interface names and unversioned API bypasses" {
-    try std.testing.expect(typed_component_abi.interfaceIdForDecl(.{
+    try std.testing.expect(component_abi_schema.interfaceIdForDecl(.{
         .name = "zigos.internal.storage.raw",
         .version_major = 1,
         .version_minor = 0,
     }) == null);
-    try std.testing.expect(typed_component_abi.interfaceIdForDecl(.{
+    try std.testing.expect(component_abi_schema.interfaceIdForDecl(.{
         .name = "kernel.task.table",
         .version_major = 1,
         .version_minor = 0,
     }) == null);
-    try std.testing.expect(typed_component_abi.interfaceIdForDecl(.{
+    try std.testing.expect(component_abi_schema.interfaceIdForDecl(.{
         .name = "vfs.root",
         .version_major = 1,
         .version_minor = 0,
     }) == null);
 
-    const unversioned = typed_component_abi.Interface(.object_workspace);
+    const unversioned = component_abi_schema.interfaceDecl(.object_workspace);
     var invalid_version = unversioned;
     invalid_version.version_major = 0;
     try std.testing.expectError(
         error.UnsupportedInterfaceVersion,
-        typed_component_abi.validateInterfaceId(.object_workspace, invalid_version),
+        component_abi_schema.validateInterfaceId(.object_workspace, invalid_version),
     );
 }
 
@@ -285,6 +285,6 @@ test "service registry binds known ids to generated typed contracts" {
 
     const binding = registry.find(.service_registry).?;
     try std.testing.expectEqual(@as(u64, 44), binding.service_id);
-    try std.testing.expect(typed_component_abi.contractForId(.service_registry).contract_hash != 0);
+    try std.testing.expect(component_abi_schema.contractForId(.service_registry).contract_hash != 0);
     _ = try registry.connect(.service_registry);
 }

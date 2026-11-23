@@ -1280,26 +1280,15 @@ test "first target telemetry provider requires complete hardware reader evidence
     });
     try std.testing.expect(partial_controller.observedTelemetry());
     try std.testing.expect(!partial_controller.last_hardware_evidence_complete);
-    try std.testing.expectError(error.AcceleratorRequired, partial_controller.claim(.{
-        .task_id = 77,
-        .request = .{
-            .class = .foreground_interactive,
-            .wants_gpu = true,
-        },
-        .require_accelerator = true,
-    }));
+    const gpu_request = accelerator_scheduler.Request{
+        .class = .foreground_interactive,
+        .wants_gpu = true,
+    };
+    try std.testing.expectEqual(accelerator_scheduler.Engine.cpu, partial_controller.plan(gpu_request).engine);
 
     var controller = accelerator_scheduler.Controller.init();
     controller.configureFromProvider(provider.telemetryProvider());
     try std.testing.expect(controller.last_hardware_evidence_complete);
-    const gpu_claim = try controller.claim(.{
-        .task_id = 78,
-        .request = .{
-            .class = .foreground_interactive,
-            .wants_gpu = true,
-        },
-        .require_accelerator = true,
-    });
-    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, gpu_claim.engine);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, controller.plan(gpu_request).engine);
     try std.testing.expectEqual(@as(u32, 2), provider.readCount());
 }
