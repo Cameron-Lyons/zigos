@@ -2,6 +2,11 @@ const std = @import("std");
 const unicode = @import("../../native/core/unicode.zig");
 const bitmap = @import("bitmap_font.zig");
 const data = @embedFile("fonts/zigos-bitmap.bin");
+// Runs of consecutive code points sharing one width; see fonts/README.md.
+const run_count: usize = std.mem.readInt(u32, data[0..4], .little);
+const run_firsts = 4;
+const run_records = run_firsts + run_count * 4;
+const glyph_rows = run_records + run_count * 8;
 pub const Glyph = struct { rows: [16]u16, width: u5 };
 pub const CELL_WIDTH = 12;
 
@@ -35,21 +40,42 @@ pub const Projection = struct {
 pub fn glyph(point: u21) Glyph {
     return lookup(point) orelse lookup(0xfffd).?;
 }
+inline fn runFirst(run: usize) u32 {
+    return std.mem.readInt(u32, data[run_firsts + run * 4 ..][0..4], .little);
+}
+
+const Run = struct { count: u16, width: u16, offset: u32 };
+
+inline fn runRecord(run: usize) Run {
+    const record = data[run_records + run * 8 ..][0..8];
+    return .{
+        .count = std.mem.readInt(u16, record[0..2], .little),
+        .width = std.mem.readInt(u16, record[2..4], .little),
+        .offset = std.mem.readInt(u32, record[4..8], .little),
+    };
+}
+
+// Search the small first-code-point table, then index the run directly.
 fn lookup(point: u21) ?Glyph {
     var low: usize = 0;
-    var high: usize = data.len / 36;
+    var high: usize = run_count;
     while (low < high) {
         const middle = low + (high - low) / 2;
-        const tag = std.mem.readInt(u32, data[middle * 36 ..][0..4], .little);
-        const cp = tag & 0x1fffff;
-        if (cp == point) {
-            var result = Glyph{ .rows = undefined, .width = if (tag & (1 << 21) != 0) 16 else 8 };
-            for (&result.rows, 0..) |*row, index| row.* = std.mem.readInt(u16, data[middle * 36 + 4 + index * 2 ..][0..2], .little);
-            return result;
-        }
-        if (cp < point) low = middle + 1 else high = middle;
+        if (runFirst(middle) <= point) low = middle + 1 else high = middle;
     }
-    return null;
+    if (low == 0) return null;
+    const index = point - runFirst(low - 1);
+    const run = runRecord(low - 1);
+    if (index >= run.count) return null;
+    var result = Glyph{ .rows = undefined, .width = @intCast(run.width) };
+    const start = glyph_rows + run.offset + index * run.width * 2;
+    if (run.width == 16) {
+        const rows = data[start..][0..32];
+        for (&result.rows, 0..) |*row, y| row.* = std.mem.readInt(u16, rows[y * 2 ..][0..2], .little);
+    } else {
+        for (&result.rows, data[start..][0..16]) |*row, byte| row.* = byte;
+    }
+    return result;
 }
 
 pub fn cluster(bytes: []const u8) Glyph {
@@ -161,18 +187,43 @@ test "Unicode bitmap glyphs preserve narrow wide and combining ink" {
     try std.testing.expectEqualDeep(glyph(0xfffd), cluster("👩‍💻"));
 }
 
-test "Unicode font records are sorted bounded and retain the replacement glyph" {
-    try std.testing.expectEqual(@as(usize, 0), data.len % 36);
-    var previous: u32 = 0;
-    for (0..data.len / 36) |index| {
-        const tag = std.mem.readInt(u32, data[index * 36 ..][0..4], .little);
-        const point = tag & 0x1fffff;
-        try std.testing.expect((index == 0 or point > previous) and point <= 0x10ffff and tag >> 22 == 0);
-        previous = point;
-        if (tag & (1 << 21) == 0) {
-            for (0..16) |row| try std.testing.expect(std.mem.readInt(u16, data[index * 36 + 4 + row * 2 ..][0..2], .little) <= 0xff);
-        }
+test "Unicode font runs are sorted contiguous and retain the replacement glyph" {
+    var next_point: u32 = 0;
+    var rows_bytes: usize = 0;
+    for (0..run_count) |run| {
+        const record = runRecord(run);
+        try std.testing.expect(runFirst(run) >= next_point and record.count != 0);
+        try std.testing.expect(record.width == 8 or record.width == 16);
+        try std.testing.expectEqual(rows_bytes, record.offset);
+        next_point = runFirst(run) + record.count;
+        rows_bytes += @as(usize, record.count) * record.width * 2;
     }
+    try std.testing.expect(next_point <= 0x110000);
+    try std.testing.expectEqual(data.len, glyph_rows + rows_bytes);
     try std.testing.expect(lookup(0xfffd) != null);
     try std.testing.expect(lookup(0x20000) != null);
+    try std.testing.expect(lookup(0x1f) == null and lookup(0x7f) == null);
+}
+
+test "Unicode font decodes every retained Unifont 18 glyph unchanged" {
+    // SHA-256 of the retained Unifont 18 glyph set: (u32 code point, u8
+    // width, sixteen u16 rows), little-endian and in code point order.
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var glyphs: usize = 0;
+    for (0..run_count) |run| {
+        const first = runFirst(run);
+        for (0..runRecord(run).count) |index| {
+            const point: u21 = @intCast(first + index);
+            const source = lookup(point).?;
+            var record: [37]u8 = undefined;
+            std.mem.writeInt(u32, record[0..4], point, .little);
+            record[4] = source.width;
+            for (source.rows, 0..) |row, y| std.mem.writeInt(u16, record[5 + y * 2 ..][0..2], row, .little);
+            hash.update(&record);
+            glyphs += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 114_988), glyphs);
+    const expected = "05ef674916f7cf3ba752810528cabee471346e4030847b7e6fc7e96522927b01";
+    try std.testing.expectEqualStrings(expected, &std.fmt.bytesToHex(hash.finalResult(), .lower));
 }

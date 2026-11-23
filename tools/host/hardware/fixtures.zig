@@ -7,6 +7,8 @@ const device = "nuc15crsu7-system-00112233";
 const commit = "1111111111111111111111111111111111111111";
 const change = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const prefix = "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7";
+/// The fixture answers as the release build's compiler under this basename.
+pub const compiler_name = "hardware-fixture-compiler";
 fn arg(args: []const []const u8, name: []const u8) ![]const u8 {
     var result: ?[]const u8 = null;
     var i: usize = 0;
@@ -27,7 +29,7 @@ pub fn compiler(ctx: *Ctx, args: []const []const u8) !void {
     try ctx.print("{s}", .{try std.json.Stringify.valueAlloc(ctx.allocator, args, .{})});
 }
 fn compilerArgvFixtures(ctx: *Ctx, temporary: []const u8, executable: []const u8) !void {
-    const compiler_path = try hw.join(ctx, temporary, "hardware-fixture-compiler");
+    const compiler_path = try hw.join(ctx, temporary, compiler_name);
     try ctx.copy(executable, compiler_path);
     try std.Io.Dir.cwd().setFilePermissions(ctx.io, compiler_path, .fromMode(0o700), .{ .follow_symlinks = false });
     var environ = try ctx.environ.clone(ctx.allocator);

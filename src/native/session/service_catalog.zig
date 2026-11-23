@@ -3,7 +3,6 @@ const capability = @import("../kernel_api/capability.zig");
 const component_abi_schema = @import("../services/component_abi_schema.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const manifest = @import("../policy/manifest.zig");
-const native_util = @import("../core/util.zig");
 const units = @import("../core/units.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const userspace_mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
@@ -44,8 +43,6 @@ pub const ServiceClass = enum(u8) {
     secret_vault,
 };
 
-pub const DIRECT_SERVICE_CLASS_SLOTS = true;
-pub const SERVICE_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
 pub const SERVICE_CLASS_COUNT: usize = @typeInfo(ServiceClass).@"enum".field_names.len;
 pub const ServiceClassSlotIndex = u8;
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
@@ -133,63 +130,13 @@ pub const BootstrapTiming = struct {
     tick: u64,
 };
 
-pub const SINGLE_BOOTSTRAP_LAUNCH_MODE = true;
-
-pub const BootstrapLaunchMode = enum(u8) {
-    kernel_contract,
-};
-
 pub const BootstrapGrantKind = enum(u8) {
     session_service_authority,
     policy_mint_authority,
     service_task_authority,
 };
 
-pub const BootstrapOwnerKey = enum(u8) {
-    policy_authority,
-    session_service,
-    network_service,
-    compositor_service,
-    storage_service,
-    review_service,
-    package_service,
-    indexing_service,
-    personal_context_service,
-    sync_service,
-    media_service,
-    attention_broker_service,
-    task_lifecycle_service,
-    pasteboard_service,
-    object_resilience_service,
-    sensitive_capture_service,
-    secret_vault_service,
-    task_runtime_service,
-};
-
-pub const BootstrapServiceRecordKey = enum(u8) {
-    runtime_service_record,
-    service_registry,
-    policy_service,
-    session,
-    review_service_record,
-    network_service,
-    compositor_service,
-    storage_service,
-    package_service,
-    indexing_service,
-    personal_context_service,
-    sync_service,
-    media_service,
-    attention_broker_service,
-    task_lifecycle_service,
-    pasteboard_service,
-    object_resilience_service,
-    sensitive_capture_service,
-    secret_vault_service,
-};
-
 pub const BootstrapLaunch = struct {
-    mode: BootstrapLaunchMode,
     budget: task_runtime.ResourceBudget,
     correlation_base: u64,
     tick: u64,
@@ -199,8 +146,6 @@ pub const BootstrapLaunch = struct {
 
 pub const ServiceCatalogEntry = struct {
     class: ServiceClass,
-    owner_key: BootstrapOwnerKey,
-    service_record_key: BootstrapServiceRecordKey,
     boundary: ServiceBoundary,
     interface: manifest.InterfaceDecl,
     required_capabilities: []const RequiredCapability = &.{},
@@ -257,22 +202,11 @@ pub const kernel_tcb = [_]KernelTcbComponent{
     .iommu_dma_isolation_hooks,
 };
 
-fn catalogInterface(comptime class: ServiceClass) manifest.InterfaceDecl {
-    inline for (@typeInfo(component_abi_schema.ServiceBinding).@"enum".field_names) |name| {
-        if (std.mem.eql(u8, name, @tagName(class))) {
-            return component_abi_schema.interfaceForService(@field(component_abi_schema.ServiceBinding, name));
-        }
-    }
-    @compileError("service catalog class is missing a component ABI service binding");
-}
-
 pub const catalog = [_]ServiceCatalogEntry{
     .{
         .class = .task_runtime,
-        .owner_key = .task_runtime_service,
-        .service_record_key = .runtime_service_record,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.task_runtime),
+        .interface = component_abi_schema.interfaceDecl(.task_runtime),
         .required_capabilities = &.{.service_bootstrap},
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true },
@@ -280,10 +214,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .session_manager,
-        .owner_key = .session_service,
-        .service_record_key = .session,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.session_manager),
+        .interface = component_abi_schema.interfaceDecl(.session_manager),
         .required_capabilities = &.{ .service_bootstrap, .ui_session_surface },
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .ui = .session_surface },
@@ -299,7 +231,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "restartable native session and task coordinator",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = .{
                 .cpu_time_ticks = 50_000,
                 .memory_bytes = mebibytes(8),
@@ -315,10 +246,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .policy_mediation,
-        .owner_key = .policy_authority,
-        .service_record_key = .policy_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.policy_mediation),
+        .interface = component_abi_schema.interfaceDecl(.policy_mediation),
         .required_capabilities = &.{ .service_bootstrap, .policy_authority },
         .dependencies = &.{.service_registry},
         .restart_policy = .supervised_restart,
@@ -335,7 +264,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "runtime grants, denials, and policy enforcement",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.policy_mediation),
             .correlation_base = 301,
             .tick = 31,
@@ -345,10 +273,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .attention_broker,
-        .owner_key = .attention_broker_service,
-        .service_record_key = .attention_broker_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.attention_broker),
+        .interface = component_abi_schema.interfaceDecl(.attention_broker),
         .required_capabilities = &.{ .service_bootstrap, .policy_authority },
         .dependencies = &.{.policy_mediation},
         .restart_policy = .supervised_restart,
@@ -366,7 +292,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "policy-gated notification posting, dismissal, query, and attention audit broker",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.attention_broker),
             .correlation_base = 303,
             .tick = 33,
@@ -376,10 +301,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .task_lifecycle,
-        .owner_key = .task_lifecycle_service,
-        .service_record_key = .task_lifecycle_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.task_lifecycle),
+        .interface = component_abi_schema.interfaceDecl(.task_lifecycle),
         .required_capabilities = &.{ .service_bootstrap, .policy_authority },
         .dependencies = &.{ .policy_mediation, .task_runtime },
         .restart_policy = .supervised_restart,
@@ -397,7 +320,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "policy-gated suspend, resume, terminate, checkpoint-aware lifecycle audit broker",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.task_lifecycle),
             .correlation_base = 305,
             .tick = 36,
@@ -407,10 +329,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .permission_review_ui,
-        .owner_key = .review_service,
-        .service_record_key = .review_service_record,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.permission_review_ui),
+        .interface = component_abi_schema.interfaceDecl(.permission_review),
         .required_capabilities = &.{ .service_bootstrap, .permission_review, .ui_review_surface },
         .dependencies = &.{.policy_mediation},
         .restart_policy = .supervised_restart,
@@ -427,7 +347,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "task-scoped permission review service for reviewed grants and denials",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = .{
                 .cpu_time_ticks = 10_000,
                 .memory_bytes = kibibytes(512),
@@ -443,10 +362,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .service_registry,
-        .owner_key = .policy_authority,
-        .service_record_key = .service_registry,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.service_registry),
+        .interface = component_abi_schema.interfaceDecl(.service_registry),
         .required_capabilities = &.{ .service_bootstrap, .endpoint_registry },
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true },
@@ -462,7 +379,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "typed service registration and brokered connection directory",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = .{
                 .cpu_time_ticks = 8_000,
                 .memory_bytes = kibibytes(512),
@@ -477,10 +393,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .network_stack,
-        .owner_key = .network_service,
-        .service_record_key = .network_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.network_stack),
+        .interface = component_abi_schema.interfaceDecl(.network_policy),
         .required_capabilities = &.{ .service_bootstrap, .unrestricted_network, .device_authority },
         .dependencies = &.{.policy_mediation},
         .driver_class = .network_adapter,
@@ -500,7 +414,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "network stack, egress mediation, and device-backed packet IO",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.network_stack),
             .correlation_base = 304,
             .tick = 34,
@@ -510,10 +423,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .storage_object,
-        .owner_key = .storage_service,
-        .service_record_key = .storage_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.storage_object),
+        .interface = component_abi_schema.interfaceDecl(.object_workspace),
         .required_capabilities = &.{ .service_bootstrap, .object_store_authority, .device_authority },
         .dependencies = &.{.policy_mediation},
         .driver_class = .storage_controller,
@@ -533,7 +444,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "content-addressed object versions, workspace authority, snapshots, and derived file-bridge views",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.storage_object),
             .correlation_base = 307,
             .tick = 35,
@@ -543,10 +453,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .package_install_update,
-        .owner_key = .package_service,
-        .service_record_key = .package_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.package_install_update),
+        .interface = component_abi_schema.interfaceDecl(.package_install),
         .required_capabilities = &.{ .service_bootstrap, .metadata_storage, .named_peer_network },
         .dependencies = &.{ .policy_mediation, .storage_object, .network_stack },
         .restart_policy = .supervised_restart,
@@ -565,7 +473,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "bundle install, update, and channel management",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.package_install_update),
             .correlation_base = 310,
             .tick = 38,
@@ -575,10 +482,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .compositor_ui_session,
-        .owner_key = .compositor_service,
-        .service_record_key = .compositor_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.compositor_ui_session),
+        .interface = component_abi_schema.interfaceDecl(.ui_session),
         .required_capabilities = &.{ .service_bootstrap, .ui_session_surface, .device_authority },
         .dependencies = &.{.policy_mediation},
         .driver_class = .graphics_adapter,
@@ -598,7 +503,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "compositor, input routing, and UI session ownership",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.compositor_ui_session),
             .correlation_base = 313,
             .tick = 41,
@@ -609,10 +513,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .indexing_search,
-        .owner_key = .indexing_service,
-        .service_record_key = .indexing_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.indexing_search),
+        .interface = component_abi_schema.interfaceDecl(.index_search),
         .required_capabilities = &.{ .service_bootstrap, .metadata_storage },
         .dependencies = &.{.storage_object},
         .restart_policy = .supervised_restart,
@@ -629,7 +531,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "indexing and search query service",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.indexing_search),
             .correlation_base = 316,
             .tick = 44,
@@ -639,10 +540,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .personal_context,
-        .owner_key = .personal_context_service,
-        .service_record_key = .personal_context_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.personal_context),
+        .interface = component_abi_schema.interfaceDecl(.personal_context),
         .required_capabilities = &.{ .service_bootstrap, .metadata_storage },
         .dependencies = &.{ .policy_mediation, .indexing_search },
         .restart_policy = .supervised_restart,
@@ -660,7 +559,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "lease-scoped local semantic memory and agent context retrieval service",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.personal_context),
             .correlation_base = 337,
             .tick = 65,
@@ -670,10 +568,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .sync_replication,
-        .owner_key = .sync_service,
-        .service_record_key = .sync_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.sync_replication),
+        .interface = component_abi_schema.interfaceDecl(.sync_replication),
         .required_capabilities = &.{ .service_bootstrap, .named_peer_network, .metadata_storage, .background_execution },
         .dependencies = &.{ .storage_object, .network_stack },
         .restart_policy = .supervised_restart,
@@ -692,7 +588,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "local-first sync and replication service",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.sync_replication),
             .correlation_base = 319,
             .tick = 47,
@@ -702,10 +597,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .media_print_helpers,
-        .owner_key = .media_service,
-        .service_record_key = .media_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.media_print_helpers),
+        .interface = component_abi_schema.interfaceDecl(.media_print),
         .required_capabilities = &.{ .service_bootstrap, .device_authority, .background_execution },
         .dependencies = &.{.policy_mediation},
         .driver_class = .audio_print_io,
@@ -723,7 +616,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "media and print helper pipeline",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.media_print_helpers),
             .correlation_base = 322,
             .tick = 50,
@@ -733,10 +625,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .sensitive_capture,
-        .owner_key = .sensitive_capture_service,
-        .service_record_key = .sensitive_capture_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.sensitive_capture),
+        .interface = component_abi_schema.interfaceDecl(.sensitive_capture),
         .required_capabilities = &.{ .service_bootstrap, .device_authority, .ui_session_surface },
         .dependencies = &.{ .policy_mediation, .compositor_ui_session },
         .restart_policy = .supervised_restart,
@@ -754,7 +644,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "foreground-only camera, microphone, location, sensor, and screen capture broker",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.sensitive_capture),
             .correlation_base = 331,
             .tick = 59,
@@ -764,10 +653,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .secure_pasteboard,
-        .owner_key = .pasteboard_service,
-        .service_record_key = .pasteboard_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.secure_pasteboard),
+        .interface = component_abi_schema.interfaceDecl(.secure_pasteboard),
         .required_capabilities = &.{ .service_bootstrap, .ui_session_surface },
         .dependencies = &.{ .policy_mediation, .compositor_ui_session },
         .restart_policy = .supervised_restart,
@@ -785,7 +672,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "destination-bound foreground paste grants without ambient clipboard state",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.secure_pasteboard),
             .correlation_base = 325,
             .tick = 53,
@@ -795,10 +681,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .object_resilience,
-        .owner_key = .object_resilience_service,
-        .service_record_key = .object_resilience_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.object_resilience),
+        .interface = component_abi_schema.interfaceDecl(.object_resilience),
         .required_capabilities = &.{ .service_bootstrap, .object_store_authority, .metadata_storage },
         .dependencies = &.{ .policy_mediation, .storage_object },
         .restart_policy = .supervised_restart,
@@ -816,7 +700,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "encrypted object backup, restore, and trusted-device migration service",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.object_resilience),
             .correlation_base = 328,
             .tick = 56,
@@ -826,10 +709,8 @@ pub const catalog = [_]ServiceCatalogEntry{
     },
     .{
         .class = .secret_vault,
-        .owner_key = .secret_vault_service,
-        .service_record_key = .secret_vault_service,
         .boundary = .userspace_service,
-        .interface = catalogInterface(.secret_vault),
+        .interface = component_abi_schema.interfaceDecl(.secret_vault),
         .required_capabilities = &.{ .service_bootstrap, .policy_authority },
         .dependencies = &.{.policy_mediation},
         .restart_policy = .supervised_restart,
@@ -847,7 +728,6 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "hardware-sealed secret import, handle lending, rotation, and revocation service",
         .service_bootstrap = .{
-            .mode = .kernel_contract,
             .budget = defaultServiceBudget(.secret_vault),
             .correlation_base = 334,
             .tick = 62,
@@ -866,6 +746,7 @@ pub const default_services = blk: {
 };
 
 pub const ordered_service_contracts = blk: {
+    @setEvalBranchQuota(100_000);
     const count = kernelBootstrapCount();
     var derived: [count]ServiceContract = undefined;
     var used = @as([catalog.len]bool, @splat(false));
@@ -879,7 +760,7 @@ pub const ordered_service_contracts = blk: {
 
             derived[count_out] = .{
                 .class = entry.class,
-                .interface_id = component_abi_schema.interfaceIdForService(@field(component_abi_schema.ServiceBinding, @tagName(entry.class))),
+                .interface_id = component_abi_schema.interfaceIdForDecl(entry.interface).?,
                 .interface = entry.interface,
                 .driver_class = entry.driver_class,
                 .description = entry.description,
@@ -900,6 +781,7 @@ pub const ordered_service_contracts = blk: {
 };
 
 pub const ordered_published_native_service_contracts = blk: {
+    @setEvalBranchQuota(100_000);
     const count = publishedNativeServiceCount();
     var derived: [count]PublishedNativeServiceContract = undefined;
     var index: usize = 0;
@@ -907,7 +789,7 @@ pub const ordered_published_native_service_contracts = blk: {
         if (entry.published_native_service) {
             derived[index] = .{
                 .class = entry.class,
-                .interface_id = component_abi_schema.interfaceIdForService(@field(component_abi_schema.ServiceBinding, @tagName(entry.class))),
+                .interface_id = component_abi_schema.interfaceIdForDecl(entry.interface).?,
                 .interface = entry.interface,
                 .driver_class = entry.driver_class,
                 .description = entry.description,
@@ -922,14 +804,6 @@ const ServiceClassSlots = [SERVICE_CLASS_COUNT]ServiceClassSlotIndex;
 const catalog_class_slots = buildCatalogClassSlots();
 const service_contract_class_slots = buildServiceContractClassSlots();
 const published_native_class_slots = buildPublishedNativeClassSlots();
-
-pub const service_catalog_indexing = .{
-    .uses_catalog_class_index = @TypeOf(catalog_class_slots) == ServiceClassSlots,
-    .uses_service_contract_class_index = @TypeOf(service_contract_class_slots) == ServiceClassSlots,
-    .uses_published_contract_class_index = @TypeOf(published_native_class_slots) == ServiceClassSlots,
-    .hash_probes_per_query = SERVICE_CLASS_HASH_PROBES_PER_QUERY,
-    .total_slot_bytes = @sizeOf(ServiceClassSlots) * 3,
-};
 
 pub fn entryForClass(class: ServiceClass) ?ServiceCatalogEntry {
     const entry_index = catalogClassIndex(class) orelse return null;
@@ -952,31 +826,11 @@ pub fn publishedNativeServiceContractForClass(class: ServiceClass) ?PublishedNat
 }
 
 pub fn orderedServiceIndex(class: ServiceClass) ?usize {
-    const entry_index = publicServiceClassSlot(service_contract_class_slots[serviceClassIndex(class)]) orelse {
-        debugAssertServiceContractClassIndexMissAbsent(class);
-        return null;
-    };
-    if (entry_index >= ordered_service_contracts.len) {
-        native_util.impossibleByInvariant("service contract class index points outside ordered contracts");
-    }
-    if (ordered_service_contracts[entry_index].class != class) {
-        native_util.impossibleByInvariant("service contract class index points at the wrong contract");
-    }
-    return entry_index;
+    return publicServiceClassSlot(service_contract_class_slots[serviceClassIndex(class)]);
 }
 
 pub fn orderedPublishedNativeServiceIndex(class: ServiceClass) ?usize {
-    const entry_index = publicServiceClassSlot(published_native_class_slots[serviceClassIndex(class)]) orelse {
-        debugAssertPublishedNativeClassIndexMissAbsent(class);
-        return null;
-    };
-    if (entry_index >= ordered_published_native_service_contracts.len) {
-        native_util.impossibleByInvariant("published native service class index points outside ordered contracts");
-    }
-    if (ordered_published_native_service_contracts[entry_index].class != class) {
-        native_util.impossibleByInvariant("published native service class index points at the wrong contract");
-    }
-    return entry_index;
+    return publicServiceClassSlot(published_native_class_slots[serviceClassIndex(class)]);
 }
 
 pub fn imageForClass(class: ServiceClass) ?UserspaceImageIdentity {
@@ -1000,16 +854,6 @@ pub fn bundleIdForServiceClass(class: ServiceClass) ?[]const u8 {
 pub fn bootstrapLaunchForClass(class: ServiceClass) ?BootstrapLaunch {
     const entry = entryForClass(class) orelse return null;
     return entry.service_bootstrap;
-}
-
-pub fn bootstrapOwnerKeyForClass(class: ServiceClass) ?BootstrapOwnerKey {
-    const entry = entryForClass(class) orelse return null;
-    return entry.owner_key;
-}
-
-pub fn bootstrapServiceRecordKeyForClass(class: ServiceClass) ?BootstrapServiceRecordKey {
-    const entry = entryForClass(class) orelse return null;
-    return entry.service_record_key;
 }
 
 pub fn rightsForBootstrapGrant(kind: BootstrapGrantKind) capability.CapabilityRights {
@@ -1058,17 +902,7 @@ pub fn allowsDriverClass(class: ServiceClass, device_class: driver_service.Devic
 }
 
 fn catalogClassIndex(class: ServiceClass) ?usize {
-    const entry_index = publicServiceClassSlot(catalog_class_slots[serviceClassIndex(class)]) orelse {
-        debugAssertCatalogClassIndexMissAbsent(class);
-        return null;
-    };
-    if (entry_index >= catalog.len) {
-        native_util.impossibleByInvariant("service catalog class index points outside catalog");
-    }
-    if (catalog[entry_index].class != class) {
-        native_util.impossibleByInvariant("service catalog class index points at the wrong entry");
-    }
-    return entry_index;
+    return publicServiceClassSlot(catalog_class_slots[serviceClassIndex(class)]);
 }
 
 fn buildCatalogClassSlots() ServiceClassSlots {
@@ -1117,33 +951,6 @@ fn serviceClassIndex(class: ServiceClass) usize {
 
 fn publicServiceClassSlot(slot: ServiceClassSlotIndex) ?usize {
     return if (slot == NO_SERVICE_CLASS_SLOT) null else slot;
-}
-
-fn debugAssertCatalogClassIndexMissAbsent(class: ServiceClass) void {
-    if (@import("builtin").mode != .debug) return;
-    for (catalog) |entry| {
-        if (entry.class == class) {
-            native_util.impossibleByInvariant("service catalog class index missed an entry");
-        }
-    }
-}
-
-fn debugAssertServiceContractClassIndexMissAbsent(class: ServiceClass) void {
-    if (@import("builtin").mode != .debug) return;
-    for (ordered_service_contracts) |entry| {
-        if (entry.class == class) {
-            native_util.impossibleByInvariant("service contract class index missed an entry");
-        }
-    }
-}
-
-fn debugAssertPublishedNativeClassIndexMissAbsent(class: ServiceClass) void {
-    if (@import("builtin").mode != .debug) return;
-    for (ordered_published_native_service_contracts) |entry| {
-        if (entry.class == class) {
-            native_util.impossibleByInvariant("published native service class index missed an entry");
-        }
-    }
 }
 
 pub fn tcbName(component: KernelTcbComponent) []const u8 {
@@ -1252,13 +1059,9 @@ fn publishedNativeServiceCount() usize {
 }
 
 test "service catalog derives descriptors and bootstrap contracts from one source" {
-    try std.testing.expect(DIRECT_SERVICE_CLASS_SLOTS);
-    try std.testing.expectEqual(@as(u8, 0), SERVICE_CLASS_HASH_PROBES_PER_QUERY);
-    try std.testing.expectEqual(@as(usize, SERVICE_CLASS_COUNT * 3), service_catalog_indexing.total_slot_bytes);
     try std.testing.expectEqual(@as(usize, catalog.len), default_services.len);
     try std.testing.expectEqual(@as(usize, 16), ordered_service_contracts.len);
     try std.testing.expectEqual(@as(usize, 15), ordered_published_native_service_contracts.len);
-    try std.testing.expectEqual(component_abi_schema.service_catalog_bindings.len, catalog.len);
     try std.testing.expectEqual(ServiceClass.service_registry, ordered_service_contracts[0].class);
     try std.testing.expectEqual(ServiceClass.policy_mediation, ordered_service_contracts[1].class);
     try std.testing.expectEqual(ServiceClass.attention_broker, ordered_service_contracts[2].class);
@@ -1275,7 +1078,8 @@ test "service catalog derives descriptors and bootstrap contracts from one sourc
     try std.testing.expectEqual(ServiceClass.secure_pasteboard, ordered_published_native_service_contracts[12].class);
     try std.testing.expectEqual(ServiceClass.object_resilience, ordered_published_native_service_contracts[13].class);
     try std.testing.expectEqual(ServiceClass.secret_vault, ordered_published_native_service_contracts[14].class);
-    try std.testing.expectEqualStrings(component_abi_schema.interfaceForService(.storage_object).name, entryForClass(.storage_object).?.interface.name);
+    try std.testing.expectEqualStrings(component_abi_schema.interfaceDecl(.object_workspace).name, entryForClass(.storage_object).?.interface.name);
+    for (catalog) |entry| try component_abi_schema.validateInterface(entry.interface);
     try std.testing.expectEqualStrings("zigos.system.store", bundleIdForServiceClass(.storage_object).?);
     try std.testing.expectEqual(@as(usize, 0), orderedServiceIndex(.service_registry).?);
     try std.testing.expectEqual(@as(usize, 1), orderedServiceIndex(.policy_mediation).?);
@@ -1290,15 +1094,6 @@ test "service catalog derives descriptors and bootstrap contracts from one sourc
     try std.testing.expect(allowsDriverClass(.media_print_helpers, .audio_print_io));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .network_adapter));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .compositor_policy));
-    try std.testing.expectEqual(BootstrapLaunchMode.kernel_contract, bootstrapLaunchForClass(.session_manager).?.mode);
-    try std.testing.expect(SINGLE_BOOTSTRAP_LAUNCH_MODE);
-    for (catalog) |entry| {
-        if (entry.service_bootstrap) |launch| {
-            try std.testing.expectEqual(BootstrapLaunchMode.kernel_contract, launch.mode);
-        }
-    }
-    try std.testing.expectEqual(BootstrapOwnerKey.storage_service, bootstrapOwnerKeyForClass(.storage_object).?);
-    try std.testing.expectEqual(BootstrapServiceRecordKey.storage_service, bootstrapServiceRecordKeyForClass(.storage_object).?);
     try std.testing.expectEqual(component_abi_schema.InterfaceId.object_workspace, serviceContractForClass(.storage_object).?.interface_id);
 }
 
@@ -1341,6 +1136,72 @@ test "default service catalog keeps native services userspace restartable and ze
                 try std.testing.expect(launch.ui_surface_id != null);
                 try std.testing.expect(launch.ui_surface_id.? != 0);
             }
+        }
+    }
+}
+
+test "kernel tcb contains the expected bootstrap surface" {
+    try std.testing.expectEqual(@as(usize, 7), kernel_tcb.len);
+    try std.testing.expectEqualStrings("ipc_transport", tcbName(.ipc_transport));
+    try std.testing.expectEqualStrings("iommu_dma_isolation_hooks", tcbName(.iommu_dma_isolation_hooks));
+}
+
+test "native bootstrap and service bootstrap services sit behind restartable userspace contracts" {
+    const runtime = serviceDescriptor(.task_runtime).?;
+    const session = serviceDescriptor(.session_manager).?;
+    const registry = serviceDescriptor(.service_registry).?;
+    const network = serviceDescriptor(.network_stack).?;
+    const storage = serviceDescriptor(.storage_object).?;
+    const policy = serviceDescriptor(.policy_mediation).?;
+
+    try std.testing.expectEqual(ServiceBoundary.userspace_service, runtime.boundary);
+    try std.testing.expectEqual(ServiceBoundary.userspace_service, session.boundary);
+    try std.testing.expectEqual(ServiceBoundary.userspace_service, registry.boundary);
+    try std.testing.expectEqual(ServiceBoundary.userspace_service, network.boundary);
+    try std.testing.expectEqual(ServiceBoundary.userspace_service, storage.boundary);
+    try std.testing.expectEqual(ServiceBoundary.userspace_service, policy.boundary);
+    try std.testing.expect(runtime.restartable);
+    try std.testing.expect(runtime.isolation.namespace_isolated);
+    try std.testing.expectEqual(NetworkPrivilege.unrestricted_brokered, network.isolation.network);
+    try std.testing.expectEqual(StoragePrivilege.object_store_authority, storage.isolation.storage);
+    try std.testing.expect(allowsDriverClass(.network_stack, .network_adapter));
+    try std.testing.expect(allowsDriverClass(.storage_object, .storage_controller));
+    try std.testing.expect(allowsDriverClass(.compositor_ui_session, .usb_controller));
+    try std.testing.expect(allowsDriverClass(.compositor_ui_session, .graphics_adapter));
+    try std.testing.expect(allowsDriverClass(.compositor_ui_session, .input_device));
+    try std.testing.expect(allowsDriverClass(.compositor_ui_session, .compositor_policy));
+    try std.testing.expect(allowsDriverClass(.media_print_helpers, .audio_print_io));
+    try std.testing.expect(!allowsDriverClass(.policy_mediation, .network_adapter));
+}
+
+test "service contract order follows declared dependencies" {
+    try std.testing.expectEqual(ServiceClass.service_registry, ordered_service_contracts[0].class);
+    const order = orderedServiceIndex;
+    try std.testing.expect(order(.service_registry).? < order(.policy_mediation).?);
+    try std.testing.expect(order(.policy_mediation).? < order(.attention_broker).?);
+    try std.testing.expect(order(.policy_mediation).? < order(.task_lifecycle).?);
+    try std.testing.expect(order(.policy_mediation).? < order(.network_stack).?);
+    try std.testing.expect(order(.policy_mediation).? < order(.storage_object).?);
+    try std.testing.expect(order(.storage_object).? < order(.indexing_search).?);
+    try std.testing.expect(order(.policy_mediation).? < order(.personal_context).?);
+    try std.testing.expect(order(.indexing_search).? < order(.personal_context).?);
+    try std.testing.expect(order(.storage_object).? < order(.package_install_update).?);
+    try std.testing.expect(order(.network_stack).? < order(.package_install_update).?);
+    try std.testing.expect(order(.policy_mediation).? < order(.compositor_ui_session).?);
+    try std.testing.expect(order(.policy_mediation).? < order(.sensitive_capture).?);
+    try std.testing.expect(order(.compositor_ui_session).? < order(.sensitive_capture).?);
+    try std.testing.expect(order(.policy_mediation).? < order(.secure_pasteboard).?);
+    try std.testing.expect(order(.compositor_ui_session).? < order(.secure_pasteboard).?);
+    try std.testing.expect(order(.policy_mediation).? < order(.secret_vault).?);
+}
+
+test "service contract interfaces remain unique and discoverable" {
+    for (ordered_service_contracts, 0..) |entry, index| {
+        try std.testing.expect(serviceContractForClass(entry.class) != null);
+        try std.testing.expectEqual(index, orderedServiceIndex(entry.class).?);
+
+        for (ordered_service_contracts[index + 1 ..]) |peer| {
+            try std.testing.expect(!std.mem.eql(u8, entry.interface.name, peer.interface.name));
         }
     }
 }

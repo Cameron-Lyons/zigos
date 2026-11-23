@@ -1,13 +1,13 @@
 const std = @import("std");
 
 var executable: ?*std.Build.Step.Compile = null;
-var relay_tests: ?*std.Build.Step.Run = null;
 
-pub fn module(b: *std.Build) *std.Build.Module {
+/// The media, image and QEMU tool runs optimized; its tests keep runtime safety.
+fn module(b: *std.Build, optimize: std.lang.Optimize) *std.Build.Module {
     const root = b.createModule(.{
         .root_source_file = b.path("tools/host/main.zig"),
         .target = b.graph.host,
-        .optimize = .fast,
+        .optimize = optimize,
         .link_libc = true,
     });
     root.addImport("native_smoke_markers", b.createModule(.{ .root_source_file = b.path("src/native_smoke_markers.zig") }));
@@ -17,7 +17,7 @@ pub fn module(b: *std.Build) *std.Build.Module {
 
 pub fn tool(b: *std.Build) *std.Build.Step.Compile {
     if (executable) |value| return value;
-    const value = b.addExecutable(.{ .name = "zigos-tool", .root_module = module(b) });
+    const value = b.addExecutable(.{ .name = "zigos-tool", .root_module = module(b, .fast) });
     executable = value;
     return value;
 }
@@ -52,23 +52,25 @@ pub fn addEnvironmentOverride(run: *std.Build.Step.Run, name: []const u8, value:
     }) catch @panic("OOM");
 }
 
-pub fn addTests(b: *std.Build) *std.Build.Step.Run {
-    const tests = b.addTest(.{ .name = "host-tool-tests", .root_module = module(b) });
+pub fn addTests(b: *std.Build, optimize: std.lang.Optimize) *std.Build.Step.Run {
+    const tests = b.addTest(.{ .name = "host-tool-tests", .root_module = module(b, optimize) });
     const run = b.addRunArtifact(tests);
     run.setCwd(b.path("."));
     return run;
 }
 
-pub fn addRelayTests(b: *std.Build) *std.Build.Step.Run {
-    if (relay_tests) |value| return value;
-    const tests = b.addTest(.{
-        .name = "qemu-peer-relay-tests",
-        .root_module = module(b),
-        .filters = &.{"QEMU relay"},
+/// The hardware-proof fixture answers as the trusted hardware and release
+/// verifiers, so it is a separate executable that zigos-tool can never become.
+pub fn addHardwareProofFixture(b: *std.Build) *std.Build.Step.Run {
+    const root = b.createModule(.{
+        .root_source_file = b.path("tools/host/hardware_fixture_main.zig"),
+        .target = b.graph.host,
+        .optimize = .fast,
+        .link_libc = true,
     });
-    const run = b.addRunArtifact(tests);
+    root.addImport("release_catalog", b.createModule(.{ .root_source_file = b.path("src/tools/release_catalog.zig") }));
+    const run = b.addRunArtifact(b.addExecutable(.{ .name = "hardware-proof-fixture", .root_module = root }));
     run.setCwd(b.path("."));
-    relay_tests = run;
     return run;
 }
 

@@ -3,7 +3,6 @@ const std = @import("std");
 // Keep generated instructions within the state owned by xstate.zig. The fixed
 // floor owns x87/SSE/YMM and selects the pinned compiler's hardware crypto.
 pub const cpu_model = &std.Target.x86.cpu.x86_64_v3;
-pub const cpu_features_string = "x86_64_v3+aes+pclmul+sha";
 const crypto_features = std.Target.x86.featureSet(&.{ .aes, .pclmul, .sha });
 
 pub fn query() std.Target.Query {
@@ -21,20 +20,6 @@ pub fn features() std.Target.Cpu.Feature.Set {
     result.addFeatureSet(crypto_features);
     result.populateDependencies(std.Target.x86.all_features[0..]);
     return result;
-}
-
-pub fn select(b: *std.Build) std.Build.ResolvedTarget {
-    const triple = b.option([]const u8, "target", "Native target (x86_64-freestanding-none)") orelse "x86_64-freestanding-none";
-    const cpu = b.option([]const u8, "cpu", "Native instruction floor (x86_64_v3+aes+pclmul+sha)") orelse cpu_features_string;
-    const target_query = std.Build.parseTargetQuery(.{
-        .arch_os_abi = triple,
-        .cpu_features = cpu,
-    }) catch @panic("invalid native target or CPU model");
-    const target = b.resolveTargetQuery(target_query);
-    if (!isSupported(target.result)) {
-        @panic("Zigos requires x86_64-freestanding-none with -Dcpu=x86_64_v3+aes+pclmul+sha; custom CPU features need a matching extended-state contract");
-    }
-    return target;
 }
 
 pub fn isSupported(target: std.Target) bool {

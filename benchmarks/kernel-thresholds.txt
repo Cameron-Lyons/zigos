@@ -12,7 +12,6 @@ paging.address_space_roundtrip 40000
 memory.heap_allocate_free 100
 memory.frame_allocate_release 48
 syscall.fast_entry_roundtrip 1600
-accelerator_scheduler.claim_release 10000
 storage.object.resolve_workspace_entry 400
 storage.workspace.commit_overlay 12000
 storage.volume.replay_segmented_log 1020000
@@ -29,7 +28,6 @@ recovery_environment.reinstall_restore_repair 17000000
 update_health.validate_pending_activation 10000000
 driver_recovery.restart_driver 22000
 slo.irq_to_task 250000
-slo.nvme_queued_io 400000
 slo.endpoint_rtt 40000
 slo.focused_input 150000
 text_layout.navigate_full_document 5000

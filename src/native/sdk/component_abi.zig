@@ -1,23 +1,22 @@
 const std = @import("std");
 const idl = @import("idl.zig");
 const manifest = @import("../policy/manifest.zig");
-const typed_component_abi = @import("../services/typed_component_abi.zig");
+const schema = @import("../services/component_abi_schema.zig");
 
-pub const MAGIC = typed_component_abi.MAGIC;
-pub const VERSION = typed_component_abi.VERSION;
-pub const InterfaceKey = typed_component_abi.InterfaceKey;
-pub const InterfaceId = typed_component_abi.InterfaceId;
-pub const OperationId = typed_component_abi.OperationId;
-pub const OperationDecl = typed_component_abi.OperationDecl;
-pub const InterfaceContract = typed_component_abi.InterfaceContract;
-pub const WireHeader = typed_component_abi.WireHeader;
-pub const PackageInstallRequest = typed_component_abi.PackageInstallRequest;
-pub const PackageInstallResponse = typed_component_abi.PackageInstallResponse;
-pub const PackageUpdateRequest = typed_component_abi.PackageUpdateRequest;
-pub const PackageUpdateResponse = typed_component_abi.PackageUpdateResponse;
-pub const COMPACT_COMPONENT_BINDING_METADATA = true;
+pub const MAGIC = schema.MAGIC;
+pub const VERSION = schema.VERSION;
+pub const InterfaceKey = schema.InterfaceKey;
+pub const InterfaceId = schema.InterfaceId;
+pub const OperationId = schema.OperationId;
+pub const OperationDecl = schema.OperationDecl;
+pub const InterfaceContract = schema.InterfaceContract;
+pub const WireHeader = schema.WireHeader;
+pub const PackageInstallRequest = schema.Request(.package_install);
+pub const PackageInstallResponse = schema.Response(.package_install);
+pub const PackageUpdateRequest = schema.Request(.package_update);
+pub const PackageUpdateResponse = schema.Response(.package_update);
 pub const BINDING_SIZE_CEILING_BYTES: usize = 40;
-pub const Error = typed_component_abi.Error || idl.Error || error{
+pub const Error = schema.Error || idl.Error || error{
     InterfaceNotDeclared,
     OperationNotInInterface,
 };
@@ -42,7 +41,7 @@ pub const Binding = struct {
 };
 
 pub fn binding(comptime key: InterfaceKey) Binding {
-    const abi_contract = typed_component_abi.contractForId(typed_component_abi.interfaceId(key));
+    const abi_contract = schema.contractForId(schema.interfaceId(key));
     return .{
         .interface_id = abi_contract.interface_id,
         .interface = abi_contract.interface,
@@ -52,7 +51,7 @@ pub fn binding(comptime key: InterfaceKey) Binding {
 }
 
 pub fn contract(comptime key: InterfaceKey) *const InterfaceContract {
-    return typed_component_abi.contractForId(typed_component_abi.interfaceId(key));
+    return schema.contractForId(schema.interfaceId(key));
 }
 
 pub fn operation(comptime key: InterfaceKey, operation_id: OperationId) Error!OperationDecl {
@@ -80,8 +79,8 @@ pub fn validateHeader(
     actual_request_len: usize,
     actual_response_len: usize,
 ) Error!void {
-    return typed_component_abi.validateMessage(
-        typed_component_abi.interfaceId(key),
+    return schema.validateMessage(
+        schema.interfaceId(key),
         operation_id,
         wire_header,
         actual_request_len,
@@ -91,7 +90,6 @@ pub fn validateHeader(
 
 test "SDK component ABI exposes typed bindings and validates real wire headers" {
     const bind = binding(.package_install);
-    try std.testing.expect(COMPACT_COMPONENT_BINDING_METADATA);
     try std.testing.expectEqual(u8, @FieldType(Binding, "operation_count"));
     try std.testing.expect(@sizeOf(Binding) <= BINDING_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(InterfaceId.package_install, bind.interface_id);
@@ -103,8 +101,8 @@ test "SDK component ABI exposes typed bindings and validates real wire headers" 
         .package_install,
         .package_update,
         wire_header,
-        @sizeOf(typed_component_abi.PackageUpdateRequest),
-        @sizeOf(typed_component_abi.PackageUpdateResponse),
+        @sizeOf(PackageUpdateRequest),
+        @sizeOf(PackageUpdateResponse),
     );
 
     var malformed = wire_header;
@@ -113,7 +111,7 @@ test "SDK component ABI exposes typed bindings and validates real wire headers" 
         .package_install,
         .package_update,
         malformed,
-        @sizeOf(typed_component_abi.PackageUpdateRequest),
-        @sizeOf(typed_component_abi.PackageUpdateResponse),
+        @sizeOf(PackageUpdateRequest),
+        @sizeOf(PackageUpdateResponse),
     ));
 }

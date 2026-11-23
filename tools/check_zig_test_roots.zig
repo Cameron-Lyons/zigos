@@ -3,11 +3,18 @@ const common = @import("check_common.zig");
 
 const TEST_ROOTS = [_][]const u8{
     "tools/host/main.zig",
+    "tools/check_kernel_benchmarks.zig",
+    "tools/check_kernel_roles.zig",
+    "tools/check_production_readiness.zig",
+    "tools/check_spec_coverage.zig",
     "src/check_release_security_gate.zig",
     "src/native_host_test.zig",
     "src/zigos_spec_test.zig",
     "src/userspace/runtime.zig",
 };
+
+const SOURCE_DIRS = [_][]const u8{ "src", "tools" };
+const IGNORED_DIRS = [_][]const u8{ ".zig-cache", "zig-cache", "zig-out", "build" };
 
 const NamedImport = struct {
     name: []const u8,
@@ -30,18 +37,19 @@ pub fn main(init: std.process.Init) !void {
     const allocator = arena_state.allocator();
 
     var errors = std.ArrayList([]const u8).empty;
-    const tracked = try loadTrackedZigFiles(allocator, gpa, io);
+    var sources = std.StringHashMap(void).init(allocator);
+    for (SOURCE_DIRS) |dir| try collectZigSources(allocator, io, dir, &sources);
     var test_files = std.StringHashMap(void).init(allocator);
 
-    var tracked_it = tracked.paths.iterator();
-    while (tracked_it.next()) |entry| {
+    var source_it = sources.iterator();
+    while (source_it.next()) |entry| {
         if (try hasTests(allocator, io, entry.key_ptr.*)) {
             try test_files.put(entry.key_ptr.*, {});
         }
     }
 
     for (TEST_ROOTS) |root| {
-        if (!tracked.paths.contains(root)) {
+        if (!sources.contains(root)) {
             try common.addError(&errors, allocator, "Configured Zig test root is missing: {s}", .{root});
         }
     }
@@ -49,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
     var reachable = std.StringHashMap(void).init(allocator);
     if (errors.items.len == 0) {
         for (TEST_ROOTS) |root| {
-            try collectReachableSources(allocator, io, tracked.paths, &reachable, root);
+            try collectReachableSources(allocator, io, sources, &reachable, root);
         }
     }
 
@@ -92,41 +100,31 @@ pub fn main(init: std.process.Init) !void {
     );
 }
 
-const TrackedFiles = struct {
-    paths: std.StringHashMap(void),
-};
-
-fn loadTrackedZigFiles(
+fn collectZigSources(
     allocator: std.mem.Allocator,
-    gpa: std.mem.Allocator,
     io: std.Io,
-) !TrackedFiles {
-    const result = try std.process.run(gpa, io, .{
-        .argv = &.{ "jj", "file", "list", "-T", "path ++ \"\\0\"", "src", "tools/host" },
-        .stdout_limit = .limited(common.child_stdout_max_bytes),
-        .stderr_limit = .limited(common.child_stderr_max_bytes),
-    });
-    defer gpa.free(result.stdout);
-    defer gpa.free(result.stderr);
+    path: []const u8,
+    sources: *std.StringHashMap(void),
+) !void {
+    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true, .follow_symlinks = false });
+    defer dir.close(io);
 
-    switch (result.term) {
-        .exited => |code| if (code != 0) {
-            std.debug.print("{s}", .{result.stderr});
-            return error.JjFileListFailed;
-        },
-        else => return error.JjFileListFailed,
+    var iterator = dir.iterate();
+    while (try iterator.next(io)) |entry| {
+        const child = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, entry.name });
+        switch (entry.kind) {
+            .directory => if (!isIgnoredDir(entry.name)) try collectZigSources(allocator, io, child, sources),
+            .file => if (std.mem.endsWith(u8, entry.name, ".zig")) try sources.put(child, {}),
+            else => {},
+        }
     }
+}
 
-    var paths = std.StringHashMap(void).init(allocator);
-    var parts = std.mem.splitScalar(u8, result.stdout, 0);
-    while (parts.next()) |raw_path| {
-        if (raw_path.len == 0) continue;
-        if (!std.mem.endsWith(u8, raw_path, ".zig")) continue;
-        if (!common.pathExists(io, raw_path)) continue;
-        try paths.put(try allocator.dupe(u8, raw_path), {});
+fn isIgnoredDir(name: []const u8) bool {
+    for (IGNORED_DIRS) |ignored| {
+        if (std.mem.eql(u8, name, ignored)) return true;
     }
-
-    return .{ .paths = paths };
+    return false;
 }
 
 fn hasTests(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
@@ -142,7 +140,7 @@ fn hasTests(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
 fn collectReachableSources(
     allocator: std.mem.Allocator,
     io: std.Io,
-    tracked: std.StringHashMap(void),
+    sources: std.StringHashMap(void),
     reachable: *std.StringHashMap(void),
     root: []const u8,
 ) !void {
@@ -165,7 +163,7 @@ fn collectReachableSources(
             offset = import_end + 1;
 
             const resolved = try resolveImport(allocator, io, current, import_path) orelse continue;
-            if (tracked.contains(resolved) and !reachable.contains(resolved)) {
+            if (sources.contains(resolved) and !reachable.contains(resolved)) {
                 try pending.append(allocator, resolved);
             }
         }
@@ -187,7 +185,7 @@ fn resolveImport(
 
     const owner_dir = std.fs.path.dirname(owner) orelse "";
     const normalized = try normalizeRelativePath(allocator, owner_dir, import_path);
-    if (!std.mem.startsWith(u8, normalized, "src/") and !std.mem.startsWith(u8, normalized, "tools/host/")) return null;
+    if (!std.mem.startsWith(u8, normalized, "src/") and !std.mem.startsWith(u8, normalized, "tools/")) return null;
     if (!common.pathExists(io, normalized)) return null;
     return normalized;
 }

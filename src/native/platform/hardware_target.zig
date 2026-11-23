@@ -1,24 +1,5 @@
 const std = @import("std");
 
-pub const Subsystem = enum {
-    uefi_boot,
-    acpi_tables,
-    vtd_discovery,
-    vtd_storage_isolation,
-    vtd_interrupt_isolation,
-    vtd_fault_capture,
-    apic_timer,
-    framebuffer_gop,
-    usb_input_xhci,
-    nvme_block,
-    network_i225_lm,
-    compositor_framebuffer,
-    suspend_resume,
-    crash_recovery,
-    crash_persistence,
-    update_rollback_power_cycle,
-};
-
 pub const EvidenceSource = enum {
     unknown,
     qemu,
@@ -145,28 +126,8 @@ pub const Target = struct {
     storage: []const u8,
     network: []const u8,
     firmware: []const u8,
-    required_subsystems: []const Subsystem,
     required_markers: []const []const u8,
     proof_minimums: ProofMinimums,
-};
-
-pub const required_subsystems = [_]Subsystem{
-    .uefi_boot,
-    .acpi_tables,
-    .vtd_discovery,
-    .vtd_storage_isolation,
-    .vtd_interrupt_isolation,
-    .vtd_fault_capture,
-    .apic_timer,
-    .framebuffer_gop,
-    .usb_input_xhci,
-    .nvme_block,
-    .network_i225_lm,
-    .compositor_framebuffer,
-    .suspend_resume,
-    .crash_recovery,
-    .crash_persistence,
-    .update_rollback_power_cycle,
 };
 
 pub const nuc15crsu7_marker_prefix = "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7";
@@ -198,7 +159,7 @@ pub const nuc15crsu7_proof_metadata_markers = [_][]const u8{
 
 pub const nuc15crsu7_hardware_fact_markers = [_][]const u8{
     nuc15crsu7_marker_prefix ++ ":SMBIOS_SKU:OBSERVED",
-    nuc15crsu7_marker_prefix ++ ":MULTIBOOT_MEMORY_MAP:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":MEMORY_MAP:OBSERVED",
     nuc15crsu7_marker_prefix ++ ":ACPI_XSDT:OBSERVED",
     nuc15crsu7_marker_prefix ++ ":ACPI_MADT:OBSERVED",
     nuc15crsu7_marker_prefix ++ ":ACPI_FADT:OBSERVED",
@@ -224,7 +185,6 @@ pub const first_supported_target = Target{
     .storage = "M.2 2280 PCIe NVMe SSD",
     .network = "Intel Ethernet Controller I225-LM",
     .firmware = "UEFI firmware with ACPI wake support",
-    .required_subsystems = &required_subsystems,
     .required_markers = &nuc15crsu7_markers,
     .proof_minimums = .{
         .cold_boots = 10,
@@ -277,20 +237,6 @@ pub const nuc15crsu7_counter_markers = [_]CounterMarker{
         .minimum = first_supported_target.proof_minimums.update_rollback_cycles,
     },
 };
-
-pub fn coversSubsystem(target: *const Target, subsystem: Subsystem) bool {
-    for (target.required_subsystems) |candidate| {
-        if (candidate == subsystem) return true;
-    }
-    return false;
-}
-
-pub fn coversRequiredSubsystems(target: *const Target) bool {
-    for (required_subsystems) |subsystem| {
-        if (!coversSubsystem(target, subsystem)) return false;
-    }
-    return true;
-}
 
 pub fn hardwareProofSatisfied(target: *const Target, evidence: EvidenceSummary) bool {
     return std.mem.eql(u8, evidence.target_id, target.id) and

@@ -14,14 +14,8 @@ pub const Value = sealing.Value;
 pub const SealedBlob = sealing.Blob;
 pub const RawValue = struct { len: u8 = 0, bytes: Value = @splat(0) };
 pub const MAX_SIGNING_MESSAGE_BYTES: usize = 256;
-pub const DIRECT_SECRET_LOOKUP = true;
-pub const GENERATIONAL_SECRET_IDS = true;
 pub const RETIRED_ID_BIT: u64 = @as(u64, 1) << 63;
 pub const MAX_SECRET_ID: u64 = RETIRED_ID_BIT - 1;
-pub const COMPACT_SECRET_METADATA = true;
-pub const IMPORTS_INTO_PREZEROED_SECRET_SLOTS = true;
-pub const DIRECT_HANDLE_LOOKUP = true;
-pub const OVERWRITES_RESERVED_HANDLE_SLOTS = true;
 pub const STORE_SIZE_CEILING_BYTES: usize = 14_792;
 
 pub const SecretRecord = struct {
@@ -454,8 +448,6 @@ fn materialBinding(owner: principal.PrincipalId, label: []const u8, exportable: 
 test "secret imports preserve zeroed inactive storage" {
     var secret_export_buffer: Value = undefined;
     defer std.crypto.secureZero(u8, &secret_export_buffer);
-    try std.testing.expect(IMPORTS_INTO_PREZEROED_SECRET_SLOTS);
-    try std.testing.expect(OVERWRITES_RESERVED_HANDLE_SLOTS);
 
     var store = Store.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 9 };

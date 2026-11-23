@@ -1,5 +1,5 @@
 const std = @import("std");
-const endpoint = @import("endpoint");
+const endpoint = @import("host_benchmarks").endpoint;
 
 const ITERATIONS = 200_000;
 const FANOUTS = [_]usize{ 1, 8, 32, endpoint.MAX_ENDPOINTS - 1 };

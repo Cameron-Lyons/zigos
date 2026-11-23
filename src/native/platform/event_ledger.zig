@@ -1,8 +1,7 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
-const contract = @import("../session/contract.zig");
+const service_catalog = @import("../session/service_catalog.zig");
 const denial_explanation = @import("../policy/denial_explanation.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const immutable_base = @import("immutable_base.zig");
@@ -16,23 +15,11 @@ const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const workspace = @import("../storage/workspace.zig");
 const kinds = @import("event_kinds.zig");
-const root = @import("root");
+const table_backing = @import("../core/table_backing.zig");
 const copyText = native_util.copyText;
-
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
-else
-    struct {};
 
 pub const MAX_EVENTS: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 512;
-pub const COMPACT_EVENT_TEXT_METADATA = true;
-pub const RECORDS_EVENTS_IN_PLACE = true;
-pub const INLINE_EVENT_TEXT_WRITES = true;
-pub const DERIVES_PERMISSION_DENIAL_METADATA = true;
-pub const DIRECT_PERSISTENT_EVENT_ENCODING = true;
-pub const PACKS_PERSISTENT_EVENT_RECORD = true;
-pub const COMPACT_PERSISTENCE_BATCH_METADATA = true;
 pub const EVENT_SIZE_CEILING_BYTES: usize = 584;
 pub const EVENT_BACKING_SIZE_CEILING_BYTES: usize = 46_080;
 pub const PERSISTENT_EVENT_RECORD_SIZE_BYTES: usize = 576;
@@ -217,7 +204,7 @@ pub const Event = struct {
     workspace_id: u64 = 0,
     related_id: u64 = 0,
     detail_code: u32 = 0,
-    service_class: contract.ServiceClass = .task_runtime,
+    service_class: service_catalog.ServiceClass = .task_runtime,
     permission_kind: ?manifest.PermissionKind = null,
     allowed: bool = false,
     denial_reason: abi.DenialReason = .none,
@@ -266,7 +253,7 @@ const EventInput = struct {
     workspace_id: u64 = 0,
     related_id: u64 = 0,
     detail_code: u32 = 0,
-    service_class: contract.ServiceClass = .task_runtime,
+    service_class: service_catalog.ServiceClass = .task_runtime,
     permission_kind: ?manifest.PermissionKind = null,
     allowed: bool = false,
     denial_reason: abi.DenialReason = .none,
@@ -298,7 +285,6 @@ const SubjectEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MA
 const TaskEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MAX_EVENTS * 2);
 const EventOrderIndex = indexed_arena.MultimapIndex(MAX_EVENTS, 1, 2);
 const EVENT_ORDER_KEY: u64 = 1;
-const heap_backed_event_ledger = builtin.target.os.tag == .freestanding;
 
 pub const EventBacking = struct {
     events: EventArena = EventArena.init(),
@@ -313,37 +299,13 @@ pub const EventBacking = struct {
         }
     }
 
-    fn init() EventBacking {
-        return .{};
-    }
-
-    fn initializeAllocated(self: *EventBacking) void {
-        @memset(std.mem.asBytes(self), 0);
-        self.events.free_head = indexed_arena.reusableNoIndex(MAX_EVENTS);
-        initializeEventIndex(&self.kind_index);
-        initializeEventIndex(&self.subject_index);
-        initializeEventIndex(&self.task_index);
-        initializeEventIndex(&self.event_order_index);
-    }
-
     fn resetIndexes(self: *EventBacking) void {
-        initializeEventIndex(&self.kind_index);
-        initializeEventIndex(&self.subject_index);
-        initializeEventIndex(&self.task_index);
-        initializeEventIndex(&self.event_order_index);
+        self.kind_index.reset();
+        self.subject_index.reset();
+        self.task_index.reset();
+        self.event_order_index.reset();
     }
 };
-
-fn initializeEventIndex(index: anytype) void {
-    const Index = @TypeOf(index.*);
-    const CompactIndex = @FieldType(Index, "free_bucket_head");
-    const compact_no_index: CompactIndex = @intCast(@max(index.links.len, index.buckets.len));
-    @memset(std.mem.asBytes(index), 0);
-    for (&index.links) |*link| link.bucket = compact_no_index;
-    index.free_bucket_head = compact_no_index;
-}
-
-const EventBackingStorage = if (heap_backed_event_ledger) ?*EventBacking else EventBacking;
 
 const QueryIndex = enum {
     kind,
@@ -363,7 +325,7 @@ pub const Ledger = struct {
     header_version_id: u64 = 0,
     next_sequence: u64 = 1,
     oldest_retained_sequence: u64 = 0,
-    event_backing: EventBackingStorage = if (heap_backed_event_ledger) null else EventBacking.init(),
+    event_backing: table_backing.Lazy(EventBacking, null) = .{},
     persistence_batch_depth: PersistenceBatchDepth = 0,
     pending_persist_first_sequence: u64 = 0,
     pending_persist_count: PendingPersistenceCount = 0,
@@ -374,19 +336,13 @@ pub const Ledger = struct {
     }
 
     comptime {
-        if (heap_backed_event_ledger and @sizeOf(@This()) != LEDGER_RESIDENT_SIZE_BYTES) {
+        if (@sizeOf(@This()) != LEDGER_RESIDENT_SIZE_BYTES) {
             @compileError("heap-backed event ledger no longer matches its compact resident layout");
         }
     }
 
     pub fn deinit(self: *Ledger) void {
-        if (comptime heap_backed_event_ledger) {
-            if (self.event_backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
-                self.event_backing = null;
-            }
-        }
+        self.event_backing.release();
     }
 
     pub fn reset(self: *Ledger) void {
@@ -395,36 +351,22 @@ pub const Ledger = struct {
     }
 
     pub fn resetRetainingBacking(self: *Ledger) void {
-        if (comptime heap_backed_event_ledger) {
-            while (self.evictOldestEvent()) {}
-            const retained_backing = self.event_backing;
-            self.* = Ledger.init();
-            self.event_backing = retained_backing;
-            return;
-        }
+        while (self.evictOldestEvent()) {}
+        const retained_backing = self.event_backing;
         self.* = Ledger.init();
+        self.event_backing = retained_backing;
     }
 
     fn eventBacking(self: *Ledger) ?*EventBacking {
-        if (comptime heap_backed_event_ledger) return self.event_backing;
-        return &self.event_backing;
+        return self.event_backing.get();
     }
 
     fn backingConst(self: *const Ledger) ?*const EventBacking {
-        if (comptime heap_backed_event_ledger) return self.event_backing;
-        return &self.event_backing;
+        return self.event_backing.get();
     }
 
     fn ensureBacking(self: *Ledger) error{NoSpaceLeft}!*EventBacking {
-        if (self.eventBacking()) |backing| return backing;
-        if (comptime heap_backed_event_ledger) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(EventBacking)) orelse return error.NoSpaceLeft;
-            const backing: *EventBacking = @ptrCast(@alignCast(allocation));
-            backing.initializeAllocated();
-            self.event_backing = backing;
-            return backing;
-        }
-        return &self.event_backing;
+        return self.event_backing.ensure();
     }
 
     pub fn initPersistent(
@@ -433,7 +375,6 @@ pub const Ledger = struct {
         state_signer: signing.SignerIdentity,
     ) Error!Ledger {
         const workspace_record = storage.findWorkspace(owner, state_workspace_label) orelse
-            storage.findWorkspaceByLabel(state_workspace_label) orelse
             try storage.createWorkspace(.{
                 .owner = owner,
                 .label = state_workspace_label,
@@ -675,7 +616,7 @@ pub const Ledger = struct {
 
     pub fn recordProcessCrash(
         self: *Ledger,
-        service_class: contract.ServiceClass,
+        service_class: service_catalog.ServiceClass,
         service_subject: principal.PrincipalId,
         tick: u64,
         code: u32,
@@ -693,7 +634,7 @@ pub const Ledger = struct {
 
     pub fn recordDriverRestart(
         self: *Ledger,
-        service_class: contract.ServiceClass,
+        service_class: service_catalog.ServiceClass,
         service_subject: principal.PrincipalId,
         device_capability_id: u64,
         tick: u64,
@@ -1433,11 +1374,9 @@ pub const Ledger = struct {
     pub fn exportText(self: *const Ledger, buffer: []u8, options: ExportOptions) Error![]const u8 {
         var used: usize = 0;
         const backing = self.backingConst() orelse return buffer[0..0];
-        var index: usize = 0;
-        while (index < backing.events.next_unclaimed_index) : (index += 1) {
-            const slot = &backing.events.slots[index];
-            if (!slot.in_use) continue;
-            try renderTextEvent(&slot.event, buffer, &used, options.include_protected_content);
+        var cursor = backing.event_order_index.head(EVENT_ORDER_KEY);
+        while (cursor != indexed_arena.no_index) : (cursor = backing.event_order_index.next(cursor)) {
+            try renderTextEvent(&backing.events.slots[cursor].event, buffer, &used, options.include_protected_content);
         }
         return buffer[0..used];
     }
@@ -1831,8 +1770,9 @@ pub const Ledger = struct {
         defer if (batch_open) {
             self.persistence_batch_depth -= 1;
         };
-        for (&source_backing.events.slots) |*slot| {
-            if (!slot.in_use) continue;
+        var cursor = source_backing.event_order_index.head(EVENT_ORDER_KEY);
+        while (cursor != indexed_arena.no_index) : (cursor = source_backing.event_order_index.next(cursor)) {
+            const slot = &source_backing.events.slots[cursor];
             if (owns_batch and !batch_open) {
                 self.beginPersistenceBatch();
                 batch_open = true;
@@ -1971,13 +1911,7 @@ pub const Ledger = struct {
             return;
         }
 
-        for (&backing.events.slots) |*slot| {
-            if (!slot.in_use) continue;
-            if (!matchesQuery(&slot.event, query)) continue;
-            if (count.* >= limit) break;
-            if (output) |records| records[count.*] = redactedForQuery(&slot.event, query);
-            count.* += 1;
-        }
+        self.visitIndex(&backing.event_order_index, EVENT_ORDER_KEY, query, limit, count, output);
     }
 
     fn visitIndex(
@@ -2041,7 +1975,7 @@ pub const Ledger = struct {
         while (indexed_count < backing.events.countInUse()) : (indexed_count += 1) {
             var selected_index: usize = indexed_arena.no_index;
             var selected_sequence: u64 = std.math.maxInt(u64);
-            for (backing.events.slots, 0..) |slot, slot_index| {
+            for (&backing.events.slots, 0..) |*slot, slot_index| {
                 if (!slot.in_use or slot.event.sequence <= last_sequence or slot.event.sequence >= selected_sequence) continue;
                 selected_index = slot_index;
                 selected_sequence = slot.event.sequence;
@@ -2065,7 +1999,7 @@ pub const Ledger = struct {
     fn scanOldestSequence(self: *const Ledger) u64 {
         const backing = self.backingConst() orelse return 0;
         var oldest_sequence: u64 = 0;
-        for (backing.events.slots) |slot| {
+        for (&backing.events.slots) |*slot| {
             if (!slot.in_use) continue;
             if (oldest_sequence == 0 or slot.event.sequence < oldest_sequence) {
                 oldest_sequence = slot.event.sequence;
@@ -2170,7 +2104,6 @@ pub const Ledger = struct {
     fn loadPersistedEvents(self: *Ledger) Error!void {
         const storage = self.storage orelse return;
         const backing = try self.ensureBacking();
-        try self.rebuildIndexes();
         self.next_sequence = 1;
         self.oldest_retained_sequence = 0;
         self.header_version_id = 0;
@@ -2185,7 +2118,10 @@ pub const Ledger = struct {
         }
 
         const entries = try storage.entries(self.workspace_id);
+        // Workspace entries are byte-sorted, so slots load out of sequence
+        // order; rebuildIndexes restores chronological order indexes.
         var loaded_count: usize = 0;
+        var last_sequence: u64 = 0;
         for (entries) |entry| {
             if (!std.mem.startsWith(u8, entry.pathSlice(), event_entry_prefix)) continue;
             if (loaded_count >= MAX_EVENTS) break;
@@ -2193,21 +2129,11 @@ pub const Ledger = struct {
             const event = try parsePersistentEvent(try storage.versionPayload(version));
             const slot_index = backing.events.reserveIndexAt(event.sequence, loaded_count) orelse return error.CorruptState;
             backing.events.slots[slot_index].event = event;
+            last_sequence = @max(last_sequence, event.sequence);
             loaded_count += 1;
         }
 
-        var index: usize = 1;
-        while (index < loaded_count) : (index += 1) {
-            var cursor = index;
-            while (cursor > 0 and backing.events.slots[cursor - 1].event.sequence > backing.events.slots[cursor].event.sequence) : (cursor -= 1) {
-                const tmp = backing.events.slots[cursor - 1];
-                backing.events.slots[cursor - 1] = backing.events.slots[cursor];
-                backing.events.slots[cursor] = tmp;
-            }
-        }
-
         if (loaded_count == 0) return error.CorruptState;
-        const last_sequence = backing.events.slots[loaded_count - 1].event.sequence;
         if (last_sequence == 0 or last_sequence == std.math.maxInt(u64)) return error.CorruptState;
         self.next_sequence = last_sequence + 1;
         try self.rebuildIndexes();
@@ -2267,7 +2193,7 @@ const PersistentEventRecord = extern struct {
         event.workspace_id = self.workspace_id;
         event.related_id = self.related_id;
         event.detail_code = self.detail_code;
-        event.service_class = std.enums.fromInt(contract.ServiceClass, self.service_class) orelse return error.CorruptState;
+        event.service_class = std.enums.fromInt(service_catalog.ServiceClass, self.service_class) orelse return error.CorruptState;
         event.permission_kind = if (self.permission_kind == permission_kind_none)
             null
         else

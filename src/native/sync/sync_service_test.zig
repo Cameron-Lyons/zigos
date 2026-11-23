@@ -787,6 +787,17 @@ test "sync service treats per-object shares and conflict review as local-first p
     try std.testing.expectEqual(@as(u8, 1), summary.transport_frame_count);
     try std.testing.expect(service.latestTransportFrameForPath(workspace_record.id.raw(), tablet, private_path) == null);
 
+    // A standing conflict with nothing newly selected does not persist again.
+    const persist_tick = resident.next_state_tick;
+    const state_generation = storage.workspaces.find(object_store.ids.workspace(service.state_workspace_id)).?.generation;
+    const checkpoint_generation = storage_checkpoint_store.last_checkpoint_generation;
+    const standing = try port.replicateWorkspace(authority, &storage, workspace_record.id.raw(), laptop, tablet, .device_to_device);
+    try std.testing.expectEqual(@as(u8, 0), standing.selected_entry_count);
+    try std.testing.expectEqual(@as(u8, 1), standing.conflict_count);
+    try std.testing.expectEqual(persist_tick, resident.next_state_tick);
+    try std.testing.expectEqual(state_generation, storage.workspaces.find(object_store.ids.workspace(service.state_workspace_id)).?.generation);
+    try std.testing.expectEqual(checkpoint_generation, storage_checkpoint_store.last_checkpoint_generation);
+
     try std.testing.expectError(error.TransportDenied, port.acceptTransportFrame(authority, &storage, .{
         .workspace_id = workspace_record.id.raw(),
         .object_id = private.object_id.raw(),
@@ -1179,7 +1190,6 @@ fn createSyncServiceTask(
         .launch = .{
             .boundary = .userspace_process,
             .image_id = image_id,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = bundle_id,
         },
@@ -1249,6 +1259,170 @@ fn configureEndToEndSync(
 
 test "sync private overlay replicates end to end across two service tasks" {
     try deterministicTwoDeviceOverlayReplication();
+}
+
+const PeerRelayReplication = struct {
+    source_storage: *const storage_service.Service,
+    target_storage: *storage_service.Service,
+    workspace_id: u64,
+    from_device: principal.PrincipalId,
+    to_device: principal.PrincipalId,
+    network_capabilities: *const capability.CapabilityTable,
+    relay_service: *sync_transport.BootedOverlayRelayService,
+    relay_capability_id: u64,
+    payload_buffer: []u8,
+    signer: signing.SignerIdentity,
+    tick: u64,
+};
+
+const PeerRelayTally = struct {
+    summary: sync_service.ReplicationSummary,
+    accepted_frame_count: usize = 0,
+    relay_delivery_count: usize = 0,
+    payload_bytes: usize = 0,
+};
+
+// Drives two booted ports the way peer devices exchange a workspace over the
+// overlay relay: the source opens a brokered relay session and replicates, each
+// payload chunk crosses the booted relay, and the target persists and accepts
+// every frame in one batch before the source acknowledges them.
+fn replicateWorkspaceToPeerViaRelay(
+    source_port: *sync_service.SyncPort,
+    source_authority: sync_service.AuthorityContext,
+    target_port: *sync_service.SyncPort,
+    request: PeerRelayReplication,
+) !PeerRelayTally {
+    const source = source_port.service;
+    const target = target_port.service;
+    try source.ensureTrustedDevices(request.from_device, request.to_device);
+    const policy = source.findWorkspacePolicy(request.workspace_id) orelse return error.WorkspacePolicyNotFound;
+    try source.authorizeTransport(policy, .relay_assisted, null);
+    if (!std.mem.eql(u8, request.relay_service.relayDomainSlice(), policy.relayDomainSlice())) return error.EgressDenied;
+    var broker = source.egressBroker(request.network_capabilities);
+    var relay_transport = sync_transport.Harness.init();
+    var session = try relay_transport.openRelay(&broker, .{
+        .task_id = source.task_id,
+        .principal_id = source.owner,
+        .capability_id = request.relay_capability_id,
+        .policy_id = policy.relay_policy_id orelse return error.TransportDenied,
+        .evidence = .{ .destination = .{ .domain = policy.relayDomainSlice() } },
+        .now_ticks = request.tick,
+    }, request.from_device, request.to_device, policy.relayDomainSlice());
+    session.deinit();
+
+    const starting_frame_id = source.latestTransportFrameId();
+    var tally = PeerRelayTally{ .summary = try source_port.replicateWorkspace(
+        source_authority,
+        request.source_storage,
+        request.workspace_id,
+        request.from_device,
+        request.to_device,
+        .relay_assisted,
+    ) };
+    var frames: [sync_service.MAX_TRANSPORT_FRAMES]sync_service.TransportFrame = undefined;
+    const frame_count = source.copyTransportFramesForSince(request.workspace_id, request.to_device, starting_frame_id, &frames);
+    std.mem.sort(sync_service.TransportFrame, frames[0..frame_count], {}, transportFrameIdLessThan);
+    var acked_ids: [sync_service.MAX_TRANSPORT_FRAMES]u64 = undefined;
+    target.beginReplicationBatch();
+    errdefer target.cancelReplicationBatch();
+    for (frames[0..frame_count], acked_ids[0..frame_count]) |frame, *acked_id| {
+        try deliverFrameToPeer(source_port, source_authority, target, request, frame, &tally);
+        acked_id.* = frame.id;
+    }
+    try target.endReplicationBatch();
+    tally.accepted_frame_count = frame_count;
+    _ = try source.ackOutboundTransportFrames(acked_ids[0..frame_count]);
+    return tally;
+}
+
+fn transportFrameIdLessThan(_: void, left: sync_service.TransportFrame, right: sync_service.TransportFrame) bool {
+    return left.id < right.id;
+}
+
+fn deliverFrameToPeer(
+    source_port: *sync_service.SyncPort,
+    source_authority: sync_service.AuthorityContext,
+    target: *Service,
+    request: PeerRelayReplication,
+    frame: sync_service.TransportFrame,
+    tally: *PeerRelayTally,
+) !void {
+    const source_version = request.source_storage.version(frame.version_id) orelse return error.VersionNotFound;
+    const payload = request.source_storage.versionPayload(source_version) catch |err| switch (err) {
+        error.PayloadRequiresStreaming => try request.source_storage.versionPayloadInto(source_version, request.payload_buffer),
+        else => return err,
+    };
+    var cursor = try request.source_storage.versionChunkCursor(source_version);
+    var chunk_count: usize = 0;
+    while (try cursor.next()) |chunk| : (chunk_count += 1) {
+        tally.relay_delivery_count += try relayPayloadToPeer(source_port, source_authority, request, chunk.bytes);
+    }
+    if (chunk_count == 0) tally.relay_delivery_count += try relayPayloadToPeer(source_port, source_authority, request, "");
+
+    const parent_version_id = if (request.target_storage.resolve(frame.workspace_id, frame.pathSlice())) |current|
+        if (current.object_id.raw() == frame.object_id) current.version_id else null
+    else |err| switch (err) {
+        error.EntryNotFound => null,
+        else => return err,
+    };
+    if (frame.semantic == .transactional_contract) {
+        const contract = source_port.service.findDatabaseContractForPath(frame.workspace_id, frame.pathSlice()) orelse return error.DatabaseContractNotFound;
+        _ = try target.importDatabaseContract(contract);
+    }
+    const persisted = try request.target_storage.putVersion(.{
+        .preferred_object_id = object_store.ids.object(frame.object_id),
+        .object_type = source_version.object_type,
+        .payload = payload,
+        .metadata = source_version.metadata,
+        .parent_version_id = parent_version_id,
+    });
+    try request.target_storage.beginTransaction(frame.workspace_id);
+    try request.target_storage.stagePut(frame.workspace_id, frame.pathSlice(), persisted.object_id, persisted.version_id, source_version.object_type);
+    const generation = try request.target_storage.commit(frame.workspace_id, request.tick);
+    _ = try target.acceptTransportFrame(request.target_storage, .{
+        .source_frame_id = frame.id,
+        .workspace_id = frame.workspace_id,
+        .object_id = persisted.object_id.raw(),
+        .version_id = persisted.version_id.raw(),
+        .source_device = frame.source_device,
+        .target_device = frame.target_device,
+        .transport = frame.transport,
+        .semantic = frame.semantic,
+        .encrypted = frame.encrypted,
+        .workspace_generation = generation,
+        .path = frame.pathSlice(),
+    });
+    tally.payload_bytes += payload.len;
+}
+
+// Splits one payload into native relay frames; an empty payload still
+// crosses the relay once.
+fn relayPayloadToPeer(
+    source_port: *sync_service.SyncPort,
+    source_authority: sync_service.AuthorityContext,
+    request: PeerRelayReplication,
+    payload: []const u8,
+) !usize {
+    var offset: usize = 0;
+    var deliveries: usize = 0;
+    while (true) {
+        const end = @min(offset + sync_transport.MAX_NATIVE_PAYLOAD_BYTES, payload.len);
+        const relayed = try source_port.sendOverlayRelayFrameViaService(source_authority, request.network_capabilities, request.relay_service, .{
+            .workspace_id = request.workspace_id,
+            .from_device = request.from_device,
+            .to_device = request.to_device,
+            .usage = .sync_replication,
+            .relay_capability_id = request.relay_capability_id,
+            .payload = payload[offset..end],
+            .signer = request.signer,
+            .tick = request.tick,
+        });
+        if (!relayed.delivered or relayed.delivered_len != end - offset) return error.RelayDeliveryMissing;
+        _ = try source_port.closeOverlaySession(source_authority, relayed.overlay_session_id, request.tick);
+        deliveries += 1;
+        offset = end;
+        if (offset == payload.len) return deliveries;
+    }
 }
 
 test "sync service replicates payloads to peer storage through booted relay fallback" {
@@ -1441,13 +1615,12 @@ test "sync service replicates payloads to peer storage through booted relay fall
     _ = try source_port.registerDatabaseContract(source_authority, workspace_id, "app.notes.db", "notes-db", contract_signer);
     try std.testing.expectEqual(@as(usize, 0), target_resident.databaseContractCount());
     try source_port.setReplicaVersion(source_authority, workspace_id, tablet, document_path, source_edit.object_id, target_conflict.version_id);
-    var denied_request = sync_service.PeerReplicationRequest{
+    var denied_request = PeerRelayReplication{
         .source_storage = &source_storage,
         .target_storage = &target_storage,
         .workspace_id = workspace_id,
         .from_device = laptop,
         .to_device = tablet,
-        .transport = .relay_assisted,
         .network_capabilities = &network_capabilities,
         .relay_service = &relay_service,
         .relay_capability_id = relay_capability.id + 1,
@@ -1455,10 +1628,10 @@ test "sync service replicates payloads to peer storage through booted relay fall
         .signer = laptop_signer,
         .tick = 50,
     };
-    try std.testing.expectError(error.EgressDenied, source_port.replicateWorkspaceToPeer(
+    try std.testing.expectError(error.EgressDenied, replicateWorkspaceToPeerViaRelay(
+        &source_port,
         source_authority,
         &target_port,
-        target_authority,
         denied_request,
     ));
     try std.testing.expectEqual(@as(usize, 0), source_sync.transportFrameCountFor(workspace_id, tablet));
@@ -1466,10 +1639,10 @@ test "sync service replicates payloads to peer storage through booted relay fall
     try std.testing.expectEqual(target_conflict.version_id, still_offline.version_id);
 
     denied_request.relay_capability_id = relay_capability.id;
-    const result = try source_port.replicateWorkspaceToPeer(
+    const result = try replicateWorkspaceToPeerViaRelay(
+        &source_port,
         source_authority,
         &target_port,
-        target_authority,
         denied_request,
     );
     try std.testing.expect(result.summary.offline_first);
@@ -1482,18 +1655,16 @@ test "sync service replicates payloads to peer storage through booted relay fall
     try std.testing.expectEqual(@as(u8, 1), result.summary.secret_transfer_count);
     try std.testing.expectEqual(@as(u8, 1), result.summary.transactional_count);
     try std.testing.expectEqual(@as(u8, 1), result.summary.conflict_count);
-    try std.testing.expectEqual(@as(u8, 4), result.accepted_frame_count);
-    try std.testing.expectEqual(@as(u8, 4), result.persisted_object_count);
+    try std.testing.expectEqual(@as(usize, 4), result.accepted_frame_count);
     const chunk_bytes = sync_transport.MAX_NATIVE_PAYLOAD_BYTES;
     const expected_relay_deliveries = ("source edit".len + chunk_bytes - 1) / chunk_bytes +
         (media_payload.len / object_store.MAX_CHUNK_BYTES) * ((object_store.MAX_CHUNK_BYTES + chunk_bytes - 1) / chunk_bytes) +
         ((media_payload.len % object_store.MAX_CHUNK_BYTES) + chunk_bytes - 1) / chunk_bytes +
         (secret_payload.len + chunk_bytes - 1) / chunk_bytes +
         (database_payload.len + chunk_bytes - 1) / chunk_bytes;
-    try std.testing.expectEqual(@as(u32, expected_relay_deliveries), result.relay_delivery_count);
-    try std.testing.expect(result.used_booted_relay_service);
+    try std.testing.expectEqual(@as(usize, expected_relay_deliveries), result.relay_delivery_count);
     const expected_payload_bytes = "source edit".len + media_payload.len + secret_payload.len + database_payload.len;
-    try std.testing.expectEqual(@as(u32, expected_payload_bytes), result.payload_bytes);
+    try std.testing.expectEqual(@as(usize, expected_payload_bytes), result.payload_bytes);
     try std.testing.expectEqual(@as(usize, expected_relay_deliveries), relay_service.accepted_packets);
     try std.testing.expectEqual(@as(usize, expected_relay_deliveries), relay_service.delivered_packets);
     try std.testing.expectEqual(@as(usize, 1), target_resident.databaseContractCount());
@@ -1803,7 +1974,7 @@ test "sync service covers device graph policy replication semantics and restart 
         const path = entry.pathSlice();
         try std.testing.expect(!std.mem.eql(u8, path, "state/index"));
         try std.testing.expect(!std.mem.startsWith(u8, path, "state/chunks/"));
-        if (std.mem.startsWith(u8, path, "state/v8/")) sync_record_count += 1;
+        if (std.mem.startsWith(u8, path, "state/")) sync_record_count += 1;
     }
     try std.testing.expect(sync_record_count >= 10);
 

@@ -1,5 +1,4 @@
 const builtin = @import("builtin");
-const contract = @import("../session/contract.zig");
 const embedded_file = @import("embedded_file.zig");
 const manifest = @import("../policy/manifest.zig");
 const service_catalog = @import("../session/service_catalog.zig");
@@ -20,12 +19,10 @@ else
         pub fn print(_: []const u8) void {}
     };
 
-const SignBundleReturn = @typeInfo(@TypeOf(userspace_manifest_signing.signBundle)).@"fn".return_type.?;
-const SigningError = @typeInfo(SignBundleReturn).error_union.error_set;
-
-pub const Error = userspace_loader.Error || SigningError || error{
+pub const Error = userspace_loader.Error || error{
     GeneratedArtifactByteLengthInvalid,
     GeneratedArtifactSegmentCountInvalid,
+    UnknownPublisherIdentity,
     UnsupportedServiceClass,
     UnknownBundleId,
 };
@@ -64,7 +61,7 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
         const artifact = archive_index.artifacts[artifact_index];
         try validateGeneratedArtifact(artifact);
         const components = [_]manifest.ExecutionComponentDecl{.{ .id = spec.componentLabel(), .entry = spec.entryName() }};
-        const bundle = try bundleForSpec(&spec, &components);
+        const bundle = bundleForSpec(&spec, &components);
         const executable_image = try executableImageFromArtifact(artifact, spec.bundleId());
         _ = catalog.registerBuildValidatedArtifact(.{
             .bundle = bundle,
@@ -89,15 +86,17 @@ pub fn validateGeneratedArtifact(artifact: anytype) Error!void {
     }
 }
 
-pub fn bundleIdForServiceClass(class: contract.ServiceClass) Error![]const u8 {
+pub fn bundleIdForServiceClass(class: service_catalog.ServiceClass) Error![]const u8 {
     return service_catalog.bundleIdForServiceClass(class) orelse error.UnsupportedServiceClass;
 }
 
+// Built-in manifests are compiled into the measured kernel image with their
+// artifacts; they carry no publisher signature of their own.
 fn bundleForSpec(
     spec: *const role_registry.ImageSpec,
     components: []const manifest.ExecutionComponentDecl,
-) Error!manifest.BundleManifest {
-    var bundle = manifest.BundleManifest{
+) manifest.BundleManifest {
+    return .{
         .bundle_id = spec.bundleId(),
         .display_name = spec.displayName(),
         .publisher = spec.publisher().name(),
@@ -107,8 +106,6 @@ fn bundleForSpec(
         .assets = spec.assets(),
         .update_channel = spec.updateChannel(),
     };
-    bundle.signature = try userspace_manifest_signing.signBundle(bundle);
-    return bundle;
 }
 
 fn initialComponentForSpec(spec: *const role_registry.ImageSpec) task_runtime.ExecutionComponentSpec {

@@ -1,13 +1,8 @@
 const std = @import("std");
 const acpi = @import("acpi.zig");
-const endian = @import("../utils/endian.zig");
 const checksum = @import("../utils/checksum.zig");
 
 const finishChecksum = checksum.finishSum8Prefix;
-const readU32Le = endian.readU32Le;
-const readU64Le = endian.readU64Le;
-const writeU32Le = endian.writeU32Le;
-const writeU64Le = endian.writeU64Le;
 
 pub const MADT_SIGNATURE = "APIC";
 pub const SDT_HEADER_LENGTH: usize = acpi.SDT_HEADER_LENGTH;
@@ -37,14 +32,8 @@ pub const Error = error{
     BadChecksum,
     InvalidLength,
     InvalidEntryLength,
-    InvalidTimerDivideValue,
-    InvalidTimerVector,
     MissingEnabledProcessor,
     MissingLocalApic,
-    TimerCountDidNotAdvance,
-    TimerEoiMissing,
-    TimerInterruptMissing,
-    TimerMasked,
 };
 
 pub const EntryType = enum(u8) {
@@ -105,11 +94,11 @@ pub const ProcessorIterator = struct {
             switch (EntryType.fromByte(entry[MADT_ENTRY_TYPE_OFFSET])) {
                 .processor_local_apic => return .{
                     .apic_id = entry[3],
-                    .enabled = (readU32Le(entry[MADT_LOCAL_APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0,
+                    .enabled = (std.mem.readInt(u32, entry[MADT_LOCAL_APIC_FLAGS_OFFSET..][0..4], .little) & MADT_PROCESSOR_ENABLED_FLAG) != 0,
                 },
                 .processor_local_x2apic => return .{
-                    .apic_id = readU32Le(entry[4..8]),
-                    .enabled = (readU32Le(entry[MADT_X2APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0,
+                    .apic_id = std.mem.readInt(u32, entry[4..8], .little),
+                    .enabled = (std.mem.readInt(u32, entry[MADT_X2APIC_FLAGS_OFFSET..][0..4], .little) & MADT_PROCESSOR_ENABLED_FLAG) != 0,
                 },
                 else => {},
             }
@@ -118,97 +107,11 @@ pub const ProcessorIterator = struct {
     }
 };
 
-pub const TIMER_VECTOR_MIN: u8 = 0x20;
-pub const TIMER_VECTOR_MAX: u8 = 0xEF;
-
-pub const TimerMode = enum(u8) {
-    one_shot,
-    periodic,
-};
-
-pub const TimerInterruptObservation = struct {
-    local_apic_address: u64,
-    vector: u8,
-    initial_count: u32,
-    current_count_before: u32,
-    current_count_after: u32,
-    divide_value: u8,
-    mode: TimerMode,
-    masked: bool = false,
-    delivered_interrupts: u16,
-    eoi_count_before: u32,
-    eoi_count_after: u32,
-};
-
-pub const TimerEvidenceSource = enum(u8) {
-    modeled_lapic,
-    hardware_lapic_timer,
-};
-
-pub const HardwareTimerInterruptEvidence = struct {
-    source: TimerEvidenceSource = .modeled_lapic,
-    initial_count_register_writes: u32 = 0,
-    divide_register_writes: u32 = 0,
-    lvt_timer_register_writes: u32 = 0,
-    current_count_register_reads: u32 = 0,
-    isr_vector_observations: u32 = 0,
-    interrupt_handler_entries: u32 = 0,
-    eoi_register_writes: u32 = 0,
-    tsc_delta_ticks: u64 = 0,
-
-    pub fn verified(
-        self: HardwareTimerInterruptEvidence,
-        delivered_interrupts: u16,
-        eoi_count: u32,
-    ) bool {
-        const expected_interrupts = @as(u32, delivered_interrupts);
-        return self.source == .hardware_lapic_timer and
-            expected_interrupts > 0 and
-            self.initial_count_register_writes != 0 and
-            self.divide_register_writes != 0 and
-            self.lvt_timer_register_writes != 0 and
-            self.current_count_register_reads >= 2 and
-            self.isr_vector_observations >= expected_interrupts and
-            self.interrupt_handler_entries >= expected_interrupts and
-            self.eoi_register_writes >= eoi_count and
-            self.tsc_delta_ticks != 0;
-    }
-};
-
-pub const TimerInterruptProof = struct {
-    local_apic_address: u64,
-    enabled_processor_count: u16,
-    vector: u8,
-    initial_count: u32,
-    current_count_before: u32,
-    current_count_after: u32,
-    divide_value: u8,
-    mode: TimerMode,
-    delivered_interrupts: u16,
-    eoi_count: u32,
-    hardware_timer: HardwareTimerInterruptEvidence = .{},
-
-    pub fn verified(self: TimerInterruptProof) bool {
-        return self.local_apic_address != 0 and
-            self.enabled_processor_count > 0 and
-            timerVectorAllowed(self.vector) and
-            self.initial_count > 0 and
-            self.current_count_before > self.current_count_after and
-            self.divide_value != 0 and
-            self.delivered_interrupts > 0 and
-            self.eoi_count >= self.delivered_interrupts;
-    }
-
-    pub fn productionHardwareVerified(self: TimerInterruptProof) bool {
-        return self.verified() and self.hardware_timer.verified(self.delivered_interrupts, self.eoi_count);
-    }
-};
-
 pub fn parseMadt(table: []const u8) Error!Summary {
     const validated = try validatedMadt(table);
     var summary = Summary{
-        .local_apic_address = readU32Le(validated[MADT_LOCAL_APIC_ADDRESS_OFFSET..][0..4]),
-        .pc_at_compatible = (readU32Le(validated[MADT_FLAGS_OFFSET..][0..4]) & MADT_PC_AT_COMPATIBLE_FLAG) != 0,
+        .local_apic_address = std.mem.readInt(u32, validated[MADT_LOCAL_APIC_ADDRESS_OFFSET..][0..4], .little),
+        .pc_at_compatible = (std.mem.readInt(u32, validated[MADT_FLAGS_OFFSET..][0..4], .little) & MADT_PC_AT_COMPATIBLE_FLAG) != 0,
     };
 
     var offset: usize = MADT_HEADER_LENGTH;
@@ -250,53 +153,6 @@ fn validatedMadt(table: []const u8) Error![]const u8 {
     return table[0..table_length];
 }
 
-pub fn proveTimerInterrupt(
-    summary: Summary,
-    observation: TimerInterruptObservation,
-) Error!TimerInterruptProof {
-    if (summary.local_apic_address == 0 or observation.local_apic_address != summary.local_apic_address) {
-        return error.MissingLocalApic;
-    }
-    if (summary.enabled_processor_count == 0) return error.MissingEnabledProcessor;
-    if (!timerVectorAllowed(observation.vector)) return error.InvalidTimerVector;
-    if (observation.masked) return error.TimerMasked;
-    if (observation.divide_value == 0) return error.InvalidTimerDivideValue;
-    if (observation.initial_count == 0 or observation.current_count_before <= observation.current_count_after) {
-        return error.TimerCountDidNotAdvance;
-    }
-    if (observation.delivered_interrupts == 0) return error.TimerInterruptMissing;
-    if (observation.eoi_count_after <= observation.eoi_count_before) return error.TimerEoiMissing;
-
-    const eoi_count = observation.eoi_count_after - observation.eoi_count_before;
-    const proof = TimerInterruptProof{
-        .local_apic_address = summary.local_apic_address,
-        .enabled_processor_count = summary.enabled_processor_count,
-        .vector = observation.vector,
-        .initial_count = observation.initial_count,
-        .current_count_before = observation.current_count_before,
-        .current_count_after = observation.current_count_after,
-        .divide_value = observation.divide_value,
-        .mode = observation.mode,
-        .delivered_interrupts = observation.delivered_interrupts,
-        .eoi_count = eoi_count,
-    };
-    if (!proof.verified()) return error.TimerEoiMissing;
-    return proof;
-}
-
-fn timerVectorAllowed(vector: u8) bool {
-    return vector >= TIMER_VECTOR_MIN and vector <= TIMER_VECTOR_MAX;
-}
-
-pub fn withHardwareTimerEvidence(
-    proof: TimerInterruptProof,
-    evidence: HardwareTimerInterruptEvidence,
-) TimerInterruptProof {
-    var upgraded = proof;
-    upgraded.hardware_timer = evidence;
-    return upgraded;
-}
-
 fn incrementCount(count: *u16) Error!void {
     count.* = std.math.add(u16, count.*, 1) catch return error.InvalidLength;
 }
@@ -305,7 +161,7 @@ fn parseEntry(entry_type: EntryType, entry: []const u8, summary: *Summary) Error
     switch (entry_type) {
         .processor_local_apic => {
             try incrementCount(&summary.processor_count);
-            if ((readU32Le(entry[MADT_LOCAL_APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0) {
+            if ((std.mem.readInt(u32, entry[MADT_LOCAL_APIC_FLAGS_OFFSET..][0..4], .little) & MADT_PROCESSOR_ENABLED_FLAG) != 0) {
                 try incrementCount(&summary.enabled_processor_count);
             }
         },
@@ -319,11 +175,11 @@ fn parseEntry(entry_type: EntryType, entry: []const u8, summary: *Summary) Error
             try incrementCount(&summary.local_apic_nmi_count);
         },
         .local_apic_address_override => {
-            summary.local_apic_address = readU64Le(entry[MADT_LOCAL_APIC_ADDRESS_OVERRIDE_OFFSET..][0..8]);
+            summary.local_apic_address = std.mem.readInt(u64, entry[MADT_LOCAL_APIC_ADDRESS_OVERRIDE_OFFSET..][0..8], .little);
         },
         .processor_local_x2apic => {
             try incrementCount(&summary.x2apic_count);
-            if ((readU32Le(entry[MADT_X2APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0) {
+            if ((std.mem.readInt(u32, entry[MADT_X2APIC_FLAGS_OFFSET..][0..4], .little) & MADT_PROCESSOR_ENABLED_FLAG) != 0) {
                 try incrementCount(&summary.enabled_processor_count);
             }
         },
@@ -334,35 +190,35 @@ fn parseEntry(entry_type: EntryType, entry: []const u8, summary: *Summary) Error
 fn validMadt() [MADT_TEST_TABLE_BYTES]u8 {
     var table = @as([MADT_TEST_TABLE_BYTES]u8, @splat(0));
     @memcpy(table[0..4], MADT_SIGNATURE);
-    writeU32Le(table[4..8], table.len);
+    std.mem.writeInt(u32, table[4..8], table.len, .little);
     table[8] = 5;
     @memcpy(table[10..16], "ZIGOS ");
     @memcpy(table[16..24], "NUC11TN ");
-    writeU32Le(table[MADT_LOCAL_APIC_ADDRESS_OFFSET..][0..4], 0xFEE0_0000);
-    writeU32Le(table[MADT_FLAGS_OFFSET..][0..4], MADT_PC_AT_COMPATIBLE_FLAG);
+    std.mem.writeInt(u32, table[MADT_LOCAL_APIC_ADDRESS_OFFSET..][0..4], 0xFEE0_0000, .little);
+    std.mem.writeInt(u32, table[MADT_FLAGS_OFFSET..][0..4], MADT_PC_AT_COMPATIBLE_FLAG, .little);
 
     table[44] = @backingInt(EntryType.processor_local_apic);
     table[45] = MADT_LOCAL_APIC_MIN_BYTES;
     table[46] = 0;
     table[47] = 1;
-    writeU32Le(table[48..52], MADT_PROCESSOR_ENABLED_FLAG);
+    std.mem.writeInt(u32, table[48..52], MADT_PROCESSOR_ENABLED_FLAG, .little);
 
     table[52] = @backingInt(EntryType.io_apic);
     table[53] = MADT_IO_APIC_MIN_BYTES;
     table[54] = 2;
-    writeU32Le(table[56..60], 0xFEC0_0000);
-    writeU32Le(table[60..64], 0);
+    std.mem.writeInt(u32, table[56..60], 0xFEC0_0000, .little);
+    std.mem.writeInt(u32, table[60..64], 0, .little);
 
     table[64] = @backingInt(EntryType.interrupt_source_override);
     table[65] = MADT_ISO_MIN_BYTES;
     table[66] = 0;
     table[67] = 0;
-    writeU32Le(table[68..72], 2);
+    std.mem.writeInt(u32, table[68..72], 2, .little);
     table[72] = 0x0D;
 
     table[74] = @backingInt(EntryType.local_apic_address_override);
     table[75] = MADT_LOCAL_APIC_ADDRESS_OVERRIDE_MIN_BYTES;
-    writeU64Le(table[78..86], 0x0000_0000_FEE0_0000);
+    std.mem.writeInt(u64, table[78..86], 0x0000_0000_FEE0_0000, .little);
 
     table[86] = @backingInt(EntryType.local_apic_nmi);
     table[87] = MADT_LOCAL_APIC_NMI_MIN_BYTES;
@@ -392,13 +248,13 @@ test "APIC MADT parser summarizes APIC topology" {
 test "APIC processor iterator reads x2APIC flags independently of processor UID" {
     var table: [MADT_TEST_TABLE_BYTES + MADT_X2APIC_MIN_BYTES]u8 = @splat(0);
     @memcpy(table[0..MADT_TEST_TABLE_BYTES], &validMadt());
-    writeU32Le(table[4..8], table.len);
+    std.mem.writeInt(u32, table[4..8], table.len, .little);
     const entry = table[MADT_TEST_TABLE_BYTES..];
     entry[0] = @backingInt(EntryType.processor_local_x2apic);
     entry[1] = MADT_X2APIC_MIN_BYTES;
-    writeU32Le(entry[4..8], 0x1234);
-    writeU32Le(entry[8..12], MADT_PROCESSOR_ENABLED_FLAG);
-    writeU32Le(entry[12..16], 0);
+    std.mem.writeInt(u32, entry[4..8], 0x1234, .little);
+    std.mem.writeInt(u32, entry[8..12], MADT_PROCESSOR_ENABLED_FLAG, .little);
+    std.mem.writeInt(u32, entry[12..16], 0, .little);
     finishChecksum(&table, 9, table.len);
     var processors = try ProcessorIterator.init(&table);
     _ = processors.next();
@@ -406,8 +262,8 @@ test "APIC processor iterator reads x2APIC flags independently of processor UID"
     try std.testing.expect(processors.next() == null);
     try std.testing.expectEqual(@as(u16, 2), (try parseMadt(&table)).enabled_processor_count);
 
-    writeU32Le(entry[8..12], 0);
-    writeU32Le(entry[12..16], 1);
+    std.mem.writeInt(u32, entry[8..12], 0, .little);
+    std.mem.writeInt(u32, entry[12..16], 1, .little);
     finishChecksum(&table, 9, table.len);
     processors = try ProcessorIterator.init(&table);
     _ = processors.next();
@@ -444,58 +300,4 @@ test "APIC MADT parser rejects truncated entries" {
     table[45] = 1;
     finishChecksum(table[0..], 9, table.len);
     try std.testing.expectError(error.InvalidEntryLength, parseMadt(table[0..]));
-}
-
-test "APIC timer interrupt proof requires count delivery and EOI" {
-    const table = validMadt();
-    const summary = try parseMadt(table[0..]);
-    const observation = TimerInterruptObservation{
-        .local_apic_address = summary.local_apic_address,
-        .vector = 0x40,
-        .initial_count = 10_000,
-        .current_count_before = 8_000,
-        .current_count_after = 6_000,
-        .divide_value = 16,
-        .mode = .periodic,
-        .delivered_interrupts = 2,
-        .eoi_count_before = 7,
-        .eoi_count_after = 9,
-    };
-    const proof = try proveTimerInterrupt(summary, observation);
-    try std.testing.expect(proof.verified());
-    try std.testing.expect(!proof.productionHardwareVerified());
-    try std.testing.expectEqual(@as(u32, 2), proof.eoi_count);
-
-    const hardware_proof = withHardwareTimerEvidence(proof, .{
-        .source = .hardware_lapic_timer,
-        .initial_count_register_writes = 1,
-        .divide_register_writes = 1,
-        .lvt_timer_register_writes = 1,
-        .current_count_register_reads = 2,
-        .isr_vector_observations = 2,
-        .interrupt_handler_entries = 2,
-        .eoi_register_writes = 2,
-        .tsc_delta_ticks = 100,
-    });
-    try std.testing.expect(hardware_proof.productionHardwareVerified());
-
-    var missing_eoi_write = hardware_proof;
-    missing_eoi_write.hardware_timer.eoi_register_writes = 0;
-    try std.testing.expect(!missing_eoi_write.productionHardwareVerified());
-
-    var missing_interrupt = observation;
-    missing_interrupt.delivered_interrupts = 0;
-    try std.testing.expectError(error.TimerInterruptMissing, proveTimerInterrupt(summary, missing_interrupt));
-
-    var missing_eoi = observation;
-    missing_eoi.eoi_count_after = missing_eoi.eoi_count_before;
-    try std.testing.expectError(error.TimerEoiMissing, proveTimerInterrupt(summary, missing_eoi));
-
-    var masked = observation;
-    masked.masked = true;
-    try std.testing.expectError(error.TimerMasked, proveTimerInterrupt(summary, masked));
-
-    var invalid_vector = observation;
-    invalid_vector.vector = 0x1F;
-    try std.testing.expectError(error.InvalidTimerVector, proveTimerInterrupt(summary, invalid_vector));
 }

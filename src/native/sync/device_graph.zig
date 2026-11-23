@@ -14,7 +14,6 @@ const addDeviceGraphMeasuredArtifact = measured_boot.addMeasuredArtifact;
 pub const MAX_USER_ROOTS: usize = 4;
 pub const MAX_DEVICES: usize = 8;
 pub const MAX_LABEL_BYTES: usize = 48;
-pub const COMPACT_IDENTITY_METADATA = true;
 pub const PLATFORM_DEVICE_ROOT_SIZE_CEILING_BYTES: usize = 112;
 pub const USER_ROOT_RECORD_SIZE_CEILING_BYTES: usize = 192;
 pub const DEVICE_RECORD_SIZE_CEILING_BYTES: usize = 720;

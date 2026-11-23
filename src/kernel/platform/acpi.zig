@@ -1,13 +1,8 @@
 const std = @import("std");
-const endian = @import("../utils/endian.zig");
 const checksum = @import("../utils/checksum.zig");
 
 const checksumIsValid = checksum.sum8IsZero;
 const finishChecksum = checksum.finishSum8Prefix;
-const readU32Le = endian.readU32Le;
-const readU64Le = endian.readU64Le;
-const writeU32Le = endian.writeU32Le;
-const writeU64Le = endian.writeU64Le;
 
 pub const RSDP_SIGNATURE = "RSD PTR ";
 pub const RSDP_BASE_CHECKSUM_LENGTH: usize = 20;
@@ -60,7 +55,7 @@ pub const SdtHeader = struct {
 
 pub fn sdtLengthFromHeader(header: []const u8) SdtError!u32 {
     if (header.len < SDT_HEADER_LENGTH) return error.TooSmall;
-    const length = readU32Le(header[SDT_LENGTH_OFFSET..][0..4]);
+    const length = std.mem.readInt(u32, header[SDT_LENGTH_OFFSET..][0..4], .little);
     if (length < SDT_HEADER_LENGTH) return error.InvalidLength;
     return length;
 }
@@ -97,7 +92,7 @@ pub fn xsdtEntryAddress(xsdt: []const u8, index: u32) SdtError!u64 {
     const count = try xsdtEntryCount(xsdt);
     if (index >= count) return error.InvalidLength;
     const offset = SDT_HEADER_LENGTH + @as(usize, index) * @sizeOf(u64);
-    return readU64Le(xsdt[offset .. offset + @sizeOf(u64)]);
+    return std.mem.readInt(u64, xsdt[offset..][0..@sizeOf(u64)], .little);
 }
 
 pub fn signatureMatches(bytes: []const u8) bool {
@@ -116,10 +111,10 @@ pub fn parseRsdp(bytes: []const u8) RsdpError!Rsdp {
     if (revision < 2) return error.UnsupportedRevision;
 
     if (bytes.len < RSDP_V2_MIN_LENGTH) return error.TooSmall;
-    const length = readU32Le(bytes[RSDP_LENGTH_OFFSET..][0..4]);
+    const length = std.mem.readInt(u32, bytes[RSDP_LENGTH_OFFSET..][0..4], .little);
     if (length < RSDP_V2_MIN_LENGTH or length > bytes.len) return error.InvalidLength;
     if (!checksumIsValid(bytes[0..length])) return error.BadChecksum;
-    const xsdt_address = readU64Le(bytes[RSDP_XSDT_ADDRESS_OFFSET..][0..8]);
+    const xsdt_address = std.mem.readInt(u64, bytes[RSDP_XSDT_ADDRESS_OFFSET..][0..8], .little);
     if (xsdt_address == 0) return error.MissingXsdt;
 
     return .{
@@ -133,12 +128,12 @@ pub fn parseRsdp(bytes: []const u8) RsdpError!Rsdp {
 fn validXsdt() [SDT_HEADER_LENGTH + 16]u8 {
     var table = @as([SDT_HEADER_LENGTH + 16]u8, @splat(0));
     @memcpy(table[SDT_SIGNATURE_OFFSET..][0..SDT_SIGNATURE_BYTES], XSDT_SIGNATURE);
-    writeU32Le(table[SDT_LENGTH_OFFSET..][0..4], table.len);
+    std.mem.writeInt(u32, table[SDT_LENGTH_OFFSET..][0..4], table.len, .little);
     table[SDT_REVISION_OFFSET] = 1;
     @memcpy(table[SDT_OEM_ID_OFFSET..][0..SDT_OEM_ID_BYTES], "ZIGOS ");
     @memcpy(table[SDT_OEM_TABLE_ID_OFFSET..][0..SDT_OEM_TABLE_ID_BYTES], "NUC11TN ");
-    writeU64Le(table[SDT_HEADER_LENGTH .. SDT_HEADER_LENGTH + 8], 0x0000_0000_00AB_C000);
-    writeU64Le(table[SDT_HEADER_LENGTH + 8 .. SDT_HEADER_LENGTH + 16], 0x0000_0000_00AC_C000);
+    std.mem.writeInt(u64, table[SDT_HEADER_LENGTH .. SDT_HEADER_LENGTH + 8], 0x0000_0000_00AB_C000, .little);
+    std.mem.writeInt(u64, table[SDT_HEADER_LENGTH + 8 .. SDT_HEADER_LENGTH + 16], 0x0000_0000_00AC_C000, .little);
     finishChecksum(table[0..], SDT_CHECKSUM_OFFSET, table.len);
     return table;
 }
@@ -148,8 +143,8 @@ fn validRsdpV2() [RSDP_V2_MIN_LENGTH]u8 {
     @memcpy(rsdp[0..8], RSDP_SIGNATURE);
     @memcpy(rsdp[RSDP_OEM_ID_OFFSET..][0..RSDP_OEM_ID_BYTES], "ZIGOS ");
     rsdp[RSDP_REVISION_OFFSET] = 2;
-    writeU32Le(rsdp[RSDP_LENGTH_OFFSET..][0..4], RSDP_V2_MIN_LENGTH);
-    writeU64Le(rsdp[RSDP_XSDT_ADDRESS_OFFSET..][0..8], 0x1122_3344_5566_7788);
+    std.mem.writeInt(u32, rsdp[RSDP_LENGTH_OFFSET..][0..4], RSDP_V2_MIN_LENGTH, .little);
+    std.mem.writeInt(u64, rsdp[RSDP_XSDT_ADDRESS_OFFSET..][0..8], 0x1122_3344_5566_7788, .little);
     finishChecksum(rsdp[0..], RSDP_CHECKSUM_OFFSET, RSDP_BASE_CHECKSUM_LENGTH);
     finishChecksum(rsdp[0..], RSDP_EXTENDED_CHECKSUM_OFFSET, RSDP_V2_MIN_LENGTH);
     return rsdp;
@@ -177,7 +172,7 @@ test "ACPI RSDP parser rejects revision 1 and missing XSDT" {
     try std.testing.expectError(error.UnsupportedRevision, parseRsdp(rsdp_bytes[0..]));
 
     rsdp_bytes = validRsdpV2();
-    writeU64Le(rsdp_bytes[RSDP_XSDT_ADDRESS_OFFSET..][0..8], 0);
+    std.mem.writeInt(u64, rsdp_bytes[RSDP_XSDT_ADDRESS_OFFSET..][0..8], 0, .little);
     finishChecksum(rsdp_bytes[0..], RSDP_EXTENDED_CHECKSUM_OFFSET, RSDP_V2_MIN_LENGTH);
     try std.testing.expectError(error.MissingXsdt, parseRsdp(rsdp_bytes[0..]));
 }

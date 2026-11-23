@@ -135,7 +135,6 @@ else
 const DISPATCH_CPU_TICK_COST: u64 = 1_000;
 pub const RESOURCE_CLASS_COUNT: usize = @typeInfo(accelerator_scheduler.ResourceClass).@"enum".field_names.len;
 pub const ENGINE_COUNT: usize = @typeInfo(accelerator_scheduler.Engine).@"enum".field_names.len;
-pub const UNIFIED_RUNQUEUE = true;
 pub const MAX_ACCELERATOR_CLAIMS: usize = task_runtime.MAX_TASKS;
 // Aging targets use the canonical timer clock as actual user preemption and wakes.
 const EMERGENCY_DEADLINE_DELTA_TICKS = units.millisecondsToTimerTicksCeil(10);
@@ -154,23 +153,8 @@ const MEMORY_BANDWIDTH_UNIT_BYTES: usize = 1024;
 const arena_no_index = indexed_arena.no_index;
 pub const QueueSlotIndex = u8;
 pub const QUEUE_NO_INDEX: QueueSlotIndex = @intCast(task_runtime.MAX_TASKS);
-pub const COMPACT_QUEUE_METADATA = true;
 pub const SINGLE_RUNTIME_OWNER = true;
-pub const PREEMPTS_BATCH_FOR_INTERACTIVE = true;
 var bound_preempt_scheduler: ?*Scheduler = null;
-pub const STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS: u8 = 0;
-pub const TASK_REGISTRATION_HANDLE_SLOT_RELOOKUPS: u8 = 0;
-pub const TASK_WAKE_HANDLE_SLOT_RELOOKUPS: u8 = 0;
-pub const FAULT_CONTAINMENT_TASK_INDEX_RELOOKUPS: u8 = 0;
-pub const SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
-pub const ACCELERATOR_WAIT_TASK_INDEX_RELOOKUPS: u8 = 0;
-pub const TASK_UNREGISTER_SLOT_RELOOKUPS: u8 = 0;
-pub const ACCELERATOR_RANK_TASK_INDEX_LOOKUPS_PER_CANDIDATE: u8 = 1;
-pub const ACCELERATOR_RANK_BACKING_RELOOKUPS_PER_COMPARISON: u8 = 0;
-pub const ACCELERATOR_INSERT_BACKING_RELOOKUPS: u8 = 0;
-pub const ACCELERATOR_REMOVE_BACKING_RELOOKUPS: u8 = 0;
-pub const ACCELERATOR_ENQUEUE_BACKING_RELOOKUPS: u8 = 0;
-pub const ACCELERATOR_WAIT_DISPATCH_REQUEST_DERIVATIONS: u8 = 1;
 
 comptime {
     if (task_runtime.MAX_TASKS > std.math.maxInt(QueueSlotIndex) or
@@ -309,54 +293,14 @@ const AcceleratorClaimSlot = struct {
 const SchedulerSlotArena = indexed_arena.IndexedArenaWithKey(u64, Slot, task_runtime.MAX_TASKS, task_runtime.MAX_TASKS * 2, schedulerSlotTaskId);
 const AcceleratorClaimArena = indexed_arena.IndexedArenaWithKey(u64, AcceleratorClaimSlot, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2, acceleratorClaimSlotId);
 const AcceleratorClaimTaskIndex = indexed_arena.MultimapIndex(MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2);
-const ColdDispatchKind = enum(u8) {
-    none = 0,
-    completed = 1,
-    delayed = 2,
-    denied = 3,
-};
-
-const ColdDispatchNote = struct {
-    active: bool = false,
-    kind: ColdDispatchKind = .none,
-    slot_index: u16 = 0,
-    engine: accelerator_scheduler.Engine = .cpu,
-    denial_engine: accelerator_scheduler.Engine = .cpu,
-    reason: accelerator_scheduler.DecisionReason = .normal,
-    degraded: bool = false,
-    zero_copy: bool = false,
-    record_decision: bool = false,
-    wait_for_event: bool = false,
-    missed_deadline: bool = false,
-    owns_ui: bool = false,
-    bandwidth: usize = 0,
-    ui_revision: u64 = 0,
-    now_ticks: u64 = 0,
-};
-
-const heap_backed_accelerator_claims = builtin.target.os.tag == .freestanding;
 pub const SCHEDULER_SLOT_SIZE_CEILING_BYTES: usize = 176;
-pub const DISPATCH_ACCOUNTING_IS_COLD = true;
 pub const ACCELERATOR_CLAIM_SLOT_SIZE_CEILING_BYTES: usize = 56;
 pub const ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES: usize = 15_888;
-pub const SCHEDULER_SIZE_CEILING_BYTES: usize = (if (heap_backed_accelerator_claims) @as(usize, 30_704) else 46_584) + @sizeOf(?dispatch_ownership.Ticket);
+pub const SCHEDULER_SIZE_CEILING_BYTES: usize = 30_704 + @sizeOf(?dispatch_ownership.Ticket);
 
 pub const AcceleratorClaimBacking = struct {
     claims: AcceleratorClaimArena = AcceleratorClaimArena.init(),
     task_index: AcceleratorClaimTaskIndex = AcceleratorClaimTaskIndex.init(),
-
-    fn init() AcceleratorClaimBacking {
-        return .{};
-    }
-
-    fn initializeAllocated(self: *AcceleratorClaimBacking) void {
-        @memset(std.mem.asBytes(self), 0);
-        self.claims.free_head = indexed_arena.reusableNoIndex(MAX_ACCELERATOR_CLAIMS);
-        const CompactIndex = @FieldType(AcceleratorClaimTaskIndex, "free_bucket_head");
-        const compact_no_index: CompactIndex = @intCast(MAX_ACCELERATOR_CLAIMS);
-        for (&self.task_index.links) |*link| link.bucket = compact_no_index;
-        self.task_index.free_bucket_head = compact_no_index;
-    }
 
     comptime {
         if (@sizeOf(@This()) > ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES) {
@@ -364,8 +308,6 @@ pub const AcceleratorClaimBacking = struct {
         }
     }
 };
-
-const AcceleratorClaimBackingStorage = if (heap_backed_accelerator_claims) ?*AcceleratorClaimBacking else AcceleratorClaimBacking;
 
 pub const Scheduler = struct {
     executor: *userspace_executor.Executor,
@@ -381,7 +323,7 @@ pub const Scheduler = struct {
     ready_tails: [RESOURCE_CLASS_COUNT]QueueSlotIndex = @as([RESOURCE_CLASS_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
     ready_counts: [RESOURCE_CLASS_COUNT]QueueSlotIndex = @as([RESOURCE_CLASS_COUNT]QueueSlotIndex, @splat(0)),
     ready_task_count: QueueSlotIndex = 0,
-    accelerator_claim_backing: AcceleratorClaimBackingStorage = if (heap_backed_accelerator_claims) null else AcceleratorClaimBacking.init(),
+    accelerator_claim_backing: table_backing.Lazy(AcceleratorClaimBacking, null) = .{},
     accelerator_claim_heads: [ENGINE_COUNT]QueueSlotIndex = @as([ENGINE_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
     accelerator_claim_tails: [ENGINE_COUNT]QueueSlotIndex = @as([ENGINE_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
     accelerator_deadline_heads: [ENGINE_COUNT]QueueSlotIndex = @as([ENGINE_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
@@ -397,7 +339,6 @@ pub const Scheduler = struct {
     last_dispatch_tick: u64 = 0,
     active_dispatch_task_id: u64 = 0,
     active_dispatch_lease: ?dispatch_ownership.Ticket = null,
-    cold_note: ColdDispatchNote = .{},
     ready_marker_printed: bool = false,
     active_marker_printed: bool = false,
     event_wait_marker_printed: bool = false,
@@ -417,49 +358,31 @@ pub const Scheduler = struct {
         requireRuntimeOwner();
         @memset(std.mem.asBytes(self), 0);
         self.executor = executor;
-        self.slots.free_head = indexed_arena.reusableNoIndex(task_runtime.MAX_TASKS);
         @memset(&self.ready_heads, QUEUE_NO_INDEX);
         @memset(&self.ready_tails, QUEUE_NO_INDEX);
         for (&self.accelerator_claim_heads) |*head| head.* = QUEUE_NO_INDEX;
         for (&self.accelerator_claim_tails) |*tail| tail.* = QUEUE_NO_INDEX;
         for (&self.accelerator_deadline_heads) |*head| head.* = QUEUE_NO_INDEX;
         for (&self.accelerator_deadline_tails) |*tail| tail.* = QUEUE_NO_INDEX;
-        if (comptime !heap_backed_accelerator_claims) {
-            self.accelerator_claim_backing.initializeAllocated();
-        }
         self.next_accelerator_claim_id = 1;
         self.resource_state = .{};
         self.resource_telemetry_source = .synthetic;
     }
 
     fn acceleratorClaimBacking(self: *Scheduler) ?*AcceleratorClaimBacking {
-        if (comptime heap_backed_accelerator_claims) return self.accelerator_claim_backing;
-        return &self.accelerator_claim_backing;
+        return self.accelerator_claim_backing.get();
     }
 
     fn acceleratorClaimBackingConst(self: *const Scheduler) ?*const AcceleratorClaimBacking {
-        if (comptime heap_backed_accelerator_claims) return self.accelerator_claim_backing;
-        return &self.accelerator_claim_backing;
+        return self.accelerator_claim_backing.get();
     }
 
     fn ensureAcceleratorClaimBacking(self: *Scheduler) ?*AcceleratorClaimBacking {
-        if (self.acceleratorClaimBacking()) |backing| return backing;
-        if (comptime heap_backed_accelerator_claims) {
-            const backing = table_backing.alloc(AcceleratorClaimBacking) orelse return null;
-            backing.initializeAllocated();
-            self.accelerator_claim_backing = backing;
-            return backing;
-        }
-        return &self.accelerator_claim_backing;
+        return self.accelerator_claim_backing.ensure() catch null;
     }
 
     fn releaseAcceleratorClaimBacking(self: *Scheduler) void {
-        if (comptime heap_backed_accelerator_claims) {
-            if (self.accelerator_claim_backing) |backing| {
-                table_backing.free(AcceleratorClaimBacking, backing);
-                self.accelerator_claim_backing = null;
-            }
-        }
+        self.accelerator_claim_backing.release();
     }
 
     pub fn deinit(self: *Scheduler) void {
@@ -863,15 +786,12 @@ pub const Scheduler = struct {
 
     pub fn accountingForSlot(self: *Scheduler, slot: *const Slot) *DispatchAccounting {
         requireRuntimeOwner();
-        self.publishColdNote();
         return &self.accountingStorage()[self.accountingIndex(slot)];
     }
 
     fn accountingForSlotConst(self: *const Scheduler, slot: *const Slot) *const DispatchAccounting {
         requireRuntimeOwner();
-        const scheduler = @constCast(self);
-        scheduler.publishColdNote();
-        const storage = scheduler.dispatch_accounting orelse
+        const storage = self.dispatch_accounting orelse
             @call(.never_inline, schedulerInvariantFailure, .{.dispatch_accounting_is_allocated_with_its_scheduler_slot});
         return &storage[self.accountingIndex(slot)];
     }
@@ -973,16 +893,12 @@ pub const Scheduler = struct {
 
     pub fn engineDispatchCount(self: *const Scheduler, engine: accelerator_scheduler.Engine) u64 {
         if (!smp.isRuntimeOwner()) return 0;
-        const scheduler = @constCast(self);
-        scheduler.publishColdNote();
-        return scheduler.engine_dispatch_counts[engineIndex(engine)];
+        return self.engine_dispatch_counts[engineIndex(engine)];
     }
 
     pub fn engineDenialCount(self: *const Scheduler, engine: accelerator_scheduler.Engine) u64 {
         if (!smp.isRuntimeOwner()) return 0;
-        const scheduler = @constCast(self);
-        scheduler.publishColdNote();
-        return scheduler.engine_denial_counts[engineIndex(engine)];
+        return self.engine_denial_counts[engineIndex(engine)];
     }
 
     pub fn executeTask(self: *Scheduler, task_id: u64, now_ticks: u64) userspace_executor.ExecutionOutcome {
@@ -993,6 +909,8 @@ pub const Scheduler = struct {
         if (!smp.isRuntimeOwner() or !self.initialized or syscall_service_active) return 0;
         const runtime = self.runtime_ptr orelse return 0;
         if (port.kernel.runtime != runtime or self.executor.bound_runtime != runtime or self.executor.binding_owner != @as(*const anyopaque, self)) return 0;
+        // Only the BSP drains copied requests. Mapping admission, the fixed
+        // input copy and invocation stay within one serialized interval.
         const x86 = @import("../../arch/x86.zig");
         const restore_if = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
         if (comptime builtin.target.os.tag == .freestanding) x86.cli();
@@ -1209,24 +1127,24 @@ pub const Scheduler = struct {
         if (active.issuer != ticket.issuer or active.cpu != ticket.cpu or active.epoch != ticket.epoch or self.active_dispatch_task_id == 0)
             @call(.never_inline, schedulerInvariantFailure, .{.scheduler_finishes_its_exact_active_dispatch});
         const task_id = self.active_dispatch_task_id;
-        // Model callbacks and failed preparation never start execution. An
-        // actual entry may only be collected after its quiescent return ack.
-        if (runtime.cancelUnstartedExecution(ticket)) |_| {
-            // A canceled prepared command publishes a canonical unavailable
-            // receipt. Consume it before collection just like an owner return;
-            // a reservation canceled before binding has no prepared receipt.
-            var canceled: dispatch_ownership.ReturnRecord = undefined;
-            runtime.execution.consumePreparedReturnInto(ticket, &canceled) catch |err| switch (err) {
-                error.WrongPurpose => {},
-                else => @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation}),
-            };
-        } else |err| switch (err) {
-            error.WrongPhase => switch (runtime.execution.phase(ticket) catch
-                @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation})) {
-                .returned, .return_consumed => {},
-                else => @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation}),
+        // An actual entry may only be collected after its quiescent return
+        // ack. Model callbacks and failed preparation never start execution,
+        // so any other phase must still cancel as unstarted.
+        switch (runtime.execution.phase(ticket) catch
+            @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation})) {
+            .returned, .return_consumed => {},
+            else => {
+                runtime.cancelUnstartedExecution(ticket) catch
+                    @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation});
+                // A canceled prepared command publishes a canonical unavailable
+                // receipt. Consume it before collection just like an owner return;
+                // a reservation canceled before binding has no prepared receipt.
+                var canceled: dispatch_ownership.ReturnRecord = undefined;
+                runtime.execution.consumePreparedReturnInto(ticket, &canceled) catch |err| switch (err) {
+                    error.WrongPurpose => {},
+                    else => @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation}),
+                };
             },
-            else => @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation}),
         }
         // Runtime collection may restore its caller's interrupt state. Keep
         // the BSP transaction held until every registered mapping is drained.
@@ -1507,12 +1425,8 @@ pub const Scheduler = struct {
     }
 
     fn observedUiRevision(self: *const Scheduler, slot: *const Slot) u64 {
-        const index = self.accountingIndex(slot);
-        if (self.cold_note.active and self.cold_note.slot_index == index and self.cold_note.owns_ui) {
-            return self.cold_note.ui_revision;
-        }
         const storage = self.dispatch_accounting orelse return 0;
-        return storage[index].last_ui_state_revision;
+        return storage[self.accountingIndex(slot)].last_ui_state_revision;
     }
 
     fn noteCompleted(
@@ -1524,22 +1438,24 @@ pub const Scheduler = struct {
         ui_revision: u64,
         bandwidth: usize,
     ) void {
-        self.publishColdNote();
-        self.cold_note = .{
-            .active = true,
-            .kind = .completed,
-            .slot_index = @intCast(self.accountingIndex(slot)),
-            .engine = decision.engine,
-            .denial_engine = decision.engine,
-            .reason = decision.reason,
-            .degraded = decision.degraded,
-            .zero_copy = decision.zero_copy_allowed,
-            .wait_for_event = wait_for_event,
-            .missed_deadline = missed_deadline,
-            .owns_ui = slot.owns_ui_surface,
-            .bandwidth = bandwidth,
-            .ui_revision = ui_revision,
-        };
+        const accounting = self.accountingForSlot(slot);
+        accounting.last_dispatch_engine = decision.engine;
+        accounting.last_dispatch_reason = decision.reason;
+        accounting.last_dispatch_degraded = decision.degraded;
+        accounting.last_dispatch_zero_copy = decision.zero_copy_allowed;
+        if (wait_for_event) accounting.event_wait_count += 1;
+        if (slot.owns_ui_surface and ui_revision > accounting.last_ui_state_revision) {
+            accounting.last_ui_state_revision = ui_revision;
+            accounting.ui_state_update_count += 1;
+        }
+        if (missed_deadline) accounting.missed_deadline_count += 1;
+        accounting.cpu_ticks_consumed += DISPATCH_CPU_TICK_COST;
+        accounting.memory_bandwidth_consumed_units = std.math.add(
+            usize,
+            accounting.memory_bandwidth_consumed_units,
+            bandwidth,
+        ) catch std.math.maxInt(usize);
+        self.engine_dispatch_counts[engineIndex(decision.engine)] += 1;
     }
 
     fn noteDenied(
@@ -1550,16 +1466,13 @@ pub const Scheduler = struct {
         denial_engine: accelerator_scheduler.Engine,
         record_decision: bool,
     ) void {
-        self.publishColdNote();
-        self.cold_note = .{
-            .active = true,
-            .kind = .denied,
-            .slot_index = @intCast(self.accountingIndex(slot)),
-            .engine = engine,
-            .denial_engine = denial_engine,
-            .reason = reason,
-            .record_decision = record_decision,
-        };
+        if (record_decision) {
+            const accounting = self.accountingForSlot(slot);
+            accounting.last_dispatch_engine = engine;
+            accounting.last_dispatch_degraded = false;
+            accounting.last_dispatch_zero_copy = false;
+        }
+        self.accountDispatchDenied(slot, reason, denial_engine);
     }
 
     fn noteAcceleratorDenied(
@@ -1568,109 +1481,32 @@ pub const Scheduler = struct {
         decision: accelerator_scheduler.Decision,
         denial_engine: accelerator_scheduler.Engine,
     ) void {
-        self.publishColdNote();
-        self.cold_note = .{
-            .active = true,
-            .kind = .denied,
-            .slot_index = @intCast(self.accountingIndex(slot)),
-            .engine = decision.engine,
-            .denial_engine = denial_engine,
-            .reason = decision.reason,
-            .degraded = decision.degraded,
-            .zero_copy = decision.zero_copy_allowed,
-            .record_decision = true,
-        };
+        const accounting = self.accountingForSlot(slot);
+        accounting.last_dispatch_engine = decision.engine;
+        accounting.last_dispatch_degraded = decision.degraded;
+        accounting.last_dispatch_zero_copy = decision.zero_copy_allowed;
+        self.accountDispatchDenied(slot, decision.reason, denial_engine);
     }
 
+    // A slot counts at most one policy delay per tick; a repeated delay in the
+    // same tick only refreshes the recorded decision. Returns whether this
+    // call counted a new delay.
     fn noteDelayed(
         self: *Scheduler,
         slot: *Slot,
         decision: accelerator_scheduler.Decision,
         now_ticks: u64,
     ) bool {
-        const slot_index: u16 = @intCast(self.accountingIndex(slot));
-        if (self.cold_note.active and
-            self.cold_note.kind == .delayed and
-            self.cold_note.slot_index == slot_index and
-            self.cold_note.now_ticks == now_ticks)
-        {
-            self.cold_note.engine = decision.engine;
-            self.cold_note.reason = decision.reason;
-            self.cold_note.degraded = decision.degraded;
-            self.cold_note.zero_copy = decision.zero_copy_allowed;
-            return false;
-        }
-        self.publishColdNote();
-        if (self.accountingStorage()[slot_index].last_policy_delay_tick == now_ticks) {
-            const accounting = &self.accountingStorage()[slot_index];
+        const accounting = self.accountingForSlot(slot);
+        if (accounting.last_policy_delay_tick == now_ticks) {
             accounting.last_dispatch_engine = decision.engine;
             accounting.last_dispatch_reason = decision.reason;
             accounting.last_dispatch_degraded = decision.degraded;
             accounting.last_dispatch_zero_copy = decision.zero_copy_allowed;
             return false;
         }
-        self.cold_note = .{
-            .active = true,
-            .kind = .delayed,
-            .slot_index = slot_index,
-            .engine = decision.engine,
-            .denial_engine = decision.engine,
-            .reason = decision.reason,
-            .degraded = decision.degraded,
-            .zero_copy = decision.zero_copy_allowed,
-            .now_ticks = now_ticks,
-        };
+        self.accountDispatchDelayedAt(slot, decision, now_ticks);
         return true;
-    }
-
-    fn publishColdNote(self: *Scheduler) void {
-        requireRuntimeOwner();
-        if (!self.cold_note.active) return;
-        const note = self.cold_note;
-        self.cold_note.active = false;
-        if (note.slot_index >= self.slots.slots.len) return;
-        const slot = &self.slots.slots[note.slot_index];
-        const decision = accelerator_scheduler.Decision{
-            .class = slot.resource_class,
-            .engine = note.engine,
-            .delayed = note.kind == .delayed,
-            .degraded = note.degraded,
-            .zero_copy_allowed = note.zero_copy,
-            .reason = note.reason,
-        };
-        switch (note.kind) {
-            .none => {},
-            .delayed => self.accountDispatchDelayedAt(slot, decision, note.now_ticks),
-            .denied => {
-                if (note.record_decision) {
-                    const accounting = &self.accountingStorage()[note.slot_index];
-                    accounting.last_dispatch_engine = note.engine;
-                    accounting.last_dispatch_degraded = note.degraded;
-                    accounting.last_dispatch_zero_copy = note.zero_copy;
-                }
-                self.accountDispatchDenied(slot, note.reason, note.denial_engine);
-            },
-            .completed => {
-                const accounting = &self.accountingStorage()[note.slot_index];
-                accounting.last_dispatch_engine = note.engine;
-                accounting.last_dispatch_reason = note.reason;
-                accounting.last_dispatch_degraded = note.degraded;
-                accounting.last_dispatch_zero_copy = note.zero_copy;
-                if (note.wait_for_event) accounting.event_wait_count += 1;
-                if (note.owns_ui and note.ui_revision > accounting.last_ui_state_revision) {
-                    accounting.last_ui_state_revision = note.ui_revision;
-                    accounting.ui_state_update_count += 1;
-                }
-                if (note.missed_deadline) accounting.missed_deadline_count += 1;
-                accounting.cpu_ticks_consumed += DISPATCH_CPU_TICK_COST;
-                accounting.memory_bandwidth_consumed_units = std.math.add(
-                    usize,
-                    accounting.memory_bandwidth_consumed_units,
-                    note.bandwidth,
-                ) catch std.math.maxInt(usize);
-                self.engine_dispatch_counts[engineIndex(note.engine)] += 1;
-            },
-        }
     }
 
     fn accountDispatchDelayed(self: *Scheduler, slot: *Slot, decision: accelerator_scheduler.Decision) void {
@@ -1786,11 +1622,6 @@ pub const Scheduler = struct {
         if (self.taskHasExecutionLease(task_id)) return false;
         self.unlinkReadyIndex(slot_index);
         self.removeAcceleratorClaimsForTask(task_id, slot);
-        if (self.cold_note.active and self.cold_note.slot_index == slot_index) {
-            self.cold_note.active = false;
-        } else {
-            self.publishColdNote();
-        }
         if (self.dispatch_accounting) |storage| storage[slot_index] = .{};
         return self.slots.removeIndex(slot_index);
     }
@@ -2095,7 +1926,6 @@ test "scheduler caches immutable UI presentation eligibility" {
     try std.testing.expect(contractOwnsUiSurface(userspace_flags.FLAG_OWNS_UI_SURFACE | userspace_flags.FLAG_BACKGROUND_ELIGIBLE));
     try std.testing.expect(!contractOwnsUiSurface(0));
     try std.testing.expect(!contractOwnsUiSurface(userspace_flags.FLAG_BACKGROUND_ELIGIBLE));
-    try std.testing.expectEqual(@as(u8, 0), STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS);
 }
 
 fn acceleratorClaimTaskKey(task_id: u64) u64 {
@@ -2383,7 +2213,6 @@ fn createRunnableSchedulerTaskWithBudget(
         .launch = .{
             .boundary = .userspace_process,
             .image_id = serial,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = bundle_id,
         },
@@ -2521,7 +2350,6 @@ test "post-dispatch requeue validates retained task identity and state" {
 
     try std.testing.expect(try runtime.terminateTask(task.id, 3));
     try std.testing.expect(!taskEligibleForPostDispatchRequeue(task.id, task, &slot));
-    try std.testing.expectEqual(@as(u8, 0), SCHEDULED_TASK_INDEX_LOOKUPS_PER_DISPATCH);
 }
 
 test "userspace scheduler registers tasks through indexed arena slots" {
@@ -2827,7 +2655,7 @@ const EventYieldTestDispatcher = if (builtin.is_test) struct {
 
 fn installEventYieldTestMapping(scheduler: *Scheduler, task: *const task_runtime.TaskRecord) !userspace_executor.MappingHandle {
     if (!builtin.is_test) @compileError("event yield mappings are test-only");
-    const mappings = &scheduler.executor.mappings;
+    const mappings = try scheduler.executor.mappings.ensure();
     const index = mappings.reserveIndex(task.address_space_id) orelse return error.UnavailableMappingSlot;
     mappings.slotAt(index).mapping = .{
         .state = .live,
@@ -2859,7 +2687,7 @@ test "voluntary event yield parks without a wait syscall and retains task and ca
     const slot = scheduler.slots.get(task.id).?;
     const task_handle = slot.task_handle;
     const mapping_handle = try installEventYieldTestMapping(&scheduler, task);
-    const mapping_before = executor.mappings.getByHandle(mapping_handle).?.mapping;
+    const mapping_before = executor.mappings.get().?.getByHandle(mapping_handle).?.mapping;
     const address_space = runtime.findAddressSpaceConst(task.address_space_id).?;
     const task_generation = task.capabilityGeneration();
     const capability_generation = capabilities.mutationGeneration();
@@ -2877,7 +2705,7 @@ test "voluntary event yield parks without a wait syscall and retains task and ca
     try std.testing.expect(runtime.findByHandle(task_handle, task.id).? == task);
     try std.testing.expect(runtime.findAddressSpaceConst(task.address_space_id).? == address_space);
     try std.testing.expect(slot.mapping_handle.eql(mapping_handle));
-    try std.testing.expectEqualDeep(mapping_before, executor.mappings.getByHandle(mapping_handle).?.mapping);
+    try std.testing.expectEqualDeep(mapping_before, executor.mappings.get().?.getByHandle(mapping_handle).?.mapping);
     try std.testing.expectEqual(@as(usize, 1), executor.materializedCount());
     try std.testing.expectEqual(@as(u16, 1), task.capability_count);
     try std.testing.expectEqual(@as(u64, 77), task.capabilityIds()[0]);
@@ -2901,7 +2729,7 @@ test "voluntary event yield parks without a wait syscall and retains task and ca
     try std.testing.expectEqual(@as(u64, 2), scheduler.taskDispatchAccounting(task.id).?.event_wait_count);
     try std.testing.expectEqualDeep(unrelated_slot, scheduler.slots.get(unrelated.id).?.*);
     try std.testing.expectEqualDeep(unrelated_accounting, scheduler.taskDispatchAccounting(unrelated.id).?.*);
-    try std.testing.expectEqualDeep(mapping_before, executor.mappings.getByHandle(mapping_handle).?.mapping);
+    try std.testing.expectEqualDeep(mapping_before, executor.mappings.get().?.getByHandle(mapping_handle).?.mapping);
 }
 
 test "voluntary event yield preserves wakes during exact leased dispatch without duplicate budget" {
@@ -3019,7 +2847,7 @@ test "voluntary event yield preserves interrupted continuation work within one a
         const slot = scheduler.slots.get(task.id).?;
         const task_handle = slot.task_handle;
         const mapping_handle = try installEventYieldTestMapping(&scheduler, task);
-        const mapping_before = executor.mappings.getByHandle(mapping_handle).?.mapping;
+        const mapping_before = executor.mappings.get().?.getByHandle(mapping_handle).?.mapping;
         const initial_wakes = scheduler.taskDispatchAccounting(task.id).?.wake_event_count;
         // Executor's actual IRQ/yield tests verify the stale wait returns to the
         // fresh user loop in place, within the same quantum and running lease.
@@ -3049,7 +2877,7 @@ test "voluntary event yield preserves interrupted continuation work within one a
         try std.testing.expect(!runtime.execution.hasLeases());
         try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
         try std.testing.expect(slot.task_handle.eql(task_handle) and slot.mapping_handle.eql(mapping_handle));
-        try std.testing.expectEqualDeep(mapping_before, executor.mappings.getByHandle(mapping_handle).?.mapping);
+        try std.testing.expectEqualDeep(mapping_before, executor.mappings.get().?.getByHandle(mapping_handle).?.mapping);
         try std.testing.expectEqualDeep(unrelated_slot, scheduler.slots.get(unrelated.id).?.*);
         try std.testing.expectEqualDeep(unrelated_accounting, scheduler.taskDispatchAccounting(unrelated.id).?.*);
     }
@@ -3080,7 +2908,6 @@ test "userspace scheduler dispatches resource ready queues by priority" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 3,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.example.background",
         },
@@ -3100,7 +2927,6 @@ test "userspace scheduler dispatches resource ready queues by priority" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 4,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.example.foreground",
         },
@@ -3150,7 +2976,6 @@ test "userspace scheduler keeps compositor-class work ahead of expired log compa
     try std.testing.expect(scheduler.wakeTask(compositor.id, .timer, 50, 2));
     try std.testing.expect(scheduler.shouldPreemptTask(compact.id));
     try std.testing.expect(!scheduler.shouldPreemptTask(compositor.id));
-    try std.testing.expect(PREEMPTS_BATCH_FOR_INTERACTIVE);
     try std.testing.expect(!scheduler.runNext(50));
     try std.testing.expectEqual(@as(u64, 1), scheduler.slots.getConst(compositor.id).?.dispatch_count);
     try std.testing.expectEqual(@as(u64, 0), scheduler.slots.getConst(compact.id).?.dispatch_count);
@@ -3178,7 +3003,6 @@ test "userspace scheduler uses event wakeups and explicit budget refills" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 5,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.example.wake-budgeted",
         },
@@ -3211,7 +3035,7 @@ test "userspace scheduler gives new event activations a full budget without accu
         .component_class = .app_component,
         .budget = .{ .cpu_time_ticks = DISPATCH_CPU_TICK_COST * 3, .memory_bytes = TEST_TASK_MEMORY_BYTES, .endpoint_slots = TEST_TASK_ENDPOINT_SLOTS, .shared_memory_bytes = 0 },
         .local_only = true,
-        .launch = .{ .boundary = .userspace_process, .image_id = 6, .component_abi_version = 1, .signed = true, .bundle_id = "app.activation-budget" },
+        .launch = .{ .boundary = .userspace_process, .image_id = 6, .signed = true, .bundle_id = "app.activation-budget" },
         .userspace_image = &image,
     });
     try std.testing.expect(scheduler.registerTask(task.id));
@@ -3831,7 +3655,6 @@ test "userspace scheduler requires complete hardware telemetry before waking har
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 20,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.example.media-required",
         },
@@ -3980,7 +3803,6 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 21,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.example.npu-batch",
         },
@@ -4072,7 +3894,6 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 22,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.example.thermal-ui",
         },
@@ -4111,7 +3932,6 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 23,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.example.battery-media",
         },
@@ -4575,7 +4395,6 @@ test "userspace scheduler thermal pressure gates batch queues without scanning t
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 7,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.example.batch",
         },
@@ -4614,7 +4433,6 @@ test "userspace scheduler stops dispatching tasks after their cpu budget is cons
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 1,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.example.budgeted",
         },
@@ -4989,8 +4807,9 @@ test "scheduler retirement domain isolates all CPU arenas and preflights complet
     }
     const MappingFixture = struct {
         fn install(executor: *userspace_executor.Executor, address_space_id: u64) !void {
-            const index = executor.mappings.reserveIndexAt(address_space_id, 0) orelse return error.UnavailableMappingSlot;
-            executor.mappings.slotAt(index).mapping = .{
+            const mappings = try executor.mappings.ensure();
+            const index = mappings.reserveIndexAt(address_space_id, 0) orelse return error.UnavailableMappingSlot;
+            mappings.slotAt(index).mapping = .{
                 .state = .live,
                 .address_space_id = address_space_id,
                 .dispatch_metadata = .{ .owner_task_id = address_space_id + 1 },
@@ -5004,7 +4823,6 @@ test "scheduler retirement domain isolates all CPU arenas and preflights complet
         const state = native_entry.stateForCpu(@intCast(index));
         previous.* = state.*;
         state.userspace_xstate = 0x1000 + index;
-        state.kernel_xstate = 0x2000 + index;
         state.resume_rsp = 0x3000 + index;
         state.resume_rip = 0x4000 + index;
         state.resume_requested = @intCast(index + 1);
@@ -5158,7 +4976,6 @@ test "scheduler execution reservation failure preserves exact ready queue and ac
     const tails_before = scheduler.ready_tails;
     const counts_before = scheduler.ready_counts;
     const resource_before = scheduler.resource_state;
-    const note_before = scheduler.cold_note;
     try std.testing.expect(!scheduler.runNextWithDispatch(20, Dispatcher{}));
     try std.testing.expectEqual(userspace_executor.ExecutionOutcome.unavailable, scheduler.executeTaskWithDispatch(first.id, 20, Dispatcher{}).outcome);
     try std.testing.expectEqualDeep(slots_before, scheduler.slots.slots);
@@ -5167,7 +4984,6 @@ test "scheduler execution reservation failure preserves exact ready queue and ac
     try std.testing.expectEqual(tails_before, scheduler.ready_tails);
     try std.testing.expectEqual(counts_before, scheduler.ready_counts);
     try std.testing.expectEqualDeep(resource_before, scheduler.resource_state);
-    try std.testing.expectEqualDeep(note_before, scheduler.cold_note);
     try std.testing.expectEqual(@as(u64, 0), scheduler.last_dispatch_tick);
     try std.testing.expectEqual(@as(u64, 0), scheduler.active_dispatch_task_id);
     try std.testing.expect(scheduler.active_dispatch_lease == null);
@@ -5468,7 +5284,7 @@ test "scheduler execution collection retains active identity through lifetime ca
     try std.testing.expect(runtime.unbindAddressSpaceRetirementSink(address_sink));
 }
 
-test "scheduler foreign readers preserve pending accounting and avoid runtime priority scans" {
+test "scheduler foreign readers neither mutate nor publish accounting and avoid runtime priority scans" {
     const previous_cpu = smp.currentCpuIndex();
     defer smp.setCurrentCpuIndexForTest(previous_cpu);
     smp.setCurrentCpuIndexForTest(0);
@@ -5485,7 +5301,6 @@ test "scheduler foreign readers preserve pending accounting and avoid runtime pr
     try std.testing.expect(scheduler.registerTask(batch.id));
     try std.testing.expect(scheduler.registerTask(foreground.id));
     scheduler.noteDenied(scheduler.slots.get(batch.id).?, .cpu_budget, .cpu, .cpu, false);
-    const note = scheduler.cold_note;
     const accounting = scheduler.accountingStorage().*;
     const dispatched = scheduler.engine_dispatch_counts;
     const denied = scheduler.engine_denial_counts;
@@ -5498,7 +5313,6 @@ test "scheduler foreign readers preserve pending accounting and avoid runtime pr
         try std.testing.expectEqual(@as(u64, 0), scheduler.engineDenialCount(.cpu));
         try std.testing.expect(!scheduler.hasReadyLatencySensitiveWork());
         try std.testing.expect(!scheduler.shouldPreemptTask(batch.id));
-        try std.testing.expectEqualDeep(note, scheduler.cold_note);
         try std.testing.expectEqualDeep(accounting, scheduler.dispatch_accounting.?.*);
         try std.testing.expectEqual(dispatched, scheduler.engine_dispatch_counts);
         try std.testing.expectEqual(denied, scheduler.engine_denial_counts);
@@ -5506,5 +5320,4 @@ test "scheduler foreign readers preserve pending accounting and avoid runtime pr
     smp.setCurrentCpuIndexForTest(0);
     try std.testing.expect(scheduler.shouldPreemptTask(batch.id));
     try std.testing.expectEqual(@as(u64, 1), scheduler.engineDenialCount(.cpu));
-    try std.testing.expect(!scheduler.cold_note.active);
 }

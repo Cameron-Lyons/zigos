@@ -2,6 +2,14 @@ const std = @import("std");
 const Header = @import("request_header_wire.zig").RequestHeader;
 
 pub const TaskTerminateWireRequest = extern struct { header: Header, task_capability_id: u64 };
+// EndpointCreateWireRequest.flags; every other bit is reserved and rejected.
+pub const EndpointFlags = packed struct(u16) {
+    local_only: bool = false,
+    service_port: bool = false,
+    carries_capability: bool = false,
+    _reserved: u13 = 0,
+};
+pub const ENDPOINT_CREATE_KNOWN_FLAGS: u16 = @bitCast(EndpointFlags{ .local_only = true, .service_port = true, .carries_capability = true });
 pub const EndpointCreateWireRequest = extern struct {
     header: Header,
     authority_capability_id: u64,
@@ -28,16 +36,14 @@ pub const TimeQueryWireRequest = extern struct { header: Header, authority_capab
 pub const ResourceQueryWireRequest = extern struct { header: Header, authority_capability_id: u64, task_id: u64 };
 pub const AccountingQueryWireRequest = extern struct { header: Header, authority_capability_id: u64, task_id: u64 };
 pub const InputRecvWireRequest = extern struct { header: Header, input_capability_id: u64, receiver_task_id: u64 };
+// text_address names the task's abi.SurfaceText, copied once at the boundary.
 pub const SurfacePresentWireRequest = extern struct {
     header: Header,
     presentation_capability_id: u64,
     presenter_task_id: u64,
     surface_id: u64,
-    fence: u64,
-    buffer_object_id: u64,
-    buffer_offset: u32,
-    buffer_bytes: u32,
-    text_address: u64 = 0,
+    revision: u64,
+    text_address: u64,
 };
 pub const DeviceDescribeWireRequest = extern struct { header: Header, device_capability_id: u64 };
 pub const DeviceMmioWindowWireRequest = extern struct {
@@ -46,16 +52,10 @@ pub const DeviceMmioWindowWireRequest = extern struct {
     window_index: u8,
     reserved: [7]u8 = @splat(0),
 };
-pub const SurfaceTextWire = extern struct {
-    window_id: u64 = 0,
-    text_length: u16 = 0,
-    cursor: u16 = 0,
-    state: u32 = 0,
-    text: [512]u8 = @splat(0),
-};
-
 // All byte patterns of an admitted wire type are legal Zig values. Explicit
 // padding makes every byte part of the schema and subject to canonical checks.
+// Packed fields of unsigned integers and bools have no invalid bit pattern;
+// their reserved bits are canonical-checked by the owning type.
 pub fn isScalarWire(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .int => |info| info.signedness == .unsigned and
@@ -63,6 +63,14 @@ pub fn isScalarWire(comptime T: type) bool {
             !std.mem.eql(u8, @typeName(T), "usize"),
         .array => |info| info.sentinel_ptr == null and isScalarWire(info.child),
         .@"struct" => |info| blk: {
+            if (info.layout == .@"packed") {
+                inline for (info.field_types) |Field| switch (@typeInfo(Field)) {
+                    .int => |field| if (field.signedness != .unsigned) break :blk false,
+                    .bool => {},
+                    else => break :blk false,
+                };
+                break :blk true;
+            }
             if (info.layout != .@"extern") break :blk false;
             var end: usize = 0;
             inline for (info.field_names, info.field_types) |name, Field| {
@@ -85,15 +93,14 @@ pub fn requireScalarWire(comptime T: type) void {
 test "scalar wire gate rejects unsafe representations and implicit padding" {
     try std.testing.expect(isScalarWire(Header));
     try std.testing.expect(isScalarWire(SurfacePresentWireRequest));
-    try std.testing.expect(isScalarWire(SurfaceTextWire));
+    try std.testing.expect(isScalarWire(packed struct(u8) { flag: bool, count: u7 }));
     inline for (.{
-        bool,                     usize,                  ?u64,                                   *const u8,                              []const u8, enum(u8) { one },
-        union(enum) { one: u64 }, struct { number: u64 }, extern struct { tag: u8, number: u64 }, extern struct { number: u64, tag: u8 },
+        bool,                     usize,                  ?u64,                                   *const u8,                              []const u8,                       enum(u8) { one },
+        union(enum) { one: u64 }, struct { number: u64 }, extern struct { tag: u8, number: u64 }, extern struct { number: u64, tag: u8 }, packed struct(u8) { number: i8 }, packed struct(u8) { tag: enum(u8) { one } },
     }) |T| try std.testing.expect(!isScalarWire(T));
     try std.testing.expectEqual(@as(usize, 4), @offsetOf(Header, "reserved"));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(Header));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(EndpointCreateWireRequest));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(DeviceMmioWindowWireRequest));
-    try std.testing.expectEqual(@as(usize, 72), @sizeOf(SurfacePresentWireRequest));
-    try std.testing.expectEqual(@as(usize, 528), @sizeOf(SurfaceTextWire));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(SurfacePresentWireRequest));
 }

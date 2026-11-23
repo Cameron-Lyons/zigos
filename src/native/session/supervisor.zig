@@ -1,34 +1,21 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
-const contract = @import("contract.zig");
+const service_catalog = @import("service_catalog.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
-const manifest = @import("../policy/manifest.zig");
 const notification_center = @import("../services/notification_center.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
-const root = @import("root");
+const table_backing = @import("../core/table_backing.zig");
 
 pub const MAX_SERVICES: usize = 24;
 pub const MAX_DIAGNOSTICS: usize = 64;
-pub const COMPACT_DIAGNOSTIC_RING_METADATA = true;
-pub const ACTIONABLE_DIAGNOSTICS_ONLY = true;
-pub const HEAP_BACKED_ACTIONABLE_DIAGNOSTICS_ON_FREESTANDING = true;
 pub const DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES: usize = 24;
-pub const DIAGNOSTIC_HANDLE_SIZE_CEILING_BYTES: usize = 8;
-pub const SCHEMA_DERIVED_SERVICE_METADATA = true;
-pub const SERVICE_ID_IS_ISOLATION_DOMAIN = true;
-pub const DERIVES_SERVICE_IDS_FROM_ARENA_COUNT = true;
-pub const OMITS_UNOBSERVED_SERVICE_TRANSITION_TIMESTAMPS = true;
-pub const OMITS_UNOBSERVED_DIAGNOSTIC_SEQUENCES = true;
-pub const DIRECT_SERVICE_CLASS_SLOTS = true;
-pub const SERVICE_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
 pub const SERVICE_RECORD_SIZE_CEILING_BYTES: usize = 40;
-pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 3_368;
+pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 1_840;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
-pub const SERVICE_CLASS_COUNT: usize = @typeInfo(contract.ServiceClass).@"enum".field_names.len;
+pub const SERVICE_CLASS_COUNT: usize = @typeInfo(service_catalog.ServiceClass).@"enum".field_names.len;
 pub const ServiceClassSlotIndex = indexed_arena.ReusableIndex(MAX_SERVICES);
 const NO_SERVICE_CLASS_SLOT = indexed_arena.reusableNoIndex(MAX_SERVICES);
 
@@ -36,7 +23,7 @@ comptime {
     if (MAX_DIAGNOSTICS > std.math.maxInt(u8)) {
         @compileError("supervisor diagnostic ring metadata exceeds u8 capacity");
     }
-    for (@typeInfo(contract.ServiceClass).@"enum".field_values, 0..) |field, class_index| {
+    for (@typeInfo(service_catalog.ServiceClass).@"enum".field_values, 0..) |field, class_index| {
         if (field != class_index) {
             @compileError("service classes must remain dense for direct supervisor lookup");
         }
@@ -52,18 +39,14 @@ pub const ServiceState = enum(u8) {
 
 pub const ServiceRecord = struct {
     id: u64,
-    class: contract.ServiceClass,
+    class: service_catalog.ServiceClass,
     owner: principal.PrincipalId,
     contract_endpoint_id: u64,
     state: ServiceState,
     restart_count: u16,
 
-    pub fn isolationDomainId(self: *const ServiceRecord) u64 {
-        return self.id;
-    }
-
-    pub fn descriptor(self: *const ServiceRecord) contract.ServiceDescriptor {
-        return contract.serviceDescriptor(self.class) orelse
+    pub fn descriptor(self: *const ServiceRecord) service_catalog.ServiceDescriptor {
+        return service_catalog.serviceDescriptor(self.class) orelse
             native_util.impossibleByInvariant("registered supervisor services retain a schema descriptor");
     }
 
@@ -88,19 +71,6 @@ pub const DiagnosticEvent = struct {
 };
 
 const DiagnosticArray = [MAX_DIAGNOSTICS]DiagnosticEvent;
-const heap_backed_actionable_diagnostics = builtin.target.os.tag == .freestanding and HEAP_BACKED_ACTIONABLE_DIAGNOSTICS_ON_FREESTANDING;
-const DiagnosticBacking = if (heap_backed_actionable_diagnostics) ?*DiagnosticArray else DiagnosticArray;
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
-else
-    struct {};
-
-pub const actionable_diagnostic_layout = .{
-    .event_bytes = @sizeOf(DiagnosticEvent),
-    .ring_bytes = @sizeOf(DiagnosticArray),
-    .resident_backing_bytes = @sizeOf(DiagnosticBacking),
-    .heap_backed_on_freestanding = heap_backed_actionable_diagnostics,
-};
 
 pub const Error = error{
     ServiceTableFull,
@@ -113,7 +83,6 @@ pub const DriverRecoveryReport = struct {
     runtime_activation_generation: u32 = 0,
     runtime_dma_domain_id: u64 = 0,
     runtime_exclusive_claim: bool = false,
-    userspace_brokered_data_plane: bool = false,
 };
 
 pub const DriverHotSwapReport = struct {
@@ -126,14 +95,12 @@ pub const DriverHotSwapReport = struct {
     runtime_activation_generation: u32 = 0,
     runtime_dma_domain_id: u64 = 0,
     runtime_exclusive_claim: bool = false,
-    userspace_brokered_data_plane: bool = false,
 };
 
 const DriverActivationState = struct {
     activation_generation: u32,
     dma_domain_id: u64,
     exclusive_claim: bool,
-    userspace_brokered_data_plane: bool,
 };
 
 const ServiceSlot = struct {
@@ -143,18 +110,10 @@ const ServiceSlot = struct {
 
 const ServiceArena = indexed_arena.IndexedArena(ServiceSlot, MAX_SERVICES, SERVICE_INDEX_CAPACITY, serviceSlotId);
 
-pub const supervisor_indexing = .{
-    .uses_service_arena = @hasDecl(ServiceArena, "reserveIndex"),
-    .uses_service_class_index = DIRECT_SERVICE_CLASS_SLOTS and
-        SERVICE_CLASS_HASH_PROBES_PER_QUERY == 0,
-    .scans_bounded_diagnostic_ring = true,
-    .scans_diagnostics_newest_first = true,
-};
-
 pub const Supervisor = struct {
     service_arena: ServiceArena = ServiceArena.init(),
     service_class_slots: [SERVICE_CLASS_COUNT]ServiceClassSlotIndex = @as([SERVICE_CLASS_COUNT]ServiceClassSlotIndex, @splat(NO_SERVICE_CLASS_SLOT)),
-    diagnostics: DiagnosticBacking = if (heap_backed_actionable_diagnostics) null else @as([MAX_DIAGNOSTICS]DiagnosticEvent, @splat(zeroDiagnostic())),
+    diagnostics: table_backing.Lazy(DiagnosticArray, null) = .{},
     diagnostic_count: u8 = 0,
     next_diagnostic_slot: u8 = 0,
 
@@ -169,27 +128,16 @@ pub const Supervisor = struct {
         if (@sizeOf(DiagnosticEvent) > DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES) {
             @compileError("supervisor diagnostic event exceeds its compact layout");
         }
-        if (heap_backed_actionable_diagnostics and @sizeOf(DiagnosticBacking) > DIAGNOSTIC_HANDLE_SIZE_CEILING_BYTES) {
-            @compileError("heap-backed supervisor diagnostics exceed their handle size ceiling");
-        }
     }
 
     pub fn deinit(self: *Supervisor) void {
-        if (comptime heap_backed_actionable_diagnostics) {
-            if (self.diagnostics) |diagnostics| {
-                @memset(std.mem.asBytes(diagnostics), 0);
-                kernel_memory.kfree(@ptrCast(diagnostics));
-                self.diagnostics = null;
-            }
-        } else {
-            self.diagnostics = @as([MAX_DIAGNOSTICS]DiagnosticEvent, @splat(zeroDiagnostic()));
-        }
+        self.diagnostics.release();
         self.diagnostic_count = 0;
         self.next_diagnostic_slot = 0;
     }
 
-    pub fn register(self: *Supervisor, class: contract.ServiceClass, owner: principal.PrincipalId) Error!*ServiceRecord {
-        if (contract.serviceDescriptor(class) == null) return error.UnknownServiceClass;
+    pub fn register(self: *Supervisor, class: service_catalog.ServiceClass, owner: principal.PrincipalId) Error!*ServiceRecord {
+        if (service_catalog.serviceDescriptor(class) == null) return error.UnknownServiceClass;
 
         const service_id = self.nextReservableServiceId() orelse return error.ServiceTableFull;
         const slot_index = self.service_arena.reserveIndex(service_id) orelse return error.ServiceTableFull;
@@ -212,7 +160,7 @@ pub const Supervisor = struct {
         return &slot.service;
     }
 
-    pub fn findByClass(self: *Supervisor, class: contract.ServiceClass) ?*ServiceRecord {
+    pub fn findByClass(self: *Supervisor, class: service_catalog.ServiceClass) ?*ServiceRecord {
         const slot_index = self.service_class_slots[serviceClassIndex(class)];
         if (slot_index == NO_SERVICE_CLASS_SLOT) return null;
         const slot = self.serviceSlotAt(slot_index, class) orelse return null;
@@ -225,13 +173,7 @@ pub const Supervisor = struct {
 
     pub fn allowsDriverAttachment(self: *const Supervisor, service_id: u64, device_class: driver_service.DeviceClass) bool {
         const service = self.findConst(service_id) orelse return false;
-        return contract.allowsDriverClass(service.class, device_class);
-    }
-
-    pub fn isolationSeparated(self: *const Supervisor, left_service_id: u64, right_service_id: u64) bool {
-        const left = self.findConst(left_service_id) orelse return false;
-        const right = self.findConst(right_service_id) orelse return false;
-        return left.isolationDomainId() != right.isolationDomainId();
+        return service_catalog.allowsDriverClass(service.class, device_class);
     }
 
     pub fn markHealthy(self: *Supervisor, service_id: u64) bool {
@@ -328,7 +270,6 @@ pub const Supervisor = struct {
             .runtime_activation_generation = activation.activation_generation,
             .runtime_dma_domain_id = activation.dma_domain_id,
             .runtime_exclusive_claim = activation.exclusive_claim,
-            .userspace_brokered_data_plane = activation.userspace_brokered_data_plane,
         };
     }
 
@@ -344,7 +285,7 @@ pub const Supervisor = struct {
     ) !DriverHotSwapReport {
         const service = self.find(request.service_id) orelse return error.ServiceNotFound;
         if (!service.descriptor().restartable) return error.ServiceNotRestartable;
-        if (!contract.allowsDriverClass(service.class, request.device_class)) {
+        if (!service_catalog.allowsDriverClass(service.class, request.device_class)) {
             return error.DriverAttachmentDenied;
         }
         const previous = (directory.findByServiceAndClass(request.service_id, request.device_class) orelse return error.DriverNotFound).*;
@@ -399,7 +340,6 @@ pub const Supervisor = struct {
             .runtime_activation_generation = activation.activation_generation,
             .runtime_dma_domain_id = activation.dma_domain_id,
             .runtime_exclusive_claim = activation.exclusive_claim,
-            .userspace_brokered_data_plane = activation.userspace_brokered_data_plane,
         };
     }
 
@@ -474,25 +414,15 @@ pub const Supervisor = struct {
     }
 
     fn diagnosticsPtr(self: *Supervisor) ?*DiagnosticArray {
-        if (comptime heap_backed_actionable_diagnostics) return self.diagnostics;
-        return &self.diagnostics;
+        return self.diagnostics.get();
     }
 
     fn diagnosticsConst(self: *const Supervisor) ?*const DiagnosticArray {
-        if (comptime heap_backed_actionable_diagnostics) return self.diagnostics;
-        return &self.diagnostics;
+        return self.diagnostics.get();
     }
 
     fn ensureDiagnostics(self: *Supervisor) ?*DiagnosticArray {
-        if (self.diagnosticsPtr()) |diagnostics| return diagnostics;
-        if (comptime heap_backed_actionable_diagnostics) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(DiagnosticArray)) orelse return null;
-            const diagnostics: *DiagnosticArray = @ptrCast(@alignCast(allocation));
-            @memset(std.mem.asBytes(diagnostics), 0);
-            self.diagnostics = diagnostics;
-            return diagnostics;
-        }
-        return &self.diagnostics;
+        return self.diagnostics.ensure() catch null;
     }
 
     fn nextDiagnosticSlot(self: *Supervisor) usize {
@@ -506,7 +436,7 @@ pub const Supervisor = struct {
         return &slot.service;
     }
 
-    fn serviceSlotAt(self: *Supervisor, slot_index: usize, class: contract.ServiceClass) ?*ServiceSlot {
+    fn serviceSlotAt(self: *Supervisor, slot_index: usize, class: service_catalog.ServiceClass) ?*ServiceSlot {
         if (slot_index >= MAX_SERVICES) return null;
         const slot = &self.service_arena.slots[slot_index];
         if (!slot.in_use) return null;
@@ -519,7 +449,7 @@ fn serviceSlotId(slot: *const ServiceSlot) u64 {
     return slot.service.id;
 }
 
-fn serviceClassIndex(class: contract.ServiceClass) usize {
+fn serviceClassIndex(class: service_catalog.ServiceClass) usize {
     return @backingInt(class);
 }
 
@@ -531,15 +461,6 @@ fn zeroService() ServiceRecord {
         .contract_endpoint_id = 0,
         .state = .registered,
         .restart_count = 0,
-    };
-}
-
-fn zeroDiagnostic() DiagnosticEvent {
-    return .{
-        .service_id = 0,
-        .tick = 0,
-        .detail = 0,
-        .kind = .crash,
     };
 }
 
@@ -598,7 +519,6 @@ fn activateRuntimeDriver(
         .activation_generation = result.activation_generation,
         .dma_domain_id = result.dma_domain_id,
         .exclusive_claim = result.hasExclusiveClaim(),
-        .userspace_brokered_data_plane = result.mode == .userspace_brokered_data_plane,
     };
 }
 
@@ -606,9 +526,9 @@ test "supervisor registers services using the contract boundary map" {
     var supervisor = Supervisor.init();
     const service = try supervisor.register(.session_manager, .{ .kind = .service, .serial = 1 });
 
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, service.descriptor().boundary);
-    try std.testing.expectEqual(contract.UiPrivilege.session_surface, service.descriptor().isolation.ui);
-    try std.testing.expectEqual(@as(u64, 1), service.isolationDomainId());
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, service.descriptor().boundary);
+    try std.testing.expectEqual(service_catalog.UiPrivilege.session_surface, service.descriptor().isolation.ui);
+    try std.testing.expectEqual(@as(u64, 1), service.id);
     try std.testing.expect(service.descriptor().restartable);
     try std.testing.expect(supervisor.markHealthy(service.id));
     try std.testing.expectEqual(ServiceState.healthy, service.state);
@@ -621,7 +541,6 @@ test "supervisor derives contiguous service identifiers from arena count" {
     const second = try supervisor.register(.task_runtime, .{ .kind = .service, .serial = 11 });
     const third = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 12 });
 
-    try std.testing.expect(DERIVES_SERVICE_IDS_FROM_ARENA_COUNT);
     try std.testing.expect(!@hasField(Supervisor, "next_service_id"));
     try std.testing.expectEqual(@as(u64, 1), first.id);
     try std.testing.expectEqual(@as(u64, 2), second.id);
@@ -688,18 +607,14 @@ test "supervisor keeps diagnostics queryable while recycling the bounded ring" {
 }
 
 test "supervisor keeps bounded diagnostic metadata compact" {
-    try std.testing.expect(DIRECT_SERVICE_CLASS_SLOTS);
-    try std.testing.expectEqual(@as(u8, 0), SERVICE_CLASS_HASH_PROBES_PER_QUERY);
     try std.testing.expect(@FieldType(Supervisor, "service_class_slots") == [SERVICE_CLASS_COUNT]ServiceClassSlotIndex);
     try std.testing.expect(!@hasField(Supervisor, "service_class_index"));
     try std.testing.expectEqual(u8, @FieldType(Supervisor, "diagnostic_count"));
     try std.testing.expectEqual(u8, @FieldType(Supervisor, "next_diagnostic_slot"));
-    try std.testing.expect(OMITS_UNOBSERVED_DIAGNOSTIC_SEQUENCES);
     try std.testing.expect(!@hasField(DiagnosticEvent, "sequence"));
     try std.testing.expect(!@hasField(Supervisor, "next_diagnostic_sequence"));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DiagnosticEvent));
-    try std.testing.expectEqual(@as(usize, 1_536), actionable_diagnostic_layout.ring_bytes);
-    try std.testing.expect(OMITS_UNOBSERVED_SERVICE_TRANSITION_TIMESTAMPS);
+    try std.testing.expectEqual(@as(usize, 1_536), @sizeOf(DiagnosticArray));
     try std.testing.expect(!@hasField(ServiceRecord, "last_transition_tick"));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ServiceRecord));
     try std.testing.expectEqual(@as(usize, SUPERVISOR_SIZE_CEILING_BYTES), @sizeOf(Supervisor));
@@ -754,7 +669,7 @@ test "services can be located by class for mediated routing" {
     const storage = try supervisor.register(.storage_object, .{ .kind = .service, .serial = 5 });
 
     try std.testing.expectEqual(network.id, supervisor.findByClass(.network_stack).?.id);
-    try std.testing.expect(supervisor.isolationSeparated(network.id, storage.id));
+    try std.testing.expect(network.id != storage.id);
     try std.testing.expect(supervisor.allowsDriverAttachment(network.id, .network_adapter));
     try std.testing.expect(!supervisor.allowsDriverAttachment(network.id, .storage_controller));
     try std.testing.expect(supervisor.findByClass(.sync_replication) == null);
@@ -771,11 +686,9 @@ test "direct service class slots follow the latest registration" {
 
 test "driver recovery restarts the failed driver and emits visible diagnostics only when needed" {
     const FakeRuntime = struct {
-        const ActivationMode = enum(u8) { userspace_brokered_data_plane };
         const ActivationRecord = struct {
             activation_generation: u32,
             dma_domain_id: u64,
-            mode: ActivationMode,
 
             pub fn hasExclusiveClaim(_: *const @This()) bool {
                 return true;
@@ -797,7 +710,6 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
             return .{
                 .activation_generation = @intCast(self.activation_count),
                 .dma_domain_id = driver.dma_domain_id,
-                .mode = .userspace_brokered_data_plane,
             };
         }
     };
@@ -810,15 +722,6 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
 
     var directory = driver_service.Directory.init();
     var capabilities = capability.CapabilityTable.init();
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "svc.driver.runtime",
-        .display_name = "Driver Runtime",
-        .publisher = "zigos.spec",
-        .signature = .{
-            .format = .ed25519,
-            .signer = "zigos-driver-key",
-        },
-    };
     const graphics_authority = try driverAuthority(
         &capabilities,
         compositor.owner,
@@ -826,7 +729,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
         0x1234_1111_0001,
         .graphics_adapter,
     );
-    const graphics_driver = try directory.register(.{
+    const graphics_driver = try directory.registerSigned(.{
         .service_id = compositor.id,
         .owner_task_id = 401,
         .device_id = 0x1234_1111_0001,
@@ -835,7 +738,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
         .capability_table = &capabilities,
         .requester = graphics_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-driver-key",
     });
     const storage_authority = try driverAuthority(
         &capabilities,
@@ -844,7 +747,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
         0x0000_1F00_0001,
         .storage_controller,
     );
-    _ = try directory.register(.{
+    _ = try directory.registerSigned(.{
         .service_id = storage.id,
         .owner_task_id = 402,
         .device_id = 0x0000_1F00_0001,
@@ -853,7 +756,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
         .capability_table = &capabilities,
         .requester = storage_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-driver-key",
     });
 
     var runtime = FakeRuntime{};
@@ -879,7 +782,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
     try std.testing.expectEqual(@as(u16, 1), compositor.restart_count);
     try std.testing.expectEqual(@as(u32, 2), graphics_driver.restart_generation);
     try std.testing.expectEqual(notification_center.Reason.driver_restart, notifications.latestVisible(20).?.reason);
-    try std.testing.expectEqual(contract.ServiceClass.compositor_ui_session, ledger.latestKind(.process_crash).?.service_class);
+    try std.testing.expectEqual(service_catalog.ServiceClass.compositor_ui_session, ledger.latestKind(.process_crash).?.service_class);
     try std.testing.expectEqual(graphics_authority.id, ledger.latestKind(.driver_restart).?.related_id);
     try std.testing.expectEqual(ServiceState.healthy, storage.state);
     try std.testing.expectEqual(@as(u32, 1), directory.findByService(storage.id).?.restart_generation);
@@ -903,17 +806,12 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
 
 test "driver hot-swap rebinds authority and restarts only the owning service" {
     const FakeRuntime = struct {
-        const ActivationMode = enum(u8) {
-            control_only,
-            userspace_brokered_data_plane,
-        };
         const ActivationRecord = struct {
             activation_generation: u32,
             dma_domain_id: u64,
-            mode: ActivationMode,
 
-            pub fn hasExclusiveClaim(self: *const @This()) bool {
-                return self.mode != .control_only;
+            pub fn hasExclusiveClaim(_: *const @This()) bool {
+                return true;
             }
         };
 
@@ -938,7 +836,6 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
             return .{
                 .activation_generation = @intCast(self.activation_count),
                 .dma_domain_id = driver.dma_domain_id,
-                .mode = .userspace_brokered_data_plane,
             };
         }
 
@@ -1011,7 +908,6 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
     try std.testing.expectEqual(@as(u32, 1), report.runtime_activation_generation);
     try std.testing.expectEqual(swapped.dma_domain_id, report.runtime_dma_domain_id);
     try std.testing.expect(report.runtime_exclusive_claim);
-    try std.testing.expect(report.userspace_brokered_data_plane);
     try std.testing.expectEqual(second_authority.id, swapped.authority_capability_id);
     try std.testing.expect(swapped.signerMatches("graphics-v2"));
     try std.testing.expect(!swapped.signerMatches("graphics-v1"));

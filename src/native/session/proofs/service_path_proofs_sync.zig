@@ -1,18 +1,11 @@
 const std = @import("std");
 const abi = @import("../../core/abi.zig");
-const attestation_service = @import("../../platform/attestation_service.zig");
 const binary_cursor = @import("binary_cursor");
 const capability = @import("../../kernel_api/capability.zig");
 const component_port = @import("../../kernel_api/component_port.zig");
-const crypto_hash = @import("../../core/crypto_hash.zig");
-const manifest = @import("../../policy/manifest.zig");
-const measured_boot = @import("../../platform/measured_boot.zig");
-const network_driver_task = @import("../../drivers/network_driver_task.zig");
-const network_policy = @import("../../sync/network_policy.zig");
 const object_store = @import("../../storage/object_store.zig");
 const principal = @import("../../core/principal.zig");
 const session_manager = @import("../session_manager.zig");
-const signing = @import("../../core/signing.zig");
 const storage_service = @import("../../storage/storage_service.zig");
 const sync_service = @import("../../sync/sync_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
@@ -25,7 +18,6 @@ const expectEndpointCreateWithFlags = common.expectEndpointCreateWithFlags;
 const expectEndpointRecv = common.expectEndpointRecv;
 const expectEndpointSend = common.expectEndpointSend;
 const signer = common.signer;
-const addMeasuredNetworkArtifact = measured_boot.addMeasuredArtifact;
 
 pub fn proveBootedSyncServicePath(
     kernel_port: *component_port.KernelPort,
@@ -33,7 +25,6 @@ pub fn proveBootedSyncServicePath(
     capability_table: *capability.CapabilityTable,
     sync_record: *const @import("../supervisor.zig").ServiceRecord,
     sync_task: *task_runtime.TaskRecord,
-    network_service_task: *task_runtime.TaskRecord,
     storage: *@import("../../storage/storage_service.zig").Service,
     session_task_id: u64,
     session_authority_id: u64,
@@ -216,84 +207,6 @@ pub fn proveBootedSyncServicePath(
         .mode = .named_service_identity,
         .target = "overlay.service-path.notes",
     });
-    const discovery_policy = try sync_port.createNetworkPolicy(sync_authority, .{
-        .owner = sync_owner,
-        .workspace_id = workspace_id,
-        .label = "printer-discovery",
-        .mode = .local_subnet_discovery,
-        .target = "printer",
-    });
-    const network_attestation_root = signer("booted-network-attestation-root", 0x7B);
-    const network_attestation_identity = try signing.publicIdentity(network_attestation_root);
-    const network_attestation_key = attestation_service.AttestationRootKeyHandle{
-        .key_id = "booted-network-attestation-root",
-        .label = "booted-network-attestation-root",
-        .public_identity = network_attestation_identity,
-        .generation = 1,
-        .origin = .tpm,
-        .provider_boundary = .platform_tpm,
-        .custody = .tpm,
-    };
-    const network_attestation_descriptor = attestation_service.RootProviderDescriptor{
-        .name = "booted-sync-tpm-attestation-root",
-        .role = .production,
-        .origin = .tpm,
-        .key_id = "booted-network-attestation-root",
-        .key_generation = 1,
-        .provider_boundary = .platform_tpm,
-        .custody = .tpm,
-        .customer_verifiable = true,
-    };
-    const NetworkAttestationSigner = struct {
-        signer: signing.SignerIdentity,
-
-        fn sign(context: *anyopaque, handle: attestation_service.AttestationRootKeyHandle, digest: []const u8) !manifest.Signature {
-            const fixture: *@This() = @ptrCast(@alignCast(context));
-            if (!std.mem.eql(u8, fixture.signer.label, handle.label)) return error.RootIdentityMismatch;
-            return signing.signWithDefaultRegistry(.ed25519, fixture.signer, digest);
-        }
-    };
-    var network_attestation_fixture = NetworkAttestationSigner{ .signer = network_attestation_root };
-    var network_attestation_provider = try attestation_service.ExternalAttestationRootProvider.init(
-        network_attestation_descriptor,
-        network_attestation_key,
-        &network_attestation_fixture,
-        NetworkAttestationSigner.sign,
-    );
-    const network_attestation_metadata_digest = network_attestation_provider.verifierMetadataDigest();
-    const peer_boot = try verifiedBootedNetworkPeer(7_050);
-    var peer_attestation = attestation_service.Service.init(tablet);
-    try peer_attestation.provisionRootProvider(network_attestation_provider.provider());
-    const native_identity_request = try attestation_service.RemoteAttestationRequest.init(.{
-        .remote_party = "overlay.service-path.notes",
-        .nonce = "native-net-00001",
-        .policy_label = "booted-service-path-network-identity",
-        .expected_key_origin = .tpm,
-        .root_key_id = "booted-network-attestation-root",
-        .minimum_root_generation = 1,
-        .attestation_verifier_metadata_digest_required = true,
-        .attestation_verifier_metadata_digest = network_attestation_metadata_digest,
-    });
-    const native_identity_response = try peer_attestation.respondToRemoteAttestationRequest(peer_boot, native_identity_request);
-    try std.testing.expect(attestation_service.Service.verifyRemoteAttestationResponse(
-        native_identity_response,
-        native_identity_request,
-        &peer_boot,
-        network_attestation_identity,
-    ));
-    try std.testing.expect(native_identity_response.attestation_verifier_metadata_digest_present);
-    try std.testing.expect(std.mem.eql(u8, &network_attestation_metadata_digest, &native_identity_response.attestation_verifier_metadata_digest));
-    const native_identity_statement = native_identity_response.statement;
-    const native_identity_policy = try sync_port.createNetworkPolicy(sync_authority, .{
-        .owner = sync_owner,
-        .workspace_id = workspace_id,
-        .label = "native-service-identity",
-        .mode = .named_service_identity,
-        .target = "overlay.service-path.notes",
-        .require_remote_attestation = true,
-        .pinned_root_digest = native_identity_statement.root_digest,
-        .pinned_attestation_verifier_metadata_digest = network_attestation_metadata_digest,
-    });
     _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_id,
         .owner = user,
@@ -350,18 +263,6 @@ pub fn proveBootedSyncServicePath(
         peer_endpoint.capability_id,
         peer_endpoint.endpoint.endpoint_id,
         116,
-    );
-    try proveBootedIdentityFirstNativeNetworkStack(
-        runtime,
-        capability_table,
-        &sync_instance,
-        network_service_task,
-        native_identity_policy.id,
-        discovery_policy.id,
-        native_identity_statement.root_digest,
-        network_attestation_metadata_digest,
-        laptop,
-        tablet,
     );
     const overlay_relay_task = try createBootedServiceTask(
         kernel_port,
@@ -615,239 +516,6 @@ pub fn proveBootedSyncServicePath(
     const clean_peer_summary = try restarted_peer_port.replicateWorkspace(peer_authority, storage, workspace_id, laptop, tablet, .device_to_device);
     try std.testing.expectEqual(@as(usize, 0), clean_peer_summary.selected_entry_count);
     try std.testing.expectEqual(@as(usize, 0), clean_peer_summary.transport_frame_count);
-}
-
-fn proveBootedIdentityFirstNativeNetworkStack(
-    runtime: *task_runtime.Runtime,
-    capability_table: *capability.CapabilityTable,
-    sync: *sync_service.Service,
-    network_service_task: *task_runtime.TaskRecord,
-    policy_id: u64,
-    discovery_policy_id: u64,
-    peer_root_digest: crypto_hash.Digest,
-    attestation_verifier_metadata_digest: crypto_hash.Digest,
-    source_device: principal.PrincipalId,
-    target_device: principal.PrincipalId,
-) !void {
-    try std.testing.expect(runtime.processSeparated(sync.task_id, network_service_task.id));
-    const policy_capability = try capability_table.mintBootRoot(.{
-        .holder = network_service_task.owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = .{ .kind = .network_policy, .id = policy_id },
-        .rights = .{ .network_policy = .{
-            .network_remote = true,
-        } },
-        .scope = .{
-            .task_id = network_service_task.id,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 117,
-            .expires_at_ticks = 1_000,
-        },
-    });
-    try runtime.grantCapability(network_service_task.id, policy_capability.id);
-
-    const Harness = struct {
-        var send_count: usize = 0;
-        var last_frame_len: usize = 0;
-
-        fn send(_: [6]u8, frame: []const u8) bool {
-            send_count += 1;
-            last_frame_len = frame.len;
-            return true;
-        }
-
-        fn mac() [6]u8 {
-            return [_]u8{ 0x02, 0x5A, 0x47, 0, 0, 1 };
-        }
-    };
-    Harness.send_count = 0;
-    Harness.last_frame_len = 0;
-    network_driver_task.reset();
-    defer network_driver_task.reset();
-
-    const device = network_driver_task.NetworkDevice{
-        .send = Harness.send,
-        .receive = network_driver_task.noNetworkFrame,
-        .getMacAddress = Harness.mac,
-    };
-    try std.testing.expect(network_driver_task.activateDevice(&device, network_service_task.id));
-
-    var broker = sync.egressBroker(capability_table);
-    var stack = network_driver_task.NativeNetworkStack.init();
-    defer stack.deinit();
-    try std.testing.expectError(error.EgressDenied, stack.openServiceIdentity(&broker, .{
-        .task_id = network_service_task.id,
-        .principal_id = network_service_task.owner,
-        .capability_id = policy_capability.id,
-        .policy_id = policy_id,
-        .evidence = .{ .destination = .{ .service_identity = "overlay.service-path.notes" } },
-        .now_ticks = 118,
-    }, source_device, target_device));
-    try std.testing.expectEqual(network_policy.EgressDecisionReason.attestation_required, stack.last_denial_reason);
-
-    const network_attestation_request_digest = crypto_hash.digestFromByte(0x87);
-    try std.testing.expectError(error.EgressDenied, stack.openServiceIdentity(&broker, .{
-        .task_id = sync.task_id,
-        .principal_id = network_service_task.owner,
-        .capability_id = policy_capability.id,
-        .policy_id = policy_id,
-        .evidence = .{
-            .destination = .{ .service_identity = "overlay.service-path.notes" },
-            .attested = true,
-            .verified_remote_attestation = true,
-            .attestation_request_digest_present = true,
-            .attestation_request_digest = network_attestation_request_digest,
-            .peer_root_digest_present = true,
-            .peer_root_digest = peer_root_digest,
-            .attestation_verifier_metadata_digest_present = true,
-            .attestation_verifier_metadata_digest_bound = true,
-            .attestation_verifier_metadata_digest = attestation_verifier_metadata_digest,
-        },
-        .now_ticks = 119,
-    }, source_device, target_device));
-    try std.testing.expectEqual(network_policy.EgressDecisionReason.scope_violation, stack.last_denial_reason);
-
-    var wrong_root_digest = peer_root_digest;
-    wrong_root_digest[0] ^= 0xFF;
-    try std.testing.expectError(error.EgressDenied, stack.openServiceIdentity(&broker, .{
-        .task_id = network_service_task.id,
-        .principal_id = network_service_task.owner,
-        .capability_id = policy_capability.id,
-        .policy_id = policy_id,
-        .evidence = .{
-            .destination = .{ .service_identity = "overlay.service-path.notes" },
-            .attested = true,
-            .verified_remote_attestation = true,
-            .attestation_request_digest_present = true,
-            .attestation_request_digest = network_attestation_request_digest,
-            .peer_root_digest_present = true,
-            .peer_root_digest = wrong_root_digest,
-            .attestation_verifier_metadata_digest_present = true,
-            .attestation_verifier_metadata_digest_bound = true,
-            .attestation_verifier_metadata_digest = attestation_verifier_metadata_digest,
-        },
-        .now_ticks = 120,
-    }, source_device, target_device));
-    try std.testing.expectEqual(network_policy.EgressDecisionReason.identity_pin_mismatch, stack.last_denial_reason);
-    try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
-
-    try stack.bindPeerLink(target_device, .{ 0x02, 0x5A, 0x47, 0, 0, 2 });
-    var connection = try stack.openServiceIdentity(&broker, .{
-        .task_id = network_service_task.id,
-        .principal_id = network_service_task.owner,
-        .capability_id = policy_capability.id,
-        .policy_id = policy_id,
-        .evidence = .{
-            .destination = .{ .service_identity = "overlay.service-path.notes" },
-            .attested = true,
-            .verified_remote_attestation = true,
-            .attestation_request_digest_present = true,
-            .attestation_request_digest = network_attestation_request_digest,
-            .peer_root_digest_present = true,
-            .peer_root_digest = peer_root_digest,
-            .attestation_verifier_metadata_digest_present = true,
-            .attestation_verifier_metadata_digest_bound = true,
-            .attestation_verifier_metadata_digest = attestation_verifier_metadata_digest,
-        },
-        .now_ticks = 121,
-    }, source_device, target_device);
-    defer connection.deinit();
-    try std.testing.expect(connection.attestation_required);
-    try std.testing.expect(connection.identity_pinned);
-    try std.testing.expectEqualStrings("overlay.service-path.notes", connection.serviceIdentitySlice());
-
-    const frame = try stack.sendServiceIdentityFrame(&connection, "native service identity payload");
-    try std.testing.expect(frame.flags.encrypted);
-    try std.testing.expect(frame.flags.egress_allowed);
-    try std.testing.expect(frame.flags.attested);
-    try std.testing.expect(frame.flags.identity_pinned);
-    try std.testing.expect(!std.mem.eql(u8, frame.ciphertextSlice(), "native service identity payload"));
-    try std.testing.expectEqual(@as(usize, 4), stack.attempted_connections);
-    try std.testing.expectEqual(@as(usize, 3), stack.denied_before_transmit);
-    try std.testing.expectEqual(@as(usize, 1), stack.opened_connections);
-    try std.testing.expectEqual(@as(usize, 1), stack.transmitted_packets);
-    try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
-    try std.testing.expect(Harness.last_frame_len > "native service identity payload".len);
-
-    const discovery_capability = try capability_table.mintBootRoot(.{
-        .holder = network_service_task.owner,
-        .issuer = .{ .kind = .policy_authority, .serial = 1 },
-        .target = .{ .kind = .network_policy, .id = discovery_policy_id },
-        .rights = .{ .network_policy = .{
-            .network_local = true,
-        } },
-        .scope = .{
-            .task_id = network_service_task.id,
-            .local_only = true,
-            .broker_only = true,
-        },
-        .lease = .{
-            .issued_at_ticks = 122,
-            .expires_at_ticks = 1_000,
-        },
-    });
-    try runtime.grantCapability(network_service_task.id, discovery_capability.id);
-
-    var discovery_stack = network_driver_task.NativeNetworkStack.init();
-    defer discovery_stack.deinit();
-    try std.testing.expectError(error.EgressDenied, discovery_stack.openLocalDiscovery(&broker, .{
-        .task_id = network_service_task.id,
-        .principal_id = network_service_task.owner,
-        .capability_id = discovery_capability.id,
-        .policy_id = discovery_policy_id,
-        .evidence = .{ .destination = .local_network },
-        .now_ticks = 122,
-    }, source_device));
-    try std.testing.expectEqual(network_policy.EgressDecisionReason.destination_mismatch, discovery_stack.last_denial_reason);
-
-    try std.testing.expectError(error.EgressDenied, discovery_stack.openLocalDiscovery(&broker, .{
-        .task_id = network_service_task.id,
-        .principal_id = network_service_task.owner,
-        .capability_id = discovery_capability.id,
-        .policy_id = discovery_policy_id,
-        .evidence = .{ .destination = .{ .discovery_class = "camera" } },
-        .now_ticks = 123,
-    }, source_device));
-    try std.testing.expectEqual(network_policy.EgressDecisionReason.destination_mismatch, discovery_stack.last_denial_reason);
-
-    var discovery_connection = try discovery_stack.openLocalDiscovery(&broker, .{
-        .task_id = network_service_task.id,
-        .principal_id = network_service_task.owner,
-        .capability_id = discovery_capability.id,
-        .policy_id = discovery_policy_id,
-        .evidence = .{ .destination = .{ .discovery_class = "printer" } },
-        .now_ticks = 124,
-    }, source_device);
-    defer discovery_connection.deinit();
-    try std.testing.expect(discovery_connection.scoped_discovery);
-    try std.testing.expectEqualStrings("printer", discovery_connection.discoveryClassSlice());
-
-    const discovery_frame = try discovery_stack.sendLocalDiscoveryProbe(&discovery_connection, "discover-printer");
-    try std.testing.expect(discovery_frame.encrypted);
-    try std.testing.expect(discovery_frame.egress_allowed);
-    try std.testing.expect(discovery_frame.scoped_discovery);
-    try std.testing.expectEqualStrings("printer", discovery_frame.discoveryClassSlice());
-    try std.testing.expect(!std.mem.eql(u8, discovery_frame.ciphertextSlice(), "discover-printer"));
-    try std.testing.expectEqual(@as(usize, 2), Harness.send_count);
-}
-
-fn verifiedBootedNetworkPeer(generation: u64) !measured_boot.BootRecord {
-    var recorder = measured_boot.Recorder.init();
-    var artifact_manifest = measured_boot.ArtifactManifest.init(generation);
-    recorder.begin(generation);
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .kernel, "kernel-zigos", "kernel=network-peer");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .base_image, "base-network-peer", "image=network-peer");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "network", "healthy");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "sync", "healthy");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "storage", "healthy");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "policy", "healthy");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .policy, "identity-first", "strict");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .driver_set, "signed-network-driver", "net");
-    var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
-    return boot;
 }
 
 fn exchangeSyncFrameOverNativeEndpoint(

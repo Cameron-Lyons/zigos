@@ -98,10 +98,7 @@ pub const Bundle = struct {
         // The whole bundle has already matched an independent pin. Its capsule
         // digest may now be used to decode the embedded public enrollment.
         const identity_bytes = try r.sized();
-        var identity_hash = std.crypto.hash.sha2.Sha256.init(.{});
-        identity_hash.update("zigos:identity-enrollment:v1\x00");
-        identity_hash.update(identity_bytes);
-        const identity = try enrollment.Record.decode(identity_bytes, &identity_hash.finalResult());
+        const identity = try enrollment.Record.decode(identity_bytes, &enrollment.digestBytes(identity_bytes));
         const initial_anchor = try nv.Record.decode(try r.take(nv.RECORD_BYTES));
         const package = recovery.Package{ .bytes = (try r.take(recovery.PACKAGE_BYTES))[0..recovery.PACKAGE_BYTES].* };
         const session_policy = try identity_policy.Record.decode(try r.take(identity_policy.BYTES));

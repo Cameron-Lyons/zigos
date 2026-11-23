@@ -4,9 +4,10 @@ const std = @import("std");
 const input = @import("../drivers/input_driver_task.zig");
 const recovery = @import("recovery_key.zig");
 const document_view = @import("trusted_document_view.zig");
+const pin = @import("tpm2_pin.zig");
 
-pub const MAX_PIN_BYTES = 32;
-pub const MIN_PIN_BYTES = 6;
+pub const MAX_PIN_BYTES = pin.MAX_PIN_BYTES;
+pub const MIN_PIN_BYTES = pin.MIN_PIN_BYTES;
 pub const MAX_ENTRY_BYTES = @import("../services/identity_recovery_record.zig").CODE_BYTES;
 pub const Method = enum { pin, recovery };
 pub const Status = enum { hidden, entering, too_short, too_long, invalid_code, pending, verifying, cancelling, rejected, locked_out, unavailable };

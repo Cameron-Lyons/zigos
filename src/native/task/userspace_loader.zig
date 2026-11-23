@@ -11,6 +11,7 @@ const std = @import("std");
 const task_runtime = @import("task_runtime.zig");
 const task_runtime_launch = @import("task_runtime_launch.zig");
 const units = @import("../core/units.zig");
+const userspace_archive_index = @import("userspace_archive_index.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
 const userspace_registry = @import("userspace_registry.zig");
@@ -135,7 +136,6 @@ pub const KernelLaunchAuthority = struct {
 pub const ImageRecord = struct {
     id: u64,
     component_class: task_runtime.ComponentClass,
-    component_abi_version: u16,
     bundle_signed: bool,
     role_tag: u32,
     heartbeat_increment: u32,
@@ -205,17 +205,12 @@ pub const Catalog = struct {
         return Catalog{};
     }
 
-    pub fn initializeAllocated(self: *Catalog) void {
-        @memset(std.mem.asBytes(self), 0);
-        self.images.free_head = indexed_arena.reusableNoIndex(MAX_IMAGES);
-    }
-
     pub fn reset(self: *Catalog) void {
-        self.initializeAllocated();
+        @memset(std.mem.asBytes(self), 0);
     }
 
     pub fn register(self: *Catalog, request: ImageRegisterRequest) Error!*const ImageRecord {
-        return self.registerWithEmbeddedElf(request, null, .{});
+        return self.registerWithEmbeddedElf(request, null, .{}, .signed_bundle);
     }
 
     pub fn registerEmbeddedArtifact(
@@ -231,23 +226,28 @@ pub const Catalog = struct {
         embedded_info: EmbeddedElfInfo,
     ) Error!*const ImageRecord {
         try validateEmbeddedElfInfo(request.elf_file, embedded_info);
-        return self.registerValidatedEmbeddedArtifact(request, embedded_info.executable_image);
+        return self.registerValidatedEmbeddedArtifact(request, embedded_info.executable_image, .signed_bundle);
     }
 
     /// Registers build-inspected archive metadata after rechecking bytes, digest, and launch contract.
+    /// Only the kernel's own generated archive artifact for the bundle is admitted: the
+    /// measured kernel image authenticates it in place of a publisher signature. Any
+    /// other image must arrive signed through `register` or `registerEmbeddedArtifact`.
     pub fn registerBuildValidatedArtifact(
         self: *Catalog,
         request: EmbeddedImageRegisterRequest,
         executable_image: task_runtime.ExecutableImageSpec,
     ) Error!*const ImageRecord {
+        if (!userspace_archive_index.holdsFile(request.bundle.bundle_id, request.elf_file)) return error.MissingBundleSignature;
         try validateBuildValidatedImage(request.elf_file, executable_image);
-        return self.registerValidatedEmbeddedArtifact(request, executable_image);
+        return self.registerValidatedEmbeddedArtifact(request, executable_image, .kernel_build);
     }
 
     fn registerValidatedEmbeddedArtifact(
         self: *Catalog,
         request: EmbeddedImageRegisterRequest,
         executable_image: task_runtime.ExecutableImageSpec,
+        origin: BundleOrigin,
     ) Error!*const ImageRecord {
         return self.registerWithEmbeddedElf(.{
             .bundle = request.bundle,
@@ -256,7 +256,7 @@ pub const Catalog = struct {
             .role_tag = request.role_tag,
             .heartbeat_increment = request.heartbeat_increment,
             .contract_flags = request.contract_flags,
-        }, executable_image, request.elf_file);
+        }, executable_image, request.elf_file, origin);
     }
 
     pub fn findByBundleId(self: *Catalog, bundle_id: []const u8) ?*const ImageRecord {
@@ -319,26 +319,28 @@ pub const Catalog = struct {
         request: ImageRegisterRequest,
         embedded: ?task_runtime.ExecutableImageSpec,
         elf_file: embedded_file.File,
+        origin: BundleOrigin,
     ) Error!*const ImageRecord {
         try manifest.validate(request.bundle);
         try manifest.validateApplicationPackaging(request.bundle);
         try validateStoredMetadata(request.bundle, request.initial_component);
         if (request.initial_component.label.len == 0) return error.EmptyLabel;
         if (request.initial_component.entry.len == 0) return error.EmptyEntry;
-        try validateExecutableBundle(request.bundle, request.initial_component, embedded != null);
+        try validateExecutableBundle(request.bundle, request.initial_component, embedded != null, origin);
 
         if (self.findByBundleId(request.bundle.bundle_id)) |existing| {
-            if (!imageMatchesRequest(existing, request, embedded)) return error.ImageConflict;
+            if (!imageMatchesRequest(existing, request, embedded, origin)) return error.ImageConflict;
             return existing;
         }
+        // Another bundle id already holds this hashed key.
+        if (self.bundle_index.contains(bundleIndexKey(request.bundle.bundle_id))) return error.ImageConflict;
 
         const executable_image = embedded orelse return error.EmbeddedArtifactRequired;
         const image_id = self.nextReservableImageId() orelse return error.ImageTableFull;
         var image = zeroImage();
         image.id = image_id;
         image.component_class = request.component_class;
-        image.component_abi_version = componentAbiVersion(request.initial_component.substrate);
-        image.bundle_signed = request.bundle.signature.isPresent();
+        image.bundle_signed = bundleSigned(request.bundle, origin);
         image.role_tag = request.role_tag;
         image.heartbeat_increment = request.heartbeat_increment;
         image.contract_flags = request.contract_flags;
@@ -360,7 +362,7 @@ pub const Catalog = struct {
         const slot_index = self.images.reserveIndex(image.id) orelse return error.ImageTableFull;
         const slot = &self.images.slots[slot_index];
         slot.image = image;
-        self.bundle_index.insert(bundleIndexKey(slot.image.bundleIdSlice()), slot_index);
+        self.bundle_index.insertAbsent(bundleIndexKey(slot.image.bundleIdSlice()), slot_index);
         return &slot.image;
     }
 
@@ -410,7 +412,6 @@ fn taskCreateRequest(image: *const ImageRecord, request: LaunchRequest, bundle_i
         .launch = .{
             .boundary = .userspace_process,
             .image_id = image.id,
-            .component_abi_version = image.component_abi_version,
             .signed = image.bundle_signed,
             .bundle_id = bundle_id,
             .source_identity = request.source_identity,
@@ -422,13 +423,24 @@ fn taskCreateRequest(image: *const ImageRecord, request: LaunchRequest, bundle_i
     };
 }
 
+// A kernel-build bundle is authenticated by the measured kernel image that
+// embeds it. Every other bundle must carry a verifying signature.
+const BundleOrigin = enum { signed_bundle, kernel_build };
+
+fn bundleSigned(bundle: manifest.BundleManifest, origin: BundleOrigin) bool {
+    return origin == .kernel_build or bundle.signature.isPresent();
+}
+
 fn validateExecutableBundle(
     bundle: manifest.BundleManifest,
     initial_component: task_runtime.ExecutionComponentSpec,
     has_embedded_artifact: bool,
+    origin: BundleOrigin,
 ) Error!void {
-    if (!bundle.signature.isPresent()) return error.MissingBundleSignature;
-    if (!userspace_manifest_signing.verifyBundle(bundle)) return error.InvalidBundleSignature;
+    if (origin == .signed_bundle) {
+        if (!bundle.signature.isPresent()) return error.MissingBundleSignature;
+        if (!userspace_manifest_signing.verifyBundle(bundle)) return error.InvalidBundleSignature;
+    }
     if (!manifest.isApplicationBundle(bundle.bundle_id) and bundle.components.len == 0) {
         return error.MissingBundleComponent;
     }
@@ -461,7 +473,6 @@ fn zeroImage() ImageRecord {
     return .{
         .id = 0,
         .component_class = .service_component,
-        .component_abi_version = 0,
         .bundle_signed = false,
         .role_tag = 0,
         .heartbeat_increment = 0,
@@ -492,6 +503,7 @@ fn imageMatchesRequest(
     existing: *const ImageRecord,
     request: ImageRegisterRequest,
     embedded: ?task_runtime.ExecutableImageSpec,
+    origin: BundleOrigin,
 ) bool {
     const expected_image = embedded orelse return false;
     const expected_source: ArtifactSource = .embedded_elf;
@@ -502,7 +514,7 @@ fn imageMatchesRequest(
     const expected_hash = expected_image.file_sha256;
 
     return existing.component_class == request.component_class and
-        existing.bundle_signed == request.bundle.signature.isPresent() and
+        existing.bundle_signed == bundleSigned(request.bundle, origin) and
         existing.role_tag == request.role_tag and
         existing.heartbeat_increment == request.heartbeat_increment and
         existing.contract_flags == request.contract_flags and
@@ -552,13 +564,6 @@ fn validateBuildValidatedImage(
         task_runtime.MAX_EXECUTABLE_SEGMENTS,
         executable_image,
     );
-}
-
-fn componentAbiVersion(substrate: task_runtime.ExecutionSubstrate) u16 {
-    return switch (substrate) {
-        .typed_component_abi => 1,
-        .early_elf_runner => 1,
-    };
 }
 
 fn validateStoredMetadata(
@@ -706,9 +711,9 @@ fn signedTestBundle(bundle_id: []const u8, display_name: []const u8) !manifest.B
     return bundle;
 }
 
-test "allocated userspace catalog initialization preserves empty catalog invariants" {
+test "a zero-filled userspace catalog is empty" {
     var catalog: Catalog = undefined;
-    catalog.initializeAllocated();
+    @memset(std.mem.asBytes(&catalog), 0);
 
     try std.testing.expectEqual(@as(usize, 0), catalog.imageCount());
     const bundle = try signedTestBundle("app.allocated-catalog", "Allocated Catalog");
@@ -726,6 +731,33 @@ test "allocated userspace catalog initialization preserves empty catalog invaria
     try std.testing.expectEqual(@as(u64, 1), image.id);
     try std.testing.expectEqual(image.id, catalog.findById(image.id).?.id);
     try std.testing.expectEqualStrings(bundle.bundle_id, catalog.findByBundleId(bundle.bundle_id).?.bundleIdSlice());
+}
+
+test "a bundle-key hash collision is a lookup miss and a registration conflict" {
+    var catalog = Catalog.init();
+    const first = try signedTestBundle("app.collision-first", "Collision First");
+    const second = try signedTestBundle("app.collision-second", "Collision Second");
+    const image_bytes = makeSyntheticElf64ForTest(0x4000_5000, 2, 2);
+    const image = try catalog.registerEmbeddedArtifact(.{
+        .bundle = first,
+        .component_class = .app_component,
+        .initial_component = .{ .label = "main", .entry = "app.main" },
+        .elf_file = embedded_file.File.fromBytes(&image_bytes),
+    });
+    // Model a collision: the second bundle's key resolves to the first image.
+    const slot_index = catalog.bundle_index.lookup(bundleIndexKey(first.bundle_id)).?;
+    catalog.bundle_index.remove(bundleIndexKey(first.bundle_id));
+    catalog.bundle_index.insert(bundleIndexKey(second.bundle_id), slot_index);
+
+    try std.testing.expect(catalog.findByBundleId(second.bundle_id) == null);
+    try std.testing.expectError(error.ImageConflict, catalog.registerEmbeddedArtifact(.{
+        .bundle = second,
+        .component_class = .app_component,
+        .initial_component = .{ .label = "main", .entry = "app.main" },
+        .elf_file = embedded_file.File.fromBytes(&image_bytes),
+    }));
+    try std.testing.expectEqual(@as(usize, 1), catalog.imageCount());
+    try std.testing.expectEqual(image.id, catalog.findById(image.id).?.id);
 }
 
 test "userspace image launch records bundle provenance and isolated process state" {
@@ -1009,8 +1041,12 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
 
     var valid_catalog = Catalog.init();
     _ = try valid_catalog.registerEmbeddedArtifactWithInfo(request, valid_info);
+    try validateBuildValidatedImage(request.elf_file, valid_info.executable_image);
     var generated_catalog = Catalog.init();
-    _ = try generated_catalog.registerBuildValidatedArtifact(request, valid_info.executable_image);
+    try std.testing.expectError(
+        error.MissingBundleSignature,
+        generated_catalog.registerBuildValidatedArtifact(request, valid_info.executable_image),
+    );
 
     var stale_digest = valid_info;
     stale_digest.file_sha256[0] = stale_digest.file_sha256[0] ^ 0x5A;
@@ -1021,10 +1057,9 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
     );
     var stale_build_digest = valid_info.executable_image;
     stale_build_digest.file_sha256[0] ^= 0x5A;
-    var generated_digest_catalog = Catalog.init();
     try std.testing.expectError(
         error.EmbeddedArtifactMetadataMismatch,
-        generated_digest_catalog.registerBuildValidatedArtifact(request, stale_build_digest),
+        validateBuildValidatedImage(request.elf_file, stale_build_digest),
     );
 
     var stale_entry = valid_info;
@@ -1036,10 +1071,9 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
     );
     var stale_build_entry = valid_info.executable_image;
     stale_build_entry.entry_point += SYNTHETIC_ELF_SEGMENT_ALIGNMENT;
-    var generated_entry_catalog = Catalog.init();
     try std.testing.expectError(
         error.InvalidUserspaceImage,
-        generated_entry_catalog.registerBuildValidatedArtifact(request, stale_build_entry),
+        validateBuildValidatedImage(request.elf_file, stale_build_entry),
     );
 
     var stale_segment = valid_info;
@@ -1052,10 +1086,9 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
 
     var invalid_generated_segment = valid_info;
     invalid_generated_segment.executable_image.segments[0].file_offset = std.math.maxInt(u32);
-    var generated_segment_catalog = Catalog.init();
     try std.testing.expectError(
         error.InvalidUserspaceImage,
-        generated_segment_catalog.registerBuildValidatedArtifact(request, invalid_generated_segment.executable_image),
+        validateBuildValidatedImage(request.elf_file, invalid_generated_segment.executable_image),
     );
 
     var missing_bytes_request = request;
@@ -1065,10 +1098,9 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
         error.InvalidElfHeader,
         missing_catalog.registerEmbeddedArtifactWithInfo(missing_bytes_request, valid_info),
     );
-    var generated_missing_catalog = Catalog.init();
     try std.testing.expectError(
         error.EmbeddedArtifactMetadataMismatch,
-        generated_missing_catalog.registerBuildValidatedArtifact(missing_bytes_request, valid_info.executable_image),
+        validateBuildValidatedImage(missing_bytes_request.elf_file, valid_info.executable_image),
     );
 
     var malformed_bytes = bytes;
@@ -1080,10 +1112,9 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
         error.InvalidElfMagic,
         malformed_catalog.registerEmbeddedArtifactWithInfo(malformed_request, valid_info),
     );
-    var generated_malformed_catalog = Catalog.init();
     try std.testing.expectError(
         error.EmbeddedArtifactMetadataMismatch,
-        generated_malformed_catalog.registerBuildValidatedArtifact(malformed_request, valid_info.executable_image),
+        validateBuildValidatedImage(malformed_request.elf_file, valid_info.executable_image),
     );
 }
 

@@ -6,12 +6,12 @@ const policy_mediation = @import("policy_mediation.zig");
 const request_header = @import("../core/request_header.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
+const policy_object = @import("policy_object.zig");
 
 pub const Error = policy_mediation.Error || error{
     SubjectTaskRequired,
     SubjectTaskMismatch,
     UnexpectedOperation,
-    UnsupportedAbiVersion,
     InvalidRequestFlags,
 };
 
@@ -97,6 +97,7 @@ test "policy port validates headers and forwards apply manifest requests" {
             .policy_service_id = 13,
             .service_registry_id = 14,
         },
+        .{ .directory = &policy_object.unattached },
     );
     var port = Port.init(&mediator);
     const permissions = [_]manifest.PermissionRequest{
@@ -150,6 +151,7 @@ test "policy port rejects invalid manifests before mediation" {
             .policy_service_id = 23,
             .service_registry_id = 24,
         },
+        .{ .directory = &policy_object.unattached },
     );
     var port = Port.init(&mediator);
     var bundle = manifest_fixtures.syncPushBundle();

@@ -6,12 +6,16 @@ pub const Error = error{ CompletionOwnershipMismatch, CommandTimeout, Controller
 
 pub fn poll(io: anytype, queue: anytype, outstanding: anytype, check_health: bool) Error!?u16 {
     if (outstanding.len == 0) return error.CompletionOwnershipMismatch;
-    if (check_health) {
-        for (outstanding) |command| if (io.expired(command.deadline)) return error.CommandTimeout;
-        if (io.fatal()) return error.ControllerFatal;
-        try io.checkDma();
+    if (completion.phase(io.status(queue.cq_head)) != queue.phase) {
+        // Only an empty poll pays for controller and IOMMU health MMIO. A
+        // visible completion is consumed first; its DMA fault check follows.
+        if (check_health) {
+            for (outstanding) |command| if (io.expired(command.deadline)) return error.CommandTimeout;
+            if (io.fatal()) return error.ControllerFatal;
+            try io.checkDma();
+        }
+        return null;
     }
-    if (completion.phase(io.status(queue.cq_head)) != queue.phase) return null;
     io.acquireCompletion();
     const value = completion.decode(io.submission(queue.cq_head), io.status(queue.cq_head));
     if (!value.belongsToQueue(queue.qid, queue.entries)) return error.CompletionOwnershipMismatch;

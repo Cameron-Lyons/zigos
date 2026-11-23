@@ -36,6 +36,10 @@ pub fn Writer(comptime ErrorSet: type, comptime full_error: ErrorSet) type {
         pub fn writeU64(self: *Self, value: u64) ErrorSet!void {
             try self.writeInt(u64, value);
         }
+
+        pub fn writeEnum(self: *Self, value: anytype) ErrorSet!void {
+            try self.writeByte(@backingInt(value));
+        }
     };
 }
 
@@ -90,6 +94,11 @@ pub fn Reader(comptime ErrorSet: type, comptime corrupt_error: ErrorSet) type {
 
         pub fn readU64(self: *Self) ErrorSet!u64 {
             return self.readInt(u64);
+        }
+
+        /// Reads a one-byte tag, rejecting values the enum does not declare.
+        pub fn readEnum(self: *Self, comptime E: type) ErrorSet!E {
+            return std.enums.fromInt(E, try self.readByte()) orelse corrupt_error;
         }
     };
 }

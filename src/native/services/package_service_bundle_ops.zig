@@ -1,11 +1,10 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const manifest = @import("../policy/manifest.zig");
+const model = @import("package_service_model.zig");
 const native_util = @import("../core/util.zig");
 
 const copyTextExact = native_util.copyTextExact;
-
-pub const REUSES_REVISION_METADATA_BACKING = true;
 
 pub const Error = manifest.ValidationError || error{
     InstallSourceTooLong,
@@ -13,34 +12,28 @@ pub const Error = manifest.ValidationError || error{
     RevisionIdExhausted,
 };
 
-pub fn validateInstallTarget(
-    comptime InstalledBundleType: type,
-    bundle: manifest.BundleManifest,
-) Error!void {
+pub fn validateInstallTarget(bundle: manifest.BundleManifest) Error!void {
     try manifest.validate(bundle);
-    try validateInstallStorageShape(InstalledBundleType, bundle);
+    try validateInstallStorageShape(bundle);
 }
 
-pub fn validateInstallStorageShape(
-    comptime InstalledBundleType: type,
-    bundle: manifest.BundleManifest,
-) Error!void {
-    const RevisionType = arrayFieldChildType(InstalledBundleType, "revisions");
-    const StoredComponentType = arrayFieldChildType(RevisionType, "components");
-    const StoredAssetType = arrayFieldChildType(RevisionType, "assets");
-    const StoredInterfaceType = arrayFieldChildType(RevisionType, "provided_interfaces");
-    const StoredPermissionType = arrayFieldChildType(RevisionType, "requested_permissions");
-    const StoredBackgroundTaskType = arrayFieldChildType(RevisionType, "background_tasks");
-    const StoredAiMetadataType = @FieldType(RevisionType, "ai_metadata");
-    const StoredDataRightsType = @FieldType(RevisionType, "data_rights");
-    const StoredSupplyChainType = @FieldType(RevisionType, "supply_chain");
+pub fn validateInstallStorageShape(bundle: manifest.BundleManifest) Error!void {
+    const RevisionType = model.BundleRevision;
+    const StoredComponentType = model.StoredComponent;
+    const StoredAssetType = model.StoredAsset;
+    const StoredInterfaceType = model.StoredInterface;
+    const StoredPermissionType = model.StoredPermission;
+    const StoredBackgroundTaskType = model.StoredBackgroundTask;
+    const StoredAiMetadataType = model.StoredAiMetadata;
+    const StoredDataRightsType = model.StoredDataRights;
+    const StoredSupplyChainType = model.StoredSupplyChain;
     const StoredAgentDelegationType = @FieldType(RevisionType, "agent_delegation");
     const StoredAccessibilityType = @FieldType(RevisionType, "accessibility");
-    const StoredObjectResilienceType = @FieldType(RevisionType, "object_resilience");
-    const StoredSemanticIndexType = @FieldType(RevisionType, "semantic_index");
-    const StoredSignatureType = @FieldType(RevisionType, "signature");
+    const StoredObjectResilienceType = model.StoredObjectResilience;
+    const StoredSemanticIndexType = model.StoredSemanticIndex;
+    const StoredSignatureType = model.StoredSignature;
 
-    try validateTextLen(bundle.bundle_id, arrayFieldLen(InstalledBundleType, "bundle_id"), error.BundleIdTooLong);
+    try validateTextLen(bundle.bundle_id, arrayFieldLen(model.InstalledBundle, "bundle_id"), error.BundleIdTooLong);
     try validateTextLen(bundle.display_name, arrayFieldLen(RevisionType, "display_name"), error.DisplayNameTooLong);
     try validateTextLen(bundle.publisher, arrayFieldLen(RevisionType, "publisher"), error.PublisherTooLong);
     try validateCount(bundle.provided_interfaces.len, arrayFieldLen(RevisionType, "provided_interfaces"), error.TooManyProvidedInterfaces);
@@ -102,19 +95,18 @@ pub fn validateInstallStorageShape(
 }
 
 pub fn installNew(
-    bundle: anytype,
+    bundle: *model.InstalledBundle,
     source: manifest.BundleManifest,
     source_identity: []const u8,
     data_schema_version: u32,
     permission_digest: crypto_hash.Digest,
 ) Error!void {
-    const BundleType = storageType(@TypeOf(bundle));
-    try validateInstallTarget(BundleType, source);
+    try validateInstallTarget(source);
     try installNewValidated(bundle, source, source_identity, data_schema_version, permission_digest);
 }
 
 pub fn installNewValidated(
-    bundle: anytype,
+    bundle: *model.InstalledBundle,
     source: manifest.BundleManifest,
     source_identity: []const u8,
     data_schema_version: u32,
@@ -127,19 +119,18 @@ pub fn installNewValidated(
 }
 
 pub fn installRevision(
-    bundle: anytype,
+    bundle: *model.InstalledBundle,
     source: manifest.BundleManifest,
     source_identity: []const u8,
     data_schema_version: u32,
     permission_digest: crypto_hash.Digest,
 ) Error!void {
-    const BundleType = storageType(@TypeOf(bundle));
-    try validateInstallTarget(BundleType, source);
+    try validateInstallTarget(source);
     try installRevisionValidated(bundle, source, source_identity, data_schema_version, permission_digest);
 }
 
 pub fn installRevisionValidated(
-    bundle: anytype,
+    bundle: *model.InstalledBundle,
     source: manifest.BundleManifest,
     source_identity: []const u8,
     data_schema_version: u32,
@@ -154,14 +145,14 @@ pub fn installRevisionValidated(
     bundle.active_revision_slot = target_slot;
 }
 
-pub fn rollback(bundle: anytype) void {
+pub fn rollback(bundle: *model.InstalledBundle) void {
     const rollback_slot = bundle.rollback_revision_slot orelse return;
     const previous_active_slot = bundle.active_revision_slot;
     bundle.active_revision_slot = rollback_slot;
     bundle.rollback_revision_slot = previous_active_slot;
 }
 
-pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.BundleManifest {
+pub fn resolveActiveManifest(bundle: *const model.InstalledBundle, resolved: *model.ResolvedManifest) manifest.BundleManifest {
     const revision = bundle.activeRevision();
     const permission_text = revision.permissionTextSlice();
 
@@ -339,7 +330,7 @@ pub fn resolveActiveManifest(bundle: anytype, resolved: anytype) manifest.Bundle
 }
 
 fn writeRevision(
-    revision: anytype,
+    revision: *model.BundleRevision,
     source: manifest.BundleManifest,
     source_identity: []const u8,
     data_schema_version: u32,
@@ -354,15 +345,13 @@ fn writeRevision(
     revision.version_minor = source.version_minor;
     revision.channel = source.update_channel;
     revision.permission_digest = permission_digest;
-    if (@hasField(@TypeOf(revision.*), "release_transparency")) {
-        revision.release_transparency = .{};
-    }
+    revision.release_transparency = .{};
     revision.schema_version = data_schema_version;
     try writeLaunchMetadata(revision, source);
     try writeManifestMetadata(revision, source);
 }
 
-fn writeLaunchMetadata(revision: anytype, source: manifest.BundleManifest) Error!void {
+fn writeLaunchMetadata(revision: *model.BundleRevision, source: manifest.BundleManifest) Error!void {
     revision.component_count = @intCast(source.components.len);
     for (source.components, 0..) |component, component_index| {
         revision.components[component_index].id_len = copyValidatedText(&revision.components[component_index].id, component.id);
@@ -376,7 +365,7 @@ fn writeLaunchMetadata(revision: anytype, source: manifest.BundleManifest) Error
     }
 }
 
-fn writeManifestMetadata(revision: anytype, source: manifest.BundleManifest) Error!void {
+fn writeManifestMetadata(revision: *model.BundleRevision, source: manifest.BundleManifest) Error!void {
     revision.provided_interface_count = @intCast(source.provided_interfaces.len);
     for (source.provided_interfaces, 0..) |interface, interface_index| {
         revision.provided_interfaces[interface_index].name_len = copyValidatedText(&revision.provided_interfaces[interface_index].name, interface.name);
@@ -501,32 +490,18 @@ fn copyValidatedText(dest: []u8, src: []const u8) u8 {
     return @intCast(src.len);
 }
 
-fn writePermissionText(revision: anytype, destination: anytype, text: []const u8) Error!void {
+fn writePermissionText(revision: *model.BundleRevision, destination: *model.PermissionTextRef, text: []const u8) Error!void {
     const start: usize = revision.permission_text_len;
     const end = std.math.add(usize, start, text.len) catch return error.PermissionTextBudgetExceeded;
     if (end > revision.permission_text.len) return error.PermissionTextBudgetExceeded;
     @memcpy(revision.permission_text[start..end], text);
-    destination.* = @TypeOf(destination.*).init(@intCast(start), @intCast(text.len));
+    destination.* = .init(@intCast(start), @intCast(text.len));
     revision.permission_text_len = @intCast(end);
-}
-
-fn storageType(comptime PtrType: type) type {
-    return switch (@typeInfo(PtrType)) {
-        .pointer => |pointer| pointer.child,
-        else => @compileError("package_service_bundle_ops expects a pointer destination"),
-    };
 }
 
 fn arrayFieldLen(comptime T: type, comptime field_name: []const u8) usize {
     return switch (@typeInfo(@FieldType(T, field_name))) {
         .array => |array| array.len,
-        else => @compileError("field '" ++ field_name ++ "' must be a fixed-size array"),
-    };
-}
-
-fn arrayFieldChildType(comptime T: type, comptime field_name: []const u8) type {
-    return switch (@typeInfo(@FieldType(T, field_name))) {
-        .array => |array| array.child,
         else => @compileError("field '" ++ field_name ++ "' must be a fixed-size array"),
     };
 }

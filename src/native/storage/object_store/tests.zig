@@ -109,20 +109,9 @@ test "object hashes reject oversized manifests before using bounded Merkle scrat
 }
 
 test "blob manifests store compact chunk slot edges" {
-    try std.testing.expect(object_store.CAPACITY_SIZED_BLOB_CHUNK_SLOT_INDEXES);
     try std.testing.expectEqual(@sizeOf(std.math.IntFittingRange(0, object_store.MAX_CHUNKS - 1)), @sizeOf(BlobChunkSlotIndex));
-    try std.testing.expect(@hasField(object_store.BlobRecord, "chunk_slot_indexes"));
-    try std.testing.expect(!@hasField(object_store.BlobRecord, "chunks"));
-    try std.testing.expect(!@hasField(object_store.BlobRecord, "merkle_root"));
-    try std.testing.expect(!@hasField(object_store.BlobRecord, "chunk_count"));
-    try std.testing.expect(object_store.PACKS_BLOB_STATE_INTO_BOUNDED_METADATA);
     try std.testing.expectEqual(@as(usize, 4), @sizeOf(@FieldType(object_store.BlobRecord, "state")));
     try std.testing.expectEqual(@as(usize, 32), @bitSizeOf(@FieldType(object_store.BlobRecord, "state")));
-    try std.testing.expect(!@hasField(object_store.BlobRecord, "payload_len"));
-    try std.testing.expect(!@hasField(object_store.BlobRecord, "ref_count"));
-    try std.testing.expect(!@hasField(object_store.BlobRecord, "manifest_verified"));
-    try std.testing.expect(object_store.PACKS_BLOB_SLOT_MEMBERSHIP_INTO_STATE);
-    try std.testing.expect(!@hasField(object_store.BlobSlot, "in_use"));
 }
 
 test "failed chunk allocation rolls back a new blob and unpublished object" {
@@ -169,6 +158,7 @@ test "failed chunk allocation rolls back a new blob and unpublished object" {
         try std.testing.expectEqual(@as(u64, 1), store.next_object_id);
         try std.testing.expectEqual(@as(u64, 1), store.next_version_id);
         try std.testing.expectEqual(@as(usize, 0), store.dirtyObjectIds().len);
+        try std.testing.expectEqual(@as(u8, 0), store.signers.count);
     }
     const saved = try store.putLocallySignedVersion(.{
         .object_type = .document,
@@ -226,7 +216,6 @@ test "a full blob table rejects new data without consuming chunk slots" {
 }
 
 test "blob chunk counts derive from payload lengths" {
-    try std.testing.expect(object_store.DERIVES_BLOB_CHUNK_COUNT_FROM_PAYLOAD_LENGTH);
     try std.testing.expectEqual(@as(usize, 0), object_store.chunkCountForPayloadLen(0));
     try std.testing.expectEqual(@as(usize, 1), object_store.chunkCountForPayloadLen(1));
     try std.testing.expectEqual(@as(usize, 1), object_store.chunkCountForPayloadLen(MAX_CHUNK_BYTES));
@@ -257,9 +246,6 @@ test "blob state packs bounded values without overlap" {
 }
 
 test "chunk slots pack membership without changing payload length" {
-    try std.testing.expect(object_store.PACKS_CHUNK_SLOT_MEMBERSHIP_INTO_PAYLOAD_STATE);
-    try std.testing.expect(!@hasField(object_store.ChunkRecord, "payload_len"));
-    try std.testing.expect(!@hasField(object_store.ChunkSlot, "in_use"));
     try std.testing.expectEqual(object_store.CHUNK_RECORD_SIZE_CEILING_BYTES, @sizeOf(object_store.ChunkRecord));
     try std.testing.expectEqual(object_store.CHUNK_SLOT_SIZE_CEILING_BYTES, @sizeOf(object_store.ChunkSlot));
 
@@ -279,9 +265,6 @@ test "chunk slots pack membership without changing payload length" {
 
 test "resident object metadata uses capacity-sized length fields" {
     try std.testing.expectEqual(@as(usize, 248), @sizeOf(SignedMetadata));
-    try std.testing.expect(object_store.PACKS_OBJECT_STORE_MEMBERSHIP_INTO_RECORD_PADDING);
-    try std.testing.expect(@hasField(object_store.ObjectRecord, "arena_in_use"));
-    try std.testing.expect(@hasField(object_store.VersionRecord, "arena_in_use"));
     try std.testing.expectEqual(@as(usize, 24), object_store.OBJECT_SLOT_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(@as(usize, 288), object_store.VERSION_SLOT_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(@as(usize, object_store.BLOB_RECORD_SIZE_CEILING_BYTES), @sizeOf(BlobRecord));
@@ -289,7 +272,6 @@ test "resident object metadata uses capacity-sized length fields" {
 }
 
 test "object store paged arenas elide unused generations" {
-    try std.testing.expect(object_store.ELIDES_UNUSED_OBJECT_STORE_SLOT_GENERATIONS);
     const BlobArena = @FieldType(Store, "blobs");
     const ChunkArena = @FieldType(Store, "chunks");
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(BlobArena, "slot_generations")));
@@ -297,7 +279,6 @@ test "object store paged arenas elide unused generations" {
 }
 
 test "object store paged arenas derive keys from payloads" {
-    try std.testing.expect(object_store.DERIVES_OBJECT_STORE_ARENA_KEYS_FROM_PAYLOADS);
     const BlobArena = @FieldType(Store, "blobs");
     const ChunkArena = @FieldType(Store, "chunks");
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(BlobArena, "slot_keys")));
@@ -305,7 +286,6 @@ test "object store paged arenas derive keys from payloads" {
 }
 
 test "object store record arenas derive keys from payloads" {
-    try std.testing.expect(object_store.DERIVES_OBJECT_STORE_RECORD_ARENA_KEYS_FROM_PAYLOADS);
     const ObjectArena = @FieldType(Store, "objects");
     const VersionArena = @FieldType(Store, "versions");
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(ObjectArena, "slot_keys")));
@@ -313,7 +293,6 @@ test "object store record arenas derive keys from payloads" {
 }
 
 test "object store dirty id indexes retain bounded load headroom" {
-    try std.testing.expect(object_store.RIGHT_SIZES_OBJECT_STORE_DIRTY_ID_INDEXES);
     const ObjectArena = @FieldType(Store, "objects");
     const VersionArena = @FieldType(Store, "versions");
     try std.testing.expectEqual(@as(usize, 256), ObjectArena.dirty_id_index_capacity);
@@ -323,7 +302,6 @@ test "object store dirty id indexes retain bounded load headroom" {
 }
 
 test "object query and history outputs use compact bounded metadata" {
-    try std.testing.expect(object_store.COMPACT_OBJECT_RESULT_METADATA);
     try std.testing.expectEqual(u8, @FieldType(object_store.ObjectQueryResult, "label_len"));
     try std.testing.expectEqual(u8, @FieldType(object_store.ObjectQueryResult, "content_type_len"));
     try std.testing.expectEqual(u32, @FieldType(object_store.ObjectHistoryEntry, "payload_len"));
@@ -346,15 +324,10 @@ test "object type index uses capacity-sized resident links" {
 }
 test "versions retain only compact canonical blob references" {
     try std.testing.expectEqual(@as(usize, 2), @sizeOf(VersionBlobSlotIndex));
-    try std.testing.expect(!@hasField(object_store.VersionRecord, "blob_address"));
-    try std.testing.expect(!@hasField(object_store.VersionRecord, "payload_len"));
-    try std.testing.expect(!@hasField(object_store.VersionRecord, "chunk_count"));
 }
 
 test "object store keeps immutable signed versions with stable version addresses" {
     var store = Store.init();
-    try std.testing.expect(object_store.DERIVES_LATEST_INSERTED_VERSION_FROM_ARENA_STATE);
-    try std.testing.expect(!@hasField(Store, "latest_inserted_version_id"));
     try std.testing.expect(store.latestInsertedVersionConst() == null);
 
     const signer = signing.SignerIdentity{
@@ -405,45 +378,7 @@ test "object store keeps immutable signed versions with stable version addresses
     gapped_parent_record.parent_version_ids = .{ ids.VersionId.zero, first.version_id };
     try std.testing.expect(!gapped_parent_record.hasCanonicalParents());
     try std.testing.expectEqualStrings("zigos-storage-key", store.latestVersion(first.object_id).?.metadata.signature.signer);
-    const model = try store.objectOperatingModel(first.object_id);
-    try std.testing.expect(model.isWholeOsObject());
-    try std.testing.expectEqual(first.object_id, model.object_id);
-    try std.testing.expectEqual(ObjectType.document, model.object_type);
-    try std.testing.expectEqual(second.version_id, model.latest_version_id);
-    try std.testing.expectEqual(@as(u16, 2), model.version_count);
-    try std.testing.expectEqual(object_store.ObjectAccessModel.capability_scoped, model.access_model);
-    try std.testing.expectEqual(object_store.ObjectSyncPolicy.local_first_selective, model.sync_policy);
-    try std.testing.expectEqual(object_store.ObjectHistoryPolicy.signed_version_chain, model.history_policy);
-    try std.testing.expect(model.typed);
-    try std.testing.expect(model.signed);
-    try std.testing.expect(model.versioned);
-    try std.testing.expectEqual(@as(u32, 2), model.sync_generation);
-    try std.testing.expectEqual(@as(u32, 1), model.sharing_policy_generation);
-    try std.testing.expect(model.has_history);
-    try std.testing.expect(model.has_sync_policy);
-    try std.testing.expect(model.has_sharing_policy);
-    try std.testing.expect(model.recoverable);
-    try std.testing.expect(object_store.DERIVES_OBJECT_MODEL_VERSION_IDS_FROM_CANONICAL_HEAD);
-    try std.testing.expect(object_store.DERIVES_OBJECT_MODEL_COUNTERS_FROM_VERSION_COUNT);
-    try std.testing.expect(!@hasField(object_store.ObjectRecord, "snapshot_state"));
-    try std.testing.expect(!@hasField(object_store.ObjectRecord, "sync_state"));
-    try std.testing.expect(object_store.DERIVES_OBJECT_POLICY_AND_RECOVERY_FROM_CANONICAL_DATA);
-    try std.testing.expect(!@hasField(object_store.ObjectRecord, "sharing_policy"));
-    try std.testing.expect(!@hasField(object_store.ObjectRecord, "recovery_history"));
-    try std.testing.expect(object_store.DERIVES_OBJECT_PROVENANCE_FROM_CANONICAL_VERSIONS);
-    try std.testing.expect(!@hasField(object_store.ObjectRecord, "provenance"));
-    try std.testing.expect(object_store.DERIVES_PREVIOUS_VERSION_ID_FROM_CANONICAL_PARENTS);
-    try std.testing.expect(!@hasField(object_store.VersionRecord, "previous_version_id"));
-    try std.testing.expect(object_store.DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS);
-    try std.testing.expect(!@hasField(object_store.VersionRecord, "parent_count"));
-    try std.testing.expect(object_store.DERIVES_VERSION_ADDRESS_FROM_CANONICAL_STATE);
-    try std.testing.expect(!@hasField(object_store.VersionRecord, "version_address"));
-    try std.testing.expect(@hasDecl(object_store.Store, "versionAddress"));
-    try std.testing.expect(object_store.PACKS_VERSION_TYPE_INTO_TRAILING_PADDING);
-    try std.testing.expect(object_store.DERIVES_BLOB_MERKLE_ROOT_FROM_CANONICAL_CHUNKS);
-    try std.testing.expect(!@hasField(object_store.BlobRecord, "merkle_root"));
-    try std.testing.expect(object_store.DERIVES_BLOB_CHUNK_COUNT_FROM_PAYLOAD_LENGTH);
-    try std.testing.expect(!@hasField(object_store.BlobRecord, "chunk_count"));
+    try std.testing.expect(store.latestVersion(first.object_id).?.metadata.isSigned());
     try std.testing.expectEqual(@as(usize, object_store.OBJECT_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.ObjectRecord));
     try std.testing.expectEqual(@as(usize, object_store.VERSION_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.VersionRecord));
     try std.testing.expectEqual(@as(usize, object_store.BLOB_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.BlobRecord));
@@ -501,7 +436,6 @@ test "object store splits blob and version addresses" {
 
 test "object store indexes full blob addresses authoritatively" {
     var store = Store.init();
-    try std.testing.expectEqual(@as(usize, 0), store.maxBlobPayloadBytes());
 
     const first_address = computeBlobAddress("first");
     const second_address = computeBlobAddress("second");
@@ -510,12 +444,10 @@ test "object store indexes full blob addresses authoritatively" {
     const second_slot = try store.putBlob(second_address, "second");
     try std.testing.expect(first_slot != second_slot);
     try std.testing.expectEqual(@as(usize, 2), store.blobCount());
-    try std.testing.expectEqual(@as(usize, "second".len), store.maxBlobPayloadBytes());
 
     const first_again = try store.putBlob(first_address, "first");
     try std.testing.expectEqual(first_slot, first_again);
     store.rebuildIndexes();
-    try std.testing.expectEqual(@as(usize, "second".len), store.maxBlobPayloadBytes());
     try std.testing.expectEqual(@as(usize, 2), store.blobCount());
     try std.testing.expectEqual(@as(usize, 2), store.chunkCount());
     try std.testing.expectEqual(@as(u16, 2), store.blobSlotAtConst(first_slot).blob.refCount());
@@ -667,7 +599,7 @@ test "offset chunk cursors retain whole-manifest corruption checks" {
     const version = store.version(result.version_id).?;
     const blob = store.versionBlob(version).?;
     const first_chunk_slot = store.blobChunkSlotIndex(blob, 0).?;
-    store.chunkSlotAt(first_chunk_slot).chunk.payload[0] ^= 1;
+    store.chunkSlotAt(first_chunk_slot).chunk.payload.?[0] ^= 1;
     // Seeking to the second page or EOF must verify even the skipped prefix.
     try std.testing.expectError(error.CorruptBlob, store.versionChunkCursorAt(version, MAX_CHUNK_BYTES));
     try std.testing.expectError(error.CorruptBlob, store.versionChunkCursorAt(version, bytes.len));
@@ -735,12 +667,12 @@ test "object store verifies blob backend corruption before serving payloads" {
 
     const blob = &store.blobSlotAtConst(version_record.blob_slot_index).blob;
     const chunk_slot_index = store.blobChunkSlotIndex(blob, 0).?;
-    store.chunkSlotAt(chunk_slot_index).chunk.payload[0] ^= 0xFF;
+    store.chunkSlotAt(chunk_slot_index).chunk.payload.?[0] ^= 0xFF;
     try std.testing.expectError(error.CorruptBlob, store.versionPayload(version_record));
     try std.testing.expectError(error.CorruptBlob, store.putBlob(result.blob_address, "checked"));
     try std.testing.expectEqual(@as(u16, 1), blob.refCount());
 
-    store.chunkSlotAt(chunk_slot_index).chunk.payload[0] ^= 0xFF;
+    store.chunkSlotAt(chunk_slot_index).chunk.payload.?[0] ^= 0xFF;
     store.blobSlotAt(version_record.blob_slot_index).blob.chunk_slot_indexes[0] = std.math.maxInt(BlobChunkSlotIndex);
     try std.testing.expectError(error.CorruptBlob, store.versionPayload(version_record));
 }
@@ -851,6 +783,109 @@ test "object queries select globally newest bounded results" {
     try std.testing.expectEqual(@as(usize, 2), newest_documents.len);
     try std.testing.expectEqual(ids.object(100), newest_documents[0].object_id);
     try std.testing.expectEqual(ids.object(103), newest_documents[1].object_id);
+}
+
+test "stored versions own signer text after the vault that signed them unloads" {
+    const Fixture = @import("../../../tests/fixtures/document_signer.zig").Fixture;
+    const allocator = std.testing.allocator;
+    const fixture = try allocator.create(Fixture);
+    defer allocator.destroy(fixture);
+    const identity = signing.SignerIdentity{ .label = "vault document key", .seed = @splat(0x41) };
+    const signer = try fixture.init(.{ .kind = .user, .serial = 1 }, .{ .kind = .service, .serial = 2 }, 3, identity);
+    const metadata = try signer.signMetadata("notes.md", "draft", 10);
+
+    const store = try allocator.create(Store);
+    defer allocator.destroy(store);
+    store.* = Store.init();
+    defer store.reset();
+    const result = try store.putVersion(.{ .object_type = .document, .payload = "draft", .metadata = metadata });
+    fixture.service.unload();
+
+    const version = store.version(result.version_id).?;
+    try std.testing.expectEqualStrings(identity.label, version.metadata.signature.signer);
+    try std.testing.expectEqual(result.version_address, try store.versionAddress(version));
+}
+
+test "a full signer table rejects a new signer before publishing anything" {
+    const SignerStore = StoreWith(.{
+        .max_objects = 72,
+        .max_versions = 72,
+        .max_blobs = 128,
+        .max_chunks = 128,
+        .object_index_capacity = 144,
+        .version_index_capacity = 144,
+        .blob_index_capacity = 256,
+        .chunk_index_capacity = 256,
+    });
+    const allocator = std.testing.allocator;
+    const store = try allocator.create(SignerStore);
+    defer allocator.destroy(store);
+    store.* = SignerStore.init();
+    defer store.reset();
+
+    var label_buffer: [object_store.MAX_SIGNER_BYTES]u8 = undefined;
+    for (0..object_store.MAX_SIGNERS + 1) |index| {
+        const label = try std.fmt.bufPrint(&label_buffer, "signer-{d}", .{index});
+        const request: object_store.PutLocallySignedRequest = .{
+            .object_type = .document,
+            .payload = label,
+            .signer = .{ .label = label, .seed = signing.seedFromByte(@intCast(index)) },
+            .label = "signer",
+            .content_type = "text/plain",
+            .created_at_ticks = index,
+        };
+        if (index < object_store.MAX_SIGNERS) {
+            _ = try store.putLocallySignedVersion(request);
+            continue;
+        }
+        try std.testing.expectError(error.NoSpaceLeft, store.putLocallySignedVersion(request));
+    }
+    try std.testing.expectEqual(@as(u8, object_store.MAX_SIGNERS), store.signers.count);
+    try std.testing.expectEqual(object_store.MAX_SIGNERS, store.versionCount());
+    try std.testing.expectEqual(object_store.MAX_SIGNERS, store.objectCount());
+    try std.testing.expectEqual(object_store.MAX_SIGNERS, store.blobCount());
+    try std.testing.expectEqual(object_store.MAX_SIGNERS, store.chunkCount());
+
+    // A signer already in the table still writes once the table is full.
+    const known = signing.SignerIdentity{ .label = "signer-0", .seed = signing.seedFromByte(0) };
+    _ = try store.putLocallySignedVersion(.{
+        .object_type = .document,
+        .payload = "known signer",
+        .signer = known,
+        .label = "signer",
+        .content_type = "text/plain",
+        .created_at_ticks = 100,
+    });
+    try std.testing.expectEqual(@as(u8, object_store.MAX_SIGNERS), store.signers.count);
+
+    store.reset();
+    try std.testing.expectEqual(@as(u8, 0), store.signers.count);
+    for (store.signers.text, store.signers.lens) |text, len| {
+        try std.testing.expectEqual(@as(u8, 0), len);
+        try std.testing.expect(std.mem.allEqual(u8, &text, 0));
+    }
+}
+
+test "object store rejects signers that cannot be persisted" {
+    const allocator = std.testing.allocator;
+    const store = try allocator.create(Store);
+    defer allocator.destroy(store);
+    store.* = Store.init();
+    defer store.reset();
+    const long_label = @as([object_store.MAX_SIGNER_BYTES + 1]u8, @splat('k'));
+    const identity = signing.SignerIdentity{ .label = &long_label, .seed = signing.seedFromByte(0x42) };
+    try std.testing.expectError(error.InvalidSignature, store.putLocallySignedVersion(.{
+        .object_type = .blob,
+        .payload = "x",
+        .signer = identity,
+        .label = "record",
+        .content_type = "application/octet-stream",
+        .created_at_ticks = 1,
+    }));
+    const metadata = try signMetadata(identity, "record", "application/octet-stream", .blob, "x", 1);
+    try std.testing.expectError(error.InvalidSignature, store.putVersion(.{ .object_type = .blob, .payload = "x", .metadata = metadata }));
+    try std.testing.expectEqual(@as(usize, 0), store.versionCount());
+    try std.testing.expectEqual(@as(usize, 0), store.blobCount());
 }
 
 test "object store rejects tampered metadata signatures" {

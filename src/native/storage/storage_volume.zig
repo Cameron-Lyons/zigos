@@ -1,71 +1,33 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
 const ids = @import("../core/ids.zig");
 const object_store = @import("object_store.zig");
 const principal = @import("../core/principal.zig");
 const volume_backend = @import("volume/backend.zig");
-const volume_capacity = @import("volume/capacity.zig");
 const volume_delta_payloads = @import("volume/delta_payloads.zig");
 const volume_errors = @import("volume/errors.zig");
 const volume_hashing = @import("volume/hashing.zig");
 const volume_layout = @import("volume/layout.zig");
 const volume_log = @import("volume/log.zig");
-const volume_quota = @import("volume/quota.zig");
+const volume_persistable = @import("volume/persistable.zig");
 const volume_root_slot = @import("volume/root_slot.zig");
 const workspace = @import("workspace.zig");
+const manifest = @import("../policy/manifest.zig");
 const dataplane_handoff = @import("../drivers/dataplane_handoff.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/memory/memory.zig")
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 pub const sector_size = volume_layout.sector_size;
-pub const slot_sectors = volume_layout.slot_sectors;
-pub const slot_count = volume_layout.slot_count;
-pub const header_sectors = volume_layout.header_sectors;
-pub const payload_sectors = volume_layout.payload_sectors;
-pub const slot_bytes = volume_layout.slot_bytes;
+pub const root_sector_count = volume_layout.root_sector_count;
 pub const image_bytes = volume_layout.image_bytes;
-pub const max_payload_bytes = volume_layout.max_payload_bytes;
 pub const required_device_sectors = volume_layout.required_device_sectors;
 pub const deviceLbaForVolumeTransfer = volume_layout.deviceLbaForVolumeTransfer;
 pub const volumeSectorsFromDeviceSectors = volume_layout.volumeSectorsFromDeviceSectors;
-pub const max_signer_bytes = volume_layout.max_signer_bytes;
-pub const SIGNER_TEXT_POOL_BYTES: usize = 12 * 1024;
-pub const HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING = true;
-pub const SIGNER_TEXT_POOL_HANDLE_SIZE_CEILING_BYTES: usize = 8;
-pub const SCRUBS_ONLY_USED_SIGNER_TEXT = true;
+pub const max_signer_bytes = object_store.MAX_SIGNER_BYTES;
 pub const replay_gate_records = volume_layout.max_replay_log_records;
 pub const replay_gate_segments = volume_layout.max_log_segments;
 pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
 pub const IO_LOG_WORKSPACE_BYTES = DATA_REGION_BYTES;
-pub const TRACKS_REPLAY_ID_BOUNDS_INLINE = true;
-pub const BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY = true;
-pub const BUILDS_WORKSPACE_INDEXES_DURING_REPLAY = true;
-pub const SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD = true;
 pub const USES_CHECKPOINT_ONLY_COLD_LOAD = volume_layout.USES_CHECKPOINT_ONLY_COLD_LOAD;
-pub const COMPACTS_IN_BACKGROUND = volume_layout.COMPACTS_IN_BACKGROUND;
-const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
-const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
-const SignerTextPool = [SIGNER_TEXT_POOL_BYTES]u8;
-const heap_backed_signer_text_pool = builtin.target.os.tag == .freestanding and HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING;
-const SignerTextPoolBacking = if (heap_backed_signer_text_pool) ?*SignerTextPool else SignerTextPool;
-
-comptime {
-    if (SIGNER_TEXT_POOL_BYTES > std.math.maxInt(u16)) {
-        @compileError("signer text pool exceeds its compact length field");
-    }
-    if (heap_backed_signer_text_pool and @sizeOf(SignerTextPoolBacking) > SIGNER_TEXT_POOL_HANDLE_SIZE_CEILING_BYTES) {
-        @compileError("heap-backed signer text pool exceeds its handle size ceiling");
-    }
-}
-
-pub const signer_text_layout = .{
-    .pool_size_bytes = @sizeOf(SignerTextPool),
-    .freestanding_handle_size_bytes = @sizeOf(?*SignerTextPool),
-    .heap_backs_pool_on_freestanding = HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING,
-};
 
 const data_start_byte = volume_layout.data_start_byte;
 const data_region_bytes = DATA_REGION_BYTES;
@@ -73,45 +35,16 @@ const alternate_data_region_offset = volume_layout.alternate_data_region_offset;
 const max_replay_log_records = volume_layout.max_replay_log_records;
 const max_log_segments = volume_layout.max_log_segments;
 const compaction_threshold_bytes = volume_layout.compaction_threshold_bytes;
-const payload_magic = volume_layout.payload_magic;
-const format_version = volume_layout.format_version;
 const share_grant_flag_read: u8 = 1 << 0;
 const share_grant_flag_write: u8 = 1 << 1;
 const share_grant_flag_export: u8 = 1 << 2;
 const share_grant_flag_admin: u8 = 1 << 3;
 
-const workspaceCount = volume_quota.workspaceCount;
-const snapshotCount = volume_quota.snapshotCount;
-const persistableWorkspaceSlot = volume_quota.persistableWorkspaceSlot;
-const persistableSnapshotSlot = volume_quota.persistableSnapshotSlot;
-
-pub const ProductCapacityEnvelope = volume_capacity.ProductCapacityEnvelope;
-pub const OverLimitWriteBehavior = volume_capacity.OverLimitWriteBehavior;
-pub const QuotaLimit = volume_capacity.QuotaLimit;
-pub const ProductCapacityUsage = volume_capacity.ProductCapacityUsage;
-pub const QuotaRejection = volume_capacity.QuotaRejection;
-
-pub const ProductQuotaPolicy = struct {
-    envelope: ProductCapacityEnvelope,
-    over_limit_write_behavior: OverLimitWriteBehavior,
-    persistence_error: Error,
-    retry_requires_freeing_space: bool,
-};
-
-pub const first_supported_capacity_envelope = volume_quota.first_supported_capacity_envelope;
-
-pub fn productCapacityEnvelope() ProductCapacityEnvelope {
-    return first_supported_capacity_envelope;
-}
-
-pub fn productQuotaPolicy() ProductQuotaPolicy {
-    return .{
-        .envelope = first_supported_capacity_envelope,
-        .over_limit_write_behavior = .reject_without_partial_persistence,
-        .persistence_error = error.NoSpaceLeft,
-        .retry_requires_freeing_space = true,
-    };
-}
+const workspaceCount = volume_persistable.workspaceCount;
+const snapshotCount = volume_persistable.snapshotCount;
+const persistableWorkspaceSlot = volume_persistable.persistableWorkspaceSlot;
+const persistableSnapshotSlot = volume_persistable.persistableSnapshotSlot;
+const ensurePersistableSlots = volume_persistable.ensurePersistableSlots;
 
 pub const Error = volume_errors.Error;
 
@@ -124,7 +57,7 @@ pub const Backend = volume_backend.Backend;
 pub const AttachedBackendKind = volume_backend.AttachedBackendKind;
 
 pub const Volume = struct {
-    io_log_buffer: IoLogWorkspace = if (heap_backed_io_workspace) null else undefined,
+    io_log_buffer: table_backing.Lazy([IO_LOG_WORKSPACE_BYTES]u8, null) = .{},
     sector_buffer: [sector_size]u8 = @as([sector_size]u8, @splat(0)),
     operation_active: bool = false,
     attached_backend_present: bool = false,
@@ -133,9 +66,8 @@ pub const Volume = struct {
     attached_backend_write: *const fn (u64, [*]const u8, usize) callconv(.c) bool = volume_backend.unattachedWrite,
     attached_backend_flush: *const fn () callconv(.c) bool = volume_backend.unattachedFlush,
     attached_backend_kind: volume_backend.AttachedBackendKind = .none,
-    signer_text_len: u16 = 0,
-    signer_text_pool: SignerTextPoolBacking = if (heap_backed_signer_text_pool) null else @as([SIGNER_TEXT_POOL_BYTES]u8, @splat(0)),
     workspace_state_hashes: WorkspaceStateHashCache = .{},
+    save_cache: SaveCache = .{},
 
     pub fn init() Volume {
         return .{};
@@ -161,6 +93,7 @@ pub const Volume = struct {
 
     pub fn reset(self: *Volume) bool {
         if (self.attachmentBusy()) return false;
+        self.dropDeviceView();
         self.releaseIoLogWorkspace();
         @memset(self.sector_buffer[0..], 0);
         self.attached_backend_present = false;
@@ -169,88 +102,16 @@ pub const Volume = struct {
         self.attached_backend_write = volume_backend.unattachedWrite;
         self.attached_backend_flush = volume_backend.unattachedFlush;
         self.attached_backend_kind = .none;
-        self.resetSignerText();
         self.workspace_state_hashes = .{};
         return true;
     }
 
     fn ioLogWorkspace(self: *Volume) Error![]u8 {
-        if (comptime heap_backed_io_workspace) {
-            if (self.io_log_buffer) |buffer| return buffer[0..IO_LOG_WORKSPACE_BYTES];
-            const allocation = kernel_memory.kmalloc(IO_LOG_WORKSPACE_BYTES) orelse return error.NoSpaceLeft;
-            const buffer: [*]u8 = @ptrCast(allocation);
-            self.io_log_buffer = buffer;
-            return buffer[0..IO_LOG_WORKSPACE_BYTES];
-        }
-        return self.io_log_buffer[0..];
+        return try self.io_log_buffer.ensure();
     }
 
     fn releaseIoLogWorkspace(self: *Volume) void {
-        if (comptime heap_backed_io_workspace) {
-            if (self.io_log_buffer) |buffer| {
-                @memset(buffer[0..IO_LOG_WORKSPACE_BYTES], 0);
-                kernel_memory.kfree(@ptrCast(buffer));
-                self.io_log_buffer = null;
-            }
-        }
-    }
-
-    fn signerTextPool(self: *Volume) ?*SignerTextPool {
-        if (comptime heap_backed_signer_text_pool) return self.signer_text_pool;
-        return &self.signer_text_pool;
-    }
-
-    fn ensureSignerTextPool(self: *Volume) Error!*SignerTextPool {
-        if (self.signerTextPool()) |pool| return pool;
-        if (comptime heap_backed_signer_text_pool) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(SignerTextPool)) orelse return error.NoSpaceLeft;
-            const pool: *SignerTextPool = @ptrCast(@alignCast(allocation));
-            self.signer_text_pool = pool;
-            return pool;
-        }
-        return &self.signer_text_pool;
-    }
-
-    // Keep the variable-length secure scrub and release out of replay's hot instruction path.
-    noinline fn resetSignerText(self: *Volume) void {
-        const used = @min(@as(usize, self.signer_text_len), SIGNER_TEXT_POOL_BYTES);
-        if (self.signerTextPool()) |pool| {
-            if (used != 0) @memset(pool[0..used], 0);
-            if (comptime heap_backed_signer_text_pool) {
-                kernel_memory.kfree(@ptrCast(pool));
-                self.signer_text_pool = null;
-            }
-        }
-        self.signer_text_len = 0;
-    }
-
-    fn internSigner(self: *Volume, signer: []const u8) Error![]const u8 {
-        if (signer.len == 0) return "";
-        if (signer.len > max_signer_bytes or signer.len > std.math.maxInt(u8)) {
-            return error.InvalidSignatureEncoding;
-        }
-
-        const pool = try self.ensureSignerTextPool();
-        const used: usize = self.signer_text_len;
-        var offset: usize = 0;
-        while (offset < used) {
-            const stored_len: usize = pool[offset];
-            const start = offset + 1;
-            const end = start + stored_len;
-            if (end > used) return error.InvalidSignatureEncoding;
-            if (std.mem.eql(u8, pool[start..end], signer)) {
-                return pool[start..end];
-            }
-            offset = end;
-        }
-
-        const start = used + 1;
-        const end = start + signer.len;
-        if (end > pool.len) return error.InvalidSignatureEncoding;
-        pool[used] = @intCast(signer.len);
-        @memcpy(pool[start..end], signer);
-        self.signer_text_len = @intCast(end);
-        return pool[start..end];
+        self.io_log_buffer.release();
     }
 
     pub fn attachBackend(self: *Volume, backend: Backend) bool {
@@ -280,6 +141,7 @@ pub const Volume = struct {
         kind: volume_backend.AttachedBackendKind,
     ) bool {
         if (self.attachmentBusy() or (kind == .nvme_pci and dataplane_handoff.operationBusy())) return false;
+        self.dropDeviceView();
         self.attached_backend_present = true;
         self.attached_backend_sector_count = sector_count;
         self.attached_backend_read = read;
@@ -291,6 +153,7 @@ pub const Volume = struct {
 
     pub fn clearAttachedBackend(self: *Volume) bool {
         if (self.attachmentBusy()) return false;
+        self.dropDeviceView();
         self.attached_backend_present = false;
         self.attached_backend_sector_count = 0;
         self.attached_backend_read = volume_backend.unattachedRead;
@@ -312,6 +175,17 @@ pub const Volume = struct {
 
     pub fn adoptAttachedBackendFrom(self: *Volume, source: *const Volume) bool {
         if (self.attachmentBusy() or source.attachmentBusy()) return false;
+        // Readopting the same device keeps the cache; the shared device epoch
+        // already covers any write or reattachment through another Volume.
+        if (self.attached_backend_present != source.attached_backend_present or
+            self.attached_backend_sector_count != source.attached_backend_sector_count or
+            self.attached_backend_read != source.attached_backend_read or
+            self.attached_backend_write != source.attached_backend_write or
+            self.attached_backend_flush != source.attached_backend_flush or
+            self.attached_backend_kind != source.attached_backend_kind)
+        {
+            self.save_cache.invalidate();
+        }
         self.attached_backend_present = source.attached_backend_present;
         self.attached_backend_sector_count = source.attached_backend_sector_count;
         self.attached_backend_read = source.attached_backend_read;
@@ -325,12 +199,33 @@ pub const Volume = struct {
         if (self.attachmentBusy()) return false;
         if (!self.beginOperation()) return false;
         defer self.endOperation();
+        self.dropDeviceView();
         return volume_backend.clearAttachedVolume(self);
+    }
+
+    // Any change of attachment or device contents through this Volume retires
+    // every cached save root, including those of other Volumes on the device.
+    fn dropDeviceView(self: *Volume) void {
+        self.save_cache.invalidate();
+        volume_backend.advanceDeviceEpoch();
+    }
+
+    // Keeps the cache epoch only while no other write reached the device since
+    // this Volume last observed it, including while this callback suspended.
+    fn writeOwnedRange(self: *Volume, start_lba: u64, bytes: []const u8) Error!void {
+        const before = volume_backend.deviceEpoch();
+        const observed = if (self.save_cache.epoch) |epoch| epoch == before else false;
+        const written = volume_backend.writeAttachedRange(self, start_lba, bytes);
+        const expected = before +% volume_backend.write_epoch_span;
+        self.save_cache.epoch = if (observed and volume_backend.deviceEpoch() == expected) expected else null;
+        if (!written) return error.DeviceWriteFailed;
     }
 
     pub fn loadFromVolume(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory) bool {
         if (!self.beginOperation()) return false;
         defer self.endOperation();
+        // A load rereads the device, so the next save does too.
+        self.save_cache.invalidate();
         if (!self.hasAttachedDevice()) return false;
         if (self.attached_backend_sector_count < required_device_sectors) return false;
 
@@ -343,8 +238,19 @@ pub const Volume = struct {
         if (!self.hasAttachedDevice()) return .{ .generation = 0, .snapshot_current = false };
         if (self.attached_backend_sector_count < required_device_sectors) return error.ImageTooSmall;
 
-        const selection = try selectBackendSaveRoot(self);
-        return saveIncremental(self, selection.current, selection.force_compaction, store, workspaces, BackendWriteFns{ .volume = self });
+        const cache = &self.save_cache;
+        const selection = if (cache.usable()) cache.selection.? else selection: {
+            // Drop the stale view first, so a failed reread leaves nothing to
+            // trust. A write that lands while a root read suspends leaves the
+            // epoch behind, so this save then cannot republish the cache.
+            cache.invalidate();
+            cache.epoch = volume_backend.deviceEpoch();
+            break :selection try selectBackendSaveRoot(self);
+        };
+        // Only a completed save republishes the root; a failed one rereads.
+        cache.selection = null;
+        const writer = BackendWriteFns{ .volume = self, .cached_tail = if (cache.tail_valid) &cache.tail else null };
+        return saveIncremental(self, selection.current, selection.force_compaction, store, workspaces, writer);
     }
 
     pub fn saveToImage(self: *Volume, image: []u8, store: *object_store.Store, workspaces: *workspace.Directory) Error!PersistResult {
@@ -364,7 +270,7 @@ pub const Volume = struct {
 };
 
 comptime {
-    if (heap_backed_io_workspace and @sizeOf(Volume) > 16 * 1024) {
+    if (@sizeOf(Volume) > 16 * 1024) {
         @compileError("heap-backed storage volumes exceed their compact resident layout");
     }
 }
@@ -411,6 +317,42 @@ const BuiltLog = volume_log.BuiltLog;
 const SaveRootSelection = struct {
     current: ?LoadedRoot = null,
     force_compaction: bool = false,
+
+    fn note(self: *SaveRootSelection, loaded: LoadedRoot) void {
+        if (self.current == null or loaded.root.generation > self.current.?.root.generation) {
+            self.current = loaded;
+        }
+    }
+
+    // A volume with no current-format root is another format: refuse it rather
+    // than overwrite it. Beside a current root, an unsupported version field is
+    // just a damaged sector that the next checkpoint compacts over.
+    fn finish(self: SaveRootSelection, unsupported: bool) Error!SaveRootSelection {
+        if (unsupported and self.current == null) return error.UnsupportedVersion;
+        return self;
+    }
+};
+
+// What the last completed backend save left on the device, so the next save
+// reads neither root sector nor the partial log sector it appends to. It is
+// trusted only while the shared device epoch still equals `epoch`.
+const SaveCache = struct {
+    epoch: ?u64 = null,
+    selection: ?SaveRootSelection = null,
+    tail_valid: bool = false,
+    // The sector holding the committed log end, zero past that end.
+    tail: [sector_size]u8 = @as([sector_size]u8, @splat(0)),
+
+    fn usable(self: *const SaveCache) bool {
+        const epoch = self.epoch orelse return false;
+        return self.selection != null and epoch == volume_backend.deviceEpoch();
+    }
+
+    fn invalidate(self: *SaveCache) void {
+        self.epoch = null;
+        self.selection = null;
+        self.tail_valid = false;
+    }
 };
 
 pub fn attachBackend(backend: Backend) bool {
@@ -419,15 +361,6 @@ pub fn attachBackend(backend: Backend) bool {
 
 pub fn attachNvmePciBackend(backend: Backend) bool {
     return default_volume.attachNvmePciBackend(backend);
-}
-
-pub fn attachNvmePciBackendFns(
-    sector_count: u64,
-    read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
-    write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
-    flush: *const fn () callconv(.c) bool,
-) bool {
-    return default_volume.attachNvmePciBackendFns(sector_count, read, write, flush);
 }
 
 pub fn clearAttachedBackend() bool {
@@ -450,17 +383,6 @@ pub fn hasProductionStorageBackend() bool {
     return default_volume.hasProductionStorageBackend();
 }
 
-pub fn clearAttachedVolume() bool {
-    return default_volume.clearAttachedVolume();
-}
-
-pub fn loadFromVolume(store: *object_store.Store, workspaces: *workspace.Directory) bool {
-    return default_volume.loadFromVolume(store, workspaces);
-}
-
-pub fn saveToVolume(store: *object_store.Store, workspaces: *workspace.Directory) !PersistResult {
-    return default_volume.saveToVolume(store, workspaces);
-}
 pub fn saveToImage(image: []u8, store: *object_store.Store, workspaces: *workspace.Directory) !PersistResult {
     return default_volume.saveToImage(image, store, workspaces);
 }
@@ -493,6 +415,7 @@ const DirtySnapshot = struct {
 
 const BackendWriteFns = struct {
     volume: *Volume,
+    cached_tail: ?*const [sector_size]u8,
 };
 
 const ImageWriteFns = struct {
@@ -507,7 +430,7 @@ fn saveIncremental(
     workspaces: *workspace.Directory,
     writer: anytype,
 ) Error!PersistResult {
-    try ensureWithinProductCapacityEnvelope(store, workspaces);
+    try ensurePersistableSlots(workspaces);
     const io_log_buffer = try self.ioLogWorkspace();
     const dirty_snapshot = DirtySnapshot.capture(store, workspaces);
     const started_dirty = store.dirtyObjectIds().len != 0 or
@@ -523,9 +446,12 @@ fn saveIncremental(
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
         state_hashes.invalidate(workspace_id.raw());
     }
+    // Deltas start after the committed head of the log's last sector, so the
+    // backend writes them as whole sectors without moving any bytes.
+    const append_head_len: usize = if (current) |loaded| loaded.root.log_bytes % sector_size else 0;
     const delta = if (current) |loaded|
         if (can_append)
-            try tryBuildAppendDelta(io_log_buffer, loaded.root, store, workspaces, state_hashes)
+            try tryBuildAppendDelta(io_log_buffer[append_head_len..], loaded.root, store, workspaces, state_hashes)
         else
             null
     else
@@ -533,6 +459,8 @@ fn saveIncremental(
 
     if (can_append and delta != null and delta.?.bytes_len == 0) {
         if (started_dirty) try flushWrites(writer);
+        // The device is unchanged, so the root this save started from stands.
+        publishSaveRoot(writer, current.?, false, null);
         return .{ .generation = current_generation, .snapshot_current = dirty_snapshot.acknowledge(store, workspaces) };
     }
 
@@ -547,10 +475,11 @@ fn saveIncremental(
         next_root.compacted_generation = current.?.root.compacted_generation;
         const next_root_sector = volume_root_slot.nextRootSector(current);
 
-        try writeBytes(writer, data_start_byte + data_offset + current.?.root.log_bytes, io_log_buffer[0..delta.?.bytes_len]);
+        const tail = try writeLog(writer, data_start_byte + data_offset + current.?.root.log_bytes, io_log_buffer, append_head_len, delta.?.bytes_len);
         try flushWrites(writer);
         try writeRoot(writer, next_root_sector, next_root);
         try flushWrites(writer);
+        publishSaveRoot(writer, .{ .sector_index = next_root_sector, .root = next_root }, false, tail);
         return .{ .generation = next_generation, .snapshot_current = dirty_snapshot.acknowledge(store, workspaces) };
     }
 
@@ -575,48 +504,58 @@ fn saveIncremental(
     // Synchronize a possibly visible prior failed root before switching its
     // alternate log region, after capturing all payload and root metadata.
     if (current != null and !can_append) try flushWrites(writer);
-    try writeBytes(writer, data_start_byte + next_data_offset, io_log_buffer[0..checkpoint_log_len]);
+    const tail = try writeLog(writer, data_start_byte + next_data_offset, io_log_buffer, 0, checkpoint_log_len);
     try flushWrites(writer);
     try writeRoot(writer, next_root_sector, next_root);
     try flushWrites(writer);
+    // Without a prior root the save wrote sector 0 and cannot vouch for a
+    // damaged sector 1, so the next save still compacts over it.
+    publishSaveRoot(writer, .{ .sector_index = next_root_sector, .root = next_root }, current == null and force_compaction, tail);
     return .{ .generation = next_generation, .snapshot_current = dirty_snapshot.acknowledge(store, workspaces) };
+}
+
+fn publishSaveRoot(writer: anytype, root: LoadedRoot, force_compaction: bool, tail: ?*const [sector_size]u8) void {
+    if (@TypeOf(writer) != BackendWriteFns) return;
+    const cache = &writer.volume.save_cache;
+    cache.selection = .{ .current = root, .force_compaction = force_compaction };
+    if (tail) |sector| {
+        @memcpy(&cache.tail, sector);
+        cache.tail_valid = true;
+    }
 }
 
 fn selectImageSaveRoot(image: []const u8) Error!SaveRootSelection {
     var selection = SaveRootSelection{};
+    var unsupported = false;
     var sector_index: u32 = 0;
     while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
         const offset = @as(usize, sector_index) * sector_size;
         const sector = image[offset .. offset + sector_size];
         if (!volume_root_slot.hasRootMagic(sector)) continue;
         const loaded = volume_root_slot.readImageRoot(image, sector_index) catch |err| {
-            // An unsupported volume is never a fresh or damaged current-format
-            // volume. Preserve it even when its peer root could be loaded.
-            if (err == error.UnsupportedVersion) return err;
+            if (err == error.UnsupportedVersion) unsupported = true;
             selection.force_compaction = true;
             continue;
         };
-        if (selection.current == null or loaded.root.generation > selection.current.?.root.generation) {
-            selection.current = loaded;
-        }
+        selection.note(loaded);
     }
-    return selection;
+    return selection.finish(unsupported);
 }
 
 fn selectBackendSaveRoot(self: *Volume) Error!SaveRootSelection {
     var selection = SaveRootSelection{};
+    var unsupported = false;
     var sector_index: u32 = 0;
     while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
         const loaded = volume_root_slot.readBackendRoot(self, sector_index) catch |err| {
-            if (err == error.DeviceReadFailed or err == error.UnsupportedVersion) return err;
+            if (err == error.DeviceReadFailed) return err;
+            if (err == error.UnsupportedVersion) unsupported = true;
             if (volume_root_slot.hasRootMagic(self.sector_buffer[0..])) selection.force_compaction = true;
             continue;
         };
-        if (selection.current == null or loaded.root.generation > selection.current.?.root.generation) {
-            selection.current = loaded;
-        }
+        selection.note(loaded);
     }
-    return selection;
+    return selection.finish(unsupported);
 }
 
 fn appendLogFits(root: RootState, delta: BuiltLog) bool {
@@ -652,7 +591,6 @@ fn loadLatestValidImageRoot(
 
     store.reset();
     workspaces.reset();
-    self.resetSignerText();
     return last_error orelse error.CorruptImage;
 }
 
@@ -684,7 +622,6 @@ fn loadLatestValidBackendRoot(
                 // records visible to other native operations.
                 store.reset();
                 workspaces.reset();
-                self.resetSignerText();
                 return err;
             }
             if (err == error.StorageMutationDuringLoad or err == error.DeviceReadFailed) return err;
@@ -723,7 +660,7 @@ fn loadImageRootCandidate(
     const region_start = data_start_byte + loaded.root.data_offset;
     if (region_start + loaded.root.log_bytes > image.len) return error.CorruptImage;
     try replayLog(self, store, workspaces, image[region_start .. region_start + loaded.root.log_bytes], loaded.root);
-    try ensureWithinProductCapacityEnvelope(store, workspaces);
+    try ensurePersistableSlots(workspaces);
     store.clearDirty();
     workspaces.clearDirty();
     return loaded.root.generation;
@@ -745,53 +682,40 @@ fn loadBackendRootCandidate(
     try validateReplayLog(log, loaded.root);
     replayed_live_state.* = true;
     try replayValidatedLog(self, store, workspaces, log, loaded.root);
-    try ensureWithinProductCapacityEnvelope(store, workspaces);
+    try ensurePersistableSlots(workspaces);
     store.clearDirty();
     workspaces.clearDirty();
 }
 
-pub fn ensureWithinProductCapacityEnvelope(store: *const object_store.Store, workspaces: *const workspace.Directory) Error!void {
-    if (quotaRejectionForCurrentState(store, workspaces) != null) {
-        return error.NoSpaceLeft;
-    }
-
-    const envelope = first_supported_capacity_envelope;
-    for (&workspaces.workspaces.slots) |*slot| {
-        if (!slot.in_use) continue;
-        if (!persistableWorkspaceSlot(slot)) return error.NoSpaceLeft;
-        if (slot.workspace.counts.entry_count > envelope.max_workspace_entries_per_workspace) return error.NoSpaceLeft;
-    }
-
-    for (&workspaces.snapshots.slots) |*slot| {
-        if (!slot.in_use) continue;
-        if (!persistableSnapshotSlot(slot)) return error.NoSpaceLeft;
-        if (slot.snapshot.entry_count > envelope.max_workspace_entries_per_workspace) return error.NoSpaceLeft;
-    }
-}
-
-pub fn productCapacityUsage(store: *const object_store.Store, workspaces: *const workspace.Directory) ProductCapacityUsage {
-    return volume_quota.productCapacityUsage(store, workspaces);
-}
-
-pub fn quotaRejectionForCurrentState(
-    store: *const object_store.Store,
-    workspaces: *const workspace.Directory,
-) ?QuotaRejection {
-    return volume_quota.quotaRejectionForCurrentState(store, workspaces, first_supported_capacity_envelope);
-}
-
-pub fn quotaRejectionForUsage(usage: ProductCapacityUsage) ?QuotaRejection {
-    return volume_quota.quotaRejectionForUsage(usage, first_supported_capacity_envelope);
-}
-
-fn writeBytes(writer: anytype, offset: usize, bytes: []const u8) Error!void {
+// Writes the `len` log bytes at `buffer[head_len..]` to absolute byte
+// `offset`, where `head_len` is the offset within its sector. The backend
+// writes whole sectors in one transfer: the committed head comes from the
+// cached tail or one device read, and the rest of the last sector is zeroed,
+// which replay never reads because the root bounds log_bytes. Returns that
+// last sector for the save cache.
+fn writeLog(writer: anytype, offset: usize, buffer: []u8, head_len: usize, len: usize) Error!?*const [sector_size]u8 {
+    std.debug.assert(len != 0 and offset % sector_size == head_len);
     switch (@TypeOf(writer)) {
         ImageWriteFns => {
-            if (offset + bytes.len > writer.image.len) return error.ImageTooSmall;
-            @memcpy(writer.image[offset .. offset + bytes.len], bytes);
+            if (offset > writer.image.len or len > writer.image.len - offset) return error.ImageTooSmall;
+            @memcpy(writer.image[offset..][0..len], buffer[head_len..][0..len]);
+            return null;
         },
         BackendWriteFns => {
-            if (!volume_backend.writeAttachedBytes(writer.volume, offset, bytes)) return error.CorruptImage;
+            const start = offset - head_len;
+            const span = std.mem.alignForward(usize, head_len + len, sector_size);
+            if (span > buffer.len or start > image_bytes or span > image_bytes - start) return error.ImageTooSmall;
+            const start_lba = start / sector_size;
+            if (head_len != 0) {
+                const head = writer.cached_tail orelse head: {
+                    if (!volume_backend.readAttachedRange(writer.volume, start_lba, writer.volume.sector_buffer[0..])) return error.DeviceReadFailed;
+                    break :head &writer.volume.sector_buffer;
+                };
+                @memcpy(buffer[0..head_len], head[0..head_len]);
+            }
+            @memset(buffer[head_len + len .. span], 0);
+            try writer.volume.writeOwnedRange(start_lba, buffer[0..span]);
+            return buffer[span - sector_size ..][0..sector_size];
         },
         else => @compileError("unsupported incremental writer"),
     }
@@ -800,7 +724,12 @@ fn writeBytes(writer: anytype, offset: usize, bytes: []const u8) Error!void {
 fn writeRoot(writer: anytype, sector_index: u32, root: RootState) Error!void {
     switch (@TypeOf(writer)) {
         ImageWriteFns => try volume_root_slot.writeImageRoot(writer.image, sector_index, root),
-        BackendWriteFns => try volume_root_slot.writeBackendRoot(writer.volume, sector_index, root),
+        BackendWriteFns => {
+            const sector = &writer.volume.sector_buffer;
+            @memset(sector, 0);
+            try volume_root_slot.encodeRoot(sector, root);
+            try writer.volume.writeOwnedRange(sector_index, sector);
+        },
         else => @compileError("unsupported root writer"),
     }
 }
@@ -815,17 +744,19 @@ fn flushWrites(writer: anytype) Error!void {
     }
 }
 
+const WorkspaceHashes = volume_hashing.WorkspaceHashes;
+
 const WorkspaceStateHashCache = struct {
     ids: [workspace.MAX_WORKSPACES]u64 = @as([workspace.MAX_WORKSPACES]u64, @splat(0)),
-    hashes: [workspace.MAX_WORKSPACES]u64 = @as([workspace.MAX_WORKSPACES]u64, @splat(0)),
+    hashes: [workspace.MAX_WORKSPACES]WorkspaceHashes = @as([workspace.MAX_WORKSPACES]WorkspaceHashes, @splat(.{ .state = 0, .log = 0 })),
     count: usize = 0,
 
-    fn getOrCompute(self: *WorkspaceStateHashCache, record: *const workspace.WorkspaceRecord) Error!u64 {
+    fn getOrCompute(self: *WorkspaceStateHashCache, record: *const workspace.WorkspaceRecord) WorkspaceHashes {
         const id = record.id.raw();
         for (self.ids[0..self.count], 0..) |cached_id, index| {
             if (cached_id == id) return self.hashes[index];
         }
-        const hash = try volume_hashing.workspaceStateHash(record);
+        const hash = volume_hashing.workspaceHashes(record);
         if (self.count < self.ids.len) {
             self.ids[self.count] = id;
             self.hashes[self.count] = hash;
@@ -841,7 +772,7 @@ const WorkspaceStateHashCache = struct {
             self.ids[index] = self.ids[self.count];
             self.hashes[index] = self.hashes[self.count];
             self.ids[self.count] = 0;
-            self.hashes[self.count] = 0;
+            self.hashes[self.count] = .{ .state = 0, .log = 0 };
             return;
         }
     }
@@ -919,10 +850,14 @@ fn buildDeltaLog(
 
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
         const workspace_record = workspaces.findConst(workspace_id) orelse continue;
-        const summary = findWorkspaceSummary(root, workspace_record.id.raw());
-        const state_hash = try state_hashes.getOrCompute(workspace_record);
-        if (summary) |persisted| {
+        const state_hash = state_hashes.getOrCompute(workspace_record).state;
+        if (findWorkspaceSummary(root, workspace_record.id.raw())) |persisted| {
             if (persisted.generation == workspace_record.generation and persisted.state_hash == state_hash) continue;
+            if (workspaceDeltaApplies(persisted, workspace_record)) {
+                try appendWorkspaceDeltaRecord(&writer, workspace_record, persisted);
+                record_count += 1;
+                continue;
+            }
         }
         try appendWorkspaceRecord(&writer, workspace_record);
         record_count += 1;
@@ -1003,10 +938,13 @@ fn buildRootState(
     };
     for (&workspaces.workspaces.slots) |*slot| {
         if (!persistableWorkspaceSlot(slot)) continue;
+        const hashes = state_hashes.getOrCompute(&slot.workspace);
         root.workspace_summaries[root.workspace_summary_count] = .{
             .id = slot.workspace.id.raw(),
             .generation = slot.workspace.generation,
-            .state_hash = try state_hashes.getOrCompute(&slot.workspace),
+            .mutation_count = @intCast(slot.workspace.counts.entry_mutation_count),
+            .log_hash = hashes.log,
+            .state_hash = hashes.state,
         };
         root.workspace_summary_count += 1;
     }
@@ -1066,25 +1004,50 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
 fn replayValidatedLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
     store.reset();
     workspaces.reset();
-    self.resetSignerText();
     self.workspace_state_hashes.reset();
     var reader = CursorReader{ .buffer = log };
     var replayed_id_bounds = ReplayIdBounds{};
+    var delta_workspaces: std.bit_set.Integer(workspace.MAX_WORKSPACES) = .empty;
     while (reader.offset < reader.buffer.len) {
         const header = try volume_log.readRecordHeader(&reader);
-        const payload = try reader.readSlice(header.payload_len);
+        var record = CursorReader{ .buffer = try reader.readSlice(header.payload_len) };
         switch (header.kind) {
-            .checkpoint => try deserializeState(self, store, workspaces, payload, &replayed_id_bounds),
+            .checkpoint => try deserializeState(store, workspaces, &record, &replayed_id_bounds),
             .segment_boundary => {},
-            .object_state => replayed_id_bounds.noteObject(try applyObjectRecord(self, store, payload)),
-            .chunk_state => try applyChunkRecord(store, payload),
-            .blob_state => try applyBlobRecord(store, payload),
-            .version_state => replayed_id_bounds.noteVersion(try applyVersionRecord(self, store, payload)),
-            .workspace_state => replayed_id_bounds.noteWorkspace(try applyWorkspaceRecord(workspaces, payload)),
-            .snapshot_state => replayed_id_bounds.noteSnapshot(try applySnapshotRecord(self, workspaces, payload)),
+            .object_state => replayed_id_bounds.noteObject(try applyObjectRecord(store, &record)),
+            .chunk_state => try applyChunkRecord(store, &record),
+            .blob_state => try applyBlobRecord(store, &record),
+            .version_state => replayed_id_bounds.noteVersion(try applyVersionRecord(store, &record)),
+            .workspace_state => replayed_id_bounds.noteWorkspace(try applyWorkspaceRecord(workspaces, &record)),
+            .workspace_delta => {
+                const workspace_id = try applyWorkspaceDelta(workspaces, &record);
+                replayed_id_bounds.noteWorkspace(workspace_id);
+                delta_workspaces.set(workspaces.workspaces.slotIndexOf(ids.workspace(workspace_id)).?);
+            },
+            .snapshot_state => replayed_id_bounds.noteSnapshot(try applySnapshotRecord(workspaces, &record)),
         }
+        if (!record.eof()) return error.CorruptImage;
     }
     if (!replayed_id_bounds.fitRoot(root)) return error.CorruptImage;
+    // Later records replace or extend workspaces, so derived indexes are
+    // rebuilt once per live workspace after the last record rather than per
+    // record.
+    for (&workspaces.workspaces.slots) |*slot| {
+        if (slot.in_use) workspaces.indexReplayedWorkspaceEntries(&slot.workspace);
+    }
+    // A delta reconstructs entries from logged mutations, so the result must
+    // match the committed summary exactly rather than being trusted.
+    var deltas = delta_workspaces.iterator(.{});
+    while (deltas.next()) |slot_index| {
+        const replayed = &workspaces.workspaces.slots[slot_index].workspace;
+        const summary = findWorkspaceSummary(root, replayed.id.raw()) orelse return error.CorruptImage;
+        if (summary.generation != replayed.generation or
+            summary.mutation_count != replayed.counts.entry_mutation_count or
+            summary.state_hash != volume_hashing.workspaceStateHash(replayed))
+        {
+            return error.CorruptImage;
+        }
+    }
 
     store.next_object_id = root.next_object_id;
     store.next_version_id = root.next_version_id;
@@ -1127,6 +1090,38 @@ fn appendWorkspaceRecord(writer: *CursorWriter, record: *const workspace.Workspa
     try volume_log.finishRecord(writer, header_offset);
 }
 
+// A delta extends the persisted mutation log, so it applies only while the
+// live record still begins with exactly what the summary fingerprinted: the
+// same identity, owner, label and mutation prefix, from which the persisted
+// entries follow. Anything else that rewrote that prefix, such as compaction,
+// reseeding or another writer's root, takes a whole record. Replay accepts
+// only appended mutations newer than the base.
+fn workspaceDeltaApplies(persisted: WorkspaceSummary, record: *const workspace.WorkspaceRecord) bool {
+    const count: usize = record.counts.entry_mutation_count;
+    const base: usize = persisted.mutation_count;
+    if (record.generation < persisted.generation or count < base) return false;
+    if (base != count and record.mutation_log.entriesConst()[base].generation <= persisted.generation) return false;
+    return volume_hashing.workspaceLogHash(record, base) == persisted.log_hash;
+}
+
+// The share table and recoverable deletes are small and rewritten whole; the
+// mutation log only grows.
+fn appendWorkspaceDeltaRecord(writer: *CursorWriter, record: *const workspace.WorkspaceRecord, persisted: WorkspaceSummary) Error!void {
+    const header_offset = try volume_log.beginRecord(writer, .workspace_delta);
+    try writer.writeU64(record.id.raw());
+    try writer.writeU32(persisted.generation);
+    try writer.writeU16(persisted.mutation_count);
+    try writer.writeU32(record.generation);
+    const appended = record.mutation_log.entriesConst()[persisted.mutation_count..record.counts.entry_mutation_count];
+    try writer.writeU16(@intCast(appended.len));
+    for (appended) |mutation| {
+        try writer.writeU32(mutation.generation);
+        try writeEntry(writer, mutation.entry);
+    }
+    try encodeWorkspaceSharesAndDeletes(writer, record);
+    try volume_log.finishRecord(writer, header_offset);
+}
+
 fn appendSnapshotRecord(writer: *CursorWriter, record: *const workspace.SnapshotRecord) Error!void {
     const header_offset = try volume_log.beginRecord(writer, .snapshot_state);
     try encodeSnapshotBody(writer, record);
@@ -1142,7 +1137,6 @@ fn encodeObjectBody(writer: *CursorWriter, record: *const object_store.ObjectRec
 
 fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.VersionRecord) Error!void {
     const blob = store.versionBlob(record) orelse return error.CorruptImage;
-    const version_address = store.versionAddress(record) catch return error.CorruptImage;
     try writer.writeU64(record.id.raw());
     try writer.writeU64(record.object_id.raw());
     var parent_index: usize = 0;
@@ -1151,9 +1145,7 @@ fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, re
     }
     try writer.writeByte(@backingInt(record.object_type));
     try writer.writeBytes(&blob.address);
-    try writer.writeBytes(&version_address);
     try writeMetadata(writer, record.metadata);
-    try writer.writeU32(@intCast(blob.payloadLen()));
 }
 
 fn appendBlobRecord(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.BlobRecord) Error!void {
@@ -1164,9 +1156,7 @@ fn appendBlobRecord(writer: *CursorWriter, store: *const object_store.Store, rec
 
 fn appendPayloadChunkRecord(writer: *CursorWriter, chunk: object_store.PayloadChunk) Error!void {
     const header_offset = try volume_log.beginRecord(writer, .chunk_state);
-    try writer.writeBytes(&chunk.address);
-    try writer.writeU16(@intCast(chunk.bytes.len));
-    try writer.writeBytes(chunk.bytes);
+    try encodeChunkBody(writer, chunk.address, chunk.bytes);
     try volume_log.finishRecord(writer, header_offset);
 }
 
@@ -1178,14 +1168,13 @@ fn encodeBlobBody(writer: *CursorWriter, store: *const object_store.Store, recor
     for (0..chunk_count) |chunk_index| {
         const chunk_ref = store.blobChunkRef(record, chunk_index) catch return error.CorruptImage;
         try writer.writeBytes(&chunk_ref.address);
-        try writer.writeU16(chunk_ref.payload_len);
     }
 }
 
-fn encodeChunkBody(writer: *CursorWriter, record: *const object_store.ChunkRecord) Error!void {
-    try writer.writeBytes(&record.address);
-    try writer.writeU16(@intCast(record.payloadLen()));
-    try writer.writeBytes(record.chunkSlice());
+fn encodeChunkBody(writer: *CursorWriter, address: object_store.ChunkAddress, bytes: []const u8) Error!void {
+    try writer.writeBytes(&address);
+    try writer.writeU16(@intCast(bytes.len));
+    try writer.writeBytes(bytes);
 }
 
 fn encodeWorkspaceBody(writer: *CursorWriter, record: *const workspace.WorkspaceRecord) Error!void {
@@ -1202,6 +1191,10 @@ fn encodeWorkspaceBody(writer: *CursorWriter, record: *const workspace.Workspace
         try writer.writeU32(mutation.generation);
         try writeEntry(writer, mutation.entry);
     }
+    try encodeWorkspaceSharesAndDeletes(writer, record);
+}
+
+fn encodeWorkspaceSharesAndDeletes(writer: *CursorWriter, record: *const workspace.WorkspaceRecord) Error!void {
     try writer.writeU16(@intCast(record.counts.share_grant_count));
     if (record.counts.share_grant_count != 0) {
         const share_table = record.share_table.dataConst();
@@ -1221,16 +1214,15 @@ fn encodeSnapshotBody(writer: *CursorWriter, record: *const workspace.SnapshotRe
     try writer.writeU32(record.generation);
     try writeText(writer, record.labelSlice());
     try writer.writeBytes(&record.root_address);
-    try writeSignature(writer, record.signature);
+    try writeSignature(writer, record.signatureView());
     try writer.writeU16(@intCast(record.entry_count));
 }
 
-fn applyObjectRecord(_: *Volume, store: *object_store.Store, payload: []const u8) Error!u64 {
-    var reader = CursorReader{ .buffer = payload };
+fn applyObjectRecord(store: *object_store.Store, reader: *CursorReader) Error!u64 {
     const object_id = ids.object(try reader.readU64());
     const existing_slot_index = store.objects.slotIndexOf(object_id);
     const slot_index = existing_slot_index orelse store.objects.reserveIndexClean(object_id) orelse return error.CorruptImage;
-    const object_type = try parseObjectType(try reader.readByte());
+    const object_type = try reader.readEnum(object_store.ObjectType);
     if (existing_slot_index != null and store.objects.slots[slot_index].object.object_type != object_type) {
         return error.CorruptImage;
     }
@@ -1248,8 +1240,7 @@ fn applyObjectRecord(_: *Volume, store: *object_store.Store, payload: []const u8
     return object_id.raw();
 }
 
-fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!u64 {
-    var reader = CursorReader{ .buffer = payload };
+fn applyVersionRecord(store: *object_store.Store, reader: *CursorReader) Error!u64 {
     const version_id = ids.version(try reader.readU64());
     const slot_index = store.versions.reserveIndexClean(version_id) orelse return error.CorruptImage;
     store.versions.slots[slot_index].version.id = version_id;
@@ -1259,25 +1250,16 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
         store.versions.slots[slot_index].version.parent_version_ids[parent_index] = ids.version(try reader.readU64());
     }
     if (!store.versions.slots[slot_index].version.hasCanonicalParents()) return error.CorruptImage;
-    store.versions.slots[slot_index].version.object_type = try parseObjectType(try reader.readByte());
+    store.versions.slots[slot_index].version.object_type = try reader.readEnum(object_store.ObjectType);
     var blob_address: object_store.BlobAddress = undefined;
     try reader.readBytes(&blob_address);
-    var serialized_version_address: object_store.VersionAddress = undefined;
-    try reader.readBytes(&serialized_version_address);
-    store.versions.slots[slot_index].version.metadata = try readMetadata(self, &reader);
-    const payload_len: usize = @intCast(try reader.readU32());
-    if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
-    const blob_slot_index = findBlobSlotIndex(store, blob_address) orelse return error.CorruptImage;
-    const blob = &store.blobSlotAtConst(blob_slot_index).blob;
-    if (blob.payloadLen() != payload_len) return error.CorruptImage;
+    store.versions.slots[slot_index].version.metadata = try readMetadata(store, reader);
+    const blob_slot_index = store.blobSlotIndex(blob_address) orelse return error.CorruptImage;
     store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
-    const derived_version_address = store.versionAddress(&store.versions.slots[slot_index].version) catch return error.CorruptImage;
-    if (!std.mem.eql(u8, &serialized_version_address, &derived_version_address)) return error.CorruptImage;
     return version_id.raw();
 }
 
-fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
-    var reader = CursorReader{ .buffer = payload };
+fn applyBlobRecord(store: *object_store.Store, reader: *CursorReader) Error!void {
     var address: object_store.BlobAddress = undefined;
     try reader.readBytes(&address);
     const payload_len: usize = @intCast(try reader.readU32());
@@ -1289,13 +1271,12 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     var chunk_index: usize = 0;
     while (chunk_index < chunk_count) : (chunk_index += 1) {
         try reader.readBytes(&chunk_refs[chunk_index].address);
-        chunk_refs[chunk_index].payload_len = try reader.readU16();
+        chunk_refs[chunk_index].payload_len = @intCast(@min(payload_len - chunk_index * object_store.MAX_CHUNK_BYTES, object_store.MAX_CHUNK_BYTES));
         const chunk_slot_index = store.chunkSlotIndex(chunk_refs[chunk_index].address) orelse return error.CorruptImage;
         const chunk_slot = store.chunkSlotAtConst(chunk_slot_index);
         if (!chunk_slot.arenaInUse() or chunk_slot.chunk.payloadLen() != chunk_refs[chunk_index].payload_len) return error.CorruptImage;
         chunk_slot_indexes[chunk_index] = @intCast(chunk_slot_index);
     }
-    if (!object_store.chunkRefsMatchPayloadLen(payload_len, chunk_refs[0..chunk_count])) return error.CorruptImage;
     if (!std.mem.eql(u8, &object_store.computeBlobManifestAddress(payload_len, chunk_refs[0..chunk_count]), &address)) return error.CorruptImage;
     const slot_index = if (store.blobSlotIndex(address)) |existing_index|
         existing_index
@@ -1305,11 +1286,9 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     slot.blob.address = address;
     slot.blob.chunk_slot_indexes = chunk_slot_indexes;
     slot.blob.setPayloadState(payload_len, ref_count);
-    store.recordReplayedBlobPayloadBytes(payload_len);
 }
 
-fn applyChunkRecord(store: *object_store.Store, payload: []const u8) Error!void {
-    var reader = CursorReader{ .buffer = payload };
+fn applyChunkRecord(store: *object_store.Store, reader: *CursorReader) Error!void {
     var address: object_store.ChunkAddress = undefined;
     try reader.readBytes(&address);
     const payload_len: usize = @intCast(try reader.readU16());
@@ -1318,8 +1297,7 @@ fn applyChunkRecord(store: *object_store.Store, payload: []const u8) Error!void 
     _ = store.putChunk(address, bytes) catch return error.CorruptImage;
 }
 
-fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) Error!u64 {
-    var reader = CursorReader{ .buffer = payload };
+fn applyWorkspaceRecord(workspaces: *workspace.Directory, reader: *CursorReader) Error!u64 {
     const workspace_id = ids.workspace(try reader.readU64());
     const existing_slot = workspaces.workspaces.get(workspace_id);
     const slot = existing_slot orelse
@@ -1331,18 +1309,16 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
 
     const previous_entry_count = slot.workspace.counts.entry_count;
     const previous_mutation_count = slot.workspace.counts.entry_mutation_count;
-    const previous_share_grant_count = slot.workspace.counts.share_grant_count;
     const previous_staged_entry_count = slot.workspace.staging.staged_entry_count;
     const previous_mutation_tail = @min(
         previous_mutation_count + previous_staged_entry_count,
         workspace.MAX_WORKSPACE_ENTRY_MUTATIONS,
     );
-    const previous_deleted_count = slot.workspace.counts.deleted_count;
     slot.workspace.id = workspace_id;
-    slot.workspace.owner = try readPrincipal(&reader);
-    readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
+    slot.workspace.owner = try readPrincipal(reader);
+    readTextInto(reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
     slot.workspace.generation = try reader.readU32();
-    slot.workspace.counts.entry_count = try readBoundedCount(workspace.WorkspaceEntryCount, &reader, workspace.MAX_WORKSPACE_ENTRIES);
+    slot.workspace.counts.entry_count = try readBoundedCount(workspace.WorkspaceEntryCount, reader, workspace.MAX_WORKSPACE_ENTRIES);
     if (slot.workspace.counts.entry_count != 0) {
         slot.workspace.path_index.ensureEntryBacking() catch {
             if (existing_slot == null) {
@@ -1353,7 +1329,7 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
         };
         const entries = slot.workspace.path_index.entries();
         for (0..slot.workspace.counts.entry_count) |entry_index| {
-            entries[entry_index] = try readEntry(&reader);
+            entries[entry_index] = try readEntry(reader);
         }
         if (slot.workspace.counts.entry_count < previous_entry_count) {
             for (entries[slot.workspace.counts.entry_count..previous_entry_count]) |*entry| {
@@ -1363,12 +1339,12 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     } else if (previous_entry_count != 0) {
         slot.workspace.path_index.releaseEntryBacking();
     }
-    slot.workspace.counts.entry_mutation_count = try readBoundedCount(workspace.WorkspaceMutationCount, &reader, workspace.MAX_WORKSPACE_ENTRY_MUTATIONS);
+    slot.workspace.counts.entry_mutation_count = try readBoundedCount(workspace.WorkspaceMutationCount, reader, workspace.MAX_WORKSPACE_ENTRY_MUTATIONS);
     const mutations = slot.workspace.mutation_log.entries();
     for (0..slot.workspace.counts.entry_mutation_count) |mutation_index| {
         mutations[mutation_index] = .{
             .generation = try reader.readU32(),
-            .entry = try readEntry(&reader),
+            .entry = try readEntry(reader),
         };
     }
     if (slot.workspace.counts.entry_mutation_count < previous_mutation_tail) {
@@ -1376,73 +1352,96 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
             mutation.* = .{};
         }
     }
-    slot.workspace.counts.share_grant_count = try readBoundedCount(workspace.WorkspaceShareGrantCount, &reader, workspace.MAX_SHARE_GRANTS);
-    if (slot.workspace.counts.share_grant_count != 0) {
-        slot.workspace.share_table.ensureBacking() catch {
-            if (existing_slot == null) {
-                slot.workspace.mutation_log.releaseBacking();
-                slot.workspace.path_index.releaseEntryBacking();
-                std.debug.assert(workspaces.workspaces.remove(workspace_id));
-            }
-            return error.NoSpaceLeft;
-        };
-        const share_table = slot.workspace.share_table.data();
-        for (0..slot.workspace.counts.share_grant_count) |grant_index| {
-            share_table.share_grants[grant_index] = try readShareGrant(&reader);
+    readWorkspaceSharesAndDeletes(&slot.workspace, reader) catch |err| {
+        if (err == error.NoSpaceLeft and existing_slot == null) {
+            slot.workspace.mutation_log.releaseBacking();
+            slot.workspace.path_index.releaseEntryBacking();
+            slot.workspace.share_table.releaseBacking();
+            std.debug.assert(workspaces.workspaces.remove(workspace_id));
         }
-        if (slot.workspace.counts.share_grant_count < previous_share_grant_count) {
-            for (share_table.share_grants[slot.workspace.counts.share_grant_count..previous_share_grant_count]) |*grant| {
-                grant.* = .{ .principal_id = .{ .kind = .service, .serial = 0 } };
-            }
-        }
-    } else if (previous_share_grant_count != 0) {
-        slot.workspace.share_table.releaseBacking();
-    }
-    slot.workspace.counts.deleted_count = try readBoundedCount(workspace.RecoverableDeleteCount, &reader, workspace.MAX_RECOVERABLE_DELETES);
-    if (slot.workspace.counts.deleted_count != 0) {
-        slot.workspace.recoverable_deletes.ensureBacking() catch {
-            if (existing_slot == null) {
-                slot.workspace.mutation_log.releaseBacking();
-                slot.workspace.path_index.releaseEntryBacking();
-                slot.workspace.share_table.releaseBacking();
-                std.debug.assert(workspaces.workspaces.remove(workspace_id));
-            }
-            return error.NoSpaceLeft;
-        };
-    }
-    if (slot.workspace.counts.deleted_count != 0) {
-        const deleted_entries = slot.workspace.recoverable_deletes.entries();
-        for (0..slot.workspace.counts.deleted_count) |entry_index| {
-            deleted_entries[entry_index] = try readEntry(&reader);
-        }
-        if (slot.workspace.counts.deleted_count < previous_deleted_count) {
-            for (deleted_entries[slot.workspace.counts.deleted_count..previous_deleted_count]) |*entry| {
-                entry.* = .{};
-            }
-        }
-    } else if (previous_deleted_count != 0) {
-        slot.workspace.recoverable_deletes.releaseBacking();
-    }
+        return err;
+    };
 
     slot.workspace.staging.transaction_open = false;
     slot.workspace.staging.staged_entry_count = 0;
     slot.workspace.staging.staged_effective_entry_count = 0;
-    workspaces.indexReplayedWorkspaceEntries(&slot.workspace);
     return workspace_id.raw();
 }
 
-fn applySnapshotRecord(self: *Volume, workspaces: *workspace.Directory, payload: []const u8) Error!u64 {
-    var reader = CursorReader{ .buffer = payload };
+fn readWorkspaceSharesAndDeletes(record: *workspace.WorkspaceRecord, reader: *CursorReader) Error!void {
+    const previous_share_grant_count = record.counts.share_grant_count;
+    const previous_deleted_count = record.counts.deleted_count;
+    record.counts.share_grant_count = try readBoundedCount(workspace.WorkspaceShareGrantCount, reader, workspace.MAX_SHARE_GRANTS);
+    if (record.counts.share_grant_count != 0) {
+        try record.share_table.ensureBacking();
+        const share_table = record.share_table.data();
+        for (0..record.counts.share_grant_count) |grant_index| {
+            share_table.share_grants[grant_index] = try readShareGrant(reader);
+        }
+        if (record.counts.share_grant_count < previous_share_grant_count) {
+            for (share_table.share_grants[record.counts.share_grant_count..previous_share_grant_count]) |*grant| {
+                grant.* = .{ .principal_id = .{ .kind = .service, .serial = 0 } };
+            }
+        }
+    } else if (previous_share_grant_count != 0) {
+        record.share_table.releaseBacking();
+    }
+    record.counts.deleted_count = try readBoundedCount(workspace.RecoverableDeleteCount, reader, workspace.MAX_RECOVERABLE_DELETES);
+    if (record.counts.deleted_count != 0) {
+        try record.recoverable_deletes.ensureBacking();
+        const deleted_entries = record.recoverable_deletes.entries();
+        for (0..record.counts.deleted_count) |entry_index| {
+            deleted_entries[entry_index] = try readEntry(reader);
+        }
+        if (record.counts.deleted_count < previous_deleted_count) {
+            for (deleted_entries[record.counts.deleted_count..previous_deleted_count]) |*entry| {
+                entry.* = .{};
+            }
+        }
+    } else if (previous_deleted_count != 0) {
+        record.recoverable_deletes.releaseBacking();
+    }
+}
+
+// Applies a delta only to the exact persisted state it was built against.
+fn applyWorkspaceDelta(workspaces: *workspace.Directory, reader: *CursorReader) Error!u64 {
+    const workspace_id = ids.workspace(try reader.readU64());
+    const record = &(workspaces.workspaces.get(workspace_id) orelse return error.CorruptImage).workspace;
+    const base_generation = try reader.readU32();
+    const base_mutation_count: usize = try reader.readU16();
+    if (record.generation != base_generation or record.counts.entry_mutation_count != base_mutation_count) return error.CorruptImage;
+    const generation = try reader.readU32();
+    if (generation < base_generation) return error.CorruptImage;
+    const appended_count: usize = try reader.readU16();
+    if (appended_count > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS - base_mutation_count) return error.CorruptImage;
+    const appended = record.mutation_log.entries()[base_mutation_count..][0..appended_count];
+    var previous_generation = base_generation +| 1;
+    for (appended) |*mutation| {
+        mutation.* = .{ .generation = try reader.readU32(), .entry = try readEntry(reader) };
+        if (mutation.generation < previous_generation or mutation.generation > generation) return error.CorruptImage;
+        previous_generation = mutation.generation;
+    }
+    if (appended_count != 0) {
+        try record.path_index.ensureEntryBacking();
+        workspace.replayEntryMutations(record, appended) catch return error.CorruptImage;
+    }
+    record.counts.entry_mutation_count = @intCast(base_mutation_count + appended_count);
+    record.generation = generation;
+    try readWorkspaceSharesAndDeletes(record, reader);
+    return workspace_id.raw();
+}
+
+fn applySnapshotRecord(workspaces: *workspace.Directory, reader: *CursorReader) Error!u64 {
     const snapshot_id = ids.snapshot(try reader.readU64());
     const slot_index = workspaces.snapshots.slotIndexOf(snapshot_id) orelse
         workspaces.snapshots.reserveIndexClean(snapshot_id) orelse return error.CorruptImage;
     workspaces.snapshots.slots[slot_index].snapshot.id = snapshot_id;
     workspaces.snapshots.slots[slot_index].snapshot.workspace_id = ids.workspace(try reader.readU64());
     workspaces.snapshots.slots[slot_index].snapshot.generation = try reader.readU32();
-    readTextInto(&reader, &workspaces.snapshots.slots[slot_index].snapshot.label, &workspaces.snapshots.slots[slot_index].snapshot.label_len) catch return error.CorruptImage;
+    readTextInto(reader, &workspaces.snapshots.slots[slot_index].snapshot.label, &workspaces.snapshots.slots[slot_index].snapshot.label_len) catch return error.CorruptImage;
     try reader.readBytes(&workspaces.snapshots.slots[slot_index].snapshot.root_address);
-    workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(self, &reader);
-    workspaces.snapshots.slots[slot_index].snapshot.entry_count = try readBoundedCount(u8, &reader, workspace.MAX_WORKSPACE_ENTRIES);
+    try readSnapshotSignature(reader, &workspaces.snapshots.slots[slot_index].snapshot);
+    workspaces.snapshots.slots[slot_index].snapshot.entry_count = try readBoundedCount(u8, reader, workspace.MAX_WORKSPACE_ENTRIES);
     return snapshot_id.raw();
 }
 
@@ -1460,8 +1459,6 @@ fn serializeCheckpointRecord(
 
 fn serializeState(store: *const object_store.Store, workspaces: *const workspace.Directory, buffer: []u8) Error!usize {
     var writer = CursorWriter{ .buffer = buffer };
-    try writer.writeBytes(payload_magic);
-    try writer.writeU16(format_version);
     try writer.writeU64(store.next_object_id);
     try writer.writeU64(store.next_version_id);
     try writer.writeU16(@intCast(store.objectCount()));
@@ -1482,7 +1479,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
     while (chunk_slot_index < store.chunkSlotCapacity()) : (chunk_slot_index += 1) {
         const slot = store.chunkSlotAtConst(chunk_slot_index);
         if (!slot.arenaInUse()) continue;
-        try encodeChunkBody(&writer, &slot.chunk);
+        try encodeChunkBody(&writer, slot.chunk.address, slot.chunk.chunkSlice());
     }
 
     var blob_slot_index: usize = 0;
@@ -1511,18 +1508,11 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
 }
 
 fn deserializeState(
-    self: *Volume,
     store: *object_store.Store,
     workspaces: *workspace.Directory,
-    payload: []const u8,
+    reader: *CursorReader,
     replayed_id_bounds: *ReplayIdBounds,
 ) Error!void {
-    var reader = CursorReader{ .buffer = payload };
-    var payload_magic_bytes: [payload_magic.len]u8 = undefined;
-    try reader.readBytes(&payload_magic_bytes);
-    if (!std.mem.eql(u8, &payload_magic_bytes, payload_magic)) return error.CorruptImage;
-    if ((try reader.readU16()) != format_version) return error.UnsupportedVersion;
-
     store.next_object_id = try reader.readU64();
     store.next_version_id = try reader.readU64();
     const object_count = try reader.readU16();
@@ -1544,142 +1534,23 @@ fn deserializeState(
         return error.CorruptImage;
     }
 
-    for (0..@as(usize, object_count)) |_| {
-        const object_id = ids.object(try reader.readU64());
-        replayed_id_bounds.noteObject(object_id.raw());
-        const slot_index = store.objects.reserveIndexClean(object_id) orelse return error.CorruptImage;
-        const slot = &store.objects.slots[slot_index];
-        slot.object.id = object_id;
-        slot.object.object_type = try parseObjectType(try reader.readByte());
-        slot.object.latest_version_id = ids.version(try reader.readU64());
-        slot.object.version_count = try reader.readU16();
-        store.indexReplayedObjectSlot(slot_index);
-    }
+    for (0..object_count) |_| replayed_id_bounds.noteObject(try applyObjectRecord(store, reader));
+    for (0..chunk_count) |_| try applyChunkRecord(store, reader);
+    for (0..blob_count) |_| try applyBlobRecord(store, reader);
+    for (0..version_count) |_| replayed_id_bounds.noteVersion(try applyVersionRecord(store, reader));
+    for (0..workspace_count_value) |_| replayed_id_bounds.noteWorkspace(try applyWorkspaceRecord(workspaces, reader));
+    for (0..snapshot_count_value) |_| replayed_id_bounds.noteSnapshot(try applySnapshotRecord(workspaces, reader));
 
-    for (0..@as(usize, chunk_count)) |_| {
-        var address: object_store.ChunkAddress = undefined;
-        try reader.readBytes(&address);
-        const payload_len: usize = @intCast(try reader.readU16());
-        if (payload_len > object_store.MAX_CHUNK_BYTES) return error.CorruptImage;
-        const bytes = try reader.readSlice(payload_len);
-        _ = store.putChunk(address, bytes) catch return error.CorruptImage;
-    }
-
-    for (0..@as(usize, blob_count)) |_| {
-        const payload_start = reader.offset;
-        var address: object_store.BlobAddress = undefined;
-        try reader.readBytes(&address);
-        const payload_len: usize = @intCast(try reader.readU32());
-        _ = try reader.readU16();
-        if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
-        const chunk_ref_count = object_store.chunkCountForPayloadLen(payload_len);
-        const payload_end = payload_start + 32 + 4 + 2 + chunk_ref_count * (32 + 2);
-        if (payload_end > reader.buffer.len) return error.CorruptImage;
-        reader.offset = payload_start;
-        try applyBlobRecord(store, reader.buffer[payload_start..payload_end]);
-        reader.offset = payload_end;
-    }
-
-    for (0..@as(usize, version_count)) |_| {
-        const version_id = ids.version(try reader.readU64());
-        replayed_id_bounds.noteVersion(version_id.raw());
-        const slot_index = store.versions.reserveIndexClean(version_id) orelse return error.CorruptImage;
-        store.versions.slots[slot_index].version.id = version_id;
-        store.versions.slots[slot_index].version.object_id = ids.object(try reader.readU64());
-        var parent_index: usize = 0;
-        while (parent_index < object_store.MAX_VERSION_PARENTS) : (parent_index += 1) {
-            store.versions.slots[slot_index].version.parent_version_ids[parent_index] = ids.version(try reader.readU64());
-        }
-        if (!store.versions.slots[slot_index].version.hasCanonicalParents()) return error.CorruptImage;
-        store.versions.slots[slot_index].version.object_type = try parseObjectType(try reader.readByte());
-        var blob_address: object_store.BlobAddress = undefined;
-        try reader.readBytes(&blob_address);
-        var serialized_version_address: object_store.VersionAddress = undefined;
-        try reader.readBytes(&serialized_version_address);
-        store.versions.slots[slot_index].version.metadata = try readMetadata(self, &reader);
-        const payload_len: usize = @intCast(try reader.readU32());
-        if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
-        const blob_slot_index = findBlobSlotIndex(store, blob_address) orelse return error.CorruptImage;
-        const blob = &store.blobSlotAtConst(blob_slot_index).blob;
-        if (blob.payloadLen() != payload_len) return error.CorruptImage;
-        store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
-        const derived_version_address = store.versionAddress(&store.versions.slots[slot_index].version) catch return error.CorruptImage;
-        if (!std.mem.eql(u8, &serialized_version_address, &derived_version_address)) return error.CorruptImage;
-    }
-
-    for (0..@as(usize, workspace_count_value)) |_| {
-        const workspace_id = ids.workspace(try reader.readU64());
-        replayed_id_bounds.noteWorkspace(workspace_id.raw());
-        const slot = workspaces.workspaces.reserveClean(workspace_id) orelse return error.CorruptImage;
-        slot.workspace.mutation_log.ensureBacking() catch {
-            std.debug.assert(workspaces.workspaces.remove(workspace_id));
-            return error.NoSpaceLeft;
-        };
-        slot.workspace.id = workspace_id;
-        slot.workspace.owner = try readPrincipal(&reader);
-        readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
-        slot.workspace.generation = try reader.readU32();
-        slot.workspace.counts.entry_count = try readBoundedCount(workspace.WorkspaceEntryCount, &reader, workspace.MAX_WORKSPACE_ENTRIES);
-        if (slot.workspace.counts.entry_count != 0) {
-            slot.workspace.path_index.ensureEntryBacking() catch {
-                slot.workspace.mutation_log.releaseBacking();
-                std.debug.assert(workspaces.workspaces.remove(workspace_id));
-                return error.NoSpaceLeft;
-            };
-            const entries = slot.workspace.path_index.entries();
-            for (0..slot.workspace.counts.entry_count) |entry_index| {
-                entries[entry_index] = try readEntry(&reader);
-            }
-        }
-        slot.workspace.counts.entry_mutation_count = try readBoundedCount(workspace.WorkspaceMutationCount, &reader, workspace.MAX_WORKSPACE_ENTRY_MUTATIONS);
-        const mutations = slot.workspace.mutation_log.entries();
-        for (0..slot.workspace.counts.entry_mutation_count) |mutation_index| {
-            mutations[mutation_index] = .{
-                .generation = try reader.readU32(),
-                .entry = try readEntry(&reader),
-            };
-        }
-        slot.workspace.counts.share_grant_count = try readBoundedCount(workspace.WorkspaceShareGrantCount, &reader, workspace.MAX_SHARE_GRANTS);
-        if (slot.workspace.counts.share_grant_count != 0) {
-            slot.workspace.share_table.ensureBacking() catch {
-                slot.workspace.mutation_log.releaseBacking();
-                slot.workspace.path_index.releaseEntryBacking();
-                std.debug.assert(workspaces.workspaces.remove(workspace_id));
-                return error.NoSpaceLeft;
-            };
-            const share_table = slot.workspace.share_table.data();
-            for (0..slot.workspace.counts.share_grant_count) |grant_index| {
-                share_table.share_grants[grant_index] = try readShareGrant(&reader);
-            }
-        }
-        slot.workspace.counts.deleted_count = try readBoundedCount(workspace.RecoverableDeleteCount, &reader, workspace.MAX_RECOVERABLE_DELETES);
-        if (slot.workspace.counts.deleted_count != 0) {
-            slot.workspace.recoverable_deletes.ensureBacking() catch {
-                slot.workspace.mutation_log.releaseBacking();
-                slot.workspace.path_index.releaseEntryBacking();
-                slot.workspace.share_table.releaseBacking();
-                std.debug.assert(workspaces.workspaces.remove(workspace_id));
-                return error.NoSpaceLeft;
-            };
-            const deleted_entries = slot.workspace.recoverable_deletes.entries();
-            for (0..slot.workspace.counts.deleted_count) |entry_index| {
-                deleted_entries[entry_index] = try readEntry(&reader);
-            }
-        }
-        workspaces.indexReplayedWorkspaceEntries(&slot.workspace);
-    }
-
-    for (0..@as(usize, snapshot_count_value)) |_| {
-        const snapshot_id = ids.snapshot(try reader.readU64());
-        replayed_id_bounds.noteSnapshot(snapshot_id.raw());
-        const slot_index = workspaces.snapshots.reserveIndexClean(snapshot_id) orelse return error.CorruptImage;
-        workspaces.snapshots.slots[slot_index].snapshot.id = snapshot_id;
-        workspaces.snapshots.slots[slot_index].snapshot.workspace_id = ids.workspace(try reader.readU64());
-        workspaces.snapshots.slots[slot_index].snapshot.generation = try reader.readU32();
-        readTextInto(&reader, &workspaces.snapshots.slots[slot_index].snapshot.label, &workspaces.snapshots.slots[slot_index].snapshot.label_len) catch return error.CorruptImage;
-        try reader.readBytes(&workspaces.snapshots.slots[slot_index].snapshot.root_address);
-        workspaces.snapshots.slots[slot_index].snapshot.signature = try readSignature(self, &reader);
-        workspaces.snapshots.slots[slot_index].snapshot.entry_count = try readBoundedCount(u8, &reader, workspace.MAX_WORKSPACE_ENTRIES);
+    // The checkpoint starts from empty tables, so a repeated identifier would
+    // leave fewer live records than its header declares.
+    if (store.objectCount() != object_count or
+        store.chunkCount() != chunk_count or
+        store.blobCount() != blob_count or
+        store.versionCount() != version_count or
+        workspaces.workspaceCount() != workspace_count_value or
+        workspaces.snapshotCount() != snapshot_count_value)
+    {
+        return error.CorruptImage;
     }
 }
 
@@ -1690,49 +1561,70 @@ fn writeMetadata(writer: *CursorWriter, metadata: object_store.SignedMetadata) E
     try writeSignature(writer, metadata.signature);
 }
 
-fn readMetadata(self: *Volume, reader: *CursorReader) Error!object_store.SignedMetadata {
+fn readMetadata(store: *object_store.Store, reader: *CursorReader) Error!object_store.SignedMetadata {
     var metadata = object_store.SignedMetadata{};
     readTextInto(reader, &metadata.label, &metadata.label_len) catch return error.CorruptImage;
     readTextInto(reader, &metadata.content_type, &metadata.content_type_len) catch return error.CorruptImage;
     metadata.created_at_ticks = try reader.readU64();
-    metadata.signature = try readSignature(self, reader);
+    const decoded = try readSignature(reader);
+    metadata.signature = decoded.signature;
+    if (decoded.present) {
+        // The store only publishes versions with complete signatures, so a
+        // partial one is a damaged record rather than a signer to drop.
+        if (!metadata.signature.isComplete()) return error.InvalidSignatureEncoding;
+        metadata.signature.signer = store.internSigner(decoded.signerSlice()) catch |err| return switch (err) {
+            error.NoSpaceLeft => error.NoSpaceLeft,
+            else => error.InvalidSignatureEncoding,
+        };
+    }
     return metadata;
 }
 
-fn writeSignature(writer: *CursorWriter, signature: anytype) Error!void {
-    if (signature.isPresent()) {
-        const signer = if (signature.signer.len <= max_signer_bytes)
-            signature.signer
-        else
-            "invalid-signer";
-        const public_key_len = @min(@as(usize, signature.public_key_len), signature.public_key.len);
-        const value_len = @min(@as(usize, signature.value_len), signature.value.len);
-        try writer.writeByte(1);
-        try writeText(writer, signer);
-        try writer.writeByte(@intCast(public_key_len));
-        try writer.writeBytes(signature.public_key[0..public_key_len]);
-        try writer.writeByte(@intCast(value_len));
-        try writer.writeBytes(signature.value[0..value_len]);
-        return;
-    }
-    try writer.writeByte(0);
+fn readSnapshotSignature(reader: *CursorReader, snapshot: *workspace.SnapshotRecord) Error!void {
+    const decoded = try readSignature(reader);
+    var signature = decoded.signature;
+    signature.signer = decoded.signerSlice();
+    snapshot.setSignature(signature) catch return error.InvalidSignatureEncoding;
 }
 
-fn readSignature(self: *Volume, reader: *CursorReader) Error!@import("../policy/manifest.zig").Signature {
-    const manifest = @import("../policy/manifest.zig");
-    const present = try reader.readByte();
-    if (present == 0) return .{};
+fn writeSignature(writer: *CursorWriter, signature: manifest.Signature) Error!void {
+    if (!signature.isPresent()) return writer.writeByte(0);
+    if (signature.signer.len > max_signer_bytes) return error.InvalidSignatureEncoding;
+    const public_key_len = @min(@as(usize, signature.public_key_len), signature.public_key.len);
+    const value_len = @min(@as(usize, signature.value_len), signature.value.len);
+    try writer.writeByte(1);
+    try writeText(writer, signature.signer);
+    try writer.writeByte(@intCast(public_key_len));
+    try writer.writeBytes(signature.public_key[0..public_key_len]);
+    try writer.writeByte(@intCast(value_len));
+    try writer.writeBytes(signature.value[0..value_len]);
+}
+
+/// A decoded signature whose signer text still lives in this value; callers
+/// copy it into Store- or record-owned storage before keeping the signature.
+const DecodedSignature = struct {
+    present: bool = false,
+    signature: manifest.Signature = .{},
+    signer_len: u8 = 0,
+    signer: [max_signer_bytes]u8 = @as([max_signer_bytes]u8, @splat(0)),
+
+    fn signerSlice(self: *const DecodedSignature) []const u8 {
+        return self.signer[0..self.signer_len];
+    }
+};
+
+fn readSignature(reader: *CursorReader) Error!DecodedSignature {
+    var decoded = DecodedSignature{};
+    if (try reader.readByte() == 0) return decoded;
+    decoded.present = true;
 
     const signer_len = try reader.readU16();
     if (signer_len > max_signer_bytes) return error.InvalidSignatureEncoding;
-    var signer_storage: [max_signer_bytes]u8 = undefined;
-    try reader.readBytes(signer_storage[0..signer_len]);
-    const signer = try self.internSigner(signer_storage[0..signer_len]);
+    try reader.readBytes(decoded.signer[0..signer_len]);
+    decoded.signer_len = @intCast(signer_len);
 
-    var signature = manifest.Signature{
-        .format = .ed25519,
-        .signer = signer,
-    };
+    const signature = &decoded.signature;
+    signature.format = .ed25519;
     const public_key_len = try reader.readByte();
     if (public_key_len > signature.public_key.len) return error.InvalidSignatureEncoding;
     signature.public_key_len = @intCast(public_key_len);
@@ -1741,7 +1633,7 @@ fn readSignature(self: *Volume, reader: *CursorReader) Error!@import("../policy/
     if (value_len > signature.value.len) return error.InvalidSignatureEncoding;
     signature.value_len = @intCast(value_len);
     try reader.readBytes(signature.value[0..value_len]);
-    return signature;
+    return decoded;
 }
 
 fn writeText(writer: *CursorWriter, text: []const u8) Error!void {
@@ -1766,7 +1658,7 @@ fn writePrincipal(writer: *CursorWriter, principal_id: principal.PrincipalId) Er
 
 fn readPrincipal(reader: *CursorReader) Error!principal.PrincipalId {
     return .{
-        .kind = try parsePrincipalKind(try reader.readByte()),
+        .kind = try reader.readEnum(principal.PrincipalKind),
         .serial = try reader.readU64(),
     };
 }
@@ -1783,61 +1675,8 @@ fn readEntry(reader: *CursorReader) Error!workspace.Entry {
     readTextInto(reader, &entry.path, &entry.path_len) catch return error.CorruptImage;
     entry.object_id = ids.object(try reader.readU64());
     entry.version_id = ids.version(try reader.readU64());
-    entry.object_type = try parseObjectType(try reader.readByte());
+    entry.object_type = try reader.readEnum(object_store.ObjectType);
     return entry;
-}
-
-fn parseObjectType(value: u8) Error!object_store.ObjectType {
-    return switch (value) {
-        @backingInt(object_store.ObjectType.blob) => .blob,
-        @backingInt(object_store.ObjectType.document) => .document,
-        @backingInt(object_store.ObjectType.collection) => .collection,
-        @backingInt(object_store.ObjectType.secret) => .secret,
-        @backingInt(object_store.ObjectType.media_asset) => .media_asset,
-        @backingInt(object_store.ObjectType.model_artifact) => .model_artifact,
-        @backingInt(object_store.ObjectType.event_stream) => .event_stream,
-        else => error.CorruptImage,
-    };
-}
-
-fn parsePrincipalKind(value: u8) Error!principal.PrincipalKind {
-    return switch (value) {
-        @backingInt(principal.PrincipalKind.user) => .user,
-        @backingInt(principal.PrincipalKind.team) => .team,
-        @backingInt(principal.PrincipalKind.device) => .device,
-        @backingInt(principal.PrincipalKind.app) => .app,
-        @backingInt(principal.PrincipalKind.service) => .service,
-        @backingInt(principal.PrincipalKind.policy_authority) => .policy_authority,
-        else => error.CorruptImage,
-    };
-}
-
-fn parseShareNetworkScope(value: u8) Error!workspace.ShareNetworkScope {
-    return switch (value) {
-        @backingInt(workspace.ShareNetworkScope.local_only) => .local_only,
-        @backingInt(workspace.ShareNetworkScope.trusted_overlay) => .trusted_overlay,
-        @backingInt(workspace.ShareNetworkScope.relay_assisted) => .relay_assisted,
-        @backingInt(workspace.ShareNetworkScope.unrestricted) => .unrestricted,
-        else => error.CorruptImage,
-    };
-}
-
-fn parseResharePolicy(value: u8) Error!workspace.ResharePolicy {
-    return switch (value) {
-        @backingInt(workspace.ResharePolicy.owner_only) => .owner_only,
-        @backingInt(workspace.ResharePolicy.admin_only) => .admin_only,
-        @backingInt(workspace.ResharePolicy.grantee_allowed) => .grantee_allowed,
-        else => error.CorruptImage,
-    };
-}
-
-fn parseAuditVisibility(value: u8) Error!workspace.AuditVisibility {
-    return switch (value) {
-        @backingInt(workspace.AuditVisibility.owner_only) => .owner_only,
-        @backingInt(workspace.AuditVisibility.shared_participants) => .shared_participants,
-        @backingInt(workspace.AuditVisibility.organization_policy) => .organization_policy,
-        else => error.CorruptImage,
-    };
 }
 
 fn writeShareGrant(writer: *CursorWriter, grant: workspace.ShareGrant) Error!void {
@@ -1865,9 +1704,9 @@ fn readShareGrant(reader: *CursorReader) Error!workspace.ShareGrant {
         .can_write = (flags & share_grant_flag_write) != 0,
         .can_export = (flags & share_grant_flag_export) != 0,
         .can_admin = (flags & share_grant_flag_admin) != 0,
-        .network_scope = try parseShareNetworkScope(try reader.readByte()),
-        .reshare_policy = try parseResharePolicy(try reader.readByte()),
-        .audit_visibility = try parseAuditVisibility(try reader.readByte()),
+        .network_scope = try reader.readEnum(workspace.ShareNetworkScope),
+        .reshare_policy = try reader.readEnum(workspace.ResharePolicy),
+        .audit_visibility = try reader.readEnum(workspace.AuditVisibility),
         .expires_at_ticks = try reader.readU64(),
     };
     grant.scope_object_id = ids.object(try reader.readU64());
@@ -1875,19 +1714,8 @@ fn readShareGrant(reader: *CursorReader) Error!workspace.ShareGrant {
     return grant;
 }
 
-fn findBlobSlotIndex(store: *const object_store.Store, address: object_store.BlobAddress) ?usize {
-    return store.blobSlotIndex(address);
-}
-
 test "storage volume bounds its log io workspace to one durable data region" {
-    try std.testing.expect(@hasField(Volume, "io_log_buffer"));
-    try std.testing.expect(!@hasField(Volume, "io_payload_buffer"));
     try std.testing.expectEqual(DATA_REGION_BYTES, IO_LOG_WORKSPACE_BYTES);
-    if (heap_backed_io_workspace) {
-        try std.testing.expect(@sizeOf(@FieldType(Volume, "io_log_buffer")) <= @sizeOf(usize));
-    } else {
-        try std.testing.expectEqual(IO_LOG_WORKSPACE_BYTES, @sizeOf(@FieldType(Volume, "io_log_buffer")));
-    }
 }
 
 test "append workspace exhaustion falls back to checkpoint compaction" {
@@ -1945,6 +1773,21 @@ test "checkpoint records accept exact capacity and reject one byte less" {
     try std.testing.expectEqual(@as(u8, 0x5A), record_storage[exact_record_len - 1]);
 }
 
+fn replayChunkPayload(store: *object_store.Store, payload: []const u8) Error!void {
+    var reader = CursorReader{ .buffer = payload };
+    try applyChunkRecord(store, &reader);
+}
+
+fn replayCheckpointPayload(
+    store: *object_store.Store,
+    workspaces: *workspace.Directory,
+    payload: []const u8,
+    bounds: *ReplayIdBounds,
+) Error!void {
+    var reader = CursorReader{ .buffer = payload };
+    try deserializeState(store, workspaces, &reader, bounds);
+}
+
 test "chunk replay owns its input and rejects truncated oversized and corrupt payloads" {
     const allocator = std.testing.allocator;
     const store = try allocator.create(object_store.Store);
@@ -1962,7 +1805,7 @@ test "chunk replay owns its input and rejects truncated oversized and corrupt pa
         try writer.writeBytes(&address);
         try writer.writeU16(@intCast(payload_len));
         try writer.writeBytes(expected[0..payload_len]);
-        try applyChunkRecord(store, record[0..writer.offset]);
+        try replayChunkPayload(store, record[0..writer.offset]);
         try std.testing.expectEqual(@as(usize, 1), store.chunkCount());
 
         @memset(record[32 + 2 .. writer.offset], 0xFF);
@@ -1975,16 +1818,16 @@ test "chunk replay owns its input and rejects truncated oversized and corrupt pa
     try writer.writeBytes(&address);
     try writer.writeU16(object_store.MAX_CHUNK_BYTES);
     try writer.writeBytes(&expected);
-    try std.testing.expectError(error.CorruptImage, applyChunkRecord(store, record[0 .. writer.offset - 1]));
+    try std.testing.expectError(error.CorruptImage, replayChunkPayload(store, record[0 .. writer.offset - 1]));
     try std.testing.expectEqual(@as(usize, 0), store.chunkCount());
 
     record[32 + 2] ^= 1;
-    try std.testing.expectError(error.CorruptImage, applyChunkRecord(store, record[0..writer.offset]));
+    try std.testing.expectError(error.CorruptImage, replayChunkPayload(store, record[0..writer.offset]));
     try std.testing.expectEqual(@as(usize, 0), store.chunkCount());
 
     writer.offset = 32;
     try writer.writeU16(object_store.MAX_CHUNK_BYTES + 1);
-    try std.testing.expectError(error.CorruptImage, applyChunkRecord(store, record[0..writer.offset]));
+    try std.testing.expectError(error.CorruptImage, replayChunkPayload(store, record[0..writer.offset]));
     try std.testing.expectEqual(@as(usize, 0), store.chunkCount());
 }
 
@@ -2001,9 +1844,6 @@ test "checkpoint chunk replay owns its input and preserves payload validation" {
     const workspaces = try allocator.create(workspace.Directory);
     defer allocator.destroy(workspaces);
     workspaces.* = workspace.Directory.init();
-    const volume = try allocator.create(Volume);
-    defer allocator.destroy(volume);
-    volume.* = Volume.init();
 
     var expected: [object_store.MAX_CHUNK_BYTES]u8 = undefined;
     for (&expected, 0..) |*byte, index| byte.* = @truncate(index * 23 + index / 17);
@@ -2014,20 +1854,20 @@ test "checkpoint chunk replay owns its input and preserves payload validation" {
     const bytes_offset = payload_len - expected.len;
     var bounds = ReplayIdBounds{};
 
-    try std.testing.expectError(error.CorruptImage, deserializeState(volume, restored, workspaces, payload[0 .. payload_len - 1], &bounds));
+    try std.testing.expectError(error.CorruptImage, replayCheckpointPayload(restored, workspaces, payload[0 .. payload_len - 1], &bounds));
     try std.testing.expectEqual(@as(usize, 0), restored.chunkCount());
 
     payload[bytes_offset] ^= 1;
-    try std.testing.expectError(error.CorruptImage, deserializeState(volume, restored, workspaces, payload[0..payload_len], &bounds));
+    try std.testing.expectError(error.CorruptImage, replayCheckpointPayload(restored, workspaces, payload[0..payload_len], &bounds));
     try std.testing.expectEqual(@as(usize, 0), restored.chunkCount());
     payload[bytes_offset] ^= 1;
 
     std.mem.writeInt(u16, payload[bytes_offset - 2 ..][0..2], object_store.MAX_CHUNK_BYTES + 1, .little);
-    try std.testing.expectError(error.CorruptImage, deserializeState(volume, restored, workspaces, payload[0..payload_len], &bounds));
+    try std.testing.expectError(error.CorruptImage, replayCheckpointPayload(restored, workspaces, payload[0..payload_len], &bounds));
     try std.testing.expectEqual(@as(usize, 0), restored.chunkCount());
     std.mem.writeInt(u16, payload[bytes_offset - 2 ..][0..2], object_store.MAX_CHUNK_BYTES, .little);
 
-    try deserializeState(volume, restored, workspaces, payload[0..payload_len], &bounds);
+    try replayCheckpointPayload(restored, workspaces, payload[0..payload_len], &bounds);
     @memset(payload[bytes_offset..payload_len], 0xFF);
     try std.testing.expectEqual(@as(usize, 1), restored.chunkCount());
     try std.testing.expectEqualSlices(u8, &expected, restored.chunk(address).?.chunkSlice());
@@ -2048,7 +1888,7 @@ test "storage replay requires exactly one leading checkpoint" {
     defer allocator.destroy(workspaces);
     workspaces.* = workspace.Directory.init();
 
-    const checkpoint_payload = try allocator.alloc(u8, max_payload_bytes);
+    const checkpoint_payload = try allocator.alloc(u8, DATA_REGION_BYTES);
     defer allocator.free(checkpoint_payload);
     const checkpoint_payload_len = try serializeState(store, workspaces, checkpoint_payload);
     const log = try allocator.alloc(u8, 2 * (volume_log.recordHeaderLen() + checkpoint_payload_len));
@@ -2087,6 +1927,13 @@ test "storage replay requires exactly one leading checkpoint" {
     ));
 }
 
+fn ensureTestWorkspaceBackings(record: *workspace.WorkspaceRecord) !void {
+    try record.path_index.ensureEntryBacking();
+    try record.mutation_log.ensureBacking();
+    try record.share_table.ensureBacking();
+    try record.recoverable_deletes.ensureBacking();
+}
+
 test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     const allocator = std.testing.allocator;
     const workspaces = try allocator.create(workspace.Directory);
@@ -2097,6 +1944,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
         .owner = .{ .kind = .user, .serial = 41 },
         .label = "live-workspace",
     });
+    try ensureTestWorkspaceBackings(live);
     live.counts.entry_count = 2;
     live.path_index.entries()[0] = try workspace.Entry.init("documents/keep.md", ids.object(1), ids.version(1), .document);
     live.path_index.entries()[1] = try workspace.Entry.init("documents/retired.md", ids.object(2), ids.version(2), .document);
@@ -2123,6 +1971,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
         .owner = live.owner,
         .label = "replacement-workspace",
     });
+    try ensureTestWorkspaceBackings(replacement);
     replacement.generation = 7;
     replacement.counts.entry_count = 1;
     replacement.path_index.entries()[0] = try workspace.Entry.init("documents/current.md", ids.object(4), ids.version(4), .document);
@@ -2133,11 +1982,12 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     replacement.counts.deleted_count = 1;
     replacement.recoverable_deletes.entries()[0] = replacement.path_index.entries()[0];
 
-    const payload = try allocator.alloc(u8, max_payload_bytes);
+    const payload = try allocator.alloc(u8, DATA_REGION_BYTES);
     defer allocator.free(payload);
     var writer = CursorWriter{ .buffer = payload };
     try encodeWorkspaceBody(&writer, replacement);
-    _ = try applyWorkspaceRecord(workspaces, payload[0..writer.offset]);
+    var reader = CursorReader{ .buffer = payload[0..writer.offset] };
+    _ = try applyWorkspaceRecord(workspaces, &reader);
 
     try std.testing.expectEqualStrings("replacement-workspace", live.labelSlice());
     try std.testing.expectEqual(@as(u32, 7), live.generation);
@@ -2154,8 +2004,6 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
 }
 
 test "inline replay ID bounds preserve root watermark validation" {
-    try std.testing.expect(TRACKS_REPLAY_ID_BOUNDS_INLINE);
-
     var bounds = ReplayIdBounds{};
     bounds.noteObject(4);
     bounds.noteObject(8);
@@ -2211,51 +2059,57 @@ test "storage append rejects issuance watermark rewind" {
     try std.testing.expect(!canAppendToRoot(.{ .next_snapshot_id = 2 }, store, workspaces));
 }
 
-test "storage volume interns repeated signer labels within a bounded pool" {
-    try std.testing.expectEqual(SIGNER_TEXT_POOL_BYTES, signer_text_layout.pool_size_bytes);
-    try std.testing.expectEqual(@sizeOf(?*anyopaque), signer_text_layout.freestanding_handle_size_bytes);
-    try std.testing.expect(signer_text_layout.heap_backs_pool_on_freestanding);
-
-    var volume = Volume.init();
-    const first = try volume.internSigner("persistent-key");
-    const repeated = try volume.internSigner("persistent-key");
-    try std.testing.expect(first.ptr == repeated.ptr);
-    try std.testing.expectEqualStrings(first, repeated);
-    try std.testing.expectEqual(@as(u16, 1 + "persistent-key".len), volume.signer_text_len);
-
-    var overflowed = false;
-    const attempts = SIGNER_TEXT_POOL_BYTES / (max_signer_bytes + 1) + 2;
-    for (0..attempts) |index| {
-        var signer = @as([max_signer_bytes]u8, @splat('s'));
-        std.mem.writeInt(u32, signer[0..@sizeOf(u32)], @intCast(index), .little);
-        _ = volume.internSigner(&signer) catch |err| {
-            try std.testing.expect(err == error.InvalidSignatureEncoding);
-            overflowed = true;
-            break;
-        };
-    }
-    try std.testing.expect(overflowed);
-    try std.testing.expect(@as(usize, volume.signer_text_len) <= volume.signer_text_pool.len);
+test "signatures with overlong signers fail to encode instead of being rewritten" {
+    var buffer: [256]u8 = undefined;
+    var writer = CursorWriter{ .buffer = &buffer };
+    var signature = manifest.Signature{ .public_key_len = 32, .value_len = 64 };
+    signature.signer = &(@as([max_signer_bytes + 1]u8, @splat('s')));
+    try std.testing.expectError(error.InvalidSignatureEncoding, writeSignature(&writer, signature));
+    signature.signer = &(@as([max_signer_bytes]u8, @splat('s')));
+    try writeSignature(&writer, signature);
+    var reader = CursorReader{ .buffer = buffer[0..writer.offset] };
+    const decoded = try readSignature(&reader);
+    try std.testing.expectEqualStrings(signature.signer, decoded.signerSlice());
 }
 
-test "storage volume signer reset scrubs only interned text" {
-    var volume = Volume.init();
-    _ = try volume.internSigner("persistent-key");
-    const used: usize = volume.signer_text_len;
-    volume.signer_text_pool[used] = 0xa5;
+test "version metadata replay rejects partial signatures instead of dropping the signer" {
+    const store = try std.testing.allocator.create(object_store.Store);
+    defer std.testing.allocator.destroy(store);
+    store.* = object_store.Store.init();
+    defer store.reset();
+    const complete = try object_store.signMetadata(
+        .{ .label = "replayed-signer", .seed = @splat(0x31) },
+        "notes",
+        "text/plain",
+        .document,
+        "notes",
+        1,
+    );
+    var partial = [_]object_store.SignedMetadata{ complete, complete, complete };
+    partial[0].signature.public_key_len = 0;
+    partial[0].signature.value_len = 0;
+    partial[1].signature.value_len -= 1;
+    partial[2].signature.signer = "";
+    for (partial) |metadata| {
+        var buffer: [512]u8 = undefined;
+        var writer = CursorWriter{ .buffer = &buffer };
+        try writeMetadata(&writer, metadata);
+        var reader = CursorReader{ .buffer = buffer[0..writer.offset] };
+        try std.testing.expectError(error.InvalidSignatureEncoding, readMetadata(store, &reader));
+    }
+    try std.testing.expectEqual(@as(u8, 0), store.signers.count);
 
-    volume.resetSignerText();
-
-    try std.testing.expectEqual(@as(u16, 0), volume.signer_text_len);
-    try std.testing.expect(std.mem.allEqual(u8, volume.signer_text_pool[0..used], 0));
-    try std.testing.expectEqual(@as(u8, 0xa5), volume.signer_text_pool[used]);
+    var buffer: [512]u8 = undefined;
+    var writer = CursorWriter{ .buffer = &buffer };
+    try writeMetadata(&writer, complete);
+    var reader = CursorReader{ .buffer = buffer[0..writer.offset] };
+    const replayed = try readMetadata(store, &reader);
+    try std.testing.expectEqualStrings("replayed-signer", replayed.signature.signer);
+    try std.testing.expect(replayed.signature.signer.ptr != complete.signature.signer.ptr);
+    try std.testing.expectEqual(@as(u8, 1), store.signers.count);
 }
 
 pub const testing = struct {
-    pub fn signerTextBytes() usize {
-        return default_volume.signer_text_len;
-    }
-
     pub fn latestImageLogBytes(image: []const u8) Error!u32 {
         return (try volume_root_slot.findLatestImageRoot(image)).?.root.log_bytes;
     }

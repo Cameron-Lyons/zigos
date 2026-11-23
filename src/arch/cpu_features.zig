@@ -2,48 +2,33 @@ const x86 = @import("x86.zig");
 pub const baseline = @import("cpu_baseline.zig");
 pub const cache_policy = @import("cache_policy.zig");
 
+// The loader requires the firmware's power-on PAT before handing off.
 pub inline fn validateBootstrapCache() cache_policy.AdmissionError!void {
     try cache_policy.validateBootstrap(x86.readBootstrapCacheState());
+}
+
+// The entry assembly admitted the firmware PAT and programmed the native one.
+pub inline fn validateNativeCache() cache_policy.AdmissionError!void {
+    try cache_policy.validateNative(x86.readBootstrapCacheState());
 }
 
 pub const CacheAdmissionError = cache_policy.CacheAdmissionError;
 
 pub inline fn initializeNativeCachePolicy() CacheAdmissionError!void {
-    try validateBootstrapCache();
+    try validateNativeCache();
     var state: cache_policy.MtrrState = undefined;
     try x86.readMtrrStateInto(&state);
     try cache_policy.initializeBsp(&state);
 }
 
 pub inline fn admitApplicationProcessorCache() CacheAdmissionError!void {
-    try validateBootstrapCache();
+    try validateNativeCache();
     var state: cache_policy.MtrrState = undefined;
     try x86.readMtrrStateInto(&state);
     try cache_policy.admitApplicationProcessor(&state);
 }
 
-const CpuidResult = struct {
-    eax: u32,
-    ebx: u32,
-    ecx: u32,
-    edx: u32,
-};
-
-fn cpuid(leaf: u32, subleaf: u32) CpuidResult {
-    var eax: u32 = undefined;
-    var ebx: u32 = undefined;
-    var ecx: u32 = undefined;
-    var edx: u32 = undefined;
-    asm volatile ("cpuid"
-        : [eax] "={eax}" (eax),
-          [ebx] "={ebx}" (ebx),
-          [ecx] "={ecx}" (ecx),
-          [edx] "={edx}" (edx),
-        : [leaf] "{eax}" (leaf),
-          [subleaf] "{ecx}" (subleaf),
-    );
-    return .{ .eax = eax, .ebx = ebx, .ecx = ecx, .edx = edx };
-}
+const cpuid = x86.cpuid;
 
 pub fn clflushLineBytes() ?usize {
     const leaf = cpuid(1, 0);
@@ -66,7 +51,7 @@ test "VT-d cache maintenance requires a valid advertised CLFLUSH line" {
 }
 
 pub fn detect() baseline.Features {
-    var registers = baseline.Registers{ .cpuid_available = true };
+    var registers = baseline.Registers{};
     registers.max_basic_leaf = cpuid(0, 0).eax;
     if (registers.max_basic_leaf >= 1) {
         const leaf1 = cpuid(1, 0);
@@ -123,51 +108,16 @@ pub const CetMode = enum {
     deferred,
 };
 
-pub const FeatureMode = enum {
-    hardware,
-    explicit_model,
-};
-
-pub fn firstMissingForEnablement(
-    features: baseline.Features,
-    process_context_mode: ProcessContextMode,
-    cet_mode: CetMode,
-    feature_mode: FeatureMode,
-) ?baseline.MissingFeature {
-    var required_features = features;
-    switch (feature_mode) {
-        .hardware => {
-            if (process_context_mode != .hardware_pcid) return .pcid;
-            if (cet_mode != .hardware) return .cet_ibt;
-        },
-        .explicit_model => {
-            if (process_context_mode == .software_flush) {
-                required_features.pcid = true;
-                required_features.invpcid = true;
-            }
-            if (cet_mode == .deferred) {
-                required_features.cet_ibt = true;
-                required_features.cet_ss = true;
-            }
-            required_features.lass = true;
-            required_features.fred = true;
-            required_features.lkgs = true;
-            required_features.tsc_deadline = true;
-            required_features.invariant_tsc = true;
-        },
-    }
-    return baseline.firstMissing(required_features);
-}
-
+// Admission (cpu_policy.AdmissionPolicy.firstMissing) has already accepted
+// these features and modes for this CPU. Every guard and control readback
+// below still halts instead of becoming an optimizer assumption.
 pub fn enableModernFeatures(
     features: baseline.Features,
     process_context_mode: ProcessContextMode,
     cet_mode: CetMode,
-    feature_mode: FeatureMode,
 ) void {
-    if (firstMissingForEnablement(features, process_context_mode, cet_mode, feature_mode) != null) unreachable;
     x86.enableNoExecute();
-    if (!x86.noExecuteEnabled()) unreachable;
+    if (!x86.noExecuteEnabled()) x86.haltFatal();
     var cr4 = x86.readCr4();
     cr4 |= x86.CR4_PGE;
     cr4 |= x86.CR4_SMEP;
@@ -177,74 +127,26 @@ pub fn enableModernFeatures(
     // UEFI specifies DF, but leaves AC undefined. Close inherited user-memory
     // access before treating SMAP or later LASS activation as enforced.
     x86.forbidSupervisorUserMemory();
-    if (!x86.globalPagesEnabled()) unreachable;
-    if (!x86.supervisorAccessPreventionEnabled()) unreachable;
+    if (!x86.globalPagesEnabled()) x86.haltFatal();
+    if (!x86.supervisorAccessPreventionEnabled()) x86.haltFatal();
     if (process_context_mode == .hardware_pcid) {
-        if (!features.pcid or !features.invpcid) unreachable;
+        if (!features.pcid or !features.invpcid) x86.haltFatal();
         x86.enableProcessContextIdentifiers();
-        if (!x86.processContextIdentifiersEnabled()) unreachable;
+        if (!x86.processContextIdentifiersEnabled()) x86.haltFatal();
     }
-    if (!features.xsave or !features.xsaves) unreachable;
+    if (!features.xsave or !features.xsaves) x86.haltFatal();
     x86.enableXsaves();
-    if (!x86.xsavesEnabled()) unreachable;
+    if (!x86.xsavesEnabled()) x86.haltFatal();
     if (cet_mode == .hardware) {
-        if (!features.cet_ibt or !features.cet_ss) unreachable;
+        if (!features.cet_ibt or !features.cet_ss) x86.haltFatal();
         x86.enableCet();
-        if (!x86.cetEnabled()) unreachable;
+        if (!x86.cetEnabled()) x86.haltFatal();
     }
     if (features.pku) {
         x86.enablePku();
-        if (!x86.pkuEnabled()) unreachable;
+        if (!x86.pkuEnabled()) x86.haltFatal();
     }
     // LASS still belongs to the mandatory hardware admission floor. Its CR4
     // activation waits until this CPU owns upper-half descriptor/native entry
     // state; inherited firmware GDTR/IDTR addresses may remain in the low half.
-}
-
-test "explicit model enablement accepts only its selected software controls" {
-    var features = baseline.completeFeatures();
-    features.pcid = false;
-    features.invpcid = false;
-    features.cet_ibt = false;
-    features.cet_ss = false;
-    features.lass = false;
-    features.fred = false;
-    features.lkgs = false;
-    features.tsc_deadline = false;
-    features.invariant_tsc = false;
-    try @import("std").testing.expectEqual(@as(?baseline.MissingFeature, null), firstMissingForEnablement(features, .software_flush, .deferred, .explicit_model));
-    try @import("std").testing.expectEqual(@as(?baseline.MissingFeature, .pcid), firstMissingForEnablement(features, .hardware_pcid, .deferred, .explicit_model));
-    features.pcid = true;
-    features.invpcid = true;
-    try @import("std").testing.expectEqual(@as(?baseline.MissingFeature, .cet_ibt), firstMissingForEnablement(features, .hardware_pcid, .hardware, .explicit_model));
-}
-
-test "hardware enablement rejects missing mandatory controls and software policy" {
-    const std = @import("std");
-    var features = baseline.completeFeatures();
-    try std.testing.expectEqual(@as(?baseline.MissingFeature, null), firstMissingForEnablement(features, .hardware_pcid, .hardware, .hardware));
-    try std.testing.expectEqual(@as(?baseline.MissingFeature, .pcid), firstMissingForEnablement(features, .software_flush, .hardware, .hardware));
-    try std.testing.expectEqual(@as(?baseline.MissingFeature, .cet_ibt), firstMissingForEnablement(features, .hardware_pcid, .deferred, .hardware));
-    features.lass = false;
-    try std.testing.expectEqual(@as(?baseline.MissingFeature, .lass), firstMissingForEnablement(features, .hardware_pcid, .hardware, .hardware));
-    features.lass = true;
-    features.fred = false;
-    try std.testing.expectEqual(@as(?baseline.MissingFeature, .fred), firstMissingForEnablement(features, .hardware_pcid, .hardware, .hardware));
-    features.fred = true;
-    features.tsc_deadline = false;
-    try std.testing.expectEqual(@as(?baseline.MissingFeature, .tsc), firstMissingForEnablement(features, .hardware_pcid, .hardware, .hardware));
-}
-
-test "every enablement mode requires real XSAVES and a selected clock" {
-    const std = @import("std");
-    for ([_]FeatureMode{ .hardware, .explicit_model }) |mode| {
-        inline for ([_]baseline.MissingFeature{ .cpuid, .sse2, .long_mode, .sse3, .ssse3, .sse4_1, .sse4_2, .popcnt, .cx16, .lahf_sahf, .avx, .avx2, .f16c, .fma, .movbe, .bmi1, .bmi2, .lzcnt, .aes, .pclmul, .sha, .ymm_state, .syscall, .nx, .smep, .smap, .umip, .pge, .x2apic, .xsave, .xsaves, .pages_1g, .rdseed, .rdpid }) |required| {
-            var missing = baseline.completeFeatures();
-            @field(missing, @tagName(required)) = false;
-            try std.testing.expectEqual(@as(?baseline.MissingFeature, required), firstMissingForEnablement(missing, .hardware_pcid, .hardware, mode));
-        }
-        var features = baseline.completeFeatures();
-        features.tsc_frequency_hz = 0;
-        try std.testing.expectEqual(@as(?baseline.MissingFeature, .tsc), firstMissingForEnablement(features, .hardware_pcid, .hardware, mode));
-    }
 }

@@ -1,5 +1,5 @@
 const std = @import("std");
-const text_layout = @import("text_layout").layout;
+const text_layout = @import("host_benchmarks").text_layout;
 
 const DOCUMENT_BYTES = 512;
 const COLUMNS = 40;

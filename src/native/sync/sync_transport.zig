@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const transport_crypto = @import("../core/transport_crypto.zig");
 const attestation_service = @import("../platform/attestation_service.zig");
@@ -7,21 +6,15 @@ const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const device_graph = @import("device_graph.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");
-const hardware_target = @import("../platform/hardware_target.zig");
 const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
-const intel_i225 = @import("../../kernel/drivers/intel_i225.zig");
-const manifest = @import("../policy/manifest.zig");
-const measured_boot = @import("../platform/measured_boot.zig");
 const network_driver_task = @import("../drivers/network_driver_task.zig");
 const network_policy = @import("network_policy.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+const tpm_quote = @import("../platform/tpm2_quote.zig");
 const sync_state = @import("sync_state_support.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/memory/memory.zig")
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 pub const harness = @import("sync_transport_harness.zig");
 
@@ -32,21 +25,18 @@ pub const SignedEncryptedFrame = harness.SignedEncryptedFrame;
 pub const Relay = harness.Relay;
 pub const BootedOverlayRelayService = harness.BootedOverlayRelayService;
 pub const TransportSession = harness.TransportSession;
-pub const VerifiedServiceIdentityOpenRequest = harness.VerifiedServiceIdentityOpenRequest;
 pub const Harness = harness.Harness;
 pub const TelemetryCount = harness.TelemetryCount;
-pub const EmulatedNativeTransport = harness.EmulatedNativeTransport;
 pub const signPacket = harness.signPacket;
 pub const verifySignedFrame = harness.verifySignedFrame;
 pub const decryptForSession = harness.decryptForSession;
 pub const decryptSignedFrame = harness.decryptSignedFrame;
 
-pub const Error = harness.Error || endpoint.Error || network_driver_task.Error || error{
+pub const Error = harness.Error || endpoint.Error || error{
     NativeTransportCongested,
     NativeTransportDisconnected,
     NativeTransportDeviceRevoked,
     NativeTransportFrameMissing,
-    NativeTransportHardwareProofMissing,
     NativeTransportMalformedFrame,
     NativeTransportReplayRejected,
     NativeTransportSequenceExhausted,
@@ -56,21 +46,11 @@ pub const Error = harness.Error || endpoint.Error || network_driver_task.Error |
 pub const MAX_CAPTURED_PACKETS: usize = 16;
 pub const MAX_NATIVE_IN_FLIGHT_FRAMES: usize = 4;
 pub const NATIVE_TRANSPORT_ABI_VERSION: u16 = 4;
-pub const COMPACT_CAPTURE_METADATA = true;
-pub const DERIVES_CAPTURE_METADATA_FROM_ARENA_STATE = true;
-pub const HEAP_BACKED_PACKET_CAPTURE_ON_FREESTANDING = true;
-pub const HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING = true;
-pub const COMPACT_NATIVE_RESULT_METADATA = true;
 pub const NativePayloadLength = u8;
 pub const ObjectSharePayloadLength = u16;
 pub const CAPTURED_PACKET_SIZE_CEILING_BYTES: usize = 272;
 pub const PACKET_CAPTURE_SIZE_CEILING_BYTES: usize = 4_808;
-pub const HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 16_264;
-pub const FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 128;
-pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
-    FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES
-else
-    HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES;
+pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 104;
 pub const NATIVE_DELIVERY_SIZE_CEILING_BYTES: usize = 520;
 pub const OBJECT_SHARE_ENVELOPE_SIZE_CEILING_BYTES: usize = 288;
 const NativeFrameWriter = binary_cursor.Writer(Error, error.PacketTooLarge);
@@ -141,30 +121,6 @@ pub const CapturedFrameExpectation = struct {
     forbidden_plaintext: []const u8 = "",
 };
 
-pub const IntelI225TransportProof = struct {
-    evidence: hardware_target.EvidenceSummary,
-    ring_plan: intel_i225.RingPlan,
-    packet_proof: intel_i225.PacketProof,
-    kernel_data_plane_disabled: bool = intel_i225.network_data_plane_exports_fail_closed,
-    i225_driver_present: bool = true,
-
-    pub fn satisfied(self: IntelI225TransportProof) bool {
-        if (!self.kernel_data_plane_disabled or !self.i225_driver_present) return false;
-        intel_i225.validateRingPlan(self.ring_plan) catch return false;
-        if (!self.packet_proof.verified()) return false;
-        if (!sameRingPlan(self.ring_plan, self.packet_proof.ring_plan)) return false;
-        if (self.packet_proof.tx_rx_cycles < hardware_target.first_supported_target.proof_minimums.network_frame_cycles) return false;
-        return hardware_target.hardwareProofSatisfied(&hardware_target.first_supported_target, self.evidence);
-    }
-};
-
-fn sameRingPlan(left: intel_i225.RingPlan, right: intel_i225.RingPlan) bool {
-    return left.rx_descriptors == right.rx_descriptors and
-        left.tx_descriptors == right.tx_descriptors and
-        left.rx_ring_address == right.rx_ring_address and
-        left.tx_ring_address == right.tx_ring_address;
-}
-
 pub const CapturedPacket = struct {
     in_use: bool = false,
     packet_id: u64 = 0,
@@ -229,11 +185,7 @@ pub const PacketCapture = struct {
         return self.packets.getConst(packetIdBefore(self.next_packet_id));
     }
 
-    fn initializeAllocated(self: *PacketCapture) void {
-        @memset(std.mem.asBytes(self), 0);
-        const no_packet_index = indexed_arena.reusableNoIndex(MAX_CAPTURED_PACKETS);
-        @memset(self.packets.free_next[0..], no_packet_index);
-        self.packets.free_head = no_packet_index;
+    fn initializeZeroed(self: *PacketCapture) void {
         self.next_packet_id = 1;
     }
 
@@ -244,40 +196,19 @@ pub const PacketCapture = struct {
     }
 };
 
-const heap_backed_packet_capture = HEAP_BACKED_PACKET_CAPTURE_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
-const PacketCaptureBacking = if (heap_backed_packet_capture) ?*PacketCapture else PacketCapture;
-
 pub const TransportPacketCapture = struct {
-    backing: PacketCaptureBacking = if (heap_backed_packet_capture) null else .{},
-
-    fn ensureBacking(self: *TransportPacketCapture) error{NoSpaceLeft}!void {
-        if (comptime heap_backed_packet_capture) {
-            if (self.backing != null) return;
-            const allocation = kernel_memory.kmalloc(@sizeOf(PacketCapture)) orelse return error.NoSpaceLeft;
-            const backing: *PacketCapture = @ptrCast(@alignCast(allocation));
-            backing.initializeAllocated();
-            self.backing = backing;
-        }
-    }
-
-    fn state(self: *TransportPacketCapture) *PacketCapture {
-        if (comptime heap_backed_packet_capture) return self.backing orelse unreachable;
-        return &self.backing;
-    }
+    backing: table_backing.Lazy(PacketCapture, PacketCapture.initializeZeroed) = .{},
 
     fn stateConst(self: *const TransportPacketCapture) ?*const PacketCapture {
-        if (comptime heap_backed_packet_capture) return self.backing;
-        return &self.backing;
+        return self.backing.get();
     }
 
     pub fn ensureCapacity(self: *TransportPacketCapture) Error!void {
-        try self.ensureBacking();
-        try self.state().ensureCapacity();
+        try (try self.backing.ensure()).ensureCapacity();
     }
 
     pub fn record(self: *TransportPacketCapture, frame: []const u8) Error!void {
-        try self.ensureBacking();
-        try self.state().record(frame);
+        try (try self.backing.ensure()).record(frame);
     }
 
     pub fn capturedCount(self: *const TransportPacketCapture) usize {
@@ -306,37 +237,12 @@ pub const TransportPacketCapture = struct {
     }
 
     pub fn reset(self: *TransportPacketCapture) void {
-        if (comptime heap_backed_packet_capture) {
-            if (self.backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
-                self.backing = null;
-            }
-        } else {
-            self.backing = .{};
-        }
+        self.backing.release();
     }
 
     pub fn deinit(self: *TransportPacketCapture) void {
         self.reset();
     }
-};
-
-pub const transport_packet_capture_layout = .{
-    .heap_backs_capture_on_freestanding = HEAP_BACKED_PACKET_CAPTURE_ON_FREESTANDING,
-    .freestanding_handle_size_bytes = @sizeOf(?*PacketCapture),
-    .backing_size_bytes = @sizeOf(PacketCapture),
-    .freestanding_resident_savings_bytes = @sizeOf(PacketCapture) - @sizeOf(?*PacketCapture),
-};
-
-const heap_backed_endpoint_table = HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
-const EndpointTableBacking = if (heap_backed_endpoint_table) ?*endpoint.Table else endpoint.Table;
-
-pub const transport_endpoint_table_layout = .{
-    .heap_backs_table_on_freestanding = HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING,
-    .freestanding_handle_size_bytes = @sizeOf(?*endpoint.Table),
-    .freestanding_backing_size_bytes = endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES,
-    .freestanding_resident_savings_bytes = endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES - @sizeOf(?*endpoint.Table),
 };
 
 fn packetIdAfter(packet_id: u64) u64 {
@@ -360,10 +266,6 @@ pub const NativeConnection = struct {
     highest_sent_sequence: u64 = 0,
     highest_delivered_sequence: u64 = 0,
     in_flight_frames: usize = 0,
-
-    pub fn isConnected(self: *const NativeConnection) bool {
-        return self.connected;
-    }
 
     pub fn deinit(self: *NativeConnection) void {
         self.session.deinit();
@@ -408,7 +310,7 @@ pub const ObjectShareEnvelope = struct {
 
 pub const NativeTransportService = struct {
     harness: Harness = Harness.init(),
-    endpoints: EndpointTableBacking = if (heap_backed_endpoint_table) null else endpoint.Table.init(),
+    endpoints: table_backing.Lazy(endpoint.Table, null) = .{},
     capture: TransportPacketCapture = .{},
     peer_links: network_driver_task.PeerLinkDirectory = .{},
     opened_connections: TelemetryCount = 0,
@@ -422,14 +324,6 @@ pub const NativeTransportService = struct {
     revoked_device_rejection_count: TelemetryCount = 0,
     peer_address_miss_count: TelemetryCount = 0,
     production_attested_sessions_required: bool = false,
-    i225_proof_required: bool = false,
-    i225_proof_attached: bool = false,
-    i225_proof_cycles: u16 = 0,
-    i225_tx_tail_register_writes: u32 = 0,
-    i225_rx_tail_register_writes: u32 = 0,
-    i225_interrupt_cause_reads: u32 = 0,
-    i225_link_speed_mbps: u32 = 0,
-    i225_mac_address: [6]u8 = @as([6]u8, @splat(0)),
     trust_graph: ?*const device_graph.Graph = null,
 
     pub fn init() NativeTransportService {
@@ -443,33 +337,16 @@ pub const NativeTransportService = struct {
     }
 
     fn ensureEndpointTable(self: *NativeTransportService) error{NoSpaceLeft}!*endpoint.Table {
-        if (comptime heap_backed_endpoint_table) {
-            if (self.endpoints) |table| return table;
-            const allocation = kernel_memory.kmalloc(@sizeOf(endpoint.Table)) orelse return error.NoSpaceLeft;
-            const table: *endpoint.Table = @ptrCast(@alignCast(allocation));
-            table.initializeAllocated();
-            self.endpoints = table;
-            return table;
-        }
-        return &self.endpoints;
+        return self.endpoints.ensure();
     }
 
     fn endpointTable(self: *NativeTransportService) error{EndpointNotFound}!*endpoint.Table {
-        if (comptime heap_backed_endpoint_table) return self.endpoints orelse error.EndpointNotFound;
-        return &self.endpoints;
+        return self.endpoints.get() orelse error.EndpointNotFound;
     }
 
     fn releaseEndpointTable(self: *NativeTransportService) void {
-        if (comptime heap_backed_endpoint_table) {
-            if (self.endpoints) |table| {
-                table.deinit();
-                @memset(std.mem.asBytes(table), 0);
-                kernel_memory.kfree(@ptrCast(table));
-                self.endpoints = null;
-            }
-        } else {
-            self.endpoints.deinit();
-        }
+        if (self.endpoints.get()) |table| table.deinit();
+        self.endpoints.release();
     }
 
     comptime {
@@ -490,35 +367,8 @@ pub const NativeTransportService = struct {
         try self.peer_links.bind(device, mac);
     }
 
-    pub fn requireIntelI225Proof(self: *NativeTransportService) void {
-        self.i225_proof_required = true;
-    }
-
     pub fn requireProductionAttestedSessions(self: *NativeTransportService) void {
         self.production_attested_sessions_required = true;
-    }
-
-    pub fn intelI225NetworkReady(self: *const NativeTransportService) bool {
-        const minimum = hardware_target.first_supported_target.proof_minimums.network_frame_cycles;
-        const expected_interrupts = @as(u32, minimum) * 2;
-        return self.i225_proof_attached and
-            self.i225_proof_cycles >= minimum and
-            self.i225_tx_tail_register_writes >= minimum and
-            self.i225_rx_tail_register_writes >= minimum and
-            self.i225_interrupt_cause_reads >= expected_interrupts and
-            self.i225_link_speed_mbps != 0 and
-            macAddressPresent(self.i225_mac_address);
-    }
-
-    pub fn attachIntelI225Proof(self: *NativeTransportService, proof: IntelI225TransportProof) Error!void {
-        if (!proof.satisfied()) return error.NativeTransportHardwareProofMissing;
-        self.i225_proof_attached = true;
-        self.i225_proof_cycles = proof.packet_proof.tx_rx_cycles;
-        self.i225_tx_tail_register_writes = proof.packet_proof.mmio.tx_tail_register_writes;
-        self.i225_rx_tail_register_writes = proof.packet_proof.mmio.rx_tail_register_writes;
-        self.i225_interrupt_cause_reads = proof.packet_proof.mmio.interrupt_cause_reads;
-        self.i225_link_speed_mbps = proof.packet_proof.mmio.link_speed_mbps;
-        self.i225_mac_address = proof.packet_proof.mac_address;
     }
 
     pub fn openDeviceToDevice(
@@ -552,26 +402,6 @@ pub const NativeTransportService = struct {
     ) Error!NativeConnection {
         try self.ensureTrustedTransportDevices(source_device, target_device);
         var session = try self.harness.openServiceIdentity(
-            broker,
-            request,
-            source_device,
-            target_device,
-        );
-        defer session.deinit();
-        return self.openEndpointBackedConnection(session, source_task_id, target_task_id, false);
-    }
-
-    pub fn openVerifiedServiceIdentity(
-        self: *NativeTransportService,
-        broker: *network_policy.EgressBroker,
-        request: VerifiedServiceIdentityOpenRequest,
-        source_task_id: u64,
-        target_task_id: u64,
-        source_device: principal.PrincipalId,
-        target_device: principal.PrincipalId,
-    ) Error!NativeConnection {
-        try self.ensureTrustedTransportDevices(source_device, target_device);
-        var session = try self.harness.openVerifiedServiceIdentity(
             broker,
             request,
             source_device,
@@ -652,7 +482,6 @@ pub const NativeTransportService = struct {
         if (!connection.connected) return error.NativeTransportDisconnected;
         try self.ensureTrustedTransportDevices(connection.session.source_device, connection.session.target_device);
         try self.ensureProductionSessionReady(&connection.session);
-        try self.ensureHardwareBackedNetworkReady();
         if (plaintext.len > MAX_NATIVE_PAYLOAD_BYTES) return error.PacketTooLarge;
         if (connection.in_flight_frames >= MAX_NATIVE_IN_FLIGHT_FRAMES) {
             self.congestion_drop_count +|= 1;
@@ -721,7 +550,6 @@ pub const NativeTransportService = struct {
             error.NativeTransportDisconnected, error.NativeTransportCongested => {
                 try self.ensureTrustedTransportDevices(connection.session.source_device, connection.session.target_device);
                 try self.ensureProductionSessionReady(&connection.session);
-                try self.ensureHardwareBackedNetworkReady();
                 const sequence = try self.pendingSequence(connection);
                 const signed_frame = try self.harness.encryptSignedFrame(&connection.session, plaintext, signer);
                 try relay_service.submitSignedFrame(connection.session.task_id, &connection.session, signed_frame);
@@ -835,12 +663,6 @@ pub const NativeTransportService = struct {
         }
     }
 
-    fn ensureHardwareBackedNetworkReady(self: *const NativeTransportService) Error!void {
-        if (self.i225_proof_required and !self.intelI225NetworkReady()) {
-            return error.NativeTransportHardwareProofMissing;
-        }
-    }
-
     fn ensureProductionSessionReady(self: *const NativeTransportService, session: *const TransportSession) Error!void {
         if (self.production_attested_sessions_required) {
             try session.requireProductionAttestation();
@@ -916,9 +738,9 @@ pub fn inspectNativeSyncFrame(frame: []const u8) Error!NativeSyncFrameView {
     const target_task_id = try reader.readU64();
     if (session_id == 0 or sequence == 0) return error.NativeTransportMalformedFrame;
     if (source_task_id == 0 or target_task_id == 0 or source_task_id == target_task_id) return error.NativeTransportMalformedFrame;
-    const transport = try parseTransportMode(try reader.readByte());
-    const source_kind = try parsePrincipalKind(try reader.readByte());
-    const target_kind = try parsePrincipalKind(try reader.readByte());
+    const transport = try reader.readEnum(sync_state.TransportMode);
+    const source_kind = try reader.readEnum(principal.PrincipalKind);
+    const target_kind = try reader.readEnum(principal.PrincipalKind);
     const flags = try reader.readByte();
     const known_flags: u8 = NativeTransportAbi.flag_encrypted | NativeTransportAbi.flag_egress_allowed;
     if ((flags & ~known_flags) != 0) return error.NativeTransportMalformedFrame;
@@ -965,7 +787,7 @@ pub fn decodeNativeSyncFrame(session: *const TransportSession, frame: []const u8
     if (view.session_id != session.id or view.transport != session.transport or
         view.policy_id != session.policy_id or view.capability_id != session.capability_id or
         !view.source_device.eql(session.source_device) or !view.target_device.eql(session.target_device)) return error.PacketTargetMismatch;
-    if (!transport_crypto.verifyWireMac(session.key, frame[0 .. frame.len - 32], view.wire_mac[0..32].*)) return error.PacketAuthenticationFailed;
+    if (!transport_crypto.verifyWireMac(session.mac_key, frame[0 .. frame.len - 32], view.wire_mac[0..32].*)) return error.PacketAuthenticationFailed;
     return view;
 }
 
@@ -1024,7 +846,7 @@ pub fn encodeNativeSyncFrame(
     try writer.writeU16(@intCast(ciphertext.len));
     try writer.writeBytes(ciphertext);
     try writer.writeBytes(&frame.packet.authentication);
-    const mac = transport_crypto.wireMac(session.key, buffer[0..writer.offset]);
+    const mac = transport_crypto.wireMac(session.mac_key, buffer[0..writer.offset]);
     try writer.writeBytes(&mac);
     return buffer[0..writer.offset];
 }
@@ -1053,33 +875,6 @@ fn validateNativeFrameForSession(
     {
         return error.NativeTransportMalformedFrame;
     }
-}
-
-fn parseTransportMode(raw: u8) Error!sync_state.TransportMode {
-    return switch (raw) {
-        @backingInt(sync_state.TransportMode.device_to_device) => .device_to_device,
-        @backingInt(sync_state.TransportMode.relay_assisted) => .relay_assisted,
-        else => error.NativeTransportMalformedFrame,
-    };
-}
-
-fn parsePrincipalKind(raw: u8) Error!principal.PrincipalKind {
-    return switch (raw) {
-        @backingInt(principal.PrincipalKind.user) => .user,
-        @backingInt(principal.PrincipalKind.device) => .device,
-        @backingInt(principal.PrincipalKind.app) => .app,
-        @backingInt(principal.PrincipalKind.service) => .service,
-        @backingInt(principal.PrincipalKind.policy_authority) => .policy_authority,
-        @backingInt(principal.PrincipalKind.team) => .team,
-        else => error.NativeTransportMalformedFrame,
-    };
-}
-
-fn macAddressPresent(mac_address: [6]u8) bool {
-    for (mac_address) |byte| {
-        if (byte != 0) return true;
-    }
-    return false;
 }
 
 fn expectNativeEncodeError(
@@ -1291,6 +1086,7 @@ test "native sync transport captures encrypted driver packets and handles replay
     var other_session = connection.session;
     defer other_session.deinit();
     other_session.key = try transport_crypto.freshKey(crypto_hash.zero_digest);
+    other_session.mac_key = transport_crypto.wireMacKey(other_session.key);
     try std.testing.expectError(error.PacketAuthenticationFailed, decryptNativeSyncFrame(&other_session, captured.slice(), &plaintext_out));
     var old_abi = captured;
     std.mem.writeInt(u16, old_abi.bytes[4..6], 3, .little);
@@ -1469,24 +1265,7 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expectEqual(@as(usize, 1), native_transport.replay_rejection_count);
 }
 
-fn verifiedSyncPeerBoot(generation: u64) !measured_boot.BootRecord {
-    var recorder = measured_boot.Recorder.init();
-    var artifact_manifest = measured_boot.ArtifactManifest.init(generation);
-    recorder.begin(generation);
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .kernel, "kernel-zigos-sync", "kernel=v1");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .base_image, "stable-sync", "image=v1");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "policy", "healthy");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "storage", "healthy");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "compositor", "healthy");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .critical_service, "network", "healthy");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "production-sync-policy", "strict");
-    try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "production-sync-drivers", "i225");
-    var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
-    return boot;
-}
-
-test "native sync transport rejects revoked trusted devices and requires real I225 proof" {
+test "native sync transport rejects revoked trusted devices and unattested production sessions" {
     var graph = device_graph.Graph.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 170 };
     const source = principal.PrincipalId{ .kind = .device, .serial = 171 };
@@ -1550,60 +1329,6 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     }, 176, 177, source, target, "relay.revoked.sync"));
     try std.testing.expectEqual(@as(usize, 4), native_transport.revoked_device_rejection_count);
 
-    const good_ring_plan = intel_i225.RingPlan{
-        .rx_descriptors = 256,
-        .tx_descriptors = 256,
-        .rx_ring_address = 0x1000,
-        .tx_ring_address = 0x2000,
-    };
-    var i225_adapter = try intel_i225.SoftwareAdapter.initWithMmio(
-        good_ring_plan,
-        .{ 0x02, 0x15, 0xF2, 0, 0, 8 },
-        intel_i225.defaultPhyLinkState(),
-        intel_i225.defaultPacketBufferPlan(),
-    );
-    const packet_proof = try i225_adapter.proveFrameCycles(hardware_target.first_supported_target.proof_minimums.network_frame_cycles);
-    const incomplete_proof = IntelI225TransportProof{
-        .evidence = .{
-            .target_id = hardware_target.first_supported_target.id,
-            .source = .qemu,
-        },
-        .ring_plan = good_ring_plan,
-        .packet_proof = packet_proof,
-    };
-    try std.testing.expectError(error.NativeTransportHardwareProofMissing, native_transport.attachIntelI225Proof(incomplete_proof));
-
-    const complete_proof = IntelI225TransportProof{
-        .evidence = .{
-            .target_id = hardware_target.first_supported_target.id,
-            .source = .real_hardware,
-            .hardware_cold_boots = hardware_target.first_supported_target.proof_minimums.cold_boots,
-            .hardware_warm_reboots = hardware_target.first_supported_target.proof_minimums.warm_reboots,
-            .storage_write_read_cycles = hardware_target.first_supported_target.proof_minimums.storage_write_read_cycles,
-            .network_frame_cycles = hardware_target.first_supported_target.proof_minimums.network_frame_cycles,
-            .suspend_resume_cycles = hardware_target.first_supported_target.proof_minimums.suspend_resume_cycles,
-            .crash_recovery_cycles = hardware_target.first_supported_target.proof_minimums.crash_recovery_cycles,
-            .crash_record_persistence_cycles = hardware_target.first_supported_target.proof_minimums.crash_record_persistence_cycles,
-            .update_rollback_cycles = hardware_target.first_supported_target.proof_minimums.update_rollback_cycles,
-            .proof_manifest_captured = true,
-            .serial_log_captured = true,
-            .required_markers_captured = true,
-            .firmware_settings_captured = true,
-            .power_cycle_notes_captured = true,
-            .artifact_digests_captured = true,
-        },
-        .ring_plan = good_ring_plan,
-        .packet_proof = packet_proof,
-    };
-    try native_transport.attachIntelI225Proof(complete_proof);
-    try std.testing.expect(native_transport.i225_proof_attached);
-    try std.testing.expect(native_transport.intelI225NetworkReady());
-    try std.testing.expectEqual(hardware_target.first_supported_target.proof_minimums.network_frame_cycles, native_transport.i225_proof_cycles);
-    try std.testing.expectEqual(@as(u32, hardware_target.first_supported_target.proof_minimums.network_frame_cycles), native_transport.i225_tx_tail_register_writes);
-    try std.testing.expectEqual(@as(u32, hardware_target.first_supported_target.proof_minimums.network_frame_cycles), native_transport.i225_rx_tail_register_writes);
-    try std.testing.expectEqual(@as(u32, hardware_target.first_supported_target.proof_minimums.network_frame_cycles) * 2, native_transport.i225_interrupt_cause_reads);
-    try std.testing.expectEqual(@as(u32, 2500), native_transport.i225_link_speed_mbps);
-
     const ProductionDriver = struct {
         var send_count: usize = 0;
         var authorized_native_frames: usize = 0;
@@ -1623,7 +1348,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
 
         fn driverEgressBroker(request: network_driver_task.EgressRequest) network_driver_task.EgressDecision {
             const native_sync_frame = std.mem.startsWith(u8, request.frame, &NativeTransportAbi.magic);
-            const no_plaintext = std.mem.indexOf(u8, request.frame, "production after i225 proof") == null;
+            const no_plaintext = std.mem.indexOf(u8, request.frame, "production attested frame") == null;
             const allowed = request.egress_capability_id == allowed_capability_id and
                 request.network_policy_id == allowed_policy_id and
                 native_sync_frame and
@@ -1653,8 +1378,6 @@ test "native sync transport rejects revoked trusted devices and requires real I2
 
     var production_transport = NativeTransportService.init();
     try production_transport.bindPeerLink(target, .{ 0x02, 0x15, 0xF2, 0, 0, 9 });
-    production_transport.requireIntelI225Proof();
-    try std.testing.expect(!production_transport.intelI225NetworkReady());
     var production_connection = try production_transport.openRelay(&broker, .{
         .task_id = 176,
         .principal_id = app,
@@ -1663,17 +1386,8 @@ test "native sync transport rejects revoked trusted devices and requires real I2
         .evidence = .{ .destination = .{ .domain = "relay.revoked.sync" } },
         .now_ticks = 30,
     }, 176, 177, source, target, "relay.revoked.sync");
-    try std.testing.expectError(error.NativeTransportHardwareProofMissing, production_transport.sendSigned(&production_connection, "blocked until i225 proof", frame_signer));
-    try std.testing.expectEqual(@as(usize, 0), production_transport.endpoint_frame_count);
-    try std.testing.expectEqual(@as(usize, 0), production_transport.network_frame_count);
-    try std.testing.expectEqual(@as(usize, 0), production_transport.capture.capturedCount());
-    try std.testing.expectEqual(@as(usize, 0), production_connection.in_flight_frames);
-    try std.testing.expectEqual(@as(usize, 0), network_driver_task.activeDriverTransmitCount());
-
-    try production_transport.attachIntelI225Proof(complete_proof);
-    try std.testing.expect(production_transport.intelI225NetworkReady());
     production_transport.requireProductionAttestedSessions();
-    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.sendSigned(&production_connection, "blocked lab session after i225 proof", frame_signer));
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.sendSigned(&production_connection, "blocked lab session", frame_signer));
     try std.testing.expectError(error.ProductionAttestationRequired, production_transport.encryptObjectShare(&production_connection, 1, 2, 3, "blocked lab object share"));
     production_transport.disconnect(&production_connection);
     var production_relay_service = try BootedOverlayRelayService.init(179, 176, "relay.revoked.sync");
@@ -1685,62 +1399,16 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     try std.testing.expectEqual(@as(usize, 0), production_transport.capture.capturedCount());
     try std.testing.expectEqual(@as(usize, 0), network_driver_task.activeDriverTransmitCount());
 
-    const peer_attestation_signer = signing.SignerIdentity{
-        .label = "production-sync-peer-root",
-        .seed = signing.seedFromByte(0xD7),
-    };
-    const peer_attestation_identity = try signing.publicIdentity(peer_attestation_signer);
-    const peer_attestation_key = attestation_service.AttestationRootKeyHandle{
-        .key_id = "production-sync-peer-root",
-        .label = "production-sync-peer-root",
-        .public_identity = peer_attestation_identity,
-        .generation = 1,
-        .origin = .tpm,
-        .provider_boundary = .platform_tpm,
-        .custody = .tpm,
-    };
-    const peer_attestation_descriptor = attestation_service.RootProviderDescriptor{
-        .name = "production-sync-tpm-attestation-root",
-        .role = .production,
-        .origin = .tpm,
-        .key_id = "production-sync-peer-root",
-        .key_generation = 1,
-        .provider_boundary = .platform_tpm,
-        .custody = .tpm,
-        .customer_verifiable = true,
-    };
-    const PeerAttestationSigner = struct {
-        signer: signing.SignerIdentity,
-
-        fn sign(context: *anyopaque, handle: attestation_service.AttestationRootKeyHandle, digest: []const u8) !manifest.Signature {
-            const fixture: *@This() = @ptrCast(@alignCast(context));
-            if (!std.mem.eql(u8, fixture.signer.label, handle.label)) return error.RootIdentityMismatch;
-            return signing.signWithDefaultRegistry(.ed25519, fixture.signer, digest);
+    const PeerQuoteEntropy = struct {
+        pub fn random(_: *@This(), out: []u8) !void {
+            @memset(out, 0x5D);
         }
     };
-    var peer_attestation_fixture = PeerAttestationSigner{ .signer = peer_attestation_signer };
-    var peer_attestation_provider = try attestation_service.ExternalAttestationRootProvider.init(
-        peer_attestation_descriptor,
-        peer_attestation_key,
-        &peer_attestation_fixture,
-        PeerAttestationSigner.sign,
-    );
-    const peer_attestation_metadata_digest = peer_attestation_provider.verifierMetadataDigest();
-    var peer_attestation = attestation_service.Service.init(target);
-    try peer_attestation.provisionRootProvider(peer_attestation_provider.provider());
-    const peer_boot = try verifiedSyncPeerBoot(32);
-    const peer_attestation_request = try attestation_service.RemoteAttestationRequest.init(.{
-        .remote_party = "overlay.production.sync",
-        .nonce = "native-sync-verified-0001",
-        .policy_label = "production-service-identity",
-        .expected_key_origin = .tpm,
-        .root_key_id = "production-sync-peer-root",
-        .minimum_root_generation = 1,
-        .attestation_verifier_metadata_digest_required = true,
-        .attestation_verifier_metadata_digest = peer_attestation_metadata_digest,
-    });
-    const peer_attestation_response = try peer_attestation.respondToRemoteAttestationRequest(peer_boot, peer_attestation_request);
-    const pinned_peer_root = peer_attestation_response.statement.root_digest;
+    const peer_pcr: tpm_quote.Digest = @splat(0x31);
+    const peer_quote_identity = try tpm_quote.testing.QuoteFixture.initFor(@splat(1), peer_pcr);
+    const peer_enrollment = try attestation_service.tpm.Enrollment.init(target, peer_quote_identity.identity, 1, "production-sync-peer-root");
+    const peer_attestation_metadata_digest = peer_enrollment.digest();
+    const pinned_peer_root = attestation_service.tpm.bootDigest(&peer_pcr);
     const service_identity_policy = try policies.create(.{
         .owner = owner,
         .label = "production-service-identity",
@@ -1763,45 +1431,31 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     ProductionDriver.allowed_policy_id = service_identity_policy.id;
     network_driver_task.bindEgressCapability(service_identity_capability.id, service_identity_policy.id);
 
-    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.openVerifiedServiceIdentity(&broker, .{
+    var peer_quote_entropy = PeerQuoteEntropy{};
+    var peer_quote = try attestation_service.tpm.Pending.init(&peer_quote_entropy, peer_enrollment, peer_pcr, .{
+        .remote_party = "overlay.production.sync",
+        .policy_label = "production-service-identity",
+    }, 100, 1000);
+    const peer_quote_evidence = try tpm_quote.testing.QuoteFixture.initFor(peer_quote.challenge.qualifyingData(), peer_pcr);
+    var service_identity_request = network_policy.TpmServiceIdentityOpenRequest{
         .task_id = 176,
         .principal_id = app,
         .capability_id = service_identity_capability.id,
         .policy_id = service_identity_policy.id,
         .service_identity = "overlay.other.sync",
-        .attestation_response = peer_attestation_response,
-        .attestation_request = peer_attestation_request,
-        .attested_boot = &peer_boot,
-        .trusted_root = peer_attestation_identity,
+        .pending = &peer_quote,
+        .response = &peer_quote_evidence.evidence,
+        .now_ms = 101,
         .now_ticks = 31,
-    }, 176, 177, source, target));
+    };
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.openTpmServiceIdentity(&broker, service_identity_request, 176, 177, source, target));
 
-    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.openVerifiedServiceIdentity(&broker, .{
-        .task_id = 176,
-        .principal_id = app,
-        .capability_id = service_identity_capability.id,
-        .policy_id = service_identity_policy.id,
-        .service_identity = "overlay.production.sync",
-        .attestation_response = peer_attestation_response,
-        .attestation_request = peer_attestation_request,
-        .attested_boot = &peer_boot,
-        .trusted_root = peer_attestation_identity,
-        .now_ticks = 31,
-    }, 176, 177, source, .{ .kind = .device, .serial = target.serial + 1 }));
+    service_identity_request.service_identity = "overlay.production.sync";
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.openTpmServiceIdentity(&broker, service_identity_request, 176, 177, source, .{ .kind = .device, .serial = target.serial + 1 }));
     try std.testing.expectEqual(@as(usize, 0), ProductionDriver.send_count);
+    try std.testing.expect(!peer_quote.verifier.consumed);
 
-    var production_service_connection = try production_transport.openVerifiedServiceIdentity(&broker, .{
-        .task_id = 176,
-        .principal_id = app,
-        .capability_id = service_identity_capability.id,
-        .policy_id = service_identity_policy.id,
-        .service_identity = "overlay.production.sync",
-        .attestation_response = peer_attestation_response,
-        .attestation_request = peer_attestation_request,
-        .attested_boot = &peer_boot,
-        .trusted_root = peer_attestation_identity,
-        .now_ticks = 31,
-    }, 176, 177, source, target);
+    var production_service_connection = try production_transport.openTpmServiceIdentity(&broker, service_identity_request, 176, 177, source, target);
     try std.testing.expect(production_service_connection.session.productionAttested());
     try std.testing.expect(production_service_connection.session.attestation_verifier_metadata_digest_present);
     try std.testing.expect(production_service_connection.session.attestation_verifier_metadata_digest_bound);
@@ -1810,7 +1464,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
         &peer_attestation_metadata_digest,
         &production_service_connection.session.attestation_verifier_metadata_digest,
     ));
-    const production_delivery = try production_transport.sendSigned(&production_service_connection, "production after i225 proof", frame_signer);
+    const production_delivery = try production_transport.sendSigned(&production_service_connection, "production attested frame", frame_signer);
     try std.testing.expect(production_delivery.endpoint_delivered);
     try std.testing.expect(production_delivery.network_delivered);
     try std.testing.expectEqual(@as(usize, 1), production_transport.endpoint_frame_count);
@@ -1908,26 +1562,11 @@ test "native sync transport falls back through booted relay and encrypts object 
 }
 
 test "compact capture metadata preserves maximum native frames" {
-    try std.testing.expect(harness.COMPACT_TRANSPORT_TELEMETRY);
     try std.testing.expectEqual(TelemetryCount, @FieldType(NativeTransportService, "opened_connections"));
     try std.testing.expectEqual(TelemetryCount, @FieldType(NativeTransportService, "relay_fallback_count"));
     try std.testing.expectEqual(TelemetryCount, @FieldType(NativeTransportService, "replay_rejection_count"));
-    try std.testing.expect(DERIVES_CAPTURE_METADATA_FROM_ARENA_STATE);
-    try std.testing.expect(!@hasField(PacketCapture, "last_packet_id"));
-    try std.testing.expect(!@hasField(PacketCapture, "captured_count"));
     try std.testing.expectEqual(@as(usize, PACKET_CAPTURE_SIZE_CEILING_BYTES), @sizeOf(PacketCapture));
     try std.testing.expectEqual(@as(usize, NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES), @sizeOf(NativeTransportService));
-    try std.testing.expect(transport_packet_capture_layout.heap_backs_capture_on_freestanding);
-    try std.testing.expectEqual(@sizeOf(?*anyopaque), transport_packet_capture_layout.freestanding_handle_size_bytes);
-    try std.testing.expectEqual(@as(usize, 4_808), transport_packet_capture_layout.backing_size_bytes);
-    try std.testing.expectEqual(@as(usize, 4_800), transport_packet_capture_layout.freestanding_resident_savings_bytes);
-    try std.testing.expect(transport_endpoint_table_layout.heap_backs_table_on_freestanding);
-    try std.testing.expectEqual(@sizeOf(?*anyopaque), transport_endpoint_table_layout.freestanding_handle_size_bytes);
-    try std.testing.expectEqual(@as(usize, endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES), transport_endpoint_table_layout.freestanding_backing_size_bytes);
-    try std.testing.expectEqual(
-        endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES - @sizeOf(?*endpoint.Table),
-        transport_endpoint_table_layout.freestanding_resident_savings_bytes,
-    );
 
     var transport_capture = TransportPacketCapture{};
     defer transport_capture.deinit();
@@ -1962,7 +1601,6 @@ test "compact capture metadata preserves maximum native frames" {
 }
 
 test "compact native result metadata preserves bounded payload capacities" {
-    try std.testing.expect(COMPACT_NATIVE_RESULT_METADATA);
     try std.testing.expectEqual(NativePayloadLength, @FieldType(NativeDelivery, "payload_len"));
     try std.testing.expectEqual(ObjectSharePayloadLength, @FieldType(ObjectShareEnvelope, "payload_len"));
     try std.testing.expectEqual(@as(usize, 512), @sizeOf(NativeDelivery));

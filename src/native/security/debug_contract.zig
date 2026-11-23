@@ -8,9 +8,8 @@ const principal = @import("../core/principal.zig");
 
 pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 96;
-pub const COMPACT_DEBUG_TEXT_METADATA = true;
 pub const DENIAL_EXPLANATION_SIZE_CEILING_BYTES: usize = 240;
-pub const PROVENANCE_RECORD_SIZE_CEILING_BYTES: usize = 504;
+pub const PROVENANCE_RECORD_SIZE_CEILING_BYTES: usize = 272;
 const DENIAL_RENDER_TEST_BUFFER_BYTES: usize = 256;
 
 comptime {
@@ -103,14 +102,18 @@ pub const ProvenanceRecord = struct {
     release_transparency_sequence: u64 = 0,
     release_transparency_root_fingerprint: u64 = 0,
     release_transparency_log_head_fingerprint: u64 = 0,
-    denial: DenialExplanation = .{},
+    // A denied record keeps only the explanation's reason and fingerprint;
+    // the full explanation stays with whoever rendered it.
+    denial_reason: abi.DenialReason = .none,
+    denial_fingerprint: u64 = 0,
 
+    // Lengths may come from untrusted copies; never slice past the buffers.
     pub fn operationSlice(self: *const ProvenanceRecord) []const u8 {
-        return self.operation[0..@as(usize, self.operation_len)];
+        return self.operation[0..@min(self.operation_len, self.operation.len)];
     }
 
     pub fn detailSlice(self: *const ProvenanceRecord) []const u8 {
-        return self.detail[0..@as(usize, self.detail_len)];
+        return self.detail[0..@min(self.detail_len, self.detail.len)];
     }
 
     pub fn hasReleaseTransparency(self: *const ProvenanceRecord) bool {
@@ -139,7 +142,7 @@ pub const ProvenanceRecord = struct {
                 self.detailSlice(),
                 self.source_identity_fingerprint,
                 self.release_transparency_sequence,
-                @tagName(self.denial.reason),
+                @tagName(self.denial_reason),
             },
         ) catch "";
     }
@@ -254,7 +257,8 @@ pub fn provenance(
         .target_kind = target_kind,
         .target_id = target_id,
         .tick = tick,
-        .denial = denial,
+        .denial_reason = denial.reason,
+        .denial_fingerprint = denial.fingerprint,
     };
     record.operation_len = @intCast(native_util.copyTextWithReserve(&record.operation, operation, 1));
     record.detail_len = @intCast(native_util.copyTextWithReserve(&record.detail, detail, 1));
@@ -494,7 +498,7 @@ pub fn provenanceFingerprint(record: ProvenanceRecord) u64 {
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.release_transparency_sequence);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.release_transparency_root_fingerprint);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.release_transparency_log_head_fingerprint);
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.denial.fingerprint);
+    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.denial_fingerprint);
     return hash;
 }
 
@@ -510,7 +514,19 @@ test "debug contract keeps bounded text metadata compact" {
     try std.testing.expectEqual(u8, @FieldType(ProvenanceRecord, "operation_len"));
     try std.testing.expectEqual(u8, @FieldType(ProvenanceRecord, "detail_len"));
     try std.testing.expectEqual(@as(usize, 240), @sizeOf(DenialExplanation));
-    try std.testing.expectEqual(@as(usize, 504), @sizeOf(ProvenanceRecord));
+    try std.testing.expectEqual(@as(usize, 272), @sizeOf(ProvenanceRecord));
+}
+
+test "provenance text slices clamp untrusted lengths to their buffers" {
+    var record = ProvenanceRecord{};
+    @memset(&record.operation, 'o');
+    @memset(&record.detail, 'd');
+    record.operation_len = std.math.maxInt(u8);
+    record.detail_len = std.math.maxInt(u8);
+    try std.testing.expectEqual(@as(usize, MAX_LABEL_BYTES), record.operationSlice().len);
+    try std.testing.expectEqual(@as(usize, MAX_DETAIL_BYTES), record.detailSlice().len);
+    try std.testing.expect(std.mem.allEqual(u8, record.operationSlice(), 'o'));
+    try std.testing.expect(std.mem.allEqual(u8, record.detailSlice(), 'd'));
 }
 
 test "denial explanations render deterministic why-denied metadata" {

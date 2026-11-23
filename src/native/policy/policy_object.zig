@@ -1,22 +1,15 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
-const hash_seeds = @import("../core/hash_seeds.zig");
-const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("manifest.zig");
 const native_util = @import("../core/util.zig");
-const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const model = @import("policy_object_model.zig");
 
 pub const MAX_POLICIES: usize = 16;
 pub const MAX_ALLOW_LIST = model.MAX_ALLOW_LIST;
 pub const MAX_LABEL_BYTES = model.MAX_LABEL_BYTES;
-pub const COMPACT_POLICY_METADATA = model.COMPACT_POLICY_METADATA;
-pub const DERIVES_POLICY_IDS_FROM_ARENA_COUNT = true;
-pub const IN_PLACE_DIRECTORY_INITIALIZATION = true;
 pub const POLICY_OBJECT_SIZE_CEILING_BYTES = model.POLICY_OBJECT_SIZE_CEILING_BYTES;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 33_168;
-const POLICY_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 32_520;
 
 pub const Scope = model.Scope;
 pub const InstallSourceMode = model.InstallSourceMode;
@@ -25,7 +18,6 @@ pub const SubjectSet = model.SubjectSet;
 pub const DecisionReason = model.DecisionReason;
 pub const PolicyDecision = model.PolicyDecision;
 pub const CreateRequest = model.CreateRequest;
-pub const RetentionAuditRequest = model.RetentionAuditRequest;
 pub const AiUseRequest = model.AiUseRequest;
 pub const SessionTrustRequest = model.SessionTrustRequest;
 pub const SensitiveEgressRequest = model.SensitiveEgressRequest;
@@ -49,29 +41,38 @@ pub const SensitiveCaptureRequest = model.SensitiveCaptureRequest;
 pub const PolicyObject = model.PolicyObject;
 pub const Error = model.Error;
 
+// A slot is authentic while its policy still hashes to the binding recorded
+// when the Directory accepted the signature. Decisions compare that binding
+// instead of re-running Ed25519, so any later change to a signed control or
+// to the signature bytes makes the policy fail closed as unsigned.
 const PolicySlot = struct {
-    in_use: bool = false,
-    policy: PolicyObject = zeroPolicy(),
+    policy: PolicyObject = .{},
+    verified_binding: crypto_hash.Digest = crypto_hash.zero_digest,
+
+    fn authenticDigest(self: *const PolicySlot) ?crypto_hash.Digest {
+        const digest = policyDigest(&self.policy);
+        const binding = verifiedBinding(&digest, &self.policy.signature);
+        return if (std.crypto.timing_safe.eql(crypto_hash.Digest, binding, self.verified_binding)) digest else null;
+    }
 };
 
-fn policySlotId(slot: *const PolicySlot) u64 {
-    return slot.policy.id;
-}
-
-const PolicyArena = indexed_arena.IndexedArena(PolicySlot, MAX_POLICIES, POLICY_INDEX_CAPACITY, policySlotId);
-const PolicyScopeIndex = indexed_arena.MultimapIndex(MAX_POLICIES, MAX_POLICIES, POLICY_INDEX_CAPACITY);
-
+// Policies are append-only: ids are slot index + 1, revocation only marks a
+// slot, and each insert takes the next generation for its scope, so the last
+// live slot matching a scope is that scope's newest policy.
 pub const Directory = struct {
-    policies: PolicyArena = PolicyArena.init(),
-    scope_index: PolicyScopeIndex = PolicyScopeIndex.init(),
+    slots: [MAX_POLICIES]PolicySlot = @splat(.{}),
+    len: usize = 0,
 
     pub fn init() Directory {
         return .{};
     }
 
     pub fn initializeAllocated(self: *Directory) void {
-        self.policies.initializeAllocated();
-        self.scope_index.initializeAllocated();
+        self.len = 0;
+    }
+
+    pub fn count(self: *const Directory) usize {
+        return self.len;
     }
 
     pub fn create(
@@ -79,11 +80,12 @@ pub const Directory = struct {
         request: CreateRequest,
         signer: signing.SignerIdentity,
     ) (Error || anyerror)!*PolicyObject {
-        if (self.policies.countInUse() >= MAX_POLICIES) return error.PolicyTableFull;
+        if (self.len >= MAX_POLICIES) return error.PolicyTableFull;
         var policy: PolicyObject = undefined;
         try policyFromRequestInto(&policy, request);
-        policy.signature = try signing.sign(signer, &policyDigest(&policy));
-        return self.insert(policy);
+        const digest = policyDigest(&policy);
+        policy.signature = try signing.sign(signer, &digest);
+        return self.insert(policy, &digest);
     }
 
     // Initial native attachment requires an independently authenticated issuer
@@ -91,694 +93,201 @@ pub const Directory = struct {
     // updates: replay must never acquire a newer local generation. Signer labels
     // are not authenticated and are never retained from a borrowed caller buffer.
     pub fn attachInitialAuthenticated(self: *Directory, request: CreateRequest, signature: manifest.Signature, issuer_key: signing.PublicKey) !*PolicyObject {
-        if (self.policies.countInUse() != 0) return error.PolicyAlreadyAttached;
+        if (self.len != 0) return error.PolicyAlreadyAttached;
         var policy: PolicyObject = undefined;
         try policyFromRequestInto(&policy, request);
-        if (!std.mem.eql(u8, signature.publicKeySlice(), &issuer_key) or
-            !signing.verify(signature, &policyDigest(&policy))) return error.UntrustedPolicy;
+        const digest = policyDigest(&policy);
+        if (!issuerSigned(&digest, signature, issuer_key)) return error.UntrustedPolicy;
         policy.signature = signature;
         policy.signature.signer = "";
-        return self.insert(policy);
+        return self.insert(policy, &digest);
     }
 
-    fn insert(self: *Directory, candidate: PolicyObject) Error!*PolicyObject {
-        const policy_count = self.policies.countInUse();
-        if (policy_count >= MAX_POLICIES) return error.PolicyTableFull;
-        const policy_id: u64 = @intCast(policy_count + 1);
-        var policy = candidate;
-        policy.id = policy_id;
-        policy.generation = nextGeneration(self, policy.scope, policy.subject_id);
-        const slot_index = self.policies.reserveIndex(policy_id) orelse
-            native_util.impossibleByInvariant("prechecked policy slot reservation must succeed");
-        const slot = &self.policies.slots[slot_index];
-        slot.policy = policy;
-        self.indexPolicy(slot_index);
+    fn insert(self: *Directory, candidate: PolicyObject, digest: *const crypto_hash.Digest) Error!*PolicyObject {
+        if (self.len >= MAX_POLICIES) return error.PolicyTableFull;
+        const generation = self.latestGeneration(candidate.scope, candidate.subject_id) + 1;
+        const slot = &self.slots[self.len];
+        slot.policy = candidate;
+        slot.policy.id = self.len + 1;
+        slot.policy.generation = generation;
+        slot.policy.revoked = false;
+        slot.verified_binding = verifiedBinding(digest, &slot.policy.signature);
+        self.len += 1;
         return &slot.policy;
     }
 
+    // Mutable access exists for in-memory tamper tests; production callers
+    // only read the returned policy.
     pub fn activeForScope(self: *Directory, scope: Scope, subject_id: u64) ?*PolicyObject {
-        var candidate: ?*PolicyObject = null;
-        var best_generation: u32 = 0;
-        var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
-        while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
-            if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-            const slot = &self.policies.slots[cursor];
-            if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
-            if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
-            if (slot.policy.revoked) continue;
-            if (slot.policy.generation < best_generation) continue;
-            candidate = &slot.policy;
-            best_generation = slot.policy.generation;
-        }
-        return candidate;
+        const slot = self.activeSlot(scope, subject_id) orelse return null;
+        return &@constCast(slot).policy;
     }
 
+    // Full re-verification: the slot binding must hold and the stored
+    // signature must still verify over the recomputed digest.
     pub fn verify(self: *const Directory, policy_id: u64) bool {
-        const policy = self.findConst(policy_id) orelse return false;
-        const digest = policyDigest(policy);
-        return signing.verify(policy.signature, &digest);
+        const slot = self.slotForId(policy_id) orelse return false;
+        const digest = slot.authenticDigest() orelse return false;
+        return signing.verify(slot.policy.signature, &digest);
     }
 
     pub fn revokePolicy(self: *Directory, policy_id: u64) Error!void {
-        const slot = self.policies.get(policy_id) orelse return error.PolicyNotFound;
-        if (slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
-        if (slot.policy.revoked) return error.PolicyAlreadyRevoked;
-        slot.policy.revoked = true;
+        const slot = self.slotForId(policy_id) orelse return error.PolicyNotFound;
+        const policy = &@constCast(slot).policy;
+        if (policy.revoked) return error.PolicyAlreadyRevoked;
+        policy.revoked = true;
     }
 
     pub fn revokePoliciesForScope(self: *Directory, scope: Scope, subject_id: u64) usize {
         var revoked_count: usize = 0;
-        var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
-        while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
-            if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-            const slot = &self.policies.slots[cursor];
-            if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
-            if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
-            if (slot.policy.revoked) continue;
+        for (self.slots[0..self.len]) |*slot| {
+            if (slot.policy.revoked or slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
             slot.policy.revoked = true;
             revoked_count += 1;
         }
         return revoked_count;
     }
 
-    pub fn installSourceAllowed(
-        self: *const Directory,
-        scope: Scope,
-        subject_id: u64,
-        source_identity: []const u8,
-    ) bool {
-        const policy = self.activeForScopeConst(scope, subject_id) orelse return true;
-        if (!self.verify(policy.id)) return false;
-        return policy.allowsInstallSource(source_identity);
+    pub fn installSourceDecision(self: *const Directory, subjects: SubjectSet, source_identity: []const u8) PolicyDecision {
+        return self.decide(subjects, source_identity, installSourceDenial);
     }
 
-    pub fn syncDestinationAllowed(
-        self: *const Directory,
-        scope: Scope,
-        subject_id: u64,
-        destination: []const u8,
-    ) bool {
-        const policy = self.activeForScopeConst(scope, subject_id) orelse return true;
-        if (!self.verify(policy.id)) return false;
-        return policy.allowsSyncDestination(destination);
+    pub fn packageProvenanceDecision(self: *const Directory, subjects: SubjectSet, request: PackageProvenanceRequest) PolicyDecision {
+        return self.decide(subjects, request, packageProvenanceDenial);
     }
 
-    pub fn installSourceDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        source_identity: []const u8,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policy.allowsInstallSource(source_identity)) {
-                return block(policy, .install_source_denied);
-            }
-        }
-        return allow();
-    }
-
-    pub fn packageProvenanceDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: PackageProvenanceRequest,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (policy.packageProvenanceDenial(request)) |reason| return block(policy, reason);
-        }
-        return allow();
-    }
-
-    pub fn agentDelegationDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: AgentDelegationRequest,
-    ) PolicyDecision {
+    pub fn agentDelegationDecision(self: *const Directory, subjects: SubjectSet, request: AgentDelegationRequest) PolicyDecision {
         if (!request.enabled) return allow();
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policy.agent_delegation_allowed) return block(policy, .agent_delegation_denied);
-            if (policy.max_agent_actions_per_session != 0 and request.autonomous_actions > policy.max_agent_actions_per_session) {
-                return block(policy, .agent_action_budget_denied);
-            }
-            if (policy.max_agent_remote_calls_per_session != 0 and request.remote_calls > policy.max_agent_remote_calls_per_session) {
-                return block(policy, .agent_remote_call_denied);
-            }
-            if (request.remote_calls != 0 and policy.require_agent_user_confirmation and !request.user_confirmed) {
-                return block(policy, .agent_confirmation_required);
-            }
-            if (policy.require_agent_audit and !request.audit_enabled) {
-                return block(policy, .agent_audit_required);
-            }
-            if (policy.require_agent_session_binding and !request.session_bound) {
-                return block(policy, .agent_session_binding_denied);
-            }
-            if (policy.require_agent_local_context and !request.local_context_only) {
-                return block(policy, .agent_context_scope_denied);
-            }
-            if (policy.max_agent_context_bytes != 0 and request.context_bytes > policy.max_agent_context_bytes) {
-                return block(policy, .agent_context_budget_denied);
-            }
-            if (request.delegation_generation < policy.min_agent_delegation_generation) {
-                return block(policy, .agent_kill_switch_denied);
-            }
-            if (policy.require_agent_visible_plan and !request.user_visible_plan) {
-                return block(policy, .agent_plan_visibility_required);
-            }
-        }
-        return allow();
+        return self.decide(subjects, request, agentDelegationDenial);
     }
 
-    pub fn syncDestinationDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        destination: []const u8,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policy.allowsSyncDestination(destination)) {
-                return block(policy, .sync_destination_denied);
-            }
-        }
-        return allow();
+    pub fn syncDestinationDecision(self: *const Directory, subjects: SubjectSet, destination: []const u8) PolicyDecision {
+        return self.decide(subjects, destination, syncDestinationDenial);
     }
 
-    pub fn networkEgressDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        destination: []const u8,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policy.allowsNetworkDestination(destination)) {
-                return block(policy, .network_egress_denied);
-            }
-        }
-        return allow();
+    pub fn networkEgressDecision(self: *const Directory, subjects: SubjectSet, destination: []const u8) PolicyDecision {
+        return self.decide(subjects, destination, networkEgressDenial);
     }
 
-    pub fn removableStorageDecision(self: *const Directory, subjects: SubjectSet) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policy.removable_storage_allowed) return block(policy, .removable_storage_denied);
-        }
-        return allow();
+    pub fn permissionKindDecision(self: *const Directory, subjects: SubjectSet, kind: manifest.PermissionKind) PolicyDecision {
+        return self.decide(subjects, kind, permissionKindDenial);
     }
 
-    pub fn screenCaptureDecision(self: *const Directory, subjects: SubjectSet) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policy.screen_capture_allowed) return block(policy, .screen_capture_denied);
-        }
-        return allow();
-    }
-
-    pub fn permissionKindDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        kind: manifest.PermissionKind,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policyAllowsPermissionKind(policy, kind)) {
-                return block(policy, permissionKindDenialReason(kind));
-            }
-        }
-        return allow();
-    }
-
-    pub fn aiUseDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: AiUseRequest,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (request.remote_model and !policy.remote_ai_allowed) return block(policy, .remote_ai_denied);
-            if (request.training_user_content and !policy.ai_training_allowed) return block(policy, .ai_training_denied);
-            if (policy.max_ai_context_bytes != 0 and request.context_bytes > policy.max_ai_context_bytes) {
-                return block(policy, .ai_context_denied);
-            }
-            if (!request.remote_model and policy.require_ai_model_measurement and !request.local_model_measured) {
-                return block(policy, .ai_model_measurement_denied);
-            }
-            if (!request.remote_model and policy.require_trusted_ai_model_source and !request.model_source_trusted) {
-                return block(policy, .ai_model_source_denied);
-            }
-            if (!request.remote_model and policy.max_ai_model_age_days != 0 and request.model_age_days > policy.max_ai_model_age_days) {
-                return block(policy, .ai_model_staleness_denied);
-            }
-        }
-        return allow();
+    pub fn aiUseDecision(self: *const Directory, subjects: SubjectSet, request: AiUseRequest) PolicyDecision {
+        return self.decide(subjects, request, aiUseDenial);
     }
 
     // Reject excessive requested authority before PIN/recovery hardware work.
     // Device posture is checked separately once authenticated keys are restored.
     pub fn sessionLifetimeDecision(self: *const Directory, subjects: SubjectSet, lifetime_ticks: u64) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (policy.max_session_unlock_age_ticks != 0 and lifetime_ticks > policy.max_session_unlock_age_ticks)
-                return block(policy, .session_unlock_stale);
-        }
-        return allow();
+        return self.decide(subjects, lifetime_ticks, sessionLifetimeDenial);
     }
 
-    pub fn sessionTrustDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: SessionTrustRequest,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (policy.require_hardware_backed_session and !request.hardware_backed_credential) {
-                return block(policy, .session_hardware_denied);
-            }
-            if (policy.require_platform_backed_device_session and !request.device_platform_backed) {
-                return block(policy, .session_device_posture_denied);
-            }
-            if (policy.require_primary_device_session and !request.primary_device_assertion) {
-                return block(policy, .session_primary_device_denied);
-            }
-            if (policy.max_session_unlock_age_ticks != 0 and request.unlock_age_ticks > policy.max_session_unlock_age_ticks) {
-                return block(policy, .session_unlock_stale);
-            }
-        }
-        return allow();
+    pub fn sessionTrustDecision(self: *const Directory, subjects: SubjectSet, request: SessionTrustRequest) PolicyDecision {
+        return self.decide(subjects, request, sessionTrustDenial);
     }
 
-    pub fn sensitiveEgressDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: SensitiveEgressRequest,
-    ) PolicyDecision {
+    pub fn sensitiveEgressDecision(self: *const Directory, subjects: SubjectSet, request: SensitiveEgressRequest) PolicyDecision {
         if (!manifest.isSensitive(request.sensitivity)) return allow();
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (policy.max_remote_private_egress_bytes != 0 and request.remote_bytes > policy.max_remote_private_egress_bytes) {
-                return block(policy, .private_egress_budget_denied);
-            }
-        }
-        return allow();
+        return self.decide(subjects, request, sensitiveEgressDenial);
     }
 
-    pub fn dataRightsDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: DataRightsRequest,
-    ) PolicyDecision {
+    pub fn dataRightsDecision(self: *const Directory, subjects: SubjectSet, request: DataRightsRequest) PolicyDecision {
         if (!manifest.isSensitive(request.sensitivity)) return allow();
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            switch (request.operation) {
-                .portable_export => {
-                    if (!policy.data_export_allowed) return block(policy, .data_export_denied);
-                    if (policy.max_data_export_bytes != 0 and request.bytes > policy.max_data_export_bytes) {
-                        return block(policy, .data_export_denied);
-                    }
-                },
-                .delete => {
-                    if (!policy.data_deletion_allowed) return block(policy, .data_deletion_denied);
-                    if (policy.require_data_deletion_receipt and !request.deletion_receipt_present) {
-                        return block(policy, .data_deletion_receipt_denied);
-                    }
-                },
-            }
-        }
-        return allow();
+        return self.decide(subjects, request, dataRightsDenial);
     }
 
-    pub fn objectResilienceDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: ObjectResilienceRequest,
-    ) PolicyDecision {
+    pub fn objectResilienceDecision(self: *const Directory, subjects: SubjectSet, request: ObjectResilienceRequest) PolicyDecision {
         if (!manifest.isSensitive(request.sensitivity)) return allow();
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            switch (request.operation) {
-                .backup => {
-                    if (!policy.object_backup_allowed) return block(policy, .object_backup_denied);
-                    if (policy.require_encrypted_object_backup and !request.encrypted) {
-                        return block(policy, .object_backup_encryption_denied);
-                    }
-                    if (policy.require_backup_recovery_key and !request.recovery_key_present) {
-                        return block(policy, .object_backup_recovery_key_denied);
-                    }
-                    if (policy.max_object_backup_bytes != 0 and request.bytes > policy.max_object_backup_bytes) {
-                        return block(policy, .object_backup_size_denied);
-                    }
-                },
-                .restore, .migrate => {
-                    if (!policy.object_restore_allowed) return block(policy, .object_restore_denied);
-                    if (policy.require_restore_device_trust and !request.device_trust_verified) {
-                        return block(policy, .object_restore_device_trust_denied);
-                    }
-                    if (policy.max_object_restore_age_days != 0 and request.restore_age_days > policy.max_object_restore_age_days) {
-                        return block(policy, .object_restore_staleness_denied);
-                    }
-                },
-            }
-        }
-        return allow();
+        return self.decide(subjects, request, objectResilienceDenial);
     }
 
-    pub fn semanticMemoryDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: SemanticMemoryRequest,
-    ) PolicyDecision {
+    pub fn semanticMemoryDecision(self: *const Directory, subjects: SubjectSet, request: SemanticMemoryRequest) PolicyDecision {
         if (!manifest.isSensitive(request.sensitivity)) return allow();
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policy.semantic_memory_allowed) return block(policy, .semantic_memory_denied);
-            if (policy.require_local_semantic_model and !request.local_model) {
-                return block(policy, .semantic_memory_remote_model_denied);
-            }
-            if (policy.require_encrypted_semantic_index and !request.encrypted_index) {
-                return block(policy, .semantic_memory_encryption_denied);
-            }
-            if (policy.require_redacted_semantic_snippets and !request.redacted_snippets) {
-                return block(policy, .semantic_memory_redaction_denied);
-            }
-            if (policy.max_semantic_query_bytes != 0 and request.query_bytes > policy.max_semantic_query_bytes) {
-                return block(policy, .semantic_query_budget_denied);
-            }
-        }
-        return allow();
+        return self.decide(subjects, request, semanticMemoryDenial);
     }
 
-    pub fn credentialAssertionDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: CredentialAssertionRequest,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policy.credential_assertions_allowed) return block(policy, .credential_assertion_denied);
-            if (policy.deny_credential_password_fallback and request.password_fallback) {
-                return block(policy, .credential_password_fallback_denied);
-            }
-            if (policy.require_phishing_resistant_credential and !request.phishing_resistant) {
-                return block(policy, .credential_phishing_resistance_denied);
-            }
-            if (policy.require_hardware_backed_credential and !request.hardware_backed) {
-                return block(policy, .credential_hardware_denied);
-            }
-            if (policy.require_local_credential_unlock and !request.local_unlock_verified) {
-                return block(policy, .credential_unlock_denied);
-            }
-            if (policy.max_credential_unlock_age_ticks != 0 and request.unlock_age_ticks > policy.max_credential_unlock_age_ticks) {
-                return block(policy, .credential_unlock_stale);
-            }
-        }
-        return allow();
+    pub fn credentialAssertionDecision(self: *const Directory, subjects: SubjectSet, request: CredentialAssertionRequest) PolicyDecision {
+        return self.decide(subjects, request, credentialAssertionDenial);
     }
 
-    pub fn secretVaultDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: SecretVaultRequest,
-    ) PolicyDecision {
+    pub fn secretVaultDecision(self: *const Directory, subjects: SubjectSet, request: SecretVaultRequest) PolicyDecision {
         if (request.operation == .revoke) return allow();
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policy.secret_vault_allowed) return block(policy, .secret_vault_denied);
-            if (policy.require_hardware_backed_secrets and !request.hardware_backed) {
-                return block(policy, .secret_hardware_denied);
-            }
-            if (policy.deny_secret_raw_export and request.raw_export) {
-                return block(policy, .secret_raw_export_denied);
-            }
-            if (policy.max_secret_handle_lease_ticks != 0 and request.lease_ticks > policy.max_secret_handle_lease_ticks) {
-                return block(policy, .secret_lease_denied);
-            }
-        }
-        return allow();
+        return self.decide(subjects, request, secretVaultDenial);
     }
 
-    pub fn lifecycleDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: LifecycleRequest,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policy.task_lifecycle_allowed) return block(policy, .task_lifecycle_denied);
-            if (request.operation == .terminate_task and
-                policy.require_lifecycle_checkpoint_before_terminate and
-                !request.checkpoint_present)
-            {
-                return block(policy, .task_lifecycle_checkpoint_required);
-            }
-        }
-        return allow();
+    pub fn lifecycleDecision(self: *const Directory, subjects: SubjectSet, request: LifecycleRequest) PolicyDecision {
+        return self.decide(subjects, request, lifecycleDenial);
     }
 
-    pub fn attentionDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: AttentionRequest,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (request.critical and !policy.allow_critical_interruption) {
-                return block(policy, .attention_critical_denied);
-            }
-            if (request.requests_interruption and
-                !request.critical and
-                policy.quiet_until_tick != 0 and
-                request.now_tick < policy.quiet_until_tick)
-            {
-                return block(policy, .attention_quiet_denied);
-            }
-            if (policy.max_visible_notifications != 0 and
-                request.visible_notifications >= policy.max_visible_notifications)
-            {
-                return block(policy, .attention_visible_budget_denied);
-            }
-            if (request.requests_interruption and
-                policy.max_interruptive_notifications != 0 and
-                request.interruptive_notifications >= policy.max_interruptive_notifications)
-            {
-                return block(policy, .attention_interruption_budget_denied);
-            }
-        }
-        return allow();
+    pub fn attentionDecision(self: *const Directory, subjects: SubjectSet, request: AttentionRequest) PolicyDecision {
+        return self.decide(subjects, request, attentionDenial);
     }
 
-    pub fn accessibilityDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: AccessibilityRequest,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (policy.require_adaptive_ui and !request.adaptive_ui) return block(policy, .accessibility_adaptive_ui_denied);
-            if (policy.require_screen_reader_support and !request.screen_reader_supported) return block(policy, .accessibility_screen_reader_denied);
-            if (policy.require_keyboard_navigation and !request.keyboard_navigation) return block(policy, .accessibility_keyboard_navigation_denied);
-            if (policy.require_reduced_motion_support and !request.reduced_motion_supported) return block(policy, .accessibility_reduced_motion_denied);
-            if (policy.require_high_contrast_support and !request.high_contrast_supported) return block(policy, .accessibility_high_contrast_denied);
-        }
-        return allow();
+    pub fn accessibilityDecision(self: *const Directory, subjects: SubjectSet, request: AccessibilityRequest) PolicyDecision {
+        return self.decide(subjects, request, accessibilityDenial);
     }
 
-    pub fn backgroundActivityDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: BackgroundActivityRequest,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (policy.max_background_duration_seconds != 0 and
-                request.expected_duration_seconds > policy.max_background_duration_seconds)
-            {
-                return block(policy, .background_duration_denied);
-            }
-            if (policy.max_background_cpu_time_ticks != 0 and
-                request.cpu_time_ticks > policy.max_background_cpu_time_ticks)
-            {
-                return block(policy, .background_cpu_denied);
-            }
-            if ((policy.max_background_memory_bytes != 0 and request.memory_bytes > policy.max_background_memory_bytes) or
-                (policy.max_background_shared_memory_bytes != 0 and request.shared_memory_bytes > policy.max_background_shared_memory_bytes))
-            {
-                return block(policy, .background_memory_denied);
-            }
-            if (!policy.allow_remote_background_network and backgroundNetworkIsRemote(request.network)) {
-                return block(policy, .background_network_denied);
-            }
-            if (policy.require_visible_background_activity and !backgroundActivityIsVisible(request.visibility)) {
-                return block(policy, .background_visibility_denied);
-            }
-        }
-        return allow();
+    pub fn backgroundActivityDecision(self: *const Directory, subjects: SubjectSet, request: BackgroundActivityRequest) PolicyDecision {
+        return self.decide(subjects, request, backgroundActivityDenial);
     }
 
-    pub fn permissionUseDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: PermissionUseRequest,
-    ) PolicyDecision {
+    pub fn permissionUseDecision(self: *const Directory, subjects: SubjectSet, request: PermissionUseRequest) PolicyDecision {
         if (!manifest.isSensitive(request.sensitivity)) return allow();
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (policy.max_sensitive_retention_days != 0 and request.retention_days > policy.max_sensitive_retention_days) {
-                return block(policy, .permission_retention_denied);
-            }
-            if (manifest.dangerousPermissionKind(request.kind) and
-                policy.require_sensitive_permission_lease and
-                request.lease_ticks == 0)
-            {
-                return block(policy, .permission_lease_denied);
-            }
-            if (manifest.dangerousPermissionKind(request.kind) and
-                policy.max_permission_lease_ticks != 0 and
-                request.lease_ticks > policy.max_permission_lease_ticks)
-            {
-                return block(policy, .permission_lease_denied);
-            }
-        }
-        return allow();
+        return self.decide(subjects, request, permissionUseDenial);
     }
 
-    pub fn sensitiveCaptureDecision(
+    pub fn sensitiveCaptureDecision(self: *const Directory, subjects: SubjectSet, request: SensitiveCaptureRequest) PolicyDecision {
+        return self.decide(subjects, request, sensitiveCaptureDenial);
+    }
+
+    // Every active policy for the subjects must be authentic and must not
+    // deny the request. Organization policy is consulted first, then user,
+    // device and workspace policy; the first denial names its blocking scope.
+    fn decide(
         self: *const Directory,
         subjects: SubjectSet,
-        request: SensitiveCaptureRequest,
+        request: anytype,
+        comptime denial: fn (*const PolicyObject, @TypeOf(request)) ?DecisionReason,
     ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (!policyAllowsPermissionKind(policy, request.kind)) {
-                return block(policy, permissionKindDenialReason(request.kind));
-            }
-            if (policy.require_sensitive_capture_foreground and !request.foreground_session) {
-                return block(policy, .capture_foreground_denied);
-            }
-            if (policy.require_capture_indicator and !request.visible_indicator) {
-                return block(policy, .capture_indicator_denied);
-            }
-            if (!policy.allow_background_capture and request.background) {
-                return block(policy, .capture_background_denied);
-            }
-            if (policy.max_sensitive_capture_lease_ticks != 0 and request.lease_ticks > policy.max_sensitive_capture_lease_ticks) {
-                return block(policy, .capture_lease_denied);
-            }
-            if (policy.max_sensitive_capture_samples != 0 and request.sample_budget > policy.max_sensitive_capture_samples) {
-                return block(policy, .capture_sample_budget_denied);
-            }
+        const active = self.activeSlots(subjects);
+        for (decision_order) |scope| {
+            const slot = active[@backingInt(scope)] orelse continue;
+            if (slot.authenticDigest() == null) return block(&slot.policy, .unsigned_policy);
+            if (denial(&slot.policy, request)) |reason| return block(&slot.policy, reason);
         }
         return allow();
     }
 
-    pub fn retentionAuditDecision(
-        self: *const Directory,
-        subjects: SubjectSet,
-        request: RetentionAuditRequest,
-    ) PolicyDecision {
-        var iter = self.activePolicyIterator(subjects);
-        while (iter.next()) |policy| {
-            const signature_decision = self.requireVerified(policy);
-            if (!signature_decision.allowed) return signature_decision;
-            if (policy.retention_days != 0 and request.retention_days > policy.retention_days) {
-                return block(policy, .retention_denied);
-            }
-            if (policy.audit_export_required and !request.audit_export_present) {
-                return block(policy, .audit_export_required);
-            }
+    fn slotForId(self: *const Directory, policy_id: u64) ?*const PolicySlot {
+        if (policy_id == 0 or policy_id > self.len) return null;
+        return &self.slots[@intCast(policy_id - 1)];
+    }
+
+    fn activeSlot(self: *const Directory, scope: Scope, subject_id: u64) ?*const PolicySlot {
+        var active: ?*const PolicySlot = null;
+        for (self.slots[0..self.len]) |*slot| {
+            if (!slot.policy.revoked and slot.policy.scope == scope and slot.policy.subject_id == subject_id) active = slot;
         }
-        return allow();
+        return active;
     }
 
-    fn findConst(self: *const Directory, policy_id: u64) ?*const PolicyObject {
-        if (policy_id == 0) return null;
-        const slot = self.policies.getConst(policy_id) orelse return null;
-        if (slot.policy.id != policy_id) native_util.impossibleByInvariant("policy id index points at the wrong policy");
-        return &slot.policy;
-    }
-
-    fn activeForScopeConst(self: *const Directory, scope: Scope, subject_id: u64) ?*const PolicyObject {
-        var candidate: ?*const PolicyObject = null;
-        var best_generation: u32 = 0;
-        var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
-        while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
-            if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-            const slot = &self.policies.slots[cursor];
-            if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
-            if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
+    fn activeSlots(self: *const Directory, subjects: SubjectSet) [scope_count]?*const PolicySlot {
+        var active: [scope_count]?*const PolicySlot = @splat(null);
+        for (self.slots[0..self.len]) |*slot| {
             if (slot.policy.revoked) continue;
-            if (slot.policy.generation < best_generation) continue;
-            candidate = &slot.policy;
-            best_generation = slot.policy.generation;
+            const subject_id = subjectFor(subjects, slot.policy.scope) orelse continue;
+            if (slot.policy.subject_id == subject_id) active[@backingInt(slot.policy.scope)] = slot;
         }
-        return candidate;
+        return active;
     }
 
-    fn activePolicyIterator(self: *const Directory, subjects: SubjectSet) ActivePolicyIterator {
-        return .{
-            .directory = self,
-            .subjects = subjects,
-        };
-    }
-
-    fn requireVerified(self: *const Directory, policy: *const PolicyObject) PolicyDecision {
-        if (self.verify(policy.id)) return allow();
-        return block(policy, .unsigned_policy);
-    }
-
-    fn indexPolicy(self: *Directory, slot_index: usize) void {
-        if (slot_index >= MAX_POLICIES) native_util.impossibleByInvariant("policy index update points outside slots");
-        const slot = &self.policies.slots[slot_index];
-        const policy = &slot.policy;
-        if (!slot.in_use or policy.id == 0) native_util.impossibleByInvariant("policy index update requires a live policy");
-        if (!self.scope_index.append(policyScopeKey(policy.scope, policy.subject_id), slot_index)) {
-            native_util.impossibleByInvariant("policy scope index capacity covers policy slots");
+    fn latestGeneration(self: *const Directory, scope: Scope, subject_id: u64) u32 {
+        var generation: u32 = 0;
+        for (self.slots[0..self.len]) |*slot| {
+            if (slot.policy.scope == scope and slot.policy.subject_id == subject_id) generation = slot.policy.generation;
         }
+        return generation;
     }
 
     comptime {
@@ -788,34 +297,22 @@ pub const Directory = struct {
     }
 };
 
-const ActivePolicyIterator = struct {
-    directory: *const Directory,
-    subjects: SubjectSet,
-    index: usize = 0,
+// The policy state of a device before any policy is attached: every decision
+// is allowed. Boot seeding and verification flows that run ahead of policy
+// enrollment name it explicitly instead of skipping policy.
+pub const unattached: Directory = .{};
 
-    fn next(self: *ActivePolicyIterator) ?*const PolicyObject {
-        while (self.index < 4) {
-            const index = self.index;
-            self.index += 1;
-            switch (index) {
-                0 => if (self.subjects.organization_id) |subject_id| {
-                    if (self.directory.activeForScopeConst(.organization, subject_id)) |policy| return policy;
-                },
-                1 => if (self.subjects.user_id) |subject_id| {
-                    if (self.directory.activeForScopeConst(.user, subject_id)) |policy| return policy;
-                },
-                2 => if (self.subjects.device_id) |subject_id| {
-                    if (self.directory.activeForScopeConst(.device, subject_id)) |policy| return policy;
-                },
-                3 => if (self.subjects.workspace_id) |subject_id| {
-                    if (self.directory.activeForScopeConst(.workspace, subject_id)) |policy| return policy;
-                },
-                else => {},
-            }
-        }
-        return null;
-    }
-};
+const scope_count = @typeInfo(Scope).@"enum".field_names.len;
+const decision_order = [scope_count]Scope{ .organization, .user, .device, .workspace };
+
+fn subjectFor(subjects: SubjectSet, scope: Scope) ?u64 {
+    return switch (scope) {
+        .user => subjects.user_id,
+        .device => subjects.device_id,
+        .workspace => subjects.workspace_id,
+        .organization => subjects.organization_id,
+    };
+}
 
 fn allow() PolicyDecision {
     return .{ .allowed = true };
@@ -831,414 +328,233 @@ fn block(policy: *const PolicyObject, reason: DecisionReason) PolicyDecision {
     };
 }
 
-fn policyAllowsPermissionKind(policy: *const PolicyObject, kind: manifest.PermissionKind) bool {
-    return switch (kind) {
-        .clipboard => policy.clipboard_allowed,
-        .camera => policy.camera_allowed,
-        .mic => policy.microphone_allowed,
-        .location => policy.location_allowed,
-        .contacts => policy.contacts_allowed,
-        .sensor => policy.sensors_allowed,
-        .screen_capture => policy.screen_capture_allowed,
-        .peer_ipc => policy.peer_ipc_allowed,
-        else => true,
+fn installSourceDenial(policy: *const PolicyObject, source_identity: []const u8) ?DecisionReason {
+    return if (policy.allowsInstallSource(source_identity)) null else .install_source_denied;
+}
+
+fn packageProvenanceDenial(policy: *const PolicyObject, request: PackageProvenanceRequest) ?DecisionReason {
+    if (policy.require_package_sbom and !request.sbom_present) return .package_sbom_denied;
+    if (policy.require_reproducible_package_build and
+        (!request.reproducible_build or !request.source_archive_present or !request.build_recipe_present))
+    {
+        return .package_reproducibility_denied;
+    }
+    if (policy.require_trusted_package_builder and !request.trusted_builder) return .package_builder_denied;
+    if (policy.require_vulnerability_scan and !request.vulnerability_scan_present) return .package_vulnerability_scan_denied;
+    return null;
+}
+
+fn agentDelegationDenial(policy: *const PolicyObject, request: AgentDelegationRequest) ?DecisionReason {
+    if (!policy.agent_delegation_allowed) return .agent_delegation_denied;
+    if (policy.max_agent_actions_per_session != 0 and request.autonomous_actions > policy.max_agent_actions_per_session) {
+        return .agent_action_budget_denied;
+    }
+    if (policy.max_agent_remote_calls_per_session != 0 and request.remote_calls > policy.max_agent_remote_calls_per_session) {
+        return .agent_remote_call_denied;
+    }
+    if (request.remote_calls != 0 and policy.require_agent_user_confirmation and !request.user_confirmed) {
+        return .agent_confirmation_required;
+    }
+    if (policy.require_agent_audit and !request.audit_enabled) return .agent_audit_required;
+    if (policy.require_agent_session_binding and !request.session_bound) return .agent_session_binding_denied;
+    if (policy.require_agent_local_context and !request.local_context_only) return .agent_context_scope_denied;
+    if (policy.max_agent_context_bytes != 0 and request.context_bytes > policy.max_agent_context_bytes) {
+        return .agent_context_budget_denied;
+    }
+    if (request.delegation_generation < policy.min_agent_delegation_generation) return .agent_kill_switch_denied;
+    if (policy.require_agent_visible_plan and !request.user_visible_plan) return .agent_plan_visibility_required;
+    return null;
+}
+
+fn syncDestinationDenial(policy: *const PolicyObject, destination: []const u8) ?DecisionReason {
+    return if (policy.allowsSyncDestination(destination)) null else .sync_destination_denied;
+}
+
+fn networkEgressDenial(policy: *const PolicyObject, destination: []const u8) ?DecisionReason {
+    return if (policy.allowsNetworkDestination(destination)) null else .network_egress_denied;
+}
+
+fn permissionKindDenial(policy: *const PolicyObject, kind: manifest.PermissionKind) ?DecisionReason {
+    const allowed, const reason: DecisionReason = switch (kind) {
+        .clipboard => .{ policy.clipboard_allowed, .clipboard_denied },
+        .camera => .{ policy.camera_allowed, .camera_denied },
+        .mic => .{ policy.microphone_allowed, .microphone_denied },
+        .location => .{ policy.location_allowed, .location_denied },
+        .contacts => .{ policy.contacts_allowed, .contacts_denied },
+        .sensor => .{ policy.sensors_allowed, .sensor_denied },
+        .screen_capture => .{ policy.screen_capture_allowed, .screen_capture_denied },
+        .peer_ipc => .{ policy.peer_ipc_allowed, .peer_ipc_denied },
+        else => return null,
     };
+    return if (allowed) null else reason;
 }
 
-fn permissionKindDenialReason(kind: manifest.PermissionKind) DecisionReason {
-    return switch (kind) {
-        .clipboard => .clipboard_denied,
-        .camera => .camera_denied,
-        .mic => .microphone_denied,
-        .location => .location_denied,
-        .contacts => .contacts_denied,
-        .sensor => .sensor_denied,
-        .screen_capture => .screen_capture_denied,
-        .peer_ipc => .peer_ipc_denied,
-        else => .none,
-    };
+fn aiUseDenial(policy: *const PolicyObject, request: AiUseRequest) ?DecisionReason {
+    if (request.remote_model and !policy.remote_ai_allowed) return .remote_ai_denied;
+    if (request.training_user_content and !policy.ai_training_allowed) return .ai_training_denied;
+    if (policy.max_ai_context_bytes != 0 and request.context_bytes > policy.max_ai_context_bytes) return .ai_context_denied;
+    if (request.remote_model) return null;
+    if (policy.require_ai_model_measurement and !request.local_model_measured) return .ai_model_measurement_denied;
+    if (policy.require_trusted_ai_model_source and !request.model_source_trusted) return .ai_model_source_denied;
+    if (policy.max_ai_model_age_days != 0 and request.model_age_days > policy.max_ai_model_age_days) return .ai_model_staleness_denied;
+    return null;
 }
 
-// Local IDs, generations and revocation state belong to the directory. Detached
-// signatures cover the complete canonical request, shared with native creation.
-pub fn requestDigest(request: CreateRequest) !crypto_hash.Digest {
-    var candidate: PolicyObject = undefined;
-    try policyFromRequestInto(&candidate, request);
-    return policyDigest(&candidate);
+fn sessionLifetimeDenial(policy: *const PolicyObject, lifetime_ticks: u64) ?DecisionReason {
+    if (policy.max_session_unlock_age_ticks != 0 and lifetime_ticks > policy.max_session_unlock_age_ticks) return .session_unlock_stale;
+    return null;
 }
 
-pub fn verifyRequest(request: CreateRequest, signature: manifest.Signature, issuer_key: signing.PublicKey) !void {
-    if (!std.mem.eql(u8, signature.publicKeySlice(), &issuer_key) or
-        !signing.verify(signature, &(try requestDigest(request)))) return error.UntrustedPolicy;
+fn sessionTrustDenial(policy: *const PolicyObject, request: SessionTrustRequest) ?DecisionReason {
+    if (policy.require_hardware_backed_session and !request.hardware_backed_credential) return .session_hardware_denied;
+    if (policy.require_platform_backed_device_session and !request.device_platform_backed) return .session_device_posture_denied;
+    if (policy.require_primary_device_session and !request.primary_device_assertion) return .session_primary_device_denied;
+    return sessionLifetimeDenial(policy, request.unlock_age_ticks);
 }
 
-// Only a successful construction may be consumed or published. The caller
-// owns this private candidate, including partial state on validation failure.
-fn policyFromRequestInto(policy: *PolicyObject, request: CreateRequest) Error!void {
-    if (request.allowed_install_sources.len > MAX_ALLOW_LIST) return error.TooManyInstallSources;
-    if (request.allowed_network_destinations.len > MAX_ALLOW_LIST) return error.TooManyNetworkDestinations;
-    if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
-
-    policy.* = zeroPolicy();
-    policy.scope = request.scope;
-    policy.subject_id = request.subject_id;
-    policy.issuer = request.issuer;
-    policy.label_len = @intCast(native_util.copyTextExact(&policy.label, request.label) catch return error.LabelTooLong);
-    policy.install_source_mode = request.install_source_mode;
-    policy.network_egress_mode = request.network_egress_mode;
-    policy.removable_storage_allowed = request.removable_storage_allowed;
-    policy.screen_capture_allowed = request.screen_capture_allowed;
-    policy.clipboard_allowed = request.clipboard_allowed;
-    policy.camera_allowed = request.camera_allowed;
-    policy.microphone_allowed = request.microphone_allowed;
-    policy.location_allowed = request.location_allowed;
-    policy.contacts_allowed = request.contacts_allowed;
-    policy.sensors_allowed = request.sensors_allowed;
-    policy.peer_ipc_allowed = request.peer_ipc_allowed;
-    policy.remote_ai_allowed = request.remote_ai_allowed;
-    policy.ai_training_allowed = request.ai_training_allowed;
-    policy.max_ai_context_bytes = request.max_ai_context_bytes;
-    policy.require_ai_model_measurement = request.require_ai_model_measurement;
-    policy.require_trusted_ai_model_source = request.require_trusted_ai_model_source;
-    policy.max_ai_model_age_days = request.max_ai_model_age_days;
-    policy.require_hardware_backed_session = request.require_hardware_backed_session;
-    policy.require_platform_backed_device_session = request.require_platform_backed_device_session;
-    policy.require_primary_device_session = request.require_primary_device_session;
-    policy.max_session_unlock_age_ticks = request.max_session_unlock_age_ticks;
-    policy.require_package_sbom = request.require_package_sbom;
-    policy.require_reproducible_package_build = request.require_reproducible_package_build;
-    policy.require_trusted_package_builder = request.require_trusted_package_builder;
-    policy.require_vulnerability_scan = request.require_vulnerability_scan;
-    policy.agent_delegation_allowed = request.agent_delegation_allowed;
-    policy.max_agent_actions_per_session = request.max_agent_actions_per_session;
-    policy.max_agent_remote_calls_per_session = request.max_agent_remote_calls_per_session;
-    policy.require_agent_user_confirmation = request.require_agent_user_confirmation;
-    policy.require_agent_audit = request.require_agent_audit;
-    policy.require_agent_session_binding = request.require_agent_session_binding;
-    policy.require_agent_local_context = request.require_agent_local_context;
-    policy.max_agent_context_bytes = request.max_agent_context_bytes;
-    policy.min_agent_delegation_generation = request.min_agent_delegation_generation;
-    policy.require_agent_visible_plan = request.require_agent_visible_plan;
-    policy.max_remote_private_egress_bytes = request.max_remote_private_egress_bytes;
-    policy.data_export_allowed = request.data_export_allowed;
-    policy.data_deletion_allowed = request.data_deletion_allowed;
-    policy.require_data_deletion_receipt = request.require_data_deletion_receipt;
-    policy.max_data_export_bytes = request.max_data_export_bytes;
-    policy.object_backup_allowed = request.object_backup_allowed;
-    policy.object_restore_allowed = request.object_restore_allowed;
-    policy.require_encrypted_object_backup = request.require_encrypted_object_backup;
-    policy.require_backup_recovery_key = request.require_backup_recovery_key;
-    policy.require_restore_device_trust = request.require_restore_device_trust;
-    policy.max_object_backup_bytes = request.max_object_backup_bytes;
-    policy.max_object_restore_age_days = request.max_object_restore_age_days;
-    policy.semantic_memory_allowed = request.semantic_memory_allowed;
-    policy.require_local_semantic_model = request.require_local_semantic_model;
-    policy.require_encrypted_semantic_index = request.require_encrypted_semantic_index;
-    policy.require_redacted_semantic_snippets = request.require_redacted_semantic_snippets;
-    policy.max_semantic_query_bytes = request.max_semantic_query_bytes;
-    policy.credential_assertions_allowed = request.credential_assertions_allowed;
-    policy.deny_credential_password_fallback = request.deny_credential_password_fallback;
-    policy.require_phishing_resistant_credential = request.require_phishing_resistant_credential;
-    policy.require_hardware_backed_credential = request.require_hardware_backed_credential;
-    policy.require_local_credential_unlock = request.require_local_credential_unlock;
-    policy.max_credential_unlock_age_ticks = request.max_credential_unlock_age_ticks;
-    policy.secret_vault_allowed = request.secret_vault_allowed;
-    policy.require_hardware_backed_secrets = request.require_hardware_backed_secrets;
-    policy.deny_secret_raw_export = request.deny_secret_raw_export;
-    policy.max_secret_handle_lease_ticks = request.max_secret_handle_lease_ticks;
-    policy.task_lifecycle_allowed = request.task_lifecycle_allowed;
-    policy.require_lifecycle_checkpoint_before_terminate = request.require_lifecycle_checkpoint_before_terminate;
-    policy.quiet_until_tick = request.quiet_until_tick;
-    policy.max_visible_notifications = request.max_visible_notifications;
-    policy.max_interruptive_notifications = request.max_interruptive_notifications;
-    policy.allow_critical_interruption = request.allow_critical_interruption;
-    policy.require_adaptive_ui = request.require_adaptive_ui;
-    policy.require_screen_reader_support = request.require_screen_reader_support;
-    policy.require_keyboard_navigation = request.require_keyboard_navigation;
-    policy.require_reduced_motion_support = request.require_reduced_motion_support;
-    policy.require_high_contrast_support = request.require_high_contrast_support;
-    policy.max_background_duration_seconds = request.max_background_duration_seconds;
-    policy.max_background_cpu_time_ticks = request.max_background_cpu_time_ticks;
-    policy.max_background_memory_bytes = request.max_background_memory_bytes;
-    policy.max_background_shared_memory_bytes = request.max_background_shared_memory_bytes;
-    policy.allow_remote_background_network = request.allow_remote_background_network;
-    policy.require_visible_background_activity = request.require_visible_background_activity;
-    policy.max_sensitive_retention_days = request.max_sensitive_retention_days;
-    policy.max_permission_lease_ticks = request.max_permission_lease_ticks;
-    policy.require_sensitive_permission_lease = request.require_sensitive_permission_lease;
-    policy.require_sensitive_capture_foreground = request.require_sensitive_capture_foreground;
-    policy.require_capture_indicator = request.require_capture_indicator;
-    policy.allow_background_capture = request.allow_background_capture;
-    policy.max_sensitive_capture_lease_ticks = request.max_sensitive_capture_lease_ticks;
-    policy.max_sensitive_capture_samples = request.max_sensitive_capture_samples;
-    policy.retention_days = request.retention_days;
-    policy.audit_export_required = request.audit_export_required;
-
-    for (request.allowed_install_sources, 0..) |source_identity, index| {
-        policy.allowed_install_source_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_install_sources[index], source_identity) catch return error.InstallSourceTooLong);
-        policy.allowed_install_source_count += 1;
+fn sensitiveEgressDenial(policy: *const PolicyObject, request: SensitiveEgressRequest) ?DecisionReason {
+    if (policy.max_remote_private_egress_bytes != 0 and request.remote_bytes > policy.max_remote_private_egress_bytes) {
+        return .private_egress_budget_denied;
     }
-    for (request.allowed_network_destinations, 0..) |destination, index| {
-        policy.allowed_network_destination_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_network_destinations[index], destination) catch return error.NetworkDestinationTooLong);
-        policy.allowed_network_destination_count += 1;
-    }
-    for (request.allowed_sync_destinations, 0..) |destination, index| {
-        policy.allowed_sync_destination_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_sync_destinations[index], destination) catch return error.SyncDestinationTooLong);
-        policy.allowed_sync_destination_count += 1;
-    }
+    return null;
 }
 
-fn zeroPolicy() PolicyObject {
-    return .{
-        .id = 0,
-        .generation = 0,
-        .revoked = false,
-        .scope = .user,
-        .subject_id = 0,
-        .issuer = .{ .kind = .policy_authority, .serial = 0 },
-        .label_len = 0,
-        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
-        .install_source_mode = .any_signed,
-        .allowed_install_source_count = 0,
-        .allowed_install_sources = @as([MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8, @splat(@as([MAX_LABEL_BYTES]u8, @splat(0)))),
-        .allowed_install_source_lens = @as([MAX_ALLOW_LIST]u8, @splat(0)),
-        .network_egress_mode = .inherit,
-        .allowed_network_destination_count = 0,
-        .allowed_network_destinations = @as([MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8, @splat(@as([MAX_LABEL_BYTES]u8, @splat(0)))),
-        .allowed_network_destination_lens = @as([MAX_ALLOW_LIST]u8, @splat(0)),
-        .allowed_sync_destination_count = 0,
-        .allowed_sync_destinations = @as([MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8, @splat(@as([MAX_LABEL_BYTES]u8, @splat(0)))),
-        .allowed_sync_destination_lens = @as([MAX_ALLOW_LIST]u8, @splat(0)),
-        .removable_storage_allowed = false,
-        .screen_capture_allowed = false,
-        .clipboard_allowed = false,
-        .camera_allowed = false,
-        .microphone_allowed = false,
-        .location_allowed = false,
-        .contacts_allowed = false,
-        .sensors_allowed = false,
-        .peer_ipc_allowed = false,
-        .remote_ai_allowed = false,
-        .ai_training_allowed = false,
-        .max_ai_context_bytes = 0,
-        .require_ai_model_measurement = false,
-        .require_trusted_ai_model_source = false,
-        .max_ai_model_age_days = 0,
-        .require_hardware_backed_session = false,
-        .require_platform_backed_device_session = false,
-        .require_primary_device_session = false,
-        .max_session_unlock_age_ticks = 0,
-        .require_package_sbom = false,
-        .require_reproducible_package_build = false,
-        .require_trusted_package_builder = false,
-        .require_vulnerability_scan = false,
-        .agent_delegation_allowed = false,
-        .max_agent_actions_per_session = 0,
-        .max_agent_remote_calls_per_session = 0,
-        .require_agent_user_confirmation = true,
-        .require_agent_audit = true,
-        .require_agent_session_binding = false,
-        .require_agent_local_context = false,
-        .max_agent_context_bytes = 0,
-        .min_agent_delegation_generation = 0,
-        .require_agent_visible_plan = false,
-        .max_remote_private_egress_bytes = 0,
-        .data_export_allowed = false,
-        .data_deletion_allowed = false,
-        .require_data_deletion_receipt = false,
-        .max_data_export_bytes = 0,
-        .object_backup_allowed = false,
-        .object_restore_allowed = false,
-        .require_encrypted_object_backup = true,
-        .require_backup_recovery_key = true,
-        .require_restore_device_trust = true,
-        .max_object_backup_bytes = 0,
-        .max_object_restore_age_days = 0,
-        .semantic_memory_allowed = false,
-        .require_local_semantic_model = true,
-        .require_encrypted_semantic_index = true,
-        .require_redacted_semantic_snippets = true,
-        .max_semantic_query_bytes = 0,
-        .credential_assertions_allowed = false,
-        .deny_credential_password_fallback = true,
-        .require_phishing_resistant_credential = true,
-        .require_hardware_backed_credential = false,
-        .require_local_credential_unlock = true,
-        .max_credential_unlock_age_ticks = 0,
-        .secret_vault_allowed = false,
-        .require_hardware_backed_secrets = true,
-        .deny_secret_raw_export = true,
-        .max_secret_handle_lease_ticks = 0,
-        .task_lifecycle_allowed = false,
-        .require_lifecycle_checkpoint_before_terminate = true,
-        .quiet_until_tick = 0,
-        .max_visible_notifications = 0,
-        .max_interruptive_notifications = 0,
-        .allow_critical_interruption = true,
-        .require_adaptive_ui = false,
-        .require_screen_reader_support = false,
-        .require_keyboard_navigation = false,
-        .require_reduced_motion_support = false,
-        .require_high_contrast_support = false,
-        .max_background_duration_seconds = 0,
-        .max_background_cpu_time_ticks = 0,
-        .max_background_memory_bytes = 0,
-        .max_background_shared_memory_bytes = 0,
-        .allow_remote_background_network = false,
-        .require_visible_background_activity = false,
-        .max_sensitive_retention_days = 0,
-        .max_permission_lease_ticks = 0,
-        .require_sensitive_permission_lease = false,
-        .require_sensitive_capture_foreground = true,
-        .require_capture_indicator = true,
-        .allow_background_capture = false,
-        .max_sensitive_capture_lease_ticks = 0,
-        .max_sensitive_capture_samples = 0,
-        .retention_days = 0,
-        .audit_export_required = false,
-        .signature = .{},
-    };
+fn dataRightsDenial(policy: *const PolicyObject, request: DataRightsRequest) ?DecisionReason {
+    switch (request.operation) {
+        .portable_export => {
+            if (!policy.data_export_allowed) return .data_export_denied;
+            if (policy.max_data_export_bytes != 0 and request.bytes > policy.max_data_export_bytes) return .data_export_denied;
+        },
+        .delete => {
+            if (!policy.data_deletion_allowed) return .data_deletion_denied;
+            if (policy.require_data_deletion_receipt and !request.deletion_receipt_present) return .data_deletion_receipt_denied;
+        },
+    }
+    return null;
 }
 
-fn nextGeneration(self: *const Directory, scope: Scope, subject_id: u64) u32 {
-    return latestGenerationForScope(self, scope, subject_id) + 1;
+fn objectResilienceDenial(policy: *const PolicyObject, request: ObjectResilienceRequest) ?DecisionReason {
+    switch (request.operation) {
+        .backup => {
+            if (!policy.object_backup_allowed) return .object_backup_denied;
+            if (policy.require_encrypted_object_backup and !request.encrypted) return .object_backup_encryption_denied;
+            if (policy.require_backup_recovery_key and !request.recovery_key_present) return .object_backup_recovery_key_denied;
+            if (policy.max_object_backup_bytes != 0 and request.bytes > policy.max_object_backup_bytes) return .object_backup_size_denied;
+        },
+        .restore, .migrate => {
+            if (!policy.object_restore_allowed) return .object_restore_denied;
+            if (policy.require_restore_device_trust and !request.device_trust_verified) return .object_restore_device_trust_denied;
+            if (policy.max_object_restore_age_days != 0 and request.restore_age_days > policy.max_object_restore_age_days) {
+                return .object_restore_staleness_denied;
+            }
+        },
+    }
+    return null;
 }
 
-fn latestGenerationForScope(self: *const Directory, scope: Scope, subject_id: u64) u32 {
-    var best_generation: u32 = 0;
-    var cursor = self.scope_index.head(policyScopeKey(scope, subject_id));
-    while (cursor != indexed_arena.no_index) : (cursor = self.scope_index.next(cursor)) {
-        if (cursor >= MAX_POLICIES) native_util.impossibleByInvariant("policy scope index points outside slots");
-        const slot = &self.policies.slots[cursor];
-        if (!slot.in_use) native_util.impossibleByInvariant("policy scope index points at a free slot");
-        if (slot.policy.scope != scope or slot.policy.subject_id != subject_id) continue;
-        if (slot.policy.generation > best_generation) best_generation = slot.policy.generation;
-    }
-    return best_generation;
+fn semanticMemoryDenial(policy: *const PolicyObject, request: SemanticMemoryRequest) ?DecisionReason {
+    if (!policy.semantic_memory_allowed) return .semantic_memory_denied;
+    if (policy.require_local_semantic_model and !request.local_model) return .semantic_memory_remote_model_denied;
+    if (policy.require_encrypted_semantic_index and !request.encrypted_index) return .semantic_memory_encryption_denied;
+    if (policy.require_redacted_semantic_snippets and !request.redacted_snippets) return .semantic_memory_redaction_denied;
+    if (policy.max_semantic_query_bytes != 0 and request.query_bytes > policy.max_semantic_query_bytes) return .semantic_query_budget_denied;
+    return null;
 }
 
-fn policyScopeKey(scope: Scope, subject_id: u64) u64 {
-    const subject_id_offset = @sizeOf(Scope);
-    const policy_scope_key_bytes = subject_id_offset + @sizeOf(u64);
-    var bytes: [policy_scope_key_bytes]u8 = undefined;
-    bytes[0] = @backingInt(scope);
-    std.mem.writeInt(u64, bytes[subject_id_offset..][0..@sizeOf(u64)], subject_id, .little);
-    return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.policy_scope_key, &bytes));
+fn credentialAssertionDenial(policy: *const PolicyObject, request: CredentialAssertionRequest) ?DecisionReason {
+    if (!policy.credential_assertions_allowed) return .credential_assertion_denied;
+    if (policy.deny_credential_password_fallback and request.password_fallback) return .credential_password_fallback_denied;
+    if (policy.require_phishing_resistant_credential and !request.phishing_resistant) return .credential_phishing_resistance_denied;
+    if (policy.require_hardware_backed_credential and !request.hardware_backed) return .credential_hardware_denied;
+    if (policy.require_local_credential_unlock and !request.local_unlock_verified) return .credential_unlock_denied;
+    if (policy.max_credential_unlock_age_ticks != 0 and request.unlock_age_ticks > policy.max_credential_unlock_age_ticks) {
+        return .credential_unlock_stale;
+    }
+    return null;
 }
 
-fn policyDigest(policy: *const PolicyObject) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
-    crypto_hash.updateEnum(&hasher, "scope", policy.scope);
-    crypto_hash.updateEnum(&hasher, "issuer-kind", policy.issuer.kind);
-    crypto_hash.updateInt(&hasher, "subject-id", policy.subject_id);
-    crypto_hash.updateInt(&hasher, "issuer-serial", policy.issuer.serial);
-    crypto_hash.updateBytes(&hasher, "label", policy.labelSlice());
-    crypto_hash.updateEnum(&hasher, "install-source-mode", policy.install_source_mode);
-    crypto_hash.updateEnum(&hasher, "network-egress-mode", policy.network_egress_mode);
-    crypto_hash.updateBool(&hasher, "removable-storage-allowed", policy.removable_storage_allowed);
-    crypto_hash.updateBool(&hasher, "screen-capture-allowed", policy.screen_capture_allowed);
-    crypto_hash.updateBool(&hasher, "clipboard-allowed", policy.clipboard_allowed);
-    crypto_hash.updateBool(&hasher, "camera-allowed", policy.camera_allowed);
-    crypto_hash.updateBool(&hasher, "microphone-allowed", policy.microphone_allowed);
-    crypto_hash.updateBool(&hasher, "location-allowed", policy.location_allowed);
-    crypto_hash.updateBool(&hasher, "contacts-allowed", policy.contacts_allowed);
-    crypto_hash.updateBool(&hasher, "sensors-allowed", policy.sensors_allowed);
-    crypto_hash.updateBool(&hasher, "peer-ipc-allowed", policy.peer_ipc_allowed);
-    crypto_hash.updateBool(&hasher, "remote-ai-allowed", policy.remote_ai_allowed);
-    crypto_hash.updateBool(&hasher, "ai-training-allowed", policy.ai_training_allowed);
-    crypto_hash.updateInt(&hasher, "max-ai-context-bytes", policy.max_ai_context_bytes);
-    crypto_hash.updateBool(&hasher, "require-ai-model-measurement", policy.require_ai_model_measurement);
-    crypto_hash.updateBool(&hasher, "require-trusted-ai-model-source", policy.require_trusted_ai_model_source);
-    crypto_hash.updateInt(&hasher, "max-ai-model-age-days", policy.max_ai_model_age_days);
-    crypto_hash.updateBool(&hasher, "require-hardware-backed-session", policy.require_hardware_backed_session);
-    crypto_hash.updateBool(&hasher, "require-platform-backed-device-session", policy.require_platform_backed_device_session);
-    crypto_hash.updateBool(&hasher, "require-primary-device-session", policy.require_primary_device_session);
-    crypto_hash.updateInt(&hasher, "max-session-unlock-age-ticks", policy.max_session_unlock_age_ticks);
-    crypto_hash.updateBool(&hasher, "require-package-sbom", policy.require_package_sbom);
-    crypto_hash.updateBool(&hasher, "require-reproducible-package-build", policy.require_reproducible_package_build);
-    crypto_hash.updateBool(&hasher, "require-trusted-package-builder", policy.require_trusted_package_builder);
-    crypto_hash.updateBool(&hasher, "require-vulnerability-scan", policy.require_vulnerability_scan);
-    crypto_hash.updateBool(&hasher, "agent-delegation-allowed", policy.agent_delegation_allowed);
-    crypto_hash.updateInt(&hasher, "max-agent-actions-per-session", policy.max_agent_actions_per_session);
-    crypto_hash.updateInt(&hasher, "max-agent-remote-calls-per-session", policy.max_agent_remote_calls_per_session);
-    crypto_hash.updateBool(&hasher, "require-agent-user-confirmation", policy.require_agent_user_confirmation);
-    crypto_hash.updateBool(&hasher, "require-agent-audit", policy.require_agent_audit);
-    crypto_hash.updateBool(&hasher, "require-agent-session-binding", policy.require_agent_session_binding);
-    crypto_hash.updateBool(&hasher, "require-agent-local-context", policy.require_agent_local_context);
-    crypto_hash.updateInt(&hasher, "max-agent-context-bytes", policy.max_agent_context_bytes);
-    crypto_hash.updateInt(&hasher, "min-agent-delegation-generation", policy.min_agent_delegation_generation);
-    crypto_hash.updateBool(&hasher, "require-agent-visible-plan", policy.require_agent_visible_plan);
-    crypto_hash.updateInt(&hasher, "max-remote-private-egress-bytes", policy.max_remote_private_egress_bytes);
-    crypto_hash.updateBool(&hasher, "data-export-allowed", policy.data_export_allowed);
-    crypto_hash.updateBool(&hasher, "data-deletion-allowed", policy.data_deletion_allowed);
-    crypto_hash.updateBool(&hasher, "require-data-deletion-receipt", policy.require_data_deletion_receipt);
-    crypto_hash.updateInt(&hasher, "max-data-export-bytes", policy.max_data_export_bytes);
-    crypto_hash.updateBool(&hasher, "object-backup-allowed", policy.object_backup_allowed);
-    crypto_hash.updateBool(&hasher, "object-restore-allowed", policy.object_restore_allowed);
-    crypto_hash.updateBool(&hasher, "require-encrypted-object-backup", policy.require_encrypted_object_backup);
-    crypto_hash.updateBool(&hasher, "require-backup-recovery-key", policy.require_backup_recovery_key);
-    crypto_hash.updateBool(&hasher, "require-restore-device-trust", policy.require_restore_device_trust);
-    crypto_hash.updateInt(&hasher, "max-object-backup-bytes", policy.max_object_backup_bytes);
-    crypto_hash.updateInt(&hasher, "max-object-restore-age-days", policy.max_object_restore_age_days);
-    crypto_hash.updateBool(&hasher, "semantic-memory-allowed", policy.semantic_memory_allowed);
-    crypto_hash.updateBool(&hasher, "require-local-semantic-model", policy.require_local_semantic_model);
-    crypto_hash.updateBool(&hasher, "require-encrypted-semantic-index", policy.require_encrypted_semantic_index);
-    crypto_hash.updateBool(&hasher, "require-redacted-semantic-snippets", policy.require_redacted_semantic_snippets);
-    crypto_hash.updateInt(&hasher, "max-semantic-query-bytes", policy.max_semantic_query_bytes);
-    crypto_hash.updateBool(&hasher, "credential-assertions-allowed", policy.credential_assertions_allowed);
-    crypto_hash.updateBool(&hasher, "deny-credential-password-fallback", policy.deny_credential_password_fallback);
-    crypto_hash.updateBool(&hasher, "require-phishing-resistant-credential", policy.require_phishing_resistant_credential);
-    crypto_hash.updateBool(&hasher, "require-hardware-backed-credential", policy.require_hardware_backed_credential);
-    crypto_hash.updateBool(&hasher, "require-local-credential-unlock", policy.require_local_credential_unlock);
-    crypto_hash.updateInt(&hasher, "max-credential-unlock-age-ticks", policy.max_credential_unlock_age_ticks);
-    crypto_hash.updateBool(&hasher, "secret-vault-allowed", policy.secret_vault_allowed);
-    crypto_hash.updateBool(&hasher, "require-hardware-backed-secrets", policy.require_hardware_backed_secrets);
-    crypto_hash.updateBool(&hasher, "deny-secret-raw-export", policy.deny_secret_raw_export);
-    crypto_hash.updateInt(&hasher, "max-secret-handle-lease-ticks", policy.max_secret_handle_lease_ticks);
-    crypto_hash.updateBool(&hasher, "task-lifecycle-allowed", policy.task_lifecycle_allowed);
-    crypto_hash.updateBool(&hasher, "require-lifecycle-checkpoint-before-terminate", policy.require_lifecycle_checkpoint_before_terminate);
-    crypto_hash.updateInt(&hasher, "quiet-until-tick", policy.quiet_until_tick);
-    crypto_hash.updateInt(&hasher, "max-visible-notifications", policy.max_visible_notifications);
-    crypto_hash.updateInt(&hasher, "max-interruptive-notifications", policy.max_interruptive_notifications);
-    crypto_hash.updateBool(&hasher, "allow-critical-interruption", policy.allow_critical_interruption);
-    crypto_hash.updateBool(&hasher, "require-adaptive-ui", policy.require_adaptive_ui);
-    crypto_hash.updateBool(&hasher, "require-screen-reader-support", policy.require_screen_reader_support);
-    crypto_hash.updateBool(&hasher, "require-keyboard-navigation", policy.require_keyboard_navigation);
-    crypto_hash.updateBool(&hasher, "require-reduced-motion-support", policy.require_reduced_motion_support);
-    crypto_hash.updateBool(&hasher, "require-high-contrast-support", policy.require_high_contrast_support);
-    crypto_hash.updateInt(&hasher, "max-background-duration-seconds", policy.max_background_duration_seconds);
-    crypto_hash.updateInt(&hasher, "max-background-cpu-time-ticks", policy.max_background_cpu_time_ticks);
-    crypto_hash.updateInt(&hasher, "max-background-memory-bytes", policy.max_background_memory_bytes);
-    crypto_hash.updateInt(&hasher, "max-background-shared-memory-bytes", policy.max_background_shared_memory_bytes);
-    crypto_hash.updateBool(&hasher, "allow-remote-background-network", policy.allow_remote_background_network);
-    crypto_hash.updateBool(&hasher, "require-visible-background-activity", policy.require_visible_background_activity);
-    crypto_hash.updateInt(&hasher, "max-sensitive-retention-days", policy.max_sensitive_retention_days);
-    crypto_hash.updateInt(&hasher, "max-permission-lease-ticks", policy.max_permission_lease_ticks);
-    crypto_hash.updateBool(&hasher, "require-sensitive-permission-lease", policy.require_sensitive_permission_lease);
-    crypto_hash.updateBool(&hasher, "require-sensitive-capture-foreground", policy.require_sensitive_capture_foreground);
-    crypto_hash.updateBool(&hasher, "require-capture-indicator", policy.require_capture_indicator);
-    crypto_hash.updateBool(&hasher, "allow-background-capture", policy.allow_background_capture);
-    crypto_hash.updateInt(&hasher, "max-sensitive-capture-lease-ticks", policy.max_sensitive_capture_lease_ticks);
-    crypto_hash.updateInt(&hasher, "max-sensitive-capture-samples", policy.max_sensitive_capture_samples);
-    crypto_hash.updateInt(&hasher, "retention-days", policy.retention_days);
-    crypto_hash.updateBool(&hasher, "audit-export-required", policy.audit_export_required);
+fn secretVaultDenial(policy: *const PolicyObject, request: SecretVaultRequest) ?DecisionReason {
+    if (!policy.secret_vault_allowed) return .secret_vault_denied;
+    if (policy.require_hardware_backed_secrets and !request.hardware_backed) return .secret_hardware_denied;
+    if (policy.deny_secret_raw_export and request.raw_export) return .secret_raw_export_denied;
+    if (policy.max_secret_handle_lease_ticks != 0 and request.lease_ticks > policy.max_secret_handle_lease_ticks) return .secret_lease_denied;
+    return null;
+}
 
-    var allow_index: usize = 0;
-    while (allow_index < @as(usize, policy.allowed_install_source_count)) : (allow_index += 1) {
-        crypto_hash.updateInt(&hasher, "install-source-index", allow_index);
-        crypto_hash.updateBytes(&hasher, "install-source", policy.allowed_install_sources[allow_index][0..@as(usize, policy.allowed_install_source_lens[allow_index])]);
+fn lifecycleDenial(policy: *const PolicyObject, request: LifecycleRequest) ?DecisionReason {
+    if (!policy.task_lifecycle_allowed) return .task_lifecycle_denied;
+    if (request.operation == .terminate_task and policy.require_lifecycle_checkpoint_before_terminate and !request.checkpoint_present) {
+        return .task_lifecycle_checkpoint_required;
     }
-    var network_index: usize = 0;
-    while (network_index < @as(usize, policy.allowed_network_destination_count)) : (network_index += 1) {
-        crypto_hash.updateInt(&hasher, "network-destination-index", network_index);
-        crypto_hash.updateBytes(&hasher, "network-destination", policy.allowed_network_destinations[network_index][0..@as(usize, policy.allowed_network_destination_lens[network_index])]);
+    return null;
+}
+
+fn attentionDenial(policy: *const PolicyObject, request: AttentionRequest) ?DecisionReason {
+    if (request.critical and !policy.allow_critical_interruption) return .attention_critical_denied;
+    if (request.requests_interruption and !request.critical and policy.quiet_until_tick != 0 and request.now_tick < policy.quiet_until_tick) {
+        return .attention_quiet_denied;
     }
-    var sync_index: usize = 0;
-    while (sync_index < @as(usize, policy.allowed_sync_destination_count)) : (sync_index += 1) {
-        crypto_hash.updateInt(&hasher, "sync-destination-index", sync_index);
-        crypto_hash.updateBytes(&hasher, "sync-destination", policy.allowed_sync_destinations[sync_index][0..@as(usize, policy.allowed_sync_destination_lens[sync_index])]);
+    if (policy.max_visible_notifications != 0 and request.visible_notifications >= policy.max_visible_notifications) {
+        return .attention_visible_budget_denied;
     }
-    return crypto_hash.finalize(&hasher);
+    if (request.requests_interruption and policy.max_interruptive_notifications != 0 and
+        request.interruptive_notifications >= policy.max_interruptive_notifications)
+    {
+        return .attention_interruption_budget_denied;
+    }
+    return null;
+}
+
+fn accessibilityDenial(policy: *const PolicyObject, request: AccessibilityRequest) ?DecisionReason {
+    if (policy.require_adaptive_ui and !request.adaptive_ui) return .accessibility_adaptive_ui_denied;
+    if (policy.require_screen_reader_support and !request.screen_reader_supported) return .accessibility_screen_reader_denied;
+    if (policy.require_keyboard_navigation and !request.keyboard_navigation) return .accessibility_keyboard_navigation_denied;
+    if (policy.require_reduced_motion_support and !request.reduced_motion_supported) return .accessibility_reduced_motion_denied;
+    if (policy.require_high_contrast_support and !request.high_contrast_supported) return .accessibility_high_contrast_denied;
+    return null;
+}
+
+fn backgroundActivityDenial(policy: *const PolicyObject, request: BackgroundActivityRequest) ?DecisionReason {
+    if (policy.max_background_duration_seconds != 0 and request.expected_duration_seconds > policy.max_background_duration_seconds) {
+        return .background_duration_denied;
+    }
+    if (policy.max_background_cpu_time_ticks != 0 and request.cpu_time_ticks > policy.max_background_cpu_time_ticks) {
+        return .background_cpu_denied;
+    }
+    if ((policy.max_background_memory_bytes != 0 and request.memory_bytes > policy.max_background_memory_bytes) or
+        (policy.max_background_shared_memory_bytes != 0 and request.shared_memory_bytes > policy.max_background_shared_memory_bytes))
+    {
+        return .background_memory_denied;
+    }
+    if (!policy.allow_remote_background_network and backgroundNetworkIsRemote(request.network)) return .background_network_denied;
+    if (policy.require_visible_background_activity and !backgroundActivityIsVisible(request.visibility)) {
+        return .background_visibility_denied;
+    }
+    return null;
+}
+
+fn permissionUseDenial(policy: *const PolicyObject, request: PermissionUseRequest) ?DecisionReason {
+    if (policy.max_sensitive_retention_days != 0 and request.retention_days > policy.max_sensitive_retention_days) {
+        return .permission_retention_denied;
+    }
+    if (!manifest.dangerousPermissionKind(request.kind)) return null;
+    if (policy.require_sensitive_permission_lease and request.lease_ticks == 0) return .permission_lease_denied;
+    if (policy.max_permission_lease_ticks != 0 and request.lease_ticks > policy.max_permission_lease_ticks) return .permission_lease_denied;
+    return null;
+}
+
+fn sensitiveCaptureDenial(policy: *const PolicyObject, request: SensitiveCaptureRequest) ?DecisionReason {
+    if (permissionKindDenial(policy, request.kind)) |reason| return reason;
+    if (policy.require_sensitive_capture_foreground and !request.foreground_session) return .capture_foreground_denied;
+    if (policy.require_capture_indicator and !request.visible_indicator) return .capture_indicator_denied;
+    if (!policy.allow_background_capture and request.background) return .capture_background_denied;
+    if (policy.max_sensitive_capture_lease_ticks != 0 and request.lease_ticks > policy.max_sensitive_capture_lease_ticks) {
+        return .capture_lease_denied;
+    }
+    if (policy.max_sensitive_capture_samples != 0 and request.sample_budget > policy.max_sensitive_capture_samples) {
+        return .capture_sample_budget_denied;
+    }
+    return null;
 }
 
 fn backgroundNetworkIsRemote(network: manifest.BackgroundNetworkMode) bool {
@@ -1254,6 +570,108 @@ fn backgroundActivityIsVisible(visibility: manifest.BackgroundVisibility) bool {
         .unspecified, .hidden, .audit_only => false,
     };
 }
+
+// Local IDs, generations and revocation state belong to the directory. Detached
+// signatures cover the complete canonical request, shared with native creation.
+pub fn requestDigest(request: CreateRequest) !crypto_hash.Digest {
+    var candidate: PolicyObject = undefined;
+    try policyFromRequestInto(&candidate, request);
+    return policyDigest(&candidate);
+}
+
+pub fn verifyRequest(request: CreateRequest, signature: manifest.Signature, issuer_key: signing.PublicKey) !void {
+    if (!issuerSigned(&(try requestDigest(request)), signature, issuer_key)) return error.UntrustedPolicy;
+}
+
+fn issuerSigned(digest: *const crypto_hash.Digest, signature: manifest.Signature, issuer_key: signing.PublicKey) bool {
+    return std.mem.eql(u8, signature.publicKeySlice(), &issuer_key) and signing.verify(signature, digest);
+}
+
+// Binds the signed policy digest to the exact signature bytes the Directory
+// accepted. The unauthenticated signer label is deliberately excluded.
+fn verifiedBinding(digest: *const crypto_hash.Digest, signature: *const manifest.Signature) crypto_hash.Digest {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "policy-digest", digest);
+    crypto_hash.updateEnum(&hasher, "signature-format", signature.format);
+    crypto_hash.updateInt(&hasher, "public-key-len", signature.public_key_len);
+    crypto_hash.updateBytes(&hasher, "public-key", &signature.public_key);
+    crypto_hash.updateInt(&hasher, "value-len", signature.value_len);
+    crypto_hash.updateBytes(&hasher, "value", &signature.value);
+    return crypto_hash.finalize(&hasher);
+}
+
+// Only a successful construction may be consumed or published. The caller
+// owns this private candidate, including partial state on validation failure.
+fn policyFromRequestInto(policy: *PolicyObject, request: CreateRequest) Error!void {
+    if (request.allowed_install_sources.len > MAX_ALLOW_LIST) return error.TooManyInstallSources;
+    if (request.allowed_network_destinations.len > MAX_ALLOW_LIST) return error.TooManyNetworkDestinations;
+    if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
+
+    policy.* = .{
+        .scope = request.scope,
+        .subject_id = request.subject_id,
+        .issuer = request.issuer,
+    };
+    policy.label_len = @intCast(native_util.copyTextExact(&policy.label, request.label) catch return error.LabelTooLong);
+    inline for (model.signed_controls) |name| @field(policy, name) = @field(request, name);
+
+    for (request.allowed_install_sources, 0..) |source_identity, index| {
+        policy.allowed_install_source_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_install_sources[index], source_identity) catch return error.InstallSourceTooLong);
+        policy.allowed_install_source_count += 1;
+    }
+    for (request.allowed_network_destinations, 0..) |destination, index| {
+        policy.allowed_network_destination_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_network_destinations[index], destination) catch return error.NetworkDestinationTooLong);
+        policy.allowed_network_destination_count += 1;
+    }
+    for (request.allowed_sync_destinations, 0..) |destination, index| {
+        policy.allowed_sync_destination_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_sync_destinations[index], destination) catch return error.SyncDestinationTooLong);
+        policy.allowed_sync_destination_count += 1;
+    }
+}
+
+fn policyDigest(policy: *const PolicyObject) crypto_hash.Digest {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateEnum(&hasher, "scope", policy.scope);
+    crypto_hash.updateEnum(&hasher, "issuer-kind", policy.issuer.kind);
+    crypto_hash.updateInt(&hasher, "subject-id", policy.subject_id);
+    crypto_hash.updateInt(&hasher, "issuer-serial", policy.issuer.serial);
+    crypto_hash.updateBytes(&hasher, "label", policy.labelSlice());
+    inline for (model.signed_controls, control_digest_tags) |name, tag| {
+        const value = @field(policy, name);
+        switch (@typeInfo(@TypeOf(value))) {
+            .bool => crypto_hash.updateBool(&hasher, tag, value),
+            .@"enum" => crypto_hash.updateEnum(&hasher, tag, value),
+            .int => crypto_hash.updateInt(&hasher, tag, value),
+            else => comptime unreachable,
+        }
+    }
+    for (0..policy.allowed_install_source_count) |index| {
+        crypto_hash.updateInt(&hasher, "install-source-index", index);
+        crypto_hash.updateBytes(&hasher, "install-source", policy.allowed_install_sources[index][0..policy.allowed_install_source_lens[index]]);
+    }
+    for (0..policy.allowed_network_destination_count) |index| {
+        crypto_hash.updateInt(&hasher, "network-destination-index", index);
+        crypto_hash.updateBytes(&hasher, "network-destination", policy.allowed_network_destinations[index][0..policy.allowed_network_destination_lens[index]]);
+    }
+    for (0..policy.allowed_sync_destination_count) |index| {
+        crypto_hash.updateInt(&hasher, "sync-destination-index", index);
+        crypto_hash.updateBytes(&hasher, "sync-destination", policy.allowed_sync_destinations[index][0..policy.allowed_sync_destination_lens[index]]);
+    }
+    return crypto_hash.finalize(&hasher);
+}
+
+// Each control is signed under its field name with '_' spelled as '-'.
+const control_digest_tags: [model.signed_controls.len][]const u8 = blk: {
+    @setEvalBranchQuota(50_000);
+    var tags: [model.signed_controls.len][]const u8 = undefined;
+    for (model.signed_controls, &tags) |name, *tag| {
+        var spelled: [name.len]u8 = name[0..name.len].*;
+        std.mem.replaceScalar(u8, &spelled, '_', '-');
+        const final = spelled;
+        tag.* = &final;
+    }
+    break :blk tags;
+};
 
 test "policy objects remain signed scoped and enforce enterprise controls" {
     var directory: Directory = undefined;
@@ -1283,10 +701,11 @@ test "policy objects remain signed scoped and enforce enterprise controls" {
     try std.testing.expectEqual(@as(u32, 1), policy.generation);
     try std.testing.expectEqualStrings("corp-defaults", policy.labelSlice());
     try std.testing.expect(directory.verify(policy.id));
-    try std.testing.expect(directory.installSourceAllowed(.organization, 77, "store:zigos"));
-    try std.testing.expect(!directory.installSourceAllowed(.organization, 77, "repo:unknown"));
-    try std.testing.expect(directory.syncDestinationAllowed(.organization, 77, "relay.corp.example"));
-    try std.testing.expect(!directory.syncDestinationAllowed(.organization, 77, "relay.personal.example"));
+    const organization = SubjectSet{ .organization_id = 77 };
+    try std.testing.expect(directory.installSourceDecision(organization, "store:zigos").allowed);
+    try std.testing.expect(!directory.installSourceDecision(organization, "repo:unknown").allowed);
+    try std.testing.expect(directory.syncDestinationDecision(organization, "relay.corp.example").allowed);
+    try std.testing.expect(!directory.syncDestinationDecision(organization, "relay.personal.example").allowed);
     try std.testing.expect(!policy.removable_storage_allowed);
     try std.testing.expect(policy.screen_capture_allowed);
     try std.testing.expect(!policy.remote_ai_allowed);
@@ -1393,12 +812,9 @@ test "policy directory composes active user device workspace and organization po
     try std.testing.expectEqual(DecisionReason.sync_destination_denied, overlay_decision.reason);
     try std.testing.expectEqual(Scope.organization, overlay_decision.blocking_scope.?);
 
-    const removable_decision = directory.removableStorageDecision(subjects);
-    try std.testing.expect(!removable_decision.allowed);
-    try std.testing.expectEqual(Scope.organization, removable_decision.blocking_scope.?);
-
-    const screen_decision = directory.screenCaptureDecision(subjects);
+    const screen_decision = directory.permissionKindDecision(subjects, .screen_capture);
     try std.testing.expect(!screen_decision.allowed);
+    try std.testing.expectEqual(DecisionReason.screen_capture_denied, screen_decision.reason);
     try std.testing.expectEqual(org_policy.id, screen_decision.blocking_policy_id);
 
     const remote_ai_decision = directory.aiUseDecision(subjects, .{
@@ -2234,10 +1650,34 @@ test "policy objects reject oversized lists and refuse authorization after tampe
     try std.testing.expectEqual(@as(u64, 1), policy.id);
     try std.testing.expect(directory.verify(policy.id));
 
-    policy.signature.value[0] ^=
-        0x5A;
+    const device = SubjectSet{ .device_id = 8 };
+    try std.testing.expect(directory.installSourceDecision(device, "store:zigos").allowed);
+
+    policy.signature.value[0] ^= 0x5A;
     try std.testing.expect(!directory.verify(policy.id));
-    try std.testing.expect(!directory.installSourceAllowed(.device, 8, "store:zigos"));
+    const forged_signature = directory.installSourceDecision(device, "store:zigos");
+    try std.testing.expect(!forged_signature.allowed);
+    try std.testing.expectEqual(DecisionReason.unsigned_policy, forged_signature.reason);
+    policy.signature.value[0] ^= 0x5A;
+    try std.testing.expect(directory.verify(policy.id));
+    try std.testing.expect(directory.installSourceDecision(device, "store:zigos").allowed);
+
+    policy.install_source_mode = .any_signed;
+    try std.testing.expect(!directory.verify(policy.id));
+    const widened = directory.installSourceDecision(device, "repo:unknown");
+    try std.testing.expect(!widened.allowed);
+    try std.testing.expectEqual(DecisionReason.unsigned_policy, widened.reason);
+    try std.testing.expectEqual(policy.id, widened.blocking_policy_id);
+
+    // Re-signing the widened policy in place with an arbitrary key verifies
+    // under its embedded key but is not the signature the Directory accepted.
+    policy.signature = try signing.sign(.{
+        .label = "in-memory-forger",
+        .seed = signing.seedFromByte(0x54),
+    }, &policyDigest(policy));
+    try std.testing.expect(signing.verify(policy.signature, &policyDigest(policy)));
+    try std.testing.expect(!directory.verify(policy.id));
+    try std.testing.expectEqual(DecisionReason.unsigned_policy, directory.installSourceDecision(device, "repo:unknown").reason);
 }
 
 test "compact policy metadata preserves exact label and allow-list capacities" {
@@ -2315,7 +1755,7 @@ test "authenticated policy attachment validates the complete candidate before pu
     var malformed = request;
     malformed.allowed_sync_destinations = &.{ "local:archive", &too_long };
     try std.testing.expectError(error.SyncDestinationTooLong, directory.attachInitialAuthenticated(malformed, signature, issuer_key));
-    try std.testing.expectEqual(@as(usize, 0), directory.policies.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), directory.count());
     try std.testing.expect(directory.activeForScope(request.scope, request.subject_id) == null);
 
     const policy = try directory.attachInitialAuthenticated(request, signature, issuer_key);
@@ -2328,10 +1768,10 @@ test "authenticated policy attachment validates the complete candidate before pu
     try std.testing.expect(policy.allowsSyncDestination("local:archive"));
     try std.testing.expect(directory.verify(policy.id));
     try std.testing.expectError(error.PolicyAlreadyAttached, directory.attachInitialAuthenticated(request, signature, issuer_key));
-    try std.testing.expectEqual(@as(usize, 1), directory.policies.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), directory.count());
 }
 
-test "policy directory indexes policy slots by id and scope through a full table" {
+test "policy directory resolves policy slots by id and scope through a full table" {
     var directory = Directory.init();
     const subject_id: u64 = 0xCAFE;
     const signer = signing.SignerIdentity{
@@ -2371,7 +1811,111 @@ test "policy directory indexes policy slots by id and scope through a full table
     const revoked_count = directory.revokePoliciesForScope(.workspace, subject_id);
     try std.testing.expectEqual(@as(usize, MAX_POLICIES - 1), revoked_count);
     try std.testing.expect(directory.activeForScope(.workspace, subject_id) == null);
-    try std.testing.expect(DERIVES_POLICY_IDS_FROM_ARENA_COUNT);
-    try std.testing.expect(!@hasField(Directory, "next_policy_id"));
     try std.testing.expectEqual(@as(usize, DIRECTORY_SIZE_CEILING_BYTES), @sizeOf(Directory));
+}
+
+test "policy digest golden vector pins the signed control encoding" {
+    const request = CreateRequest{
+        .scope = .workspace,
+        .subject_id = 0x5157_4F52_4B53_5041,
+        .issuer = .{ .kind = .policy_authority, .serial = 0x4F52_4741 },
+        .label = "golden-policy",
+        .allowed_install_sources = &.{ "store:zigos", "repo:golden" },
+        .allowed_network_destinations = &.{"lan.golden"},
+        .allowed_sync_destinations = &.{ "relay.golden", "local:archive", "overlay.golden" },
+        .install_source_mode = .trusted_sources,
+        .network_egress_mode = .allow_list,
+        .removable_storage_allowed = true,
+        .screen_capture_allowed = true,
+        .clipboard_allowed = true,
+        .camera_allowed = true,
+        .microphone_allowed = true,
+        .location_allowed = true,
+        .contacts_allowed = true,
+        .sensors_allowed = true,
+        .peer_ipc_allowed = true,
+        .remote_ai_allowed = true,
+        .ai_training_allowed = true,
+        .max_ai_context_bytes = 1014,
+        .require_ai_model_measurement = true,
+        .require_trusted_ai_model_source = true,
+        .max_ai_model_age_days = 1017,
+        .require_hardware_backed_session = true,
+        .require_platform_backed_device_session = true,
+        .require_primary_device_session = true,
+        .max_session_unlock_age_ticks = 1021,
+        .require_package_sbom = true,
+        .require_reproducible_package_build = true,
+        .require_trusted_package_builder = true,
+        .require_vulnerability_scan = true,
+        .agent_delegation_allowed = true,
+        .max_agent_actions_per_session = 1027,
+        .max_agent_remote_calls_per_session = 1028,
+        .require_agent_user_confirmation = false,
+        .require_agent_audit = false,
+        .require_agent_session_binding = true,
+        .require_agent_local_context = true,
+        .max_agent_context_bytes = 1033,
+        .min_agent_delegation_generation = 1034,
+        .require_agent_visible_plan = true,
+        .max_remote_private_egress_bytes = 1036,
+        .data_export_allowed = true,
+        .data_deletion_allowed = true,
+        .require_data_deletion_receipt = true,
+        .max_data_export_bytes = 1040,
+        .object_backup_allowed = true,
+        .object_restore_allowed = true,
+        .require_encrypted_object_backup = false,
+        .require_backup_recovery_key = false,
+        .require_restore_device_trust = false,
+        .max_object_backup_bytes = 1046,
+        .max_object_restore_age_days = 1047,
+        .semantic_memory_allowed = true,
+        .require_local_semantic_model = false,
+        .require_encrypted_semantic_index = false,
+        .require_redacted_semantic_snippets = false,
+        .max_semantic_query_bytes = 1052,
+        .credential_assertions_allowed = true,
+        .deny_credential_password_fallback = false,
+        .require_phishing_resistant_credential = false,
+        .require_hardware_backed_credential = true,
+        .require_local_credential_unlock = false,
+        .max_credential_unlock_age_ticks = 1058,
+        .secret_vault_allowed = true,
+        .require_hardware_backed_secrets = false,
+        .deny_secret_raw_export = false,
+        .max_secret_handle_lease_ticks = 1062,
+        .task_lifecycle_allowed = true,
+        .require_lifecycle_checkpoint_before_terminate = false,
+        .quiet_until_tick = 1065,
+        .max_visible_notifications = 1066,
+        .max_interruptive_notifications = 1067,
+        .allow_critical_interruption = false,
+        .require_adaptive_ui = true,
+        .require_screen_reader_support = true,
+        .require_keyboard_navigation = true,
+        .require_reduced_motion_support = true,
+        .require_high_contrast_support = true,
+        .max_background_duration_seconds = 1074,
+        .max_background_cpu_time_ticks = 1075,
+        .max_background_memory_bytes = 1076,
+        .max_background_shared_memory_bytes = 1077,
+        .allow_remote_background_network = true,
+        .require_visible_background_activity = true,
+        .max_sensitive_retention_days = 1080,
+        .max_permission_lease_ticks = 1081,
+        .require_sensitive_permission_lease = true,
+        .require_sensitive_capture_foreground = false,
+        .require_capture_indicator = false,
+        .allow_background_capture = true,
+        .max_sensitive_capture_lease_ticks = 1086,
+        .max_sensitive_capture_samples = 1087,
+        .retention_days = 1088,
+        .audit_export_required = true,
+    };
+    const golden = [_]u8{
+        0x8f, 0x43, 0x26, 0x0c, 0x36, 0xa6, 0x89, 0x8b, 0x64, 0xad, 0x7e, 0xfd, 0x19, 0x57, 0x5d, 0x8f,
+        0x4e, 0x52, 0x83, 0x9f, 0x0e, 0xfe, 0x5c, 0x10, 0x01, 0x70, 0xa9, 0x37, 0x43, 0xc3, 0xc8, 0x7d,
+    };
+    try std.testing.expectEqualSlices(u8, &golden, &(try requestDigest(request)));
 }

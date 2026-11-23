@@ -153,7 +153,7 @@ test "failed document writes retain one pending version across retries" {
     var editor = document_save.Session{};
     fixture.fail_writes = true;
     for (0..4) |_| {
-        try std.testing.expectError(error.CorruptImage, editor.saveForVerification(&fixture.service, fixture.request("pending draft")));
+        try std.testing.expectError(error.DeviceWriteFailed, editor.saveForVerification(&fixture.service, fixture.request("pending draft")));
         try std.testing.expectEqual(@as(usize, 2), fixture.service.versionCount());
         try std.testing.expect(editor.pending != null);
         try std.testing.expect(fixture.checkpoint.dirty);
@@ -224,7 +224,7 @@ test "stale editor and pending save cannot overwrite another editor" {
     var first = document_save.Session{};
     var second = document_save.Session{};
     fixture.fail_writes = true;
-    try std.testing.expectError(error.CorruptImage, first.saveForVerification(&fixture.service, fixture.request("first")));
+    try std.testing.expectError(error.DeviceWriteFailed, first.saveForVerification(&fixture.service, fixture.request("first")));
     fixture.fail_writes = false;
     var next = fixture.request("second");
     next.expected_version_id = first.pending.?.version_id;

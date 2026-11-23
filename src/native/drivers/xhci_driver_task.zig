@@ -23,9 +23,6 @@ else
             return;
         }
         pub fn activate() !void {}
-        pub fn isolationDomain() ?void {
-            return null;
-        }
         pub fn eventWorkPending() bool {
             return false;
         }
@@ -48,10 +45,6 @@ else
             return null;
         }
     };
-const intel_vtd = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/platform/intel_vtd.zig")
-else
-    struct {};
 const console = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/utils/console.zig")
 else
@@ -75,7 +68,6 @@ pub fn boundTaskId() u64 {
 
 pub fn bringUp() bool {
     if (programmed) return true;
-    var xhci_prepared = false;
     if (builtin.target.os.tag == .freestanding) {
         const pci = @import("../../kernel/drivers/pci.zig");
         if (pci.firstXhciController()) |dev| {
@@ -86,19 +78,11 @@ pub fn bringUp() bool {
             console.print("ZIGOS:XHCI:HW:OWNERSHIP_OK\n");
             console.print("ZIGOS:XHCI:HW:RESET_OK\n");
             console.print("ZIGOS:XHCI:HW:SLOTS_OK\n");
-            var isolation_domains: [1]intel_vtd.DmaDomain = undefined;
-            var isolation_domain_count: usize = 0;
-            if (xhci_hw.isolationDomain()) |domain| {
-                isolation_domains[isolation_domain_count] = domain;
-                isolation_domain_count += 1;
-            }
-            _ = isolation_domains[0..isolation_domain_count];
             console.print("ZIGOS:XHCI:HW:DMA_OK\n");
         }
     }
     xhci_hw.activate() catch return false;
-    xhci_prepared = true;
-    programmed = xhci_prepared;
+    programmed = true;
     if (builtin.target.os.tag == .freestanding) {
         console.print("ZIGOS:XHCI:HW:REMAP_MSI_OK\n");
         console.print("ZIGOS:XHCI:HW:RUN_OK\n");
@@ -113,10 +97,6 @@ pub fn dispatch() usize {
 
 pub fn dispatchForTask(task_id: u64) usize {
     if (task_id == 0 or task_id != bound_task_id) return 0;
-    return dispatch();
-}
-
-pub fn serviceController() usize {
     return dispatch();
 }
 

@@ -64,8 +64,6 @@ pub const CapabilityRight = enum(u8) {
     }
 };
 
-pub const DIRECT_RIGHT_MASKS = true;
-
 pub const first_product_right: CapabilityRight = .object_read;
 
 pub fn isKernelRight(right: CapabilityRight) bool {

@@ -599,13 +599,13 @@ test "shared copy rejects padding cross-object spans and overflowing ranges with
     try expectCopyRejected(error.MappingDescriptorMismatch, &table, task, token, mapping.virtual_base, std.math.maxInt(usize));
     try expectCopyRejected(error.SizeZero, &table, task, token, mapping.virtual_base, 0);
     {
-        const slot = table.backing.arena.getByHandle(.{ .value = first.id.raw() }).?;
+        const slot = table.backing.get().?.arena.getByHandle(.{ .value = first.id.raw() }).?;
         slot.object.page_base = std.math.maxInt(u64) & ~@as(u64, PAGE_SIZE - 1);
         defer slot.object.page_base = first.page_base;
         try expectCopyRejected(error.MappingDescriptorMismatch, &table, task, token, mapping.virtual_base, 1);
     }
     {
-        const slot = table.backing.arena.getByHandle(.{ .value = first.id.raw() }).?;
+        const slot = table.backing.get().?.arena.getByHandle(.{ .value = first.id.raw() }).?;
         slot.object.size_bytes = std.math.maxInt(usize);
         defer slot.object.size_bytes = first.size_bytes;
         try expectCopyRejected(error.MappingDescriptorMismatch, &table, task, token, mapping.virtual_base, 1);
@@ -673,7 +673,7 @@ test "shared copy unmap retirement and generational slot reuse invalidate prior 
     try expectCopyRejected(error.StaleMappingDescriptor, &table, task, old_token, current.virtual_base, 1);
     // A stale object generation must not become authority through a live index.
     {
-        const slot = table.backing.arena.getByHandle(.{ .value = replacement.id.raw() }).?;
+        const slot = table.backing.get().?.arena.getByHandle(.{ .value = replacement.id.raw() }).?;
         slot.object.id = object.id;
         defer slot.object.id = replacement.id;
         try expectCopyRejected(error.StaleMappingDescriptor, &table, task, current_token, current.virtual_base, 1);

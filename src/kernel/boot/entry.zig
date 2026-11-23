@@ -10,7 +10,7 @@ const handoff = @import("handoff.zig");
 const boot_markers = @import("markers.zig");
 const init_core = @import("init/core.zig");
 const init_devices = @import("init/devices.zig");
-const init_runtime = @import("init/runtime.zig");
+const timer = @import("../timer/timer.zig");
 const hardware_proof = @import("../platform/hardware_proof.zig");
 const tcb = @import("../tcb.zig");
 const tsc_clock = @import("../timer/tsc_clock.zig");
@@ -21,8 +21,7 @@ comptime {
     }
 }
 
-fn cpuModelRequest() cpu_policy.ModelRequest {
-    const info = handoff.capturedInfo() orelse return .{};
+fn cpuModelRequest(info: *const handoff.BootInfo) cpu_policy.ModelRequest {
     return .{
         .model_inventory = handoff.commandLineHasFlag(info, "model_inventory"),
         .software_cpu_fallback = handoff.commandLineHasFlag(info, "qemu_software_cpu_fallback"),
@@ -39,8 +38,14 @@ fn printBootIdentity() void {
 pub fn kernelMain() void {
     // Native assembly has already established FP controls before compiled code.
     console.init();
+    // Copy and validate the loader's record before anything can allocate.
+    const boot_info = handoff.capturedInfo() orelse {
+        printBootIdentity();
+        console.print("Invalid EFI boot handoff\n");
+        x86.haltFatal();
+    };
     const detected_features = cpu_features.detect();
-    const model_request = cpuModelRequest();
+    const model_request = cpuModelRequest(boot_info);
     const admission_policy = cpu_policy.AdmissionPolicy.init(detected_features, model_request);
     const features = admission_policy.resolveFeatures(detected_features);
     const hardware_process_contexts = admission_policy.process_context_mode == .hardware_pcid;
@@ -54,16 +59,14 @@ pub fn kernelMain() void {
         console.print("Unsupported CPU: missing ");
         console.print(@tagName(missing_feature));
         console.print("\n");
-        x86.cli();
-        while (true) x86.hlt();
+        x86.haltFatal();
     }
     cpu_features.initializeNativeCachePolicy() catch |err| {
         printBootIdentity();
         console.print("Unsupported memory cache policy: ");
         console.print(@errorName(err));
         console.print("\n");
-        x86.cli();
-        while (true) x86.hlt();
+        x86.haltFatal();
     };
     tsc_clock.init(features.tsc_frequency_hz);
     printBootIdentity();
@@ -72,20 +75,14 @@ pub fn kernelMain() void {
         common.printBootMarker(boot_markers.random_rejected);
         console.print(@errorName(err));
         console.print("\n");
-        x86.cli();
-        while (true) x86.hlt();
+        x86.haltFatal();
     };
     common.printBootMarker(boot_markers.random_ready);
     console.print("ZIGOS:BOOT:INSTANCE ");
     const instance_hex = std.fmt.bytesToHex(&secure_random.bootInstanceId(), .lower);
     console.print(&instance_hex);
     console.print("\n");
-    cpu_features.enableModernFeatures(
-        features,
-        admission_policy.process_context_mode,
-        admission_policy.cet_mode,
-        admission_policy.featureMode(),
-    );
+    cpu_features.enableModernFeatures(features, admission_policy.process_context_mode, admission_policy.cet_mode);
     common.printBootMarker(boot_markers.cpu_nx_enabled);
     common.printBootMarker(boot_markers.cpu_smep_enabled);
     common.printBootMarker(boot_markers.cpu_smap_enabled);
@@ -104,11 +101,10 @@ pub fn kernelMain() void {
     console.print("A minimal operating system written in Zig\n");
     hardware_proof.captureEarlyBootEvidence();
 
-    init_core.init(hardware_lass) catch {
+    init_core.init(features.rdpid, hardware_lass, hardware_fred) catch {
         common.printBootMarker(boot_markers.cpu_lass_address_partition_rejected);
         console.print("Unsupported kernel address partition: LASS requires canonical upper-half instruction, stack, kernel data and descriptor table addresses\n");
-        x86.cli();
-        while (true) x86.hlt();
+        x86.haltFatal();
     };
     if (hardware_lass) {
         common.printBootMarker(boot_markers.cpu_lass_enabled);
@@ -118,20 +114,19 @@ pub fn kernelMain() void {
     } else {
         common.printBootMarker(boot_markers.cpu_syscall_enabled);
     }
+    common.printBootMarker(boot_markers.cpu_native_entry_ready);
     init_devices.init();
     console.print("Delegating device dataplanes to userspace driver claims.\n");
     common.printBootMarker(boot_markers.kernel_dataplane_userspace);
     common.printBootMarker(boot_markers.kernel_network_deferred);
-    init_runtime.init(
-        features,
-        if (hardware_tsc_timer) .tsc_deadline else .calibrated_countdown,
-    );
+    console.print("Initializing timer...\n");
+    timer.init(features, if (hardware_tsc_timer) .tsc_deadline else .calibrated_countdown);
     @import("../smp.zig").init(hardware_proof.madtTable(), admission_policy);
 
     common.printBootMarker(boot_markers.boot_core_ready);
     switch (comptime config.bootProfile()) {
         .zigos_native => @import("profiles/zigos_native.zig").run(),
-        .recovery => @import("profiles/recovery.zig").run(),
-        .benchmark => @import("profiles/benchmark.zig").run(),
+        .recovery => @import("recovery_suite.zig").run(),
+        .benchmark => @import("benchmark/suite.zig").run(),
     }
 }

@@ -35,7 +35,7 @@ pub fn decodeChallenge(bytes: []const u8, enrollment: *const attest.Enrollment) 
     if (bytes.len > MAX_BYTES) return error.InvalidAttestationWire;
     var r = Reader{ .buffer = bytes };
     if (!std.mem.eql(u8, try r.readSlice(challenge_header.len), challenge_header)) return error.InvalidAttestationWire;
-    var result = attest.Challenge{ .request = .{ .nonce_len = 32, .expected_key_origin = .tpm, .attestation_verifier_metadata_digest_required = true }, .approved_pcr11 = undefined };
+    var result = attest.Challenge{ .request = .{ .nonce_len = 32 }, .approved_pcr11 = undefined };
     try r.readBytes(&result.request.nonce);
     try r.readBytes(&result.approved_pcr11);
     try r.readBytes(&result.channel_binding);

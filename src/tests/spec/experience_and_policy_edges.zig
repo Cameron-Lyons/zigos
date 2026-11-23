@@ -5,7 +5,6 @@ const capability = @import("../../native/kernel_api/capability.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const manifest = @import("../../native/policy/manifest.zig");
-const agent_delegation_service = @import("../../native/services/agent_delegation_service.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const permission_review = @import("../../native/policy/permission_review.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
@@ -13,7 +12,6 @@ const policy_object = @import("../../native/policy/policy_object.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const signing = @import("../../native/core/signing.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
-const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
 const workspace = @import("../../native/storage/workspace.zig");
 
 const REVIEW_SUMMARY_BUFFER_BYTES: usize = 4096;
@@ -178,6 +176,7 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
             .policy_service_id = 902,
             .service_registry_id = 903,
         },
+        .{ .directory = &policy_object.unattached },
     );
     mediator.attachLedger(&ledger);
     const activation = try mediator.applyManifest(app_task.id, bundle, grants, 55);
@@ -306,9 +305,6 @@ pub fn taskViewsAndNativeComponentsStayExplicit() !void {
 }
 
 pub fn agentSessionsStayBoundedAuditedAndRevocable() !void {
-    try std.testing.expect(typed_component_abi.contractFor("zigos.agent.delegation").?.operation(.agent_bind_session) != null);
-    try std.testing.expect(typed_component_abi.contractFor("zigos.agent.delegation").?.operation(.agent_kill_switch) != null);
-
     var policies = policy_object.Directory.init();
     _ = try policies.create(.{
         .scope = .organization,
@@ -342,69 +338,52 @@ pub fn agentSessionsStayBoundedAuditedAndRevocable() !void {
     try std.testing.expect(!hidden_plan.allowed);
     try std.testing.expectEqual(policy_object.DecisionReason.agent_plan_visibility_required, hidden_plan.reason);
 
-    var service = agent_delegation_service.Service.init();
-    var ledger = event_ledger.Ledger.init();
-    const delegation = try service.authorize(&policies, subjects, .{
-        .subject = app,
-        .task_id = 3131,
-        .session_id = 8080,
-        .autonomous_actions = 3,
-        .remote_calls = 1,
+    const stale_generation = policies.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 1,
         .user_confirmed = true,
         .audit_enabled = true,
+        .session_bound = true,
+        .local_context_only = true,
+        .context_bytes = 1024,
+        .delegation_generation = 6,
+        .user_visible_plan = true,
+    });
+    try std.testing.expect(!stale_generation.allowed);
+    try std.testing.expectEqual(policy_object.DecisionReason.agent_kill_switch_denied, stale_generation.reason);
+
+    const remote_over_budget = policies.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 1,
+        .remote_calls = 2,
+        .user_confirmed = true,
+        .audit_enabled = true,
+        .session_bound = true,
         .local_context_only = true,
         .context_bytes = 1024,
         .delegation_generation = 7,
         .user_visible_plan = true,
-        .now_tick = 30,
-        .detail = "private agent workspace plan",
-    }, &ledger);
-    try std.testing.expectEqual(@as(usize, 1), service.activeCount());
+    });
+    try std.testing.expect(!remote_over_budget.allowed);
+    try std.testing.expectEqual(policy_object.DecisionReason.agent_remote_call_denied, remote_over_budget.reason);
 
-    _ = try service.recordAction(.{
-        .subject = app,
-        .task_id = 3131,
-        .delegation_id = delegation.id,
-        .session_id = 8080,
-        .expected_generation = 7,
-        .action_count = 2,
-        .remote_call_count = 1,
-        .context_bytes = 512,
-        .now_tick = 31,
-        .detail = "private agent workspace action",
-    }, &ledger);
-    try std.testing.expectError(error.RemoteCallBudgetExceeded, service.recordAction(.{
-        .subject = app,
-        .task_id = 3131,
-        .delegation_id = delegation.id,
-        .session_id = 8080,
-        .expected_generation = 7,
-        .remote_call_count = 1,
-    }, null));
-
-    try std.testing.expectEqual(@as(usize, 1), try service.killSwitch(8, &ledger, app, 32, "private agent kill switch"));
-    try std.testing.expectEqual(@as(usize, 0), service.activeCount());
-    try std.testing.expectError(error.DelegationRevoked, service.recordAction(.{
-        .subject = app,
-        .task_id = 3131,
-        .delegation_id = delegation.id,
-        .session_id = 8080,
-        .expected_generation = 7,
-    }, null));
-    try std.testing.expectError(error.KillSwitchGenerationStale, service.authorize(&policies, subjects, .{
-        .subject = app,
-        .task_id = 3132,
-        .session_id = 8081,
-        .autonomous_actions = 1,
+    const bounded = policies.agentDelegationDecision(subjects, .{
+        .enabled = true,
+        .autonomous_actions = 3,
+        .remote_calls = 1,
         .user_confirmed = true,
         .audit_enabled = true,
+        .session_bound = true,
         .local_context_only = true,
-        .context_bytes = 512,
+        .context_bytes = 1024,
         .delegation_generation = 7,
         .user_visible_plan = true,
-        .now_tick = 33,
-        .detail = "private stale agent plan",
-    }, &ledger));
+    });
+    try std.testing.expect(bounded.allowed);
+
+    var ledger = event_ledger.Ledger.init();
+    try ledger.recordAgentSessionBoundary(app, 3131, true, true, true, false, 7, 30, "private agent workspace plan");
+    try ledger.recordAgentSessionBoundary(app, 3132, false, true, true, true, 6, 33, "private stale agent plan");
 
     var diagnostics_buffer: [REVIEW_SUMMARY_BUFFER_BYTES]u8 = undefined;
     const diagnostics = try ledger.exportText(&diagnostics_buffer, .{});
@@ -412,9 +391,9 @@ pub fn agentSessionsStayBoundedAuditedAndRevocable() !void {
     try expectContains(diagnostics, "kill_switch_block=yes");
     try std.testing.expect(std.mem.indexOf(u8, diagnostics, "private agent") == null);
     const summary = ledger.userVisibleDiagnosticSummary();
-    try std.testing.expectEqual(@as(usize, 3), summary.agent_session_events);
-    try std.testing.expectEqual(@as(usize, 2), summary.agent_session_denials);
-    try std.testing.expectEqual(@as(usize, 2), summary.agent_kill_switch_denials);
+    try std.testing.expectEqual(@as(usize, 2), summary.agent_session_events);
+    try std.testing.expectEqual(@as(usize, 1), summary.agent_session_denials);
+    try std.testing.expectEqual(@as(usize, 1), summary.agent_kill_switch_denials);
 }
 
 pub fn thermalPowerAndAppUpdatesStayExplicit() !void {
@@ -520,7 +499,7 @@ pub fn thermalPowerAndAppUpdatesStayExplicit() !void {
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &.{}, .{});
 
     const v2_permissions = [_]manifest.PermissionRequest{
         .{
@@ -558,14 +537,14 @@ pub fn thermalPowerAndAppUpdatesStayExplicit() !void {
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &.{}, .{}));
 
     const updated = try package_port.install(package_authority, .{
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
         .declared_permission_change = true,
-    }, null);
+    }, &.{}, .{});
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.permissions_changed);
     try std.testing.expect(updated.rollback_available);
@@ -581,13 +560,13 @@ pub fn thermalPowerAndAppUpdatesStayExplicit() !void {
         .bundle = hidden_schema_change,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
-    }, null));
+    }, &.{}, .{}));
 
     const compatible = try package_port.install(package_authority, .{
         .bundle = v3,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
-    }, null);
+    }, &.{}, .{});
     try std.testing.expect(compatible.updated_existing);
     try std.testing.expectEqual(@as(u32, 2), packages.find("app.notes").?.schemaVersion());
 

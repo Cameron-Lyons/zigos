@@ -14,19 +14,18 @@ stack_top:
 .global zigos_efi_entry
 .type zigos_efi_entry, @function
 .extern kernel_main
-.extern zigos_multiboot_magic
-.extern zigos_multiboot_info_addr
+.extern zigos_boot_info_addr
 zigos_efi_entry:
     endbr64
     cli
     cld
-    # Firmware has already mapped the upper-half image and physical window.
-    # The tagged handoff still carries physical addresses on the wire.
-    movl %edi, zigos_multiboot_info_addr(%rip)
-    movl $0x36D76289, zigos_multiboot_magic(%rip)
+    # The stub has already mapped the upper-half image and physical window.
+    # %rdi holds the physical address of its BootInfo record.
+    movq %rdi, zigos_boot_info_addr(%rip)
     leaq stack_top(%rip), %rsp
     xorq %rbp, %rbp
     ZIGOS_REQUIRE_BOOTSTRAP_CACHE .Lcache_bsp_rejected, 64
+    ZIGOS_PROGRAM_NATIVE_PAT_LIVE
     ZIGOS_REQUIRE_NATIVE .halt
     ZIGOS_ENABLE_NATIVE_XSTATE
     call kernel_main

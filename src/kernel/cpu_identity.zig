@@ -2,7 +2,9 @@ const builtin = @import("builtin");
 const std = @import("std");
 
 pub const MAX_CPUS: usize = 16;
-pub const USES_RDPID = true;
+// The bootstrap processor publishes logical index 0. It alone owns the shared
+// executor, kernel port and service tables; APs never dispatch runtime work.
+pub const BSP_INDEX: u8 = 0;
 threadlocal var test_cpu_index: u8 = 0;
 
 pub fn indexFromSignature(signature: u32) ?u8 {
@@ -36,6 +38,10 @@ pub inline fn currentIndex() u8 {
     // payload to the stack at every allocator and syscall identity lookup.
     if (signature >= MAX_CPUS) @panic("invalid logical CPU signature");
     return @intCast(signature);
+}
+
+pub inline fn isBsp() bool {
+    return currentIndex() == BSP_INDEX;
 }
 
 pub fn setIndexForTest(index: u8) void {

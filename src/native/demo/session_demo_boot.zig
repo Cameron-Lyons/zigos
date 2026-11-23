@@ -14,6 +14,7 @@ const scenario_world = @import("scenario_world.zig");
 const session_bootstrap = @import("../session/session_bootstrap.zig");
 const session_boot_flow = @import("../session/session_manager_boot_flow.zig");
 const session_service_bootstrap = @import("../session/session_service_bootstrap.zig");
+const service_restart_proofs = @import("../session/proofs/service_restart_proofs.zig");
 const session_support = @import("../session/session_manager_support.zig");
 const transport_checks = @import("transport_checks.zig");
 
@@ -33,7 +34,7 @@ pub fn bootScenarioWorld(manager: *session_boot_flow.SessionManager) void {
     bootstrap_packages.seed(
         manager.packageServicePtr(),
         manager.capabilityTablePtr(),
-        graph.state.services.package_service.id,
+        graph.state.services.get(.package_install_update).id,
         graph.state.ids.package_service,
         graph.state.session_task.id,
         graph.state.ids.session_service,
@@ -49,7 +50,7 @@ pub fn bootScenarioWorld(manager: *session_boot_flow.SessionManager) void {
 
     var review_service = initReviewService(
         manager,
-        graph.state.services.review_service_record.id,
+        graph.state.services.get(.permission_review_ui).id,
         graph.state.review_service_task.id,
     ) catch {
         manager.failBoot();
@@ -57,7 +58,7 @@ pub fn bootScenarioWorld(manager: *session_boot_flow.SessionManager) void {
     };
     var compositor_checkpoint_store = compositor_session.CheckpointStore{};
     var compositor_service = compositor_session.Service.initWithCheckpoint(
-        graph.state.services.compositor_service.id,
+        graph.state.services.get(.compositor_ui_session).id,
         graph.service_bindings.bindingFor(.compositor_ui_session).task_id,
         manager.runtimePtr(),
         manager.compositorSessionPtr(),
@@ -71,7 +72,7 @@ pub fn bootScenarioWorld(manager: *session_boot_flow.SessionManager) void {
 
     transport_checks.run(&graph.env, &graph.state, graph.kernel_port);
     const notes_review = permission_flows.run(&graph.env, &graph.state, graph.kernel_port, &review_port, &policy_port);
-    if (!session_service_bootstrap.run(&graph.env, &graph.state, graph.kernel_port, &graph.service_bindings)) {
+    if (!service_restart_proofs.run(&graph.env, &graph.state, graph.kernel_port, &graph.service_bindings)) {
         manager.failBoot();
         return;
     }
@@ -95,11 +96,12 @@ fn initPolicyMediator(
         manager.capabilityTablePtr(),
         manager.runtimeServicePtr().runtimePtr(),
         .{
-            .network_service_id = services.network_service.id,
-            .compositor_service_id = services.compositor_service.id,
-            .policy_service_id = services.policy_service.id,
-            .service_registry_id = services.service_registry.id,
+            .network_service_id = services.get(.network_stack).id,
+            .compositor_service_id = services.get(.compositor_ui_session).id,
+            .policy_service_id = services.get(.policy_mediation).id,
+            .service_registry_id = services.get(.service_registry).id,
         },
+        .{ .directory = &@import("../policy/policy_object.zig").unattached },
     );
 }
 
@@ -125,6 +127,8 @@ fn runSessionLifecycle(
     service_bindings: *const session_boot_flow.ServiceBindings,
     notes_review: session_support.NotesReviewState,
 ) void {
+    // The scenario world runs without a production volume binding.
+    _ = manager.native_store.ensureCheckpointStore() catch |err| native_util.bootProofFailure("scenario checkpoint store", err);
     var lifecycle_context = scenario_world.Context{
         .capability_table = manager.capabilityTablePtr(),
         .runtime = manager.runtimePtr(),
@@ -139,17 +143,17 @@ fn runSessionLifecycle(
         .policy_authority = state.ids.policy_authority,
         .session_service = state.ids.session_service,
         .session_user = state.ids.session_user,
-        .storage_service_id = state.services.storage_service.id,
+        .storage_service_id = state.services.get(.storage_object).id,
         .storage_task_id = service_bindings.bindingFor(.storage_object).task_id,
         .storage_service_principal = state.ids.storage_service,
-        .sync_service_id = state.services.sync_service.id,
+        .sync_service_id = state.services.get(.sync_replication).id,
         .sync_task_id = service_bindings.bindingFor(.sync_replication).task_id,
         .sync_service_principal = state.ids.sync_service,
         .sync_resident_state = manager.syncResidentStatePtr() catch |err| native_util.bootProofFailure("scenario sync state", err),
-        .policy_service_id = state.services.policy_service.id,
-        .network_service_id = state.services.network_service.id,
-        .compositor_service_id = state.services.compositor_service.id,
-        .package_service_id = state.services.package_service.id,
+        .policy_service_id = state.services.get(.policy_mediation).id,
+        .network_service_id = state.services.get(.network_stack).id,
+        .compositor_service_id = state.services.get(.compositor_ui_session).id,
+        .package_service_id = state.services.get(.package_install_update).id,
         .package_service_principal = state.ids.package_service,
         .update_ledger = manager.updateLedgerPtr(),
         .notes_task_id = notes_review.task_id,

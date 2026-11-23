@@ -14,8 +14,9 @@ pub const production_required = [_][]const u8{
     boot_markers.cpu_smap_enabled,
     boot_markers.cpu_umip_enabled,
     boot_markers.cpu_pge_enabled,
-    boot_markers.cpu_syscall_enabled,
+    boot_markers.cpu_native_entry_ready,
     boot_markers.cpu_pcid_ready,
+    boot_markers.x86_64_paging_ready,
     boot_markers.smp_ready,
     boot_markers.kernel_wx_enforced,
     boot_markers.boot_core_ready,
@@ -113,7 +114,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.cpu_smap_enabled,
     boot_markers.cpu_umip_enabled,
     boot_markers.cpu_pge_enabled,
-    boot_markers.cpu_syscall_enabled,
+    boot_markers.cpu_native_entry_ready,
     boot_markers.cpu_pcid_ready,
     boot_markers.smp_ready,
     boot_markers.kernel_wx_enforced,
@@ -165,8 +166,6 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.service_boot_storage_controller_revoke_rejected,
     boot_markers.service_boot_storage_republish_after_revoke_ok,
     boot_markers.service_boot_storage_io_after_restart_ok,
-    boot_markers.service_boot_accelerator_queue_owned,
-    boot_markers.service_boot_accelerator_completion_interrupt,
     boot_markers.service_boot_ipc_connect_all_ok,
     boot_markers.permission_review_port_ready,
     boot_markers.permission_policy_port_ready,
@@ -260,8 +259,6 @@ pub const driver_restart_required = [_][]const u8{
     boot_markers.service_boot_storage_controller_revoke_rejected,
     boot_markers.service_boot_storage_republish_after_revoke_ok,
     boot_markers.service_boot_storage_io_after_restart_ok,
-    boot_markers.service_boot_accelerator_queue_owned,
-    boot_markers.service_boot_accelerator_completion_interrupt,
 };
 
 pub const service_startup_required = [_][]const u8{
@@ -466,7 +463,7 @@ pub const recovery_required = [_][]const u8{
     boot_markers.cpu_smap_enabled,
     boot_markers.cpu_umip_enabled,
     boot_markers.cpu_pge_enabled,
-    boot_markers.cpu_syscall_enabled,
+    boot_markers.cpu_native_entry_ready,
     boot_markers.cpu_pcid_ready,
     boot_markers.smp_ready,
     boot_markers.kernel_wx_enforced,
@@ -501,8 +498,9 @@ test "production smoke gate requires core readiness and excludes verification ev
         boot_markers.cpu_smap_enabled,
         boot_markers.cpu_umip_enabled,
         boot_markers.cpu_pge_enabled,
-        boot_markers.cpu_syscall_enabled,
+        boot_markers.cpu_native_entry_ready,
         boot_markers.cpu_pcid_ready,
+        boot_markers.x86_64_paging_ready,
         boot_markers.smp_ready,
         boot_markers.kernel_wx_enforced,
         boot_markers.boot_core_ready,
@@ -537,8 +535,8 @@ test "verification smoke groups require the verification kernel role" {
     try std.testing.expect(contains(&recovery_required, boot_markers.cpu_umip_enabled));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.cpu_pge_enabled));
     try std.testing.expect(contains(&recovery_required, boot_markers.cpu_pge_enabled));
-    try std.testing.expect(contains(&cold_boot_required, boot_markers.cpu_syscall_enabled));
-    try std.testing.expect(contains(&recovery_required, boot_markers.cpu_syscall_enabled));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.cpu_native_entry_ready));
+    try std.testing.expect(contains(&recovery_required, boot_markers.cpu_native_entry_ready));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.cpu_pcid_ready));
     try std.testing.expect(contains(&recovery_required, boot_markers.cpu_pcid_ready));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.smp_ready));
@@ -596,8 +594,6 @@ test "native smoke gate requires in-boot driver crash restart proof markers" {
     for (driver_restart_required) |marker| {
         try std.testing.expect(contains(&cold_boot_required, marker));
     }
-    try std.testing.expect(contains(&driver_restart_required, boot_markers.service_boot_accelerator_queue_owned));
-    try std.testing.expect(contains(&driver_restart_required, boot_markers.service_boot_accelerator_completion_interrupt));
 }
 
 test "native smoke gate requires booted service startup proof markers" {

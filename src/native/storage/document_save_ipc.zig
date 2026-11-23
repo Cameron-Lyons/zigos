@@ -271,7 +271,7 @@ pub const Server = struct {
                     error.OperationPolicyDenied,
                     => .permission_denied,
                     error.DocumentChanged, error.NotDocument, error.ObjectMissing => .document_changed,
-                    error.DurabilityBarrierFailed, error.NoBackingDevice, error.CheckpointDeferred, error.CorruptImage => .durability_failed,
+                    error.DurabilityBarrierFailed, error.DeviceReadFailed, error.DeviceWriteFailed, error.NoBackingDevice, error.CheckpointDeferred, error.CorruptImage => .durability_failed,
                     else => .storage_failed,
                 } };
                 const receipt = protocol.Receipt{

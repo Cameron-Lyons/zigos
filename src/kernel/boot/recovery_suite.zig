@@ -2,6 +2,7 @@ const std = @import("std");
 const console = @import("../utils/console.zig");
 const qemu_exit = @import("../utils/qemu_exit.zig");
 const boot_markers = @import("markers.zig");
+const printMarker = @import("common.zig").printBootMarker;
 const capability = @import("../../native/kernel_api/capability.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const immutable_base = @import("../../native/platform/immutable_base.zig");
@@ -285,9 +286,4 @@ fn signer(label: []const u8, byte: u8) signing.SignerIdentity {
 
 fn require(condition: bool, err: anyerror) !void {
     if (!condition) return err;
-}
-
-fn printMarker(marker: []const u8) void {
-    console.print(marker);
-    console.print("\n");
 }

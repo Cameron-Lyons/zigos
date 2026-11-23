@@ -1,5 +1,5 @@
 const std = @import("std");
-const heap = @import("heap_allocator").heap;
+const heap = @import("host_benchmarks").heap;
 
 var arena: [16 * 1024 * 1024]u8 align(32) = undefined;
 const Workload = enum { hot_reuse, fragmented_fit, fragmented_exhausted, page_batches, cached_pressure, large_fragmented_fit, large_fragmented_exhausted };

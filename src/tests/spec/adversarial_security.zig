@@ -371,7 +371,7 @@ pub fn downgradeAndRollbackAttacksNeedFreshSignedMetadata() !void {
         .bundle = signed_v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &.{}, .{});
 
     var freshly_signed_downgrade = signed_v2;
     freshly_signed_downgrade.version_major = 1;
@@ -381,13 +381,13 @@ pub fn downgradeAndRollbackAttacksNeedFreshSignedMetadata() !void {
         .bundle = freshly_signed_downgrade,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &.{}, .{}));
 
     try std.testing.expectError(package_service.Error.VersionReplayRejected, port.install(authority, .{
         .bundle = signed_v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &.{}, .{}));
 
     var freshly_signed_channel_drift = signed_v2;
     freshly_signed_channel_drift.version_major = 3;
@@ -397,7 +397,7 @@ pub fn downgradeAndRollbackAttacksNeedFreshSignedMetadata() !void {
         .bundle = freshly_signed_channel_drift,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &.{}, .{}));
 
     var freshly_signed_source_drift = signed_v2;
     freshly_signed_source_drift.version_major = 3;
@@ -406,7 +406,7 @@ pub fn downgradeAndRollbackAttacksNeedFreshSignedMetadata() !void {
         .bundle = freshly_signed_source_drift,
         .source_identity = "repo:mirror",
         .data_schema_version = 1,
-    }, null));
+    }, &.{}, .{}));
 
     var freshly_signed_publisher_drift = signed_v2;
     freshly_signed_publisher_drift.publisher = "zigos.dev";
@@ -416,7 +416,7 @@ pub fn downgradeAndRollbackAttacksNeedFreshSignedMetadata() !void {
         .bundle = freshly_signed_publisher_drift,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &.{}, .{}));
 }
 
 fn mintServiceAuthority(

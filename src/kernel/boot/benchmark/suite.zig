@@ -38,10 +38,11 @@ const object_store = @import("../../../native/storage/object_store.zig");
 const storage_service = @import("../../../native/storage/storage_service.zig");
 const storage_volume = @import("../../../native/storage/storage_volume.zig");
 const package_service = @import("../../../native/services/package_service.zig");
+const policy_object = @import("../../../native/policy/policy_object.zig");
 const package_service_bundle_ops = @import("../../../native/services/package_service_bundle_ops.zig");
-const indexing_service = @import("../../../native/services/indexing_service.zig");
+const indexing_service = @import("models/indexing_service.zig");
 const notification_center = @import("../../../native/services/notification_center.zig");
-const media_print_service = @import("../../../native/services/media_print_service.zig");
+const media_print_service = @import("models/media_print_service.zig");
 const compositor_session = @import("../../../native/platform/compositor_session.zig");
 const input_router = @import("../../../native/platform/input_router.zig");
 const endpoint = @import("../../../native/kernel_api/endpoint.zig");
@@ -51,9 +52,8 @@ const recovery_environment = @import("../../../native/platform/recovery_environm
 const secure_secret_store = @import("../../../native/platform/secure_secret_store.zig");
 const update_health = @import("../../../native/platform/update_health.zig");
 const driver_service = @import("../../../native/drivers/driver_service.zig");
-const kernel_nvme = @import("../../drivers/nvme.zig");
 const kernel_xhci = @import("../../drivers/xhci.zig");
-const contract = @import("../../../native/session/contract.zig");
+const service_catalog = @import("../../../native/session/service_catalog.zig");
 const supervisor_mod = @import("../../../native/session/supervisor.zig");
 
 const kibibytes = units.kibibytes;
@@ -157,6 +157,7 @@ const TaskCheckpointContext = struct {
 
 const PackageContext = struct {
     service: package_service.Service = package_service.Service.init(),
+    policies: policy_object.Directory = .{},
     signed_v1: manifest.BundleManifest = package_bundle_v1,
     signed_v2: manifest.BundleManifest = package_bundle_v2,
     resolved: package_service.ResolvedManifest = undefined,
@@ -175,10 +176,6 @@ const MediaContext = struct {
 
 const EventLedgerContext = struct {
     ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
-};
-
-const AcceleratorContext = struct {
-    shared: shared_memory.Table = shared_memory.Table.init(),
 };
 
 const SecretStoreContext = struct {
@@ -268,7 +265,6 @@ const cases = benchmark_cases.benchmarkCases(.{
     .heap_allocate_free = benchmarkHeapAllocateFree,
     .frame_allocate_release = benchmarkFrameAllocateRelease,
     .syscall_fast_entry_roundtrip = benchmarkSyscallFastEntryRoundtrip,
-    .accelerator_claim_release = benchmarkAcceleratorClaimRelease,
     .file_bridge_resolve = benchmarkFileBridgeResolve,
     .workspace_commit_overlay = benchmarkWorkspaceCommitOverlay,
     .storage_volume_replay_segmented_log = benchmarkStorageVolumeReplaySegmentedLog,
@@ -286,7 +282,6 @@ const cases = benchmark_cases.benchmarkCases(.{
     .driver_recovery_restart = benchmarkDriverRecoveryRestart,
     .slo_irq_to_task = benchmarkSloIrqToTask,
     .slo_irq_teardown = releaseSloIrqFixture,
-    .slo_nvme_queued_io = benchmarkSloNvmeQueuedIo,
     .slo_endpoint_rtt = benchmarkSloEndpointRtt,
     .slo_focused_input = benchmarkSloFocusedInput,
     .text_navigation = benchmarkTextNavigation,
@@ -321,7 +316,6 @@ const quality_gates = benchmark_cases.qualityGateCases(.{
     .starvation_resistance_after_pressure = qualityStarvationResistanceAfterPressure,
     .lower_class_service_debt_batch_tie_dispatch = qualityLowerClassServiceDebtBatchTieDispatch,
     .accelerator_claim_deadline_priority = qualityAcceleratorClaimDeadlinePriority,
-    .brokered_accelerator_queue_completion_release = qualityBrokeredAcceleratorQueueCompletionRelease,
     .background_throttling_delayed_dispatches = qualityBackgroundThrottlingDelayedDispatches,
     .latency_under_load_max_wait_ticks = qualityLatencyUnderLoadMaxWaitTicks,
 });
@@ -501,7 +495,6 @@ var package_context = PackageContext{};
 var indexing_context = IndexingContext{};
 var media_context = MediaContext{};
 var event_ledger_context = EventLedgerContext{};
-var accelerator_context = AcceleratorContext{};
 var secret_store_context = SecretStoreContext{};
 var overlay_session_context = OverlaySessionContext{};
 var capability_lookup_context = CapabilityLookupContext{};
@@ -549,7 +542,6 @@ fn prepareFixtures() void {
     prepareWorkspaceCommitFixture();
     preparePackageFixture();
     prepareEventLedgerFixture();
-    prepareAcceleratorFixture();
     prepareTaskCheckpointFixture();
     restoreStorageVolumeSeedImage();
 }
@@ -903,7 +895,6 @@ fn prepareTaskCheckpointFixture() void {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 44,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.sync",
         },
@@ -966,7 +957,7 @@ fn preparePackageFixture() void {
     _ = package_context.service.install(.{
         .bundle = package_context.signed_v1,
         .source_identity = "benchmark:zigos",
-    }, null) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    }, &package_context.policies, .{}) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
 fn prepareEventLedgerFixture() void {
@@ -979,15 +970,6 @@ fn prepareEventLedgerFixture() void {
         "benchmark backing warmup",
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     event_ledger_context.ledger.resetRetainingBacking();
-}
-
-fn prepareAcceleratorFixture() void {
-    const object = accelerator_context.shared.createWithAccess(ids.task(1), kibibytes(4), .{
-        .cpu = true,
-        .gpu = true,
-    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    _ = accelerator_context.shared.revoke(object.id) catch |err|
-        benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
 fn trustBenchmarkPackagePublisher(service_ref: *package_service.Service) void {
@@ -1005,8 +987,7 @@ fn trustBenchmarkPackagePublisher(service_ref: *package_service.Service) void {
 
 fn signedPackageBundle(template: manifest.BundleManifest) manifest.BundleManifest {
     var bundle = template;
-    bundle.signature = signing.signWithDefaultRegistry(
-        .ed25519,
+    bundle.signature = signing.sign(
         package_signer_identity,
         &package_service.digestBundle(bundle),
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
@@ -1433,41 +1414,6 @@ fn syscallBenchmarkGeneralProtectionFault(frame: *isr.InterruptFrame) void {
     qemu_exit.failure();
 }
 
-fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
-    var controller = accelerator_scheduler.Controller.init();
-    controller.configure(.{
-        .thermal_pressure = .nominal,
-        .battery_saver = false,
-        .privacy_mode = false,
-        .gpu_available = true,
-        .npu_available = true,
-        .media_available = true,
-    });
-
-    const shared = &accelerator_context.shared;
-    const task_id = ids.task(800 + iteration);
-    const object = shared.createWithAccess(task_id, kibibytes(64), .{
-        .cpu = true,
-        .gpu = true,
-    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    const claim = controller.claimWithSharedMemory(.{
-        .task_id = task_id.raw(),
-        .request = .{
-            .class = .foreground_interactive,
-            .wants_gpu = true,
-            .shared_memory_bytes = object.size_bytes,
-        },
-        .shared_memory_object_id = object.id,
-    }, shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    std.mem.doNotOptimizeAway(&controller);
-    std.mem.doNotOptimizeAway(shared);
-    const released = controller.releaseClaim(claim.id, shared) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    std.mem.doNotOptimizeAway(&controller);
-    std.mem.doNotOptimizeAway(shared);
-    _ = shared.revoke(object.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    return claim.id + object.id.raw() + @intFromBool(released) + @backingInt(claim.engine);
-}
-
 fn benchmarkFileBridgeResolve(iteration: u32) u64 {
     const entry = file_bridge_context.storage.resolve(ids.workspace(file_bridge_context.workspace_id), "documents/plan.md") catch |err|
         benchmark_reporting.benchStepFailure("benchmark suite", err);
@@ -1516,7 +1462,7 @@ fn benchmarkStorageVolumeReplaySegmentedLog(iteration: u32) u64 {
     return generation + record.generation + record.entryCount() +
         storage_volume_context.store.objectCount() + storage_volume_context.store.versionCount() +
         storage_volume_context.store.blobCount() + storage_volume_context.store.chunkCount() +
-        storage_volume_context.store.maxBlobPayloadBytes() + stored_object.latest_version_id.raw();
+        stored_object.latest_version_id.raw();
 }
 
 fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
@@ -1547,8 +1493,7 @@ fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
     const after_compacted = storage_volume.testing.latestImageCompactedGeneration(storage_volume_context.seed_image[0..]) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return result.generation + after_compacted - before_compacted + record.generation +
         storage_volume_context.store.objectCount() + storage_volume_context.store.versionCount() +
-        storage_volume_context.store.blobCount() + storage_volume_context.store.chunkCount() +
-        storage_volume_context.store.maxBlobPayloadBytes();
+        storage_volume_context.store.blobCount() + storage_volume_context.store.chunkCount();
 }
 
 fn benchmarkPackageRevision(iteration: u32) u64 {
@@ -1612,8 +1557,8 @@ fn benchmarkMediaPrintSubmitComplete(iteration: u32) u64 {
         .visibility = .user,
     }, &media_context.scheduler, &media_context.notifications, 21 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
-    _ = media_context.service.complete(print_job.id, &media_context.scheduler, &media_context.notifications, 30 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    _ = media_context.service.complete(export_job.id, &media_context.scheduler, &media_context.notifications, 31 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = media_context.service.complete(print_job.id, &media_context.notifications, 30 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    _ = media_context.service.complete(export_job.id, &media_context.notifications, 31 + iteration) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     std.mem.doNotOptimizeAway(&media_context.service);
 
     return export_job.id +
@@ -1875,16 +1820,7 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
         @as(u64, 0x1234_1111_0001) + iteration,
         .graphics_adapter,
     );
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "svc.driver.runtime",
-        .display_name = "Driver Runtime",
-        .publisher = "zigos.spec",
-        .signature = .{
-            .format = .ed25519,
-            .signer = "zigos-driver-key",
-        },
-    };
-    const driver = directory.register(.{
+    const driver = directory.registerSigned(.{
         .service_id = compositor.id,
         .owner_task_id = 401 + iteration,
         .device_id = @as(u64, 0x1234_1111_0001) + iteration,
@@ -1893,7 +1829,7 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
         .capability_table = &capabilities,
         .requester = authority.holder,
         .now_ticks = 1 + iteration,
-        .bundle = bundle,
+        .signer = "zigos-driver-key",
     }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     var runtime = DriverRecoveryRuntime{};
@@ -2248,68 +2184,6 @@ fn qualityAcceleratorClaimDeadlinePriority() u64 {
         foreground_stats.queued_ready);
 }
 
-fn qualityBrokeredAcceleratorQueueCompletionRelease() u64 {
-    var controller = accelerator_scheduler.Controller.init();
-    controller.configure(.{
-        .npu_available = true,
-    });
-    controller.requireBrokeredEngineQueues();
-
-    const rejected_without_queue = if (controller.claim(.{
-        .task_id = 780,
-        .request = .{
-            .class = .batch_compute,
-            .wants_npu = true,
-        },
-        .require_accelerator = true,
-    })) |unexpected_claim| blk: {
-        _ = unexpected_claim;
-        break :blk false;
-    } else |err| err == error.AcceleratorRequired;
-
-    controller.observeBrokeredEngineQueueEvent(.{
-        .engine = .npu,
-        .broker_task_id = 7_080,
-        .owner_task_id = 780,
-        .generation = 3,
-        .completion_sequence = 30,
-        .completion_interrupts_observed = 3,
-        .accepts_work = true,
-    }) catch return 0;
-
-    const claim = controller.claim(.{
-        .task_id = 780,
-        .request = .{
-            .class = .batch_compute,
-            .wants_npu = true,
-        },
-        .require_accelerator = true,
-    }) catch return 0;
-
-    const release_without_completion = if (controller.releaseClaim(claim.id, null)) |unexpected_release| blk: {
-        _ = unexpected_release;
-        break :blk false;
-    } else |err| err == error.QueueCompletionMissing;
-    controller.observeBrokeredEngineQueueEvent(.{
-        .engine = .npu,
-        .broker_task_id = 7_080,
-        .owner_task_id = 780,
-        .generation = 3,
-        .completion_sequence = 31,
-        .completion_interrupts_observed = 4,
-        .accepts_work = true,
-    }) catch return 0;
-    const released = controller.releaseClaim(claim.id, null) catch return 0;
-
-    return @intFromBool(rejected_without_queue and
-        claim.engine == .npu and
-        claim.queue_generation == 3 and
-        claim.queue_completion_sequence == 30 and
-        release_without_completion and
-        released and
-        controller.activeClaimCount() == 0);
-}
-
 fn qualityBackgroundThrottlingDelayedDispatches() u64 {
     quality_gate_runtime.reset();
     const runtime = &quality_gate_runtime;
@@ -2466,13 +2340,6 @@ const SloIrqContext = struct {
     tick: u64 = 1,
 };
 
-const SloNvmeContext = struct {
-    image: [kernel_nvme.SECTOR_BYTES * 8]u8 = @as([kernel_nvme.SECTOR_BYTES * 8]u8, @splat(0)),
-    namespaces: [1]kernel_nvme.Namespace = undefined,
-    controller: kernel_nvme.Controller = undefined,
-    ready: bool = false,
-};
-
 const SloEndpointContext = struct {
     table: endpoint.Table = endpoint.Table.init(),
     source_id: ids.EndpointId = ids.endpoint(0),
@@ -2493,7 +2360,6 @@ const SloInputContext = struct {
 };
 
 var slo_irq_context = SloIrqContext{};
-var slo_nvme_context = SloNvmeContext{};
 var slo_endpoint_context = SloEndpointContext{};
 var slo_input_context = SloInputContext{};
 
@@ -2544,29 +2410,6 @@ fn benchmarkSloIrqToTask(iteration: u32) u64 {
     if (stats.last_dispatch_tick < stats.last_wake_tick) return 0;
     if (!scheduler.parkTaskUntilEvent(slo_irq_context.task_id)) return 0;
     return stats.last_dispatch_tick - stats.last_wake_tick + stats.wake_event_count;
-}
-
-fn prepareSloNvmeFixture() void {
-    if (slo_nvme_context.ready) return;
-    slo_nvme_context.namespaces[0] = .{
-        .id = 1,
-        .sector_count = 8,
-        .image = slo_nvme_context.image[0..],
-    };
-    slo_nvme_context.controller = kernel_nvme.Controller.init(
-        kernel_nvme.softwareQueueCapabilities(),
-        slo_nvme_context.namespaces[0..],
-        16,
-    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    slo_nvme_context.ready = true;
-}
-
-fn benchmarkSloNvmeQueuedIo(iteration: u32) u64 {
-    _ = iteration;
-    prepareSloNvmeFixture();
-    const proof = slo_nvme_context.controller.proveWriteReadCycles(1, 0, 8) catch |err|
-        benchmark_reporting.benchStepFailure("benchmark suite", err);
-    return proof.write_completions + proof.read_completions + proof.mmio.completed_commands;
 }
 
 fn prepareSloEndpointFixture() void {
@@ -2697,7 +2540,6 @@ fn createLoadTask(
         .launch = .{
             .boundary = .userspace_process,
             .image_id = serial,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = bundle_id,
         },
@@ -2706,11 +2548,9 @@ fn createLoadTask(
 }
 
 const DriverRecoveryRuntime = struct {
-    const ActivationMode = enum(u8) { userspace_brokered_data_plane };
     const ActivationRecord = struct {
         activation_generation: u32,
         dma_domain_id: u64,
-        mode: ActivationMode,
 
         pub fn hasExclusiveClaim(_: *const @This()) bool {
             return true;
@@ -2730,7 +2570,6 @@ const DriverRecoveryRuntime = struct {
         return .{
             .dma_domain_id = driver.dma_domain_id,
             .activation_generation = @intCast(self.activation_count),
-            .mode = .userspace_brokered_data_plane,
         };
     }
 };
@@ -2938,7 +2777,7 @@ fn prepareUpdateHealthFixture(iteration: u32) void {
 
 fn registerHealthyServiceForBenchmark(
     supervisor: *supervisor_mod.Supervisor,
-    class: contract.ServiceClass,
+    class: service_catalog.ServiceClass,
     owner: principal.PrincipalId,
 ) u64 {
     const service_record = supervisor.register(class, owner) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);

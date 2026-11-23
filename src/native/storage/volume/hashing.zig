@@ -1,71 +1,101 @@
-const native_util = @import("../../core/util.zig");
+const std = @import("std");
 const principal = @import("../../core/principal.zig");
-const volume_errors = @import("errors.zig");
 const workspace = @import("../workspace.zig");
 pub const checksumBytes = @import("checksum.zig").checksumBytes;
 
-pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) volume_errors.Error!u64 {
-    var hash = native_util.FNV1A_64_OFFSET_BASIS;
-    hash = hashBytes(hash, "workspace-state");
-    hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.id.raw());
-    hash = hashPrincipal(hash, record.owner);
-    hash = hashBytes(hash, record.labelSlice());
-    hash = native_util.fnv1a64AppendU32LittleEndian(hash, record.generation);
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.counts.entry_count));
-    hash = hashBytes(hash, &record.path_index.root_address);
+/// What a root summary records about one workspace.
+pub const WorkspaceHashes = struct {
+    /// Change detector over every persisted field.
+    state: u64,
+    /// `workspaceLogHash` over the whole mutation log.
+    log: u64,
+};
 
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.counts.entry_mutation_count));
-    for (record.mutation_log.entriesConst()[0..record.counts.entry_mutation_count]) |mutation| {
-        hash = native_util.fnv1a64AppendU32LittleEndian(hash, mutation.generation);
-        hash = hashEntry(hash, mutation.entry);
+/// Fingerprints what a workspace_delta record leaves unwritten: the
+/// workspace's identity, owner and label and its first `mutation_count`
+/// logged mutations, from which its entries follow.
+pub fn workspaceLogHash(record: *const workspace.WorkspaceRecord, mutation_count: usize) u64 {
+    var hasher = StateHasher{};
+    hasher.bytes("workspace-log");
+    hasher.int(u64, record.id.raw());
+    hasher.principalId(record.owner);
+    hasher.bytes(record.labelSlice());
+    hasher.int(u16, @intCast(mutation_count));
+    for (record.mutation_log.entriesConst()[0..mutation_count]) |mutation| {
+        hasher.int(u32, mutation.generation);
+        hasher.entry(mutation.entry);
     }
+    return hasher.state.final();
+}
 
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.counts.share_grant_count));
+/// Seed-zero XXH64 over every persisted field, framed so adjacent fields
+/// cannot alias. The log fingerprint stands in for the fields it covers, so
+/// one pass over the mutation log yields both hashes.
+pub fn workspaceHashes(record: *const workspace.WorkspaceRecord) WorkspaceHashes {
+    const log = workspaceLogHash(record, record.counts.entry_mutation_count);
+    var hasher = StateHasher{};
+    hasher.bytes("workspace-state");
+    hasher.int(u64, log);
+    hasher.int(u32, record.generation);
+    hasher.int(u16, @intCast(record.counts.entry_count));
+    hasher.bytes(&record.path_index.root_address);
+
+    hasher.int(u16, @intCast(record.counts.share_grant_count));
     if (record.counts.share_grant_count != 0) {
         const share_table = record.share_table.dataConst();
         for (share_table.share_grants[0..record.counts.share_grant_count]) |grant| {
-            hash = hashShareGrant(hash, grant);
+            hasher.shareGrant(grant);
         }
     }
 
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.counts.deleted_count));
-    for (record.recoverable_deletes.entriesConst(record.counts.deleted_count)) |entry| {
-        hash = hashEntry(hash, entry);
+    hasher.int(u16, @intCast(record.counts.deleted_count));
+    for (record.recoverable_deletes.entriesConst(record.counts.deleted_count)) |deleted| {
+        hasher.entry(deleted);
     }
-    return hash;
+    return .{ .state = hasher.state.final(), .log = log };
 }
 
-fn hashBytes(hash: u64, bytes: []const u8) u64 {
-    var next = native_util.fnv1a64AppendU32LittleEndian(hash, @intCast(bytes.len));
-    next = native_util.fnv1a64WithSeed(next, bytes);
-    return next;
+pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) u64 {
+    return workspaceHashes(record).state;
 }
 
-fn hashPrincipal(hash: u64, id: principal.PrincipalId) u64 {
-    var next = native_util.fnv1a64AppendByte(hash, @backingInt(id.kind));
-    next = native_util.fnv1a64AppendU64LittleEndian(next, id.serial);
-    return next;
-}
+const StateHasher = struct {
+    state: std.hash.XxHash64 = .init(0),
 
-fn hashEntry(hash: u64, entry: workspace.Entry) u64 {
-    var next = hashBytes(hash, entry.pathSlice());
-    next = native_util.fnv1a64AppendU64LittleEndian(next, entry.object_id.raw());
-    next = native_util.fnv1a64AppendU64LittleEndian(next, entry.version_id.raw());
-    next = native_util.fnv1a64AppendByte(next, @backingInt(entry.object_type));
-    return next;
-}
+    fn int(self: *StateHasher, comptime T: type, value: T) void {
+        var encoded: [@sizeOf(T)]u8 = undefined;
+        std.mem.writeInt(T, &encoded, value, .little);
+        self.state.update(&encoded);
+    }
 
-fn hashShareGrant(hash: u64, grant: workspace.ShareGrant) u64 {
-    var next = hashPrincipal(hash, grant.principal_id);
-    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_read));
-    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_write));
-    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_admin));
-    next = native_util.fnv1a64AppendByte(next, @intFromBool(grant.can_export));
-    next = native_util.fnv1a64AppendByte(next, @backingInt(grant.network_scope));
-    next = native_util.fnv1a64AppendByte(next, @backingInt(grant.reshare_policy));
-    next = native_util.fnv1a64AppendByte(next, @backingInt(grant.audit_visibility));
-    next = native_util.fnv1a64AppendU64LittleEndian(next, grant.expires_at_ticks);
-    next = native_util.fnv1a64AppendU64LittleEndian(next, grant.scope_object_id.raw());
-    next = hashBytes(next, grant.scopePathSlice());
-    return next;
-}
+    fn bytes(self: *StateHasher, value: []const u8) void {
+        self.int(u32, @intCast(value.len));
+        self.state.update(value);
+    }
+
+    fn principalId(self: *StateHasher, id: principal.PrincipalId) void {
+        self.int(u8, @backingInt(id.kind));
+        self.int(u64, id.serial);
+    }
+
+    fn entry(self: *StateHasher, value: workspace.Entry) void {
+        self.bytes(value.pathSlice());
+        self.int(u64, value.object_id.raw());
+        self.int(u64, value.version_id.raw());
+        self.int(u8, @backingInt(value.object_type));
+    }
+
+    fn shareGrant(self: *StateHasher, grant: workspace.ShareGrant) void {
+        self.principalId(grant.principal_id);
+        self.int(u8, @intFromBool(grant.can_read));
+        self.int(u8, @intFromBool(grant.can_write));
+        self.int(u8, @intFromBool(grant.can_admin));
+        self.int(u8, @intFromBool(grant.can_export));
+        self.int(u8, @backingInt(grant.network_scope));
+        self.int(u8, @backingInt(grant.reshare_policy));
+        self.int(u8, @backingInt(grant.audit_visibility));
+        self.int(u64, grant.expires_at_ticks);
+        self.int(u64, grant.scope_object_id.raw());
+        self.bytes(grant.scopePathSlice());
+    }
+};

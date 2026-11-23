@@ -1,5 +1,5 @@
 const std = @import("std");
-const abi = @import("surface_text").abi;
+const abi = @import("host_benchmarks").abi;
 const unicode = abi.text_layout.unicode;
 
 const DOCUMENT_BYTES = 512;

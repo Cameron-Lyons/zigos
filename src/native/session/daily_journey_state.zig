@@ -3,10 +3,8 @@ const manifest = @import("../policy/manifest.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const public_store = @import("../services/public_store.zig");
-const transient_state = @import("transient_state.zig");
+const table_backing = @import("../core/table_backing.zig");
 
-pub const HEAP_BACKED_ON_FREESTANDING = transient_state.HEAP_BACKED_ON_FREESTANDING;
-pub const HANDLE_SIZE_CEILING_BYTES = transient_state.HANDLE_SIZE_CEILING_BYTES;
 pub const STATE_SIZE_CEILING_BYTES: usize = policy_object.DIRECTORY_SIZE_CEILING_BYTES +
     native_ux.CONTROLLER_SIZE_CEILING_BYTES + public_store.CHANNEL_SIZE_CEILING_BYTES;
 
@@ -32,36 +30,32 @@ pub const State = struct {
     }
 };
 
-const Storage = transient_state.ScopedState(State);
-
 pub const Instance = struct {
-    storage: Storage = .{},
+    storage: table_backing.Lazy(State, null) = .{},
 
     pub inline fn initInto(
         self: *Instance,
         source_identity: []const u8,
         update_channel: manifest.UpdateChannel,
     ) error{NoSpaceLeft}!void {
-        const state = try self.storage.begin();
+        self.storage.release();
+        const state = try self.storage.ensure();
         state.initializeAllocated(source_identity, update_channel);
     }
 
     pub fn deinit(self: *Instance) void {
-        self.storage.deinit();
+        self.storage.release();
     }
 
     pub fn ptr(self: *Instance) *State {
-        return self.storage.ptr();
+        return self.storage.get().?;
     }
 };
 
-pub const FREESTANDING_HANDLE_SIZE_BYTES = transient_state.freestandingHandleSize(State);
-
-test "host daily journey state retains initialized value storage" {
-    try std.testing.expectEqual(@sizeOf(State), @sizeOf(Instance));
+test "daily journey state initializes its heap storage" {
     try std.testing.expectEqual(STATE_SIZE_CEILING_BYTES, @sizeOf(State));
 
-    var instance: Instance = undefined;
+    var instance: Instance = .{};
     try instance.initInto("store:test/daily", .beta);
     defer instance.deinit();
 

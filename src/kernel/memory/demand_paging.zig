@@ -1,11 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
-pub const DEMAND_PAGES_USER_OBJECTS = true;
-pub const REGISTERS_MAPPED_OBJECTS = true;
-pub const COPIES_ON_WRITE = true;
-pub const ISOLATES_REGIONS_BY_SPACE = true;
-pub const RELEASES_REGIONS_WITH_SPACE = true;
 pub const MAX_REGIONS: usize = 128;
 
 pub const Kind = enum(u8) {
@@ -20,7 +15,6 @@ pub const Region = struct {
     writable: bool = false,
     kind: Kind = .anonymous_zero,
     physical_base: u64 = 0,
-    protection_key: u4 = 0,
 };
 
 const MAX_ADDRESS_SPACES: usize = 16;
@@ -38,31 +32,12 @@ pub fn reset() void {
     spaces = @as([MAX_ADDRESS_SPACES]SpaceSlot, @splat(.{}));
 }
 
-pub fn register(region: Region) bool {
-    return registerInSpace(0, region);
-}
-
 pub fn registerForSpace(space: anytype, region: Region) bool {
     return registerInSpace(spaceIdOf(space), region);
 }
 
-pub fn registerRange(virt_start: u64, size_bytes: u64, writable: bool, kind: Kind, physical_base: u64) bool {
-    if (size_bytes == 0) return false;
-    const end = std.math.add(u64, virt_start, size_bytes) catch return false;
-    return register(.{
-        .virt_start = virt_start,
-        .virt_end_exclusive = end,
-        .writable = writable,
-        .kind = kind,
-        .physical_base = physical_base,
-    });
-}
-
 pub fn unregisterSpace(space: anytype) void {
-    if (comptime !RELEASES_REGIONS_WITH_SPACE) return;
-    const space_id = spaceIdOf(space);
-    if (space_id == 0) return;
-    const slot = findSpace(space_id) orelse return;
+    const slot = findSpace(spaceIdOf(space)) orelse return;
     if (comptime builtin.target.os.tag == .freestanding) {
         var index: u8 = 0;
         while (index < slot.region_count) : (index += 1) {
@@ -98,19 +73,6 @@ pub fn unregisterRegionForSpace(space: anytype, virt_start: u64, virt_end_exclus
     return false;
 }
 
-pub fn regionFor(fault_address: u64) ?*Region {
-    return regionForSpaceId(0, fault_address);
-}
-
-pub fn resolve(fault_address: u64, write: bool) bool {
-    const region = regionFor(fault_address) orelse return false;
-    return !write or region.writable or region.kind == .object_cow;
-}
-
-pub fn resolveAndMap(space: anytype, fault_address: u64, write: bool) bool {
-    return resolveFault(space, fault_address, 0x4 | @as(u32, if (write) 0x2 else 0));
-}
-
 // Prepare only bytes that the kernel will touch. Metadata permission checks
 // remain the caller's responsibility; this checks actual private user backing.
 // The BSP keeps IF=0, the task/root quiescent and admission valid through the
@@ -134,12 +96,11 @@ pub fn validateSharedUserRangeRegistration(
     virtual_start: usize,
     size_bytes: usize,
     write: bool,
-    protection_key: u4,
 ) bool {
     _ = write;
-    // Current shared objects use ordinary writable RAM and key zero. Private
-    // COW registrations and caller-selected keys grant no shared-copy access.
-    if (size_bytes == 0 or authority.size_bytes == 0 or protection_key != 0 or
+    // Shared objects use ordinary writable RAM. Private COW registrations
+    // grant no shared-copy access.
+    if (size_bytes == 0 or authority.size_bytes == 0 or
         authority.virtual_base & 0xFFF != 0 or authority.physical_base & 0xFFF != 0) return false;
     const logical_end = std.math.add(u64, authority.virtual_base, authority.size_bytes) catch return false;
     const copy_end = std.math.add(u64, virtual_start, size_bytes) catch return false;
@@ -152,7 +113,7 @@ pub fn validateSharedUserRangeRegistration(
         if (region.virt_end_exclusive <= authority.virtual_base or region.virt_start >= logical_end) continue;
         if (matched or region.virt_start != authority.virtual_base or region.virt_end_exclusive != logical_end or
             region.physical_base != authority.physical_base or region.kind != .shared_ram or
-            !region.writable or region.protection_key != protection_key) return false;
+            !region.writable) return false;
         matched = true;
     }
     return matched;
@@ -164,9 +125,8 @@ pub fn prepareSharedUserRange(
     virtual_start: usize,
     size_bytes: usize,
     write: bool,
-    protection_key: u4,
 ) ?usize {
-    return prepareSharedUserRangeWith(@import("paging64.zig"), space, authority, virtual_start, size_bytes, write, protection_key);
+    return prepareSharedUserRangeWith(@import("paging64.zig"), space, authority, virtual_start, size_bytes, write);
 }
 
 fn prepareSharedUserRangeWith(
@@ -176,11 +136,10 @@ fn prepareSharedUserRangeWith(
     virtual_start: usize,
     size_bytes: usize,
     write: bool,
-    protection_key: u4,
 ) ?usize {
-    if (!validateSharedUserRangeRegistration(space, authority, virtual_start, size_bytes, write, protection_key)) return null;
+    if (!validateSharedUserRangeRegistration(space, authority, virtual_start, size_bytes, write)) return null;
     const physical = std.math.add(u64, authority.physical_base, virtual_start - authority.virtual_base) catch return null;
-    return paging.prepareSharedPhysicalUserRange(space, virtual_start, physical, size_bytes, write, protection_key);
+    return paging.prepareSharedPhysicalUserRange(space, virtual_start, physical, size_bytes, write);
 }
 
 test "shared copy registration requires exact live logical authority and rejects padding shadows and COW" {
@@ -196,25 +155,24 @@ test "shared copy registration requires exact live logical authority and rejects
         .kind = .shared_ram,
         .writable = true,
     };
-    try std.testing.expect(!validateSharedUserRangeRegistration(&space, authority, 0x7000_0FF0, 19, true, 0));
+    try std.testing.expect(!validateSharedUserRangeRegistration(&space, authority, 0x7000_0FF0, 19, true));
     try std.testing.expect(registerForSpace(&space, region));
-    try std.testing.expect(validateSharedUserRangeRegistration(&space, authority, 0x7000_0FF0, 19, true, 0));
-    try std.testing.expect(validateSharedUserRangeRegistration(&space, authority, 0x7000_1002, 1, false, 0));
-    try std.testing.expect(!validateSharedUserRangeRegistration(&foreign, authority, 0x7000_0FF0, 19, false, 0));
+    try std.testing.expect(validateSharedUserRangeRegistration(&space, authority, 0x7000_0FF0, 19, true));
+    try std.testing.expect(validateSharedUserRangeRegistration(&space, authority, 0x7000_1002, 1, false));
+    try std.testing.expect(!validateSharedUserRangeRegistration(&foreign, authority, 0x7000_0FF0, 19, false));
     for ([_]struct { start: usize, size: usize }{
         .{ .start = 0x7000_0FF0, .size = 20 },
         .{ .start = 0x7000_1003, .size = 1 },
         .{ .start = 0x6FFF_FFFF, .size = 2 },
         .{ .start = 0x7000_0000, .size = 0 },
         .{ .start = std.math.maxInt(usize), .size = 2 },
-    }) |range| try std.testing.expect(!validateSharedUserRangeRegistration(&space, authority, range.start, range.size, true, 0));
+    }) |range| try std.testing.expect(!validateSharedUserRangeRegistration(&space, authority, range.start, range.size, true));
     var wrong = authority;
     wrong.physical_base += 0x1000;
-    try std.testing.expect(!validateSharedUserRangeRegistration(&space, wrong, 0x7000_0000, 1, false, 0));
+    try std.testing.expect(!validateSharedUserRangeRegistration(&space, wrong, 0x7000_0000, 1, false));
     wrong = authority;
     wrong.size_bytes = 0x2000;
-    try std.testing.expect(!validateSharedUserRangeRegistration(&space, wrong, 0x7000_0000, 1, false, 0));
-    try std.testing.expect(!validateSharedUserRangeRegistration(&space, authority, 0x7000_0000, 1, false, 3));
+    try std.testing.expect(!validateSharedUserRangeRegistration(&space, wrong, 0x7000_0000, 1, false));
     try std.testing.expect(unregisterRegionForSpace(&space, region.virt_start, region.virt_end_exclusive));
     for ([_]Region{
         blk: {
@@ -227,14 +185,9 @@ test "shared copy registration requires exact live logical authority and rejects
             r.kind = .object_cow;
             break :blk r;
         },
-        blk: {
-            var r = region;
-            r.protection_key = 3;
-            break :blk r;
-        },
     }) |invalid| {
         try std.testing.expect(registerForSpace(&space, invalid));
-        try std.testing.expect(!validateSharedUserRangeRegistration(&space, authority, 0x7000_0000, 1, false, 0));
+        try std.testing.expect(!validateSharedUserRangeRegistration(&space, authority, 0x7000_0000, 1, false));
         try std.testing.expect(unregisterRegionForSpace(&space, invalid.virt_start, invalid.virt_end_exclusive));
     }
     try std.testing.expect(registerForSpace(&space, region));
@@ -245,14 +198,13 @@ test "shared copy registration requires exact live logical authority and rejects
         .kind = .shared_ram,
         .writable = true,
     }));
-    try std.testing.expect(!validateSharedUserRangeRegistration(&space, authority, 0x7000_0FF0, 19, true, 0));
+    try std.testing.expect(!validateSharedUserRangeRegistration(&space, authority, 0x7000_0FF0, 19, true));
 }
 
 test "shared copy preparation passes exact offset only after registration admission" {
     const Model = struct { calls: usize = 0, physical: u64 = 0, write: bool = false };
     const Paging = struct {
-        pub fn prepareSharedPhysicalUserRange(model: *Model, _: usize, physical: u64, _: usize, write: bool, key: u4) ?usize {
-            if (key != 0) return null;
+        pub fn prepareSharedPhysicalUserRange(model: *Model, _: usize, physical: u64, _: usize, write: bool) ?usize {
             model.calls += 1;
             model.physical = physical;
             model.write = write;
@@ -263,7 +215,7 @@ test "shared copy preparation passes exact offset only after registration admiss
     defer reset();
     var model = Model{};
     const authority = SharedCopyAuthority{ .virtual_base = 0x7000_0000, .physical_base = 0xA000, .size_bytes = 0x1010 };
-    try std.testing.expect(prepareSharedUserRangeWith(Paging, &model, authority, 0x7000_0FF0, 32, true, 0) == null);
+    try std.testing.expect(prepareSharedUserRangeWith(Paging, &model, authority, 0x7000_0FF0, 32, true) == null);
     try std.testing.expectEqual(@as(usize, 0), model.calls);
     try std.testing.expect(registerForSpace(&model, .{
         .virt_start = authority.virtual_base,
@@ -272,11 +224,11 @@ test "shared copy preparation passes exact offset only after registration admiss
         .physical_base = authority.physical_base,
         .writable = true,
     }));
-    try std.testing.expectEqual(@as(?usize, 0xFFFF_8000_0000_AFF0), prepareSharedUserRangeWith(Paging, &model, authority, 0x7000_0FF0, 32, true, 0));
+    try std.testing.expectEqual(@as(?usize, 0xFFFF_8000_0000_AFF0), prepareSharedUserRangeWith(Paging, &model, authority, 0x7000_0FF0, 32, true));
     try std.testing.expectEqual(@as(u64, 0xAFF0), model.physical);
     try std.testing.expect(model.write);
     try std.testing.expectEqual(@as(usize, 1), model.calls);
-    try std.testing.expect(prepareSharedUserRangeWith(Paging, &model, authority, 0x7000_1000, 17, false, 0) == null);
+    try std.testing.expect(prepareSharedUserRangeWith(Paging, &model, authority, 0x7000_1000, 17, false) == null);
     try std.testing.expectEqual(@as(usize, 1), model.calls);
 }
 
@@ -454,7 +406,6 @@ fn resolveRegionFaultWithBatch(
         // Shared objects own ordinary RAM and use the same cached memory type
         // as the kernel direct alias. Device MMIO uses the broker mapper.
         .cache_disabled = false,
-        .protection_key = region.protection_key,
     };
     switch (region.kind) {
         .anonymous_zero => {
@@ -523,7 +474,6 @@ const UserCopyTestModel = struct {
     borrowed_mappings: usize = 0,
     borrowed_physical: u64 = 0,
     borrowed_cache_disabled: bool = false,
-    borrowed_protection_key: u4 = 0,
     allow_borrowed: bool = false,
     promotions: usize = 0,
     barriers: usize = 0,
@@ -571,7 +521,6 @@ const UserCopyTestPaging = struct {
         executable: bool,
         write_through: bool,
         cache_disabled: bool,
-        protection_key: u4,
     };
     pub const PagePermissions = struct { writable: bool, executable: bool, user: bool };
 
@@ -616,7 +565,6 @@ const UserCopyTestPaging = struct {
         };
         model.borrowed_physical = physical;
         model.borrowed_cache_disabled = permissions.cache_disabled;
-        model.borrowed_protection_key = permissions.protection_key;
         model.borrowed_mappings += 1;
     }
 
@@ -783,8 +731,10 @@ test "private COW preparation batches actual leaf publication and completes late
             try std.testing.expectEqualDeep(untouched, model.payload);
             try std.testing.expectEqual(@as(usize, 1), model.barriers);
             try std.testing.expectEqual(@as(usize, 1), model.remote_count);
-            try std.testing.expectEqual(@as(usize, @intFromBool(identifiers_enabled)), model.local_count);
-            try std.testing.expectEqual(@as(usize, @intFromBool(!identifiers_enabled and active)), model.reload_count);
+            // Two promoted leaves retire individually, never the whole context.
+            try std.testing.expectEqual(@as(usize, 0), model.local_count + model.reload_count);
+            try std.testing.expectEqual(@as(usize, if (active) 2 else 0), model.current_page_count);
+            try std.testing.expectEqual(@as(usize, if (!active and identifiers_enabled) 2 else 0), model.individual_count);
             try std.testing.expect(prepareUserRangeWith(Paging, &model, Paging.Model.base, 2 * 0x1000, true));
             try std.testing.expectEqual(@as(usize, 1), model.barriers);
             // Single hardware-fault resolution retains the immediate path.
@@ -957,46 +907,40 @@ test "private copy preparation rejects foreign CPU or enabled interrupts before 
 
 test "demand paging resolves the containing region when ranges overlap" {
     reset();
-    try std.testing.expect(register(.{
+    var space: u8 = 1;
+    try std.testing.expect(registerForSpace(&space, .{
         .virt_start = 0x5000_0000,
         .virt_end_exclusive = 0x5000_3000,
         .writable = true,
         .kind = .anonymous_zero,
     }));
-    try std.testing.expect(register(.{
+    try std.testing.expect(registerForSpace(&space, .{
         .virt_start = 0x5000_1000,
         .virt_end_exclusive = 0x5000_1800,
         .writable = false,
         .kind = .shared_ram,
         .physical_base = 0x8000,
     }));
-    const inner = regionFor(0x5000_1400) orelse return error.MissingRegion;
+    const inner = regionForSpaceId(spaceIdOf(&space), 0x5000_1400) orelse return error.MissingRegion;
     try std.testing.expectEqual(Kind.shared_ram, inner.kind);
-    const outer = regionFor(0x5000_2000) orelse return error.MissingRegion;
+    const outer = regionForSpaceId(spaceIdOf(&space), 0x5000_2000) orelse return error.MissingRegion;
     try std.testing.expectEqual(Kind.anonymous_zero, outer.kind);
     reset();
 }
 
 test "demand paging registers object-backed regions" {
     reset();
-    try std.testing.expect(register(.{
+    var space: u8 = 1;
+    try std.testing.expect(registerForSpace(&space, .{
         .virt_start = 0x4000_0000,
         .virt_end_exclusive = 0x4000_2000,
         .writable = true,
         .kind = .shared_ram,
         .physical_base = 0x1000,
     }));
-    try std.testing.expect(regionFor(0x4000_0FFF) != null);
-    try std.testing.expect(regionFor(0x4000_2000) == null);
-    try std.testing.expect(resolve(0x4000_1000, true));
-    try std.testing.expect(COPIES_ON_WRITE);
-    reset();
-}
-
-test "demand paging registers a mapped object range" {
-    reset();
-    try std.testing.expect(registerRange(0x7000_0000, 0x2000, true, .shared_ram, 0x2000));
-    try std.testing.expect(resolve(0x7000_1000, false));
+    try std.testing.expect(regionForSpaceId(spaceIdOf(&space), 0x4000_0FFF) != null);
+    try std.testing.expect(regionForSpaceId(spaceIdOf(&space), 0x4000_2000) == null);
+    try std.testing.expect(resolveFault(&space, 0x4000_1000, 0x6));
     reset();
 }
 
@@ -1016,8 +960,8 @@ test "demand paging keeps per-space stack regions" {
         .writable = false,
         .kind = .object_cow,
     }));
-    try std.testing.expect(resolveAndMap(&first, 0x0000_007F_0000_0004, true));
-    try std.testing.expect(resolveAndMap(&second, 0x0000_007F_0000_0004, false));
+    try std.testing.expect(resolveFault(&first, 0x0000_007F_0000_0004, 0x6));
+    try std.testing.expect(resolveFault(&second, 0x0000_007F_0000_0004, 0x4));
     reset();
 }
 
@@ -1032,10 +976,8 @@ test "demand paging does not map another space's objects" {
         .kind = .shared_ram,
         .physical_base = 0x2000,
     }));
-    try std.testing.expect(registerRange(0x7000_0000, 0x1000, true, .shared_ram, 0x2000));
-    try std.testing.expect(!resolveAndMap(&stranger, 0x7000_0000, false));
-    try std.testing.expect(resolveAndMap(&owner, 0x7000_0000, false));
-    try std.testing.expect(ISOLATES_REGIONS_BY_SPACE);
+    try std.testing.expect(!resolveFault(&stranger, 0x7000_0000, 0x4));
+    try std.testing.expect(resolveFault(&owner, 0x7000_0000, 0x4));
     reset();
 }
 
@@ -1075,7 +1017,6 @@ test "demand paging unregisters retired spaces" {
         .writable = true,
         .kind = .anonymous_zero,
     }));
-    try std.testing.expect(RELEASES_REGIONS_WITH_SPACE);
     reset();
 }
 
@@ -1096,9 +1037,9 @@ test "retiring one shared-space region preserves siblings and reuses capacity" {
     try std.testing.expect(!unregisterRegionForSpace(&space, base + 0x1000, base + 0x1800));
     for (0..MAX_REGIONS + 1) |_| {
         try std.testing.expect(unregisterRegionForSpace(&space, base + 0x1000, base + 0x2000));
-        try std.testing.expect(!resolveAndMap(&space, base + 0x1000, true));
-        try std.testing.expect(resolveAndMap(&space, base, true));
-        try std.testing.expect(resolveAndMap(&space, base + 0x2000, true));
+        try std.testing.expect(!resolveFault(&space, base + 0x1000, 0x6));
+        try std.testing.expect(resolveFault(&space, base, 0x6));
+        try std.testing.expect(resolveFault(&space, base + 0x2000, 0x6));
         try std.testing.expect(registerForSpace(&space, .{
             .virt_start = base + 0x1000,
             .virt_end_exclusive = base + 0x2000,
@@ -1153,7 +1094,6 @@ test "private-copy read then write promotes without copying over task changes" {
             executable: bool,
             write_through: bool,
             cache_disabled: bool,
-            protection_key: u4,
         };
 
         pub fn mapOwnedUserRange(model: *Model, _: usize, _: usize, permissions: UserPermissions) error{ AlreadyMapped, OutOfMemory }!void {
@@ -1274,7 +1214,6 @@ test "shared RAM faults preserve page offsets and cached borrowed permissions" {
         .writable = true,
         .kind = .shared_ram,
         .physical_base = 0xF000_0000,
-        .protection_key = 6,
     };
     var model = UserCopyTestModel{ .allow_borrowed = true };
     try std.testing.expect(resolveRegionFault(UserCopyTestPaging, &model, &region, UserCopyTestModel.base + 0x1007, true, false));
@@ -1282,7 +1221,6 @@ test "shared RAM faults preserve page offsets and cached borrowed permissions" {
     try std.testing.expect(!model.pages[1].executable);
     try std.testing.expectEqual(@as(u64, 0xF000_1000), model.borrowed_physical);
     try std.testing.expect(!model.borrowed_cache_disabled);
-    try std.testing.expectEqual(@as(u4, 6), model.borrowed_protection_key);
     try std.testing.expectEqual(@as(usize, 1), model.borrowed_mappings);
     try std.testing.expectEqual(@as(usize, 0), model.allocations);
     try std.testing.expectEqual(@as(usize, 0), model.copies);

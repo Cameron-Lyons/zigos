@@ -9,7 +9,7 @@ fn testInfo() framebuffer.Info {
         .width = 288,
         .height = 240,
         .pixels_per_scan_line = 293,
-        .format = .bgrx8888,
+        .pixel_mask = framebuffer.BGRX8888_MASK,
         .buffer_bytes = 293 * 240 * 4,
     };
 }
@@ -133,9 +133,8 @@ test "framebuffer mapping covers page offsets without exceeding its aperture" {
 test "framebuffer colors use exact byte order and scale contiguous bitmasks" {
     var info = testInfo();
     try std.testing.expectEqual(@as(u32, 0x123456), info.encodeColor(0x123456));
-    info.format = .rgbx8888;
+    info.pixel_mask = framebuffer.RGBX8888_MASK;
     try std.testing.expectEqual(@as(u32, 0x563412), info.encodeColor(0x123456));
-    info.format = .bitmask;
     info.pixel_mask = .{ .red = 0x3ff0_0000, .green = 0x000f_fc00, .blue = 0x0000_03ff, .reserved = 0xc000_0000 };
     try framebuffer.validate(info);
     try std.testing.expectEqual(@as(u32, 0x3fff_ffff), info.encodeColor(0xffffff));
@@ -144,7 +143,7 @@ test "framebuffer colors use exact byte order and scale contiguous bitmasks" {
     try std.testing.expectError(error.UnsupportedPixelFormat, framebuffer.validate(info));
     info.pixel_mask.red = 0x3010_0000;
     try std.testing.expectError(error.UnsupportedPixelFormat, framebuffer.validate(info));
-    info.format = .bgrx8888;
+    info.pixel_mask = framebuffer.BGRX8888_MASK;
     info.physical_address += 1;
     try std.testing.expectError(error.InvalidAddress, framebuffer.validate(info));
     info.physical_address = std.math.maxInt(u64) - 3;

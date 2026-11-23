@@ -65,9 +65,8 @@ pub const Challenge = struct {
         try enrolled.validate();
         try self.request.validate();
         if (self.request.remote_party_len == 0 or self.request.nonce_len != 32 or
-            std.mem.allEqual(u8, &self.request.nonce, 0) or !self.request.user_visible or
-            self.request.expected_key_origin != .tpm or !std.mem.eql(u8, self.request.rootKeyIdSlice(), enrolled.keyId()) or
-            !self.request.attestation_verifier_metadata_digest_required or
+            std.mem.allEqual(u8, &self.request.nonce, 0) or
+            !std.mem.eql(u8, self.request.rootKeyIdSlice(), enrolled.keyId()) or
             !std.mem.eql(u8, &self.request.attestation_verifier_metadata_digest, &enrolled.digest()) or
             std.mem.allEqual(u8, &self.approved_pcr11, 0)) return error.InvalidTpmChallenge;
         if (self.request.minimum_root_generation == 0 or enrolled.generation < self.request.minimum_root_generation) return error.StaleRootGeneration;
@@ -117,11 +116,9 @@ pub const Pending = struct {
                 .remote_party = policy.remote_party,
                 .nonce = &verifier.nonce,
                 .policy_label = policy.policy_label,
-                .expected_key_origin = .tpm,
                 .root_key_id = enrolled.keyId(),
                 .minimum_root_generation = policy.minimum_generation,
                 .revoked_root_generations = policy.revoked_generations,
-                .attestation_verifier_metadata_digest_required = true,
                 .attestation_verifier_metadata_digest = enrolled.digest(),
             }),
             .approved_pcr11 = approved_pcr11,
@@ -166,8 +163,7 @@ pub const Pending = struct {
     }
 };
 
-// Network policy pins this profile-specific digest, never confuses PCR evidence
-// with a signed runtime BootRecord root from an external attestation provider.
+// Network policy pins this profile-specific, domain-separated PCR 11 digest.
 pub fn bootDigest(pcr11: *const hash.Digest) hash.Digest {
     var h = hash.init();
     hash.updateBytes(&h, "schema", "zigos.tpm-pcr11-boot.v1");
@@ -297,7 +293,7 @@ test "TPM remote attestation service rejects invalid requests without TPM comman
     var io = Io{};
     var out = Response{ .bytes = @splat(0xa5), .len = 19 };
     var challenge = pending.challenge;
-    challenge.request.user_visible = false;
+    challenge.approved_pcr11 = @splat(0);
     try std.testing.expectError(error.InvalidTpmChallenge, service.respondToTpmAttestationRequest(&client, &io, "", &(@as(hash.Digest, @splat(1))), &enrolled, &challenge, &out));
     try std.testing.expect(std.mem.allEqual(u8, &out.bytes, 0));
     try std.testing.expectEqual(@as(u16, 0), out.len);

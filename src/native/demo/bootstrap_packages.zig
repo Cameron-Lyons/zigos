@@ -3,6 +3,7 @@ const native_util = @import("../core/util.zig");
 const manifest_fixtures = @import("../policy/manifest_fixtures.zig");
 const capability = @import("../kernel_api/capability.zig");
 const package_service = @import("../services/package_service.zig");
+const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 
@@ -26,8 +27,7 @@ const capture_signer = signing.SignerIdentity{
 };
 
 fn signDemoReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) manifest.Signature {
-    return signing.signWithDefaultRegistry(
-        .ed25519,
+    return signing.sign(
         identity,
         &package_service.digestBundle(bundle),
     ) catch |err| native_util.bootProofFailure("bootstrap packages", err);
@@ -139,7 +139,7 @@ fn installViewer(port: *package_service.PackagePort, authority: package_service.
         .bundle = bundle,
         .source_identity = store_source,
         .data_schema_version = 1,
-    }, null) catch |err| native_util.bootProofFailure("bootstrap packages", err);
+    }, &policy_object.unattached, .{}) catch |err| native_util.bootProofFailure("bootstrap packages", err);
 }
 
 fn installNotes(port: *package_service.PackagePort, authority: package_service.AuthorityContext, packages: *package_service.Service) void {
@@ -151,7 +151,7 @@ fn installNotes(port: *package_service.PackagePort, authority: package_service.A
         .bundle = bundle,
         .source_identity = store_source,
         .data_schema_version = 1,
-    }, null) catch |err| native_util.bootProofFailure("bootstrap packages", err);
+    }, &policy_object.unattached, .{}) catch |err| native_util.bootProofFailure("bootstrap packages", err);
 }
 
 fn installSync(port: *package_service.PackagePort, authority: package_service.AuthorityContext, packages: *package_service.Service) void {
@@ -163,7 +163,7 @@ fn installSync(port: *package_service.PackagePort, authority: package_service.Au
         .bundle = bundle,
         .source_identity = store_source,
         .data_schema_version = 1,
-    }, null) catch |err| native_util.bootProofFailure("bootstrap packages", err);
+    }, &policy_object.unattached, .{}) catch |err| native_util.bootProofFailure("bootstrap packages", err);
 }
 
 fn installCapture(port: *package_service.PackagePort, authority: package_service.AuthorityContext, packages: *package_service.Service) void {
@@ -175,5 +175,5 @@ fn installCapture(port: *package_service.PackagePort, authority: package_service
         .bundle = bundle,
         .source_identity = store_source,
         .data_schema_version = 1,
-    }, null) catch |err| native_util.bootProofFailure("bootstrap packages", err);
+    }, &policy_object.unattached, .{}) catch |err| native_util.bootProofFailure("bootstrap packages", err);
 }

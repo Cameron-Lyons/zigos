@@ -1,6 +1,5 @@
 const std = @import("std");
 
-pub const INTERRUPT_VECTOR: u8 = 65;
 pub const TRANSMIT_COMPLETE_CAUSE: u32 = 1 << 0;
 pub const RECEIVE_DESCRIPTOR_CAUSE: u32 = 1 << 4;
 pub const RECEIVE_TIMER_CAUSE: u32 = 1 << 7;
@@ -8,7 +7,7 @@ pub const ASSERTED_CAUSE: u32 = 1 << 31;
 pub const RECEIVE_CAUSES: u32 = RECEIVE_DESCRIPTOR_CAUSE | RECEIVE_TIMER_CAUSE;
 pub const QUEUE_CAUSES: u32 = TRANSMIT_COMPLETE_CAUSE | RECEIVE_CAUSES;
 pub const MAX_TX_COMPLETIONS_PER_SERVICE: u32 = 63;
-pub const MAX_RX_FRAMES_PER_SERVICE: u32 = 1;
+pub const MAX_RX_FRAMES_PER_SERVICE: u32 = 63;
 pub const EMPTY_INTERRUPT_LIMIT: u8 = 8;
 
 pub const Cause = enum {
@@ -57,5 +56,5 @@ test "I225 empty interrupt accounting resets on bounded queue progress" {
     for (0..EMPTY_INTERRUPT_LIMIT) |_| streak = nextEmptyStreak(streak, false);
     try std.testing.expect(shouldContain(streak));
     try std.testing.expectEqual(@as(u32, 63), MAX_TX_COMPLETIONS_PER_SERVICE);
-    try std.testing.expectEqual(@as(u32, 1), MAX_RX_FRAMES_PER_SERVICE);
+    try std.testing.expectEqual(@as(u32, 63), MAX_RX_FRAMES_PER_SERVICE);
 }

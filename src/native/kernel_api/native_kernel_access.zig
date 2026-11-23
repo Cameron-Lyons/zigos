@@ -15,7 +15,6 @@ pub fn validateTaskCreateRequest(
         .app_component, .service_component => {
             if (request.launch.boundary != .userspace_process) return error.UserspaceLaunchRequired;
             if (request.launch.image_id == 0 or
-                request.launch.component_abi_version == 0 or
                 !request.launch.signed or
                 request.launch.bundle_id.len == 0 or
                 request.launch.bundle_id.len >= task_runtime.MAX_TASK_BUNDLE_ID_BYTES)

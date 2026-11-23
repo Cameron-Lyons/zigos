@@ -95,9 +95,8 @@ pub fn indexForRole(bundle_id: []const u8) ?usize {
     if (spec_index >= verification_boot_image_specs.len) {
         native_util.impossibleByInvariant("verification boot bundle id index points outside registry specs");
     }
-    if (!std.mem.eql(u8, verification_boot_image_specs[spec_index].bundleId(), bundle_id)) {
-        native_util.impossibleByInvariant("verification boot bundle id index points at the wrong registry spec");
-    }
+    // A spec under the same hashed key with another bundle id is a collision.
+    if (!std.mem.eql(u8, verification_boot_image_specs[spec_index].bundleId(), bundle_id)) return null;
     return spec_index;
 }
 
@@ -109,7 +108,7 @@ fn buildBundleIndex() id_index.Table(BUNDLE_INDEX_CAPACITY) {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(BUNDLE_INDEX_CAPACITY);
     for (verification_boot_image_specs, 0..) |spec, spec_index| {
-        id_index.insert(BUNDLE_INDEX_CAPACITY, &index, production_registry.bundleIndexKey(spec.bundleId()), spec_index, "verification boot bundle id index covers userspace registry");
+        id_index.insertAbsent(BUNDLE_INDEX_CAPACITY, &index, production_registry.bundleIndexKey(spec.bundleId()), spec_index, "verification boot bundle id index covers userspace registry");
     }
     return index;
 }
@@ -169,4 +168,17 @@ test "verification registry keeps the ring-three exception containment proof" {
     const proof = findVerification("zigos.system.termination-probe") orelse return error.MissingTerminationProof;
     try std.testing.expect((proof.contractFlags() & production_registry.FLAG_GP_PROOF_PROBE) != 0);
     try std.testing.expectEqual(production_registry.ComponentClass.app_component, proof.componentClass());
+}
+
+test "userspace contracts stay unique and cover every boot artifact" {
+    for (&verification_boot_image_specs, 0..) |*spec, index| {
+        const contract = production_registry.contractForSpec(spec);
+        try std.testing.expect(contract.role_tag != 0);
+        try std.testing.expect(contract.heartbeat_increment != 0);
+        for (verification_boot_image_specs[0..index]) |*previous| {
+            const earlier = production_registry.contractForSpec(previous);
+            try std.testing.expect(!std.mem.eql(u8, earlier.bundle_id, contract.bundle_id));
+            try std.testing.expect(earlier.role_tag != contract.role_tag);
+        }
+    }
 }

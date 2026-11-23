@@ -20,10 +20,8 @@ pub fn addCheckSteps(
     zig_test_roots_step.dependOn(&zig_test_roots_cmd.step);
 
     const host_tests_step = b.step("host-tests", "Run host-side unit tests for native logic and userspace runtime");
-    const host_tool_tests = host_tools.addTests(b);
-    b.step("host-tool-tests", "Test native file, release, hardware and QEMU utilities").dependOn(&host_tool_tests.step);
-    const relay_tests = host_tools.addRelayTests(b);
-    b.step("qemu-peer-relay-tests", "Test QEMU relay framing, confirmation loss and live socket cleanup").dependOn(&relay_tests.step);
+    const host_tool_tests = host_tools.addTests(b, optimize);
+    b.step("host-tool-tests", "Test native file, release, hardware, QEMU and peer relay utilities").dependOn(&host_tool_tests.step);
     host_tests_step.dependOn(&host_tool_tests.step);
     host_tests_step.dependOn(&zig_test_roots_cmd.step);
     host_tests_step.dependOn(&test_artifacts.run_host_tests.step);
@@ -51,25 +49,19 @@ pub fn addCheckSteps(
     lint_step.dependOn(&action_lint_cmd.step);
 
     const spec_coverage_cmd = addHostToolRun(b, optimize, "check-spec-coverage", "tools/check_spec_coverage.zig");
+    const spec_coverage_test_cmd = addHostToolTestRun(b, optimize, "check-spec-coverage-tests", "tools/check_spec_coverage.zig");
     test_artifacts.run_spec_tests.step.dependOn(&spec_coverage_cmd.step);
+    test_artifacts.run_spec_tests.step.dependOn(&spec_coverage_test_cmd.step);
     test_artifacts.run_spec_tests.step.dependOn(&zig_test_roots_cmd.step);
-    const spec_tests_step = b.step("spec-tests", "Run the spec coverage gate and native spec unit tests");
+    host_tests_step.dependOn(&spec_coverage_test_cmd.step);
+    const spec_tests_step = b.step("spec-tests", "Run the spec coverage gate, its checker tests and native spec unit tests");
     spec_tests_step.dependOn(&test_artifacts.run_spec_tests.step);
 
     const prod_readiness_cmd = addHostToolRun(b, optimize, "check-production-readiness", "tools/check_production_readiness.zig");
-    const prod_readiness_tests = b.addTest(.{
-        .name = "check-production-readiness-tests",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/check_production_readiness.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
-    });
-    const prod_readiness_test_cmd = b.addRunArtifact(prod_readiness_tests);
-    prod_readiness_test_cmd.setCwd(b.path("."));
-    b.step("production-readiness-tests", "Test production-readiness source and ownership gates").dependOn(&prod_readiness_test_cmd.step);
+    const prod_readiness_test_cmd = addHostToolTestRun(b, optimize, "check-production-readiness-tests", "tools/check_production_readiness.zig");
+    b.step("production-readiness-tests", "Test the production-readiness manifest, retired-source and security-control gates").dependOn(&prod_readiness_test_cmd.step);
     host_tests_step.dependOn(&prod_readiness_test_cmd.step);
-    const hardware_proof_checker_cmd = host_tools.addRun(b, "test-nuc15crsu7-hardware-proof-checker");
+    const hardware_proof_checker_cmd = host_tools.addHardwareProofFixture(b);
     const hardware_proof_checker_step = b.step("hardware-proof-checker-test", "Exercise the RNUC15CRSU7 proof-bundle checker with synthetic pass/fail fixtures");
     hardware_proof_checker_step.dependOn(&hardware_proof_checker_cmd.step);
 
@@ -110,6 +102,25 @@ fn addHostToolRun(
         }),
     });
     const run = b.addRunArtifact(tool);
+    run.setCwd(b.path("."));
+    return run;
+}
+
+fn addHostToolTestRun(
+    b: *std.Build,
+    optimize: std.lang.Optimize,
+    name: []const u8,
+    source_path: []const u8,
+) *std.Build.Step.Run {
+    const tests = b.addTest(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(source_path),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const run = b.addRunArtifact(tests);
     run.setCwd(b.path("."));
     return run;
 }
@@ -169,7 +180,7 @@ pub fn addVerifyStep(
     verify_smoke: bool,
     verify_benchmark: bool,
 ) *std.Build.Step {
-    const verify_step = b.step("verify", "Run local CI-aligned checks: lint, kernel build, host tests, spec tests, and production-readiness checks; pass -Dverify-smoke=true and/or -Dverify-benchmark=true for QEMU gates");
+    const verify_step = b.step("verify", "Run local CI-aligned checks: lint, kernel build, host tests, spec tests, production-readiness checks and the QEMU architecture probes; pass -Dverify-smoke=true and/or -Dverify-benchmark=true for the native smoke and benchmark");
     verify_step.dependOn(checks.lint);
     verify_step.dependOn(kernel_step);
     verify_step.dependOn(checks.host_tests);

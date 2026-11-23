@@ -2,7 +2,7 @@ const std = @import("std");
 const native_util = @import("../core/util.zig");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
-const contract = @import("../session/contract.zig");
+const service_catalog = @import("../session/service_catalog.zig");
 const immutable_base = @import("../platform/immutable_base.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const measured_boot_console = @import("../platform/measured_boot_console.zig");
@@ -263,12 +263,12 @@ pub fn run(
                 &service_measure,
                 "{s}:{d}:{d}",
                 .{
-                    contract.serviceName(service_record.class),
+                    service_catalog.serviceName(service_record.class),
                     @backingInt(service_record.state),
                     service_record.restart_count,
                 },
             ) catch |err| native_util.bootProofFailure("platform scenarios", err);
-            measured.add(.critical_service, contract.serviceName(service_record.class), service_measure_text) catch |err| native_util.bootProofFailure("platform scenarios", err);
+            measured.add(.critical_service, service_catalog.serviceName(service_record.class), service_measure_text) catch |err| native_util.bootProofFailure("platform scenarios", err);
         }
     }
     measured.addDriverSet("core-driver-set", context.driver_directory) catch |err| native_util.bootProofFailure("platform scenarios", err);

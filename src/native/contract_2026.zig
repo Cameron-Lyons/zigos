@@ -3,7 +3,6 @@ const ipc_ring = @import("kernel_api/ipc_ring.zig");
 const syscall_surface = @import("kernel_api/syscall_surface.zig");
 const shared_memory = @import("kernel_api/shared_memory.zig");
 const abi = @import("core/abi.zig");
-const display_driver_task = @import("drivers/display_driver_task.zig");
 const network_driver_task = @import("drivers/network_driver_task.zig");
 const storage_driver_task = @import("drivers/storage_driver_task.zig");
 const xhci_driver_task = @import("drivers/xhci_driver_task.zig");
@@ -14,8 +13,6 @@ const userspace_mailbox = @import("task/userspace_bootstrap_mailbox.zig");
 const task_runtime = @import("task/task_runtime.zig");
 const storage_volume = @import("storage/storage_volume.zig");
 const cpu_baseline = @import("../arch/cpu_baseline.zig");
-const cpu_identity = @import("../kernel/cpu_identity.zig");
-const x86 = @import("../arch/x86.zig");
 
 pub const generated_from_typed_idl = true;
 
@@ -23,17 +20,14 @@ pub const Floor = struct {
     canonical_47_bit_user: bool,
     u64_user_stacks: bool,
     image_2m_pages: bool,
-    owned_xstate: bool,
     register_fred_syscalls: bool,
     rings_only_ipc: bool,
     yield_plus_rings: bool,
     userspace_nvme_dataplane: bool,
     userspace_i225_dataplane: bool,
     userspace_xhci_dataplane: bool,
-    userspace_gop_dataplane: bool,
     eight_address_spaces: bool,
     checkpoint_only_cold_load: bool,
-    fred_only_traps: bool,
     trusted_cpu_identity: bool,
 };
 
@@ -41,10 +35,8 @@ pub const floor: Floor = .{
     .canonical_47_bit_user = userspace_layout.user_end_exclusive == 0x0000_8000_0000_0000 and
         userspace_layout.stack_start == 0x0000_007F_0000_0000,
     .u64_user_stacks = task_runtime.UserStackByteLength == u64,
-    .image_2m_pages = userspace_layout.USES_2M_IMAGE_PAGES and
-        userspace_layout.image_start % userspace_layout.huge_page_size == 0,
-    .owned_xstate = x86.OWNED_XSTATE,
-    .register_fred_syscalls = syscall_surface.REGISTER_FRED_SYSCALLS and cpu_baseline.FRED_ONLY_TRAPS,
+    .image_2m_pages = userspace_layout.image_start % userspace_layout.huge_page_size == 0,
+    .register_fred_syscalls = syscall_surface.REGISTER_FRED_SYSCALLS,
     .rings_only_ipc = ipc_ring.DATA_PLANE_USES_SEALED_RINGS and
         endpoint.RINGS_ONLY_DATAPLANE and
         endpoint.AUTO_ATTACHES_DATA_RINGS and
@@ -60,9 +52,6 @@ pub const floor: Floor = .{
     .userspace_xhci_dataplane = xhci_driver_task.USERSPACE_XHCI_DATAPLANE and
         xhci_driver_task.KERNEL_LATCHES_ONLY and
         xhci_driver_task.DISPATCHES_FROM_BOUND_TASK,
-    .userspace_gop_dataplane = display_driver_task.USERSPACE_GOP_DATAPLANE and
-        display_driver_task.KERNEL_LATCHES_ONLY and
-        display_driver_task.PRESENTS_BY_HANDLE,
     .eight_address_spaces = userspace_registry.PRODUCTION_ADDRESS_SPACE_COUNT == 8 and
         userspace_registry.DRIVERS_USE_DISTINCT_ADDRESS_SPACES and
         userspace_registry.addressSpaceGroupForServiceClass(.network_stack) != userspace_registry.addressSpaceGroupForServiceClass(.compositor_ui_session) and
@@ -71,13 +60,8 @@ pub const floor: Floor = .{
         !userspace_registry.USES_PKU_WITHIN_GROUP and
         userspace_executor.SHARES_GROUP_PAGE_TABLES and
         !userspace_executor.USES_PKU_WITHIN_SHARED_TABLES,
-    .checkpoint_only_cold_load = storage_volume.BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY and
-        storage_volume.BUILDS_WORKSPACE_INDEXES_DURING_REPLAY and
-        storage_volume.SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD and
-        storage_volume.USES_CHECKPOINT_ONLY_COLD_LOAD and
-        storage_volume.COMPACTS_IN_BACKGROUND,
-    .fred_only_traps = cpu_baseline.FRED_ONLY_TRAPS,
-    .trusted_cpu_identity = cpu_baseline.REQUIRES_RDPID and cpu_identity.USES_RDPID,
+    .checkpoint_only_cold_load = storage_volume.USES_CHECKPOINT_ONLY_COLD_LOAD,
+    .trusted_cpu_identity = cpu_baseline.REQUIRES_RDPID,
 };
 
 test "2026 contract floor is generated from typed flags" {

@@ -1,7 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const cpu_identity = @import("cpu_identity.zig");
-const config = @import("config.zig");
 const cpu_policy = @import("boot/cpu_policy.zig");
 const tlb_request = @import("smp/tlb_request.zig");
 const cache_rendezvous = @import("smp/cache_rendezvous.zig");
@@ -75,13 +74,6 @@ pub const EXECUTION_STOP_IPI_VECTOR: u8 = 0x71;
 pub const SYSCALL_REQUEST_IPI_VECTOR: u8 = 0x72;
 pub const SYSCALL_COMPLETION_IPI_VECTOR: u8 = 0x73;
 pub const PREPARED_EXECUTION_IPI_VECTOR: u8 = 0x74;
-pub const AP_STACK_BYTES: usize = 16 * 1024;
-pub const STARTS_APPLICATION_PROCESSORS = true;
-pub const SINGLE_RUNTIME_OWNER = true;
-pub const SHOOTS_DOWN_REMOTE_TLB = true;
-pub const PINS_DEVICE_IRQS_TO_BSP = true;
-pub const IDLES_PER_CPU = true;
-pub const SIPI_PHYSICAL_LIMIT: u32 = 1024 * 1024;
 
 pub const Cpu = struct {
     apic_id: u32 = 0,
@@ -99,28 +91,25 @@ else
 var cpus: [MAX_CPUS]Cpu = @as([MAX_CPUS]Cpu, @splat(.{}));
 var cpu_count: u8 = 1;
 var online_count: u8 = 1;
-var bsp_cpu_index: u8 = 0;
 var tlb_requests = tlb_request.Coordinator.init(0) catch unreachable;
 var cache_transitions = cache_rendezvous.Coordinator.init(0) catch unreachable;
 var cache_transition_generation: u64 = 0;
 var cache_transition_restore_interrupts = false;
 var initialized = false;
+// CPUs that may hold non-global translations tagged with each process context.
+// A CPU sets its bit before loading the context and the bit clears only after
+// the context retires everywhere, so the set is always a residency superset.
+var pcid_residency: [MAX_PCIDS]tlb_request.CpuMask = @splat(0);
+const MAX_PCIDS = 4096;
 
 pub fn init(madt: []const u8, admission_policy: cpu_policy.AdmissionPolicy) void {
-    const madt_table = madt;
-    if (!config.shouldInitSmp()) {
-        common.printBootMarker(boot_markers.smp_ready);
-        return;
-    }
-
     const bsp_apic_id: u32 = if (builtin.target.os.tag == .freestanding) x2apic.localId() else 0;
     cpus[0] = .{ .apic_id = bsp_apic_id, .online = true };
     cpu_count = 1;
     @atomicStore(u8, &online_count, 1, .release);
-    bsp_cpu_index = 0;
 
     if (builtin.target.os.tag == .freestanding) {
-        const admission = inventoryFromMadt(bsp_apic_id, madt_table) catch |err| {
+        const admission = inventoryFromMadt(bsp_apic_id, madt) catch |err| {
             console.print("Invalid SMP MADT topology: ");
             console.print(@errorName(err));
             console.print("\n");
@@ -149,12 +138,12 @@ pub fn currentCpuIndex() u8 {
 
 // The shared executor, kernel port, and service tables belong to the BSP.
 // APs service architectural interrupts; they do not dispatch runtime work.
-pub fn runtimeOwnerCpu() u8 {
-    return bsp_cpu_index;
+pub inline fn runtimeOwnerCpu() u8 {
+    return cpu_identity.BSP_INDEX;
 }
 
-pub fn isRuntimeOwner() bool {
-    return currentCpuIndex() == runtimeOwnerCpu();
+pub inline fn isRuntimeOwner() bool {
+    return cpu_identity.isBsp();
 }
 
 pub fn irqDestinationId() u32 {
@@ -211,6 +200,25 @@ pub fn notifySyscallCompletion(cpu: u8) bool {
     return true;
 }
 
+/// Paging calls this before this CPU loads a user context. The locked update
+/// orders the residency publication before any translation fill under that
+/// context, against the shooter's locked residency read after its PTE store.
+/// A context outside the tracked range keeps no residency, and its shootdowns
+/// reach every online CPU.
+pub fn notePcidResident(pcid: u16) void {
+    if (pcid >= MAX_PCIDS) return;
+    const bit = tlb_request.cpuBit(currentCpuIndex()) orelse @panic("PCID residency requires an admitted logical CPU");
+    if (@atomicLoad(tlb_request.CpuMask, &pcid_residency[pcid], .acquire) & bit != 0) return;
+    _ = @atomicRmw(tlb_request.CpuMask, &pcid_residency[pcid], .Or, bit, .seq_cst);
+}
+
+/// Called only after the retiring context's final invalidation completed on
+/// every resident CPU and no CPU can load it again before reallocation.
+pub fn retirePcidResidency(pcid: u16) void {
+    if (pcid >= MAX_PCIDS) return;
+    @atomicStore(tlb_request.CpuMask, &pcid_residency[pcid], 0, .release);
+}
+
 pub fn shootdownPcid(pcid: u16) void {
     shootdown(.{ .pcid = pcid });
 }
@@ -231,7 +239,7 @@ fn shootdown(target: tlb_request.Target) void {
     x86.cli();
     defer if (restore_interrupts) x86.sti();
     const self = currentCpuIndex();
-    const participants = capturedParticipants(self);
+    const participants = shootdownParticipants(self, target);
     if (@popCount(participants) <= 1) return;
     const request = tlb_requests.begin(self, target, participants) catch
         @panic("invalid or concurrent remote TLB request");
@@ -250,6 +258,20 @@ fn shootdown(target: tlb_request.Target) void {
     tlb_requests.finish(self, request.generation) catch unreachable;
 }
 
+// The issuer plus every online CPU that may hold the target's translations.
+// Idle CPUs that never loaded a process context hold none of its entries.
+fn shootdownParticipants(self: u8, target: tlb_request.Target) tlb_request.CpuMask {
+    const online = capturedParticipants(self);
+    return switch (target) {
+        .pcid => |pcid| if (pcid < MAX_PCIDS)
+            // The locked read orders the caller's PTE stores before it.
+            online & (@atomicRmw(tlb_request.CpuMask, &pcid_residency[pcid], .Or, 0, .seq_cst) | tlb_request.cpuBit(self).?)
+        else
+            online,
+        .kernel => online,
+    };
+}
+
 inline fn capturedParticipants(self: u8) tlb_request.CpuMask {
     var participants = tlb_request.cpuBit(self) orelse @call(.never_inline, cacheTransitionFailure, .{.invalid_owner_cpu});
     var index: u8 = 0;
@@ -265,6 +287,19 @@ inline fn sendParticipantIpis(self: u8, participants: tlb_request.CpuMask) void 
     while (index < cpu_count) : (index += 1) {
         if (index == self or participants & tlb_request.cpuBit(index).? == 0) continue;
         x2apic.sendIpi(.{ .destination = cpus[index].apic_id, .vector = TLB_IPI_VECTOR, .delivery = .fixed });
+    }
+}
+
+/// Panic stop: a unicast NMI to every other admitted online CPU, since a
+/// spinning CPU may hold IF=0. Processors this kernel never started keep their
+/// firmware state, so no destination shorthand may reach them.
+pub fn stopOtherCpus() void {
+    if (onlineCpuCount() <= 1) return;
+    const self = currentCpuIndex();
+    var index: u8 = 0;
+    while (index < cpu_count) : (index += 1) {
+        if (index == self or !@atomicLoad(bool, &cpus[index].online, .acquire)) continue;
+        x2apic.sendIpi(.{ .destination = cpus[index].apic_id, .delivery = .nmi });
     }
 }
 
@@ -468,7 +503,7 @@ pub const ArchitectureProof = if (architecture_proof_enabled) struct {
     pub fn bindTopology(apic_ids: []const u32) void {
         if (comptime builtin.target.os.tag != .freestanding)
             @compileError("architecture proof topology requires a freestanding proof image");
-        if (initialized or apic_ids.len == 0 or apic_ids.len > MAX_CPUS or currentCpuIndex() != 0 or
+        if (initialized or apic_ids.len == 0 or apic_ids.len > MAX_CPUS or !cpu_identity.isBsp() or
             apic_ids[0] != x2apic.localId()) @panic("invalid architecture proof topology");
         for (apic_ids, 0..) |apic_id, logical| {
             for (apic_ids[0..logical]) |earlier| {
@@ -478,7 +513,6 @@ pub const ArchitectureProof = if (architecture_proof_enabled) struct {
         }
         cpu_count = @intCast(apic_ids.len);
         @atomicStore(u8, &online_count, cpu_count, .release);
-        bsp_cpu_index = 0;
         initialized = true;
     }
 } else struct {};
@@ -680,11 +714,6 @@ test "SMP routes runtime and device interrupts to one owner with multiple CPUs o
     for (0..MAX_CPUS) |_| {
         try std.testing.expectEqual(@as(u32, 7), irqDestinationId());
     }
-    try std.testing.expect(SINGLE_RUNTIME_OWNER);
-    try std.testing.expect(PINS_DEVICE_IRQS_TO_BSP);
-    try std.testing.expect(STARTS_APPLICATION_PROCESSORS);
-    try std.testing.expect(SHOOTS_DOWN_REMOTE_TLB);
-    try std.testing.expect(IDLES_PER_CPU);
     try std.testing.expectEqual(@as(u8, 0x70), TLB_IPI_VECTOR);
 }
 
@@ -703,7 +732,6 @@ test "execution stop transport sends only admitted remote CPU fixed vectors" {
     const previous_cpu = currentCpuIndex();
     const previous_cpus = cpus;
     const previous_count = cpu_count;
-    const previous_bsp = bsp_cpu_index;
     const previous_initialized = initialized;
     const previous_observer = x2apic.Testing.swapWriteObserver(Trace.observe);
     defer {
@@ -711,13 +739,11 @@ test "execution stop transport sends only admitted remote CPU fixed vectors" {
         cpu_identity.setIndexForTest(previous_cpu);
         cpus = previous_cpus;
         cpu_count = previous_count;
-        bsp_cpu_index = previous_bsp;
         initialized = previous_initialized;
     }
     Trace.count = 0;
     Trace.invalid_msr = false;
     cpu_identity.setIndexForTest(0);
-    bsp_cpu_index = 0;
     initialized = true;
     cpu_count = MAX_CPUS;
     for (&cpus, 0..) |*cpu, index| {
@@ -772,7 +798,6 @@ test "prepared execution doorbell sends only admitted remote CPU fixed vectors" 
     const previous_cpu = currentCpuIndex();
     const previous_cpus = cpus;
     const previous_count = cpu_count;
-    const previous_bsp = bsp_cpu_index;
     const previous_initialized = initialized;
     const previous_observer = x2apic.Testing.swapWriteObserver(Trace.observe);
     defer {
@@ -780,13 +805,11 @@ test "prepared execution doorbell sends only admitted remote CPU fixed vectors" 
         cpu_identity.setIndexForTest(previous_cpu);
         cpus = previous_cpus;
         cpu_count = previous_count;
-        bsp_cpu_index = previous_bsp;
         initialized = previous_initialized;
     }
     Trace.count = 0;
     Trace.invalid_msr = false;
     cpu_identity.setIndexForTest(0);
-    bsp_cpu_index = 0;
     initialized = true;
     cpu_count = MAX_CPUS;
     for (&cpus, 0..) |*cpu, index| {
@@ -844,7 +867,6 @@ test "syscall doorbells follow admitted AP to BSP and BSP to AP ownership" {
     const previous_cpu = currentCpuIndex();
     const previous_cpus = cpus;
     const previous_count = cpu_count;
-    const previous_bsp = bsp_cpu_index;
     const previous_initialized = initialized;
     const previous_observer = x2apic.Testing.swapWriteObserver(Trace.observe);
     defer {
@@ -852,12 +874,10 @@ test "syscall doorbells follow admitted AP to BSP and BSP to AP ownership" {
         cpu_identity.setIndexForTest(previous_cpu);
         cpus = previous_cpus;
         cpu_count = previous_count;
-        bsp_cpu_index = previous_bsp;
         initialized = previous_initialized;
     }
     Trace.count = 0;
     Trace.invalid_msr = false;
-    bsp_cpu_index = 0;
     initialized = true;
     cpu_count = MAX_CPUS;
     for (&cpus, 0..) |*cpu, index| {
@@ -902,4 +922,100 @@ test "syscall doorbells follow admitted AP to BSP and BSP to AP ownership" {
     }
     try std.testing.expectEqual(@as(usize, 2 * (MAX_CPUS - 1)), Trace.count);
     try std.testing.expect(!Trace.invalid_msr);
+}
+
+test "PCID shootdowns reach only the issuer and online CPUs that loaded the context" {
+    const Mask = tlb_request.CpuMask;
+    const previous_cpu = currentCpuIndex();
+    const previous_cpus = cpus;
+    const previous_count = cpu_count;
+    const previous_residency = pcid_residency;
+    defer {
+        cpu_identity.setIndexForTest(previous_cpu);
+        cpus = previous_cpus;
+        cpu_count = previous_count;
+        pcid_residency = previous_residency;
+    }
+    cpu_count = 4;
+    for (&cpus, 0..) |*cpu, index| cpu.* = .{ .apic_id = @intCast(index), .online = true };
+    pcid_residency = @splat(0);
+    const pcid: u16 = 7;
+    cpu_identity.setIndexForTest(0);
+    try std.testing.expectEqual(@as(Mask, 0b0001), shootdownParticipants(0, .{ .pcid = pcid }));
+    try std.testing.expectEqual(@as(Mask, 0b1111), shootdownParticipants(0, .kernel));
+
+    for ([_]u8{ 2, 2, 0 }) |cpu| {
+        cpu_identity.setIndexForTest(cpu);
+        notePcidResident(pcid);
+    }
+    cpu_identity.setIndexForTest(0);
+    try std.testing.expectEqual(@as(Mask, 0b0101), pcid_residency[pcid]);
+    // Computing participants retains residency; another context stays local.
+    for (0..2) |_| try std.testing.expectEqual(@as(Mask, 0b0101), shootdownParticipants(0, .{ .pcid = pcid }));
+    try std.testing.expectEqual(@as(Mask, 0b0001), shootdownParticipants(0, .{ .pcid = pcid + 1 }));
+
+    // Resident CPUs that are offline or outside the admitted topology get no IPI.
+    @atomicStore(bool, &cpus[2].online, false, .release);
+    try std.testing.expectEqual(@as(Mask, 0b0001), shootdownParticipants(0, .{ .pcid = pcid }));
+    @atomicStore(bool, &cpus[2].online, true, .release);
+    cpu_identity.setIndexForTest(5);
+    notePcidResident(pcid);
+    cpu_identity.setIndexForTest(0);
+    try std.testing.expectEqual(@as(Mask, 0b0010_0101), pcid_residency[pcid]);
+    try std.testing.expectEqual(@as(Mask, 0b0101), shootdownParticipants(0, .{ .pcid = pcid }));
+
+    // Untracked contexts keep no residency and reach every online CPU.
+    notePcidResident(MAX_PCIDS);
+    try std.testing.expectEqual(@as(Mask, 0b1111), shootdownParticipants(0, .{ .pcid = MAX_PCIDS }));
+
+    // Only retirement clears residency.
+    retirePcidResidency(pcid);
+    try std.testing.expectEqual(@as(Mask, 0), pcid_residency[pcid]);
+    try std.testing.expectEqual(@as(Mask, 0b0001), shootdownParticipants(0, .{ .pcid = pcid }));
+}
+
+test "panic stop sends unicast NMIs only to other admitted online CPUs" {
+    const Trace = struct {
+        var values: [MAX_CPUS]u64 = undefined;
+        var count: usize = 0;
+        var invalid_msr = false;
+        fn observe(msr: u32, value: u64) void {
+            if (msr != x2apic.Testing.ICR_MSR or count >= values.len) {
+                invalid_msr = true;
+                return;
+            }
+            values[count] = value;
+            count += 1;
+        }
+    };
+    const previous_cpu = currentCpuIndex();
+    const previous_cpus = cpus;
+    const previous_count = cpu_count;
+    const previous_online = setOnlineCpuCountForTest(1);
+    const previous_observer = x2apic.Testing.swapWriteObserver(Trace.observe);
+    defer {
+        _ = x2apic.Testing.swapWriteObserver(previous_observer);
+        _ = setOnlineCpuCountForTest(previous_online);
+        cpu_identity.setIndexForTest(previous_cpu);
+        cpus = previous_cpus;
+        cpu_count = previous_count;
+    }
+    Trace.count = 0;
+    Trace.invalid_msr = false;
+    // Entries past cpu_count model processors that were never admitted.
+    for (&cpus, 0..) |*cpu, index| cpu.* = .{ .apic_id = 0x40 + @as(u32, @intCast(index)), .online = true };
+    cpu_count = 5;
+    @atomicStore(bool, &cpus[3].online, false, .release);
+    cpu_identity.setIndexForTest(1);
+    stopOtherCpus();
+    try std.testing.expectEqual(@as(usize, 0), Trace.count);
+
+    _ = setOnlineCpuCountForTest(4);
+    stopOtherCpus();
+    try std.testing.expect(!Trace.invalid_msr);
+    try std.testing.expectEqualSlices(u64, &.{
+        0x0000_0040_0000_0400,
+        0x0000_0042_0000_0400,
+        0x0000_0044_0000_0400,
+    }, Trace.values[0..Trace.count]);
 }

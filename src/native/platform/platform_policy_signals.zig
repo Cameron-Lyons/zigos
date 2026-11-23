@@ -576,157 +576,6 @@ pub const FirstTargetDriverCallbackProvider = struct {
     }
 };
 
-pub const FirstTargetHardwareProofDriverReadings = struct {
-    facts: hardware_proof.ProbeFacts,
-
-    pub fn init(facts: hardware_proof.ProbeFacts) FirstTargetHardwareProofDriverReadings {
-        return .{ .facts = facts };
-    }
-
-    pub fn driverCallbackProvider(self: *FirstTargetHardwareProofDriverReadings) FirstTargetDriverCallbackProvider {
-        return FirstTargetDriverCallbackProvider.init(
-            .{
-                .name = "nuc15crsu7-hardware-proof-driver-callbacks",
-                .role = .production,
-                .reader_generation = self.facts.telemetry_reader_generation,
-            },
-            FirstTargetDriverCallbacks.init(FirstTargetHardwareProofDriverReadings, self),
-        );
-    }
-
-    pub fn readAcpiSample(self: *FirstTargetHardwareProofDriverReadings) PlatformTelemetryError!FirstTargetAcpiDriverSample {
-        const acpi = self.facts.acpiTelemetryFacts() orelse return error.FirstTargetTelemetryIncomplete;
-        return .{
-            .firmware = acpi.firmware,
-            .thermal_zone_count = acpi.thermal_zone_count,
-            .battery_device_count = acpi.battery_device_count,
-        };
-    }
-
-    pub fn readThermalSample(self: *FirstTargetHardwareProofDriverReadings) PlatformTelemetryError!FirstTargetThermalDriverSample {
-        const thermal = self.facts.thermalTelemetryFacts() orelse return error.FirstTargetTelemetryIncomplete;
-        return .{
-            .zone_count = thermal.zone_count,
-            .sample_sequence = thermal.sample_sequence,
-            .thermal_milli_celsius = thermal.thermal_milli_celsius,
-        };
-    }
-
-    pub fn readBatterySample(self: *FirstTargetHardwareProofDriverReadings) PlatformTelemetryError!FirstTargetBatteryDriverSample {
-        const battery = self.facts.batteryTelemetryFacts() orelse return error.FirstTargetTelemetryIncomplete;
-        return .{
-            .battery_device_count = battery.battery_device_count,
-            .sample_sequence = battery.sample_sequence,
-            .battery_percent = battery.battery_percent,
-            .charging = battery.charging,
-        };
-    }
-
-    pub fn readAcceleratorSample(self: *FirstTargetHardwareProofDriverReadings) PlatformTelemetryError!FirstTargetAcceleratorDriverSample {
-        const accelerators = self.facts.acceleratorTelemetryFacts() orelse return error.FirstTargetTelemetryIncomplete;
-        return .{
-            .sample_sequence = accelerators.sample_sequence,
-            .gpu_driver_online = accelerators.gpu_driver_online,
-            .npu_driver_online = accelerators.npu_driver_online,
-            .media_driver_online = accelerators.media_driver_online,
-            .gpu_driver_generation = accelerators.gpu_driver_generation,
-            .npu_driver_generation = accelerators.npu_driver_generation,
-            .media_driver_generation = accelerators.media_driver_generation,
-            .completion_interrupts_observed = accelerators.completion_interrupts_observed,
-        };
-    }
-
-    pub fn memoryCapacityBytes(self: *FirstTargetHardwareProofDriverReadings) usize {
-        return self.facts.memory_capacity_bytes;
-    }
-
-    pub fn readGridCarbonSample(self: *FirstTargetHardwareProofDriverReadings) PlatformTelemetryError!FirstTargetGridCarbonDriverSample {
-        const carbon = self.facts.gridCarbonTelemetryFacts() orelse return error.FirstTargetTelemetryIncomplete;
-        return .{
-            .sample_sequence = carbon.sample_sequence,
-            .grams_per_kwh = carbon.grams_per_kwh,
-        };
-    }
-};
-
-pub const HostFakeTelemetryProvider = struct {
-    current: accelerator_scheduler.TelemetrySample = .{ .source = .emulator },
-    read_count: u32 = 0,
-
-    pub const telemetry_descriptor = accelerator_scheduler.TelemetryProviderDescriptor{
-        .name = "host-fake-platform-telemetry",
-        .role = .test_only,
-    };
-
-    pub fn init(sample: accelerator_scheduler.TelemetrySample) HostFakeTelemetryProvider {
-        var current = sample;
-        current.source = .emulator;
-        return .{ .current = current };
-    }
-
-    pub fn update(self: *HostFakeTelemetryProvider, sample: accelerator_scheduler.TelemetrySample) void {
-        var current = sample;
-        current.source = .emulator;
-        self.current = current;
-    }
-
-    pub fn telemetryProvider(self: *HostFakeTelemetryProvider) accelerator_scheduler.TelemetryProvider {
-        return accelerator_scheduler.TelemetryProvider.init(
-            HostFakeTelemetryProvider,
-            self,
-            telemetry_descriptor,
-        );
-    }
-
-    pub fn read(self: *HostFakeTelemetryProvider) accelerator_scheduler.TelemetrySample {
-        self.read_count += 1;
-        return self.current;
-    }
-};
-
-pub const FirstTargetProofReaderBridge = struct {
-    descriptor: FirstTargetReaderProviderDescriptor,
-    proofs: FirstTargetReaderProofs,
-
-    pub fn init(
-        descriptor: FirstTargetReaderProviderDescriptor,
-        proofs: FirstTargetReaderProofs,
-    ) FirstTargetProofReaderBridge {
-        return .{
-            .descriptor = descriptor,
-            .proofs = proofs,
-        };
-    }
-
-    pub fn readerProvider(self: *FirstTargetProofReaderBridge) FirstTargetReaderProvider {
-        return FirstTargetReaderProvider.init(FirstTargetProofReaderBridge, self, self.descriptor);
-    }
-
-    pub fn readAcpi(self: *FirstTargetProofReaderBridge) PlatformTelemetryError!FirstTargetAcpiReaderProof {
-        return self.proofs.acpi;
-    }
-
-    pub fn readThermal(self: *FirstTargetProofReaderBridge) PlatformTelemetryError!FirstTargetThermalReaderProof {
-        return self.proofs.thermal;
-    }
-
-    pub fn readBattery(self: *FirstTargetProofReaderBridge) PlatformTelemetryError!FirstTargetBatteryReaderProof {
-        return self.proofs.battery;
-    }
-
-    pub fn readAccelerators(self: *FirstTargetProofReaderBridge) PlatformTelemetryError!FirstTargetAcceleratorReaderProof {
-        return self.proofs.accelerators;
-    }
-
-    pub fn memoryCapacityBytes(self: *FirstTargetProofReaderBridge) usize {
-        return self.proofs.memory_capacity_bytes;
-    }
-
-    pub fn readGridCarbon(self: *FirstTargetProofReaderBridge) PlatformTelemetryError!FirstTargetGridCarbonReaderProof {
-        return self.proofs.grid_carbon;
-    }
-};
-
 pub const FirstTargetPlatformTelemetryProvider = struct {
     booted: accelerator_scheduler.BootedPlatformTelemetryProvider,
     latest_readers: FirstTargetReaderSnapshot,
@@ -756,24 +605,6 @@ pub const FirstTargetPlatformTelemetryProvider = struct {
         };
     }
 
-    pub fn initFromReaderProofs(
-        boot_id: u64,
-        task_id: u64,
-        observed_tick: u64,
-        runtime: *const task_runtime.Runtime,
-        scheduler: *const userspace_scheduler.Scheduler,
-        proofs: FirstTargetReaderProofs,
-    ) PlatformTelemetryError!FirstTargetPlatformTelemetryProvider {
-        return initForBootedService(
-            boot_id,
-            task_id,
-            observed_tick,
-            runtime,
-            scheduler,
-            try proofs.toSnapshot(),
-        );
-    }
-
     pub fn initFromReaderProvider(
         boot_id: u64,
         task_id: u64,
@@ -782,13 +613,13 @@ pub const FirstTargetPlatformTelemetryProvider = struct {
         scheduler: *const userspace_scheduler.Scheduler,
         reader_provider: FirstTargetReaderProvider,
     ) PlatformTelemetryError!FirstTargetPlatformTelemetryProvider {
-        return initFromReaderProofs(
+        return initForBootedService(
             boot_id,
             task_id,
             observed_tick,
             runtime,
             scheduler,
-            try reader_provider.readProofs(),
+            try (try reader_provider.readProofs()).toSnapshot(),
         );
     }
 
@@ -813,23 +644,6 @@ pub const FirstTargetPlatformTelemetryProvider = struct {
         self.latest_readers = readers;
     }
 
-    pub fn observeFirstTargetProofs(
-        self: *FirstTargetPlatformTelemetryProvider,
-        caller_task_id: u64,
-        observed_tick: u64,
-        runtime: *const task_runtime.Runtime,
-        scheduler: *const userspace_scheduler.Scheduler,
-        proofs: FirstTargetReaderProofs,
-    ) PlatformTelemetryError!void {
-        try self.observeFirstTarget(
-            caller_task_id,
-            observed_tick,
-            runtime,
-            scheduler,
-            try proofs.toSnapshot(),
-        );
-    }
-
     pub fn observeFirstTargetProvider(
         self: *FirstTargetPlatformTelemetryProvider,
         caller_task_id: u64,
@@ -838,12 +652,12 @@ pub const FirstTargetPlatformTelemetryProvider = struct {
         scheduler: *const userspace_scheduler.Scheduler,
         reader_provider: FirstTargetReaderProvider,
     ) PlatformTelemetryError!void {
-        try self.observeFirstTargetProofs(
+        try self.observeFirstTarget(
             caller_task_id,
             observed_tick,
             runtime,
             scheduler,
-            try reader_provider.readProofs(),
+            try (try reader_provider.readProofs()).toSnapshot(),
         );
     }
 
@@ -868,64 +682,6 @@ pub const FirstTargetPlatformTelemetryProvider = struct {
     }
 
     pub fn readCount(self: *const FirstTargetPlatformTelemetryProvider) u32 {
-        return self.booted.read_count;
-    }
-};
-
-pub const FreestandingPlatformTelemetryProvider = struct {
-    booted: accelerator_scheduler.BootedPlatformTelemetryProvider,
-
-    pub const telemetry_descriptor = accelerator_scheduler.TelemetryProviderDescriptor{
-        .name = "freestanding-platform-telemetry",
-        .role = .production,
-    };
-
-    pub fn initForBootedService(
-        boot_id: u64,
-        task_id: u64,
-        observed_tick: u64,
-        counters: accelerator_scheduler.LivePlatformCounters,
-    ) accelerator_scheduler.TelemetryError!FreestandingPlatformTelemetryProvider {
-        return .{
-            .booted = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(
-                boot_id,
-                task_id,
-                observed_tick,
-                counters,
-            ),
-        };
-    }
-
-    pub fn observeLive(
-        self: *FreestandingPlatformTelemetryProvider,
-        caller_task_id: u64,
-        observed_tick: u64,
-        counters: accelerator_scheduler.LivePlatformCounters,
-    ) accelerator_scheduler.TelemetryError!void {
-        try self.booted.observeLive(caller_task_id, observed_tick, counters);
-    }
-
-    pub fn telemetryProvider(self: *FreestandingPlatformTelemetryProvider) accelerator_scheduler.TelemetryProvider {
-        return accelerator_scheduler.TelemetryProvider.init(
-            FreestandingPlatformTelemetryProvider,
-            self,
-            telemetry_descriptor,
-        );
-    }
-
-    pub fn read(self: *FreestandingPlatformTelemetryProvider) accelerator_scheduler.TelemetrySample {
-        return self.booted.read();
-    }
-
-    pub fn liveObservationCount(self: *const FreestandingPlatformTelemetryProvider) u32 {
-        return self.booted.live_observation_count;
-    }
-
-    pub fn rejectedObservationCount(self: *const FreestandingPlatformTelemetryProvider) u32 {
-        return self.booted.rejected_observation_count;
-    }
-
-    pub fn readCount(self: *const FreestandingPlatformTelemetryProvider) u32 {
         return self.booted.read_count;
     }
 };
@@ -980,22 +736,6 @@ pub fn collectFirstTargetLiveCounters(
     counters.grid_carbon_intensity_grams_per_kwh = readers.grid_carbon_intensity_grams_per_kwh;
     counters.hardware_evidence = readers.hardwareEvidence();
     return counters;
-}
-
-pub fn collectFirstTargetLiveCountersFromProofs(
-    runtime: *const task_runtime.Runtime,
-    scheduler: *const userspace_scheduler.Scheduler,
-    proofs: FirstTargetReaderProofs,
-) PlatformTelemetryError!accelerator_scheduler.LivePlatformCounters {
-    return collectFirstTargetLiveCounters(runtime, scheduler, try proofs.toSnapshot());
-}
-
-pub fn collectFirstTargetLiveCountersFromReaderProvider(
-    runtime: *const task_runtime.Runtime,
-    scheduler: *const userspace_scheduler.Scheduler,
-    reader_provider: FirstTargetReaderProvider,
-) PlatformTelemetryError!accelerator_scheduler.LivePlatformCounters {
-    return collectFirstTargetLiveCountersFromProofs(runtime, scheduler, try reader_provider.readProofs());
 }
 
 fn firstTargetReaderIdentityVerified(
@@ -1152,6 +892,47 @@ const TestFirstTargetDriverReadings = struct {
     }
 };
 
+const TestReaderBridge = struct {
+    descriptor: FirstTargetReaderProviderDescriptor,
+    proofs: FirstTargetReaderProofs,
+
+    fn readerProvider(self: *TestReaderBridge) FirstTargetReaderProvider {
+        return FirstTargetReaderProvider.init(TestReaderBridge, self, self.descriptor);
+    }
+
+    pub fn readAcpi(self: *TestReaderBridge) PlatformTelemetryError!FirstTargetAcpiReaderProof {
+        return self.proofs.acpi;
+    }
+
+    pub fn readThermal(self: *TestReaderBridge) PlatformTelemetryError!FirstTargetThermalReaderProof {
+        return self.proofs.thermal;
+    }
+
+    pub fn readBattery(self: *TestReaderBridge) PlatformTelemetryError!FirstTargetBatteryReaderProof {
+        return self.proofs.battery;
+    }
+
+    pub fn readAccelerators(self: *TestReaderBridge) PlatformTelemetryError!FirstTargetAcceleratorReaderProof {
+        return self.proofs.accelerators;
+    }
+
+    pub fn memoryCapacityBytes(self: *TestReaderBridge) usize {
+        return self.proofs.memory_capacity_bytes;
+    }
+
+    pub fn readGridCarbon(self: *TestReaderBridge) PlatformTelemetryError!FirstTargetGridCarbonReaderProof {
+        return self.proofs.grid_carbon;
+    }
+};
+
+fn testCollectFromReaderProvider(
+    runtime: *const task_runtime.Runtime,
+    scheduler: *const userspace_scheduler.Scheduler,
+    reader_provider: FirstTargetReaderProvider,
+) PlatformTelemetryError!accelerator_scheduler.LivePlatformCounters {
+    return collectFirstTargetLiveCounters(runtime, scheduler, try (try reader_provider.readProofs()).toSnapshot());
+}
+
 fn testFirstTargetDriverCallbackProvider(
     descriptor: FirstTargetReaderProviderDescriptor,
     readings: *TestFirstTargetDriverReadings,
@@ -1160,39 +941,6 @@ fn testFirstTargetDriverCallbackProvider(
         descriptor,
         FirstTargetDriverCallbacks.init(TestFirstTargetDriverReadings, readings),
     );
-}
-
-fn testHardwareProofFacts(reader_generation: u32) hardware_proof.ProbeFacts {
-    return .{
-        .real_target_sku = true,
-        .multiboot_handoff = true,
-        .memory_map = true,
-        .memory_capacity_bytes = units.mebibytes(16),
-        .acpi_xsdt = true,
-        .acpi_madt = true,
-        .acpi_fadt = true,
-        .acpi_mcfg = true,
-        .fadt_firmware = testFadtFirmware(),
-        .telemetry_reader_generation = reader_generation,
-        .thermal_zone_count = 2,
-        .thermal_sample_sequence = 21,
-        .thermal_milli_celsius = 64_000,
-        .battery_device_count = 1,
-        .battery_sample_sequence = 22,
-        .battery_percent = 55,
-        .battery_charging = true,
-        .gpu_driver_online = true,
-        .npu_driver_online = false,
-        .media_driver_online = true,
-        .gpu_driver_generation = reader_generation,
-        .npu_driver_generation = 0,
-        .media_driver_generation = reader_generation,
-        .accelerator_sample_sequence = 23,
-        .accelerator_completion_interrupts = 3,
-        .grid_carbon_intensity_observed = true,
-        .grid_carbon_sample_sequence = 24,
-        .grid_carbon_intensity_grams_per_kwh = 215,
-    };
 }
 
 test "platform policy signals derive hardware scheduler telemetry from booted runtime state" {
@@ -1220,7 +968,6 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 91_001,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.viewer",
         },
@@ -1245,7 +992,6 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 91_002,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.viewer",
         },
@@ -1274,7 +1020,7 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
     try std.testing.expectEqual(@as(usize, shared_memory.PAGE_SIZE * 3), counters.reserved_shared_memory_bytes);
     try std.testing.expect(counters.status.privacy_sensitive_task_present);
 
-    var provider = try FreestandingPlatformTelemetryProvider.initForBootedService(91, 91_000, 30, counters);
+    var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(91, 91_000, 30, counters);
     const provider_interface = provider.telemetryProvider();
     try std.testing.expect(!provider_interface.testOnly());
     try std.testing.expectEqual(accelerator_scheduler.TelemetryProviderRole.production, provider_interface.descriptor.role);
@@ -1285,40 +1031,6 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
     try std.testing.expect(controller.state.battery_saver);
     try std.testing.expect(controller.state.privacy_mode);
     try std.testing.expect(!controller.state.npu_available);
-}
-
-test "platform telemetry providers expose test-only host fake and production freestanding boundaries" {
-    var host_fake = HostFakeTelemetryProvider.init(.{
-        .source = .synthetic,
-        .observed_tick = 5,
-        .thermal_pressure = .critical,
-        .battery_saver = true,
-    });
-    const host_provider = host_fake.telemetryProvider();
-    try std.testing.expect(host_provider.testOnly());
-    try std.testing.expectEqual(accelerator_scheduler.TelemetryProviderRole.test_only, host_provider.descriptor.role);
-    const host_sample = host_provider.read();
-    try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.emulator, host_sample.source);
-    try std.testing.expectEqual(@as(u64, 5), host_sample.observed_tick);
-    try std.testing.expectEqual(@as(u32, 1), host_fake.read_count);
-
-    var freestanding = try FreestandingPlatformTelemetryProvider.initForBootedService(5, 50, 6, .{
-        .total_cpu_budget_ticks = 2_000,
-        .consumed_cpu_ticks = 500,
-        .memory_capacity_bytes = units.kibibytes(128),
-        .thermal_milli_celsius = 76_000,
-        .battery_percent = 90,
-    });
-    const freestanding_provider = freestanding.telemetryProvider();
-    try std.testing.expect(!freestanding_provider.testOnly());
-    try std.testing.expectEqual(accelerator_scheduler.TelemetryProviderRole.production, freestanding_provider.descriptor.role);
-    const freestanding_sample = freestanding_provider.read();
-    try std.testing.expectEqual(accelerator_scheduler.TelemetrySource.hardware, freestanding_sample.source);
-    try std.testing.expectEqual(accelerator_scheduler.ThermalPressure.elevated, freestanding_sample.thermal_pressure);
-    try std.testing.expectEqual(@as(u64, 6), freestanding_sample.observed_tick);
-    try std.testing.expectEqual(@as(u32, 1), freestanding.readCount());
-    try std.testing.expectEqual(@as(u32, 1), freestanding.liveObservationCount());
-    try std.testing.expectEqual(@as(u32, 0), freestanding.rejectedObservationCount());
 }
 
 test "first target reader proofs compose fail closed into scheduler telemetry" {
@@ -1363,38 +1075,38 @@ test "first target reader provider rejects invalid bridges and validates driver 
     scheduler.bind(&catalog, &runtime, &capabilities);
 
     const proofs = testFirstTargetReaderProofs(9);
-    var test_only_bridge = FirstTargetProofReaderBridge.init(.{
+    var test_only_bridge = TestReaderBridge{ .descriptor = .{
         .name = "host-fake-first-target-readers",
         .role = .test_only,
         .reader_generation = 9,
-    }, proofs);
+    }, .proofs = proofs };
     const test_only_provider = test_only_bridge.readerProvider();
     try std.testing.expect(test_only_provider.testOnly());
     try std.testing.expectError(
         error.FirstTargetReaderProviderRejected,
-        collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, test_only_provider),
+        testCollectFromReaderProvider(&runtime, &scheduler, test_only_provider),
     );
 
-    var stale_descriptor_bridge = FirstTargetProofReaderBridge.init(.{
+    var stale_descriptor_bridge = TestReaderBridge{ .descriptor = .{
         .name = "nuc15crsu7-driver-reader-bridge",
         .role = .production,
         .reader_generation = 10,
-    }, proofs);
+    }, .proofs = proofs };
     try std.testing.expectError(
         error.FirstTargetTelemetryIncomplete,
-        collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, stale_descriptor_bridge.readerProvider()),
+        testCollectFromReaderProvider(&runtime, &scheduler, stale_descriptor_bridge.readerProvider()),
     );
 
     var target_mismatch_proofs = proofs;
     target_mismatch_proofs.thermal.target_id = "other-target";
-    var target_mismatch_bridge = FirstTargetProofReaderBridge.init(.{
+    var target_mismatch_bridge = TestReaderBridge{ .descriptor = .{
         .name = "nuc15crsu7-driver-reader-bridge",
         .role = .production,
         .reader_generation = 9,
-    }, target_mismatch_proofs);
+    }, .proofs = target_mismatch_proofs };
     try std.testing.expectError(
         error.FirstTargetReaderProviderTargetMismatch,
-        collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, target_mismatch_bridge.readerProvider()),
+        testCollectFromReaderProvider(&runtime, &scheduler, target_mismatch_bridge.readerProvider()),
     );
 
     var driver_readings = TestFirstTargetDriverReadings.fromProofs(proofs);
@@ -1406,7 +1118,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
     missing_thermal_driver.callbacks.read_thermal_fn = null;
     try std.testing.expectError(
         error.FirstTargetDriverCallbackMissing,
-        collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, missing_thermal_driver.readerProvider()),
+        testCollectFromReaderProvider(&runtime, &scheduler, missing_thermal_driver.readerProvider()),
     );
 
     var missing_grid_driver = testFirstTargetDriverCallbackProvider(.{
@@ -1417,7 +1129,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
     missing_grid_driver.callbacks.grid_carbon_fn = null;
     try std.testing.expectError(
         error.FirstTargetDriverCallbackMissing,
-        collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, missing_grid_driver.readerProvider()),
+        testCollectFromReaderProvider(&runtime, &scheduler, missing_grid_driver.readerProvider()),
     );
 
     var stale_battery_readings = TestFirstTargetDriverReadings.fromProofs(proofs);
@@ -1429,7 +1141,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
     }, &stale_battery_readings);
     try std.testing.expectError(
         error.FirstTargetTelemetryIncomplete,
-        collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, stale_battery_driver.readerProvider()),
+        testCollectFromReaderProvider(&runtime, &scheduler, stale_battery_driver.readerProvider()),
     );
 
     var stale_grid_readings = TestFirstTargetDriverReadings.fromProofs(proofs);
@@ -1441,7 +1153,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
     }, &stale_grid_readings);
     try std.testing.expectError(
         error.FirstTargetTelemetryIncomplete,
-        collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, stale_grid_driver.readerProvider()),
+        testCollectFromReaderProvider(&runtime, &scheduler, stale_grid_driver.readerProvider()),
     );
 
     var driver_provider = testFirstTargetDriverCallbackProvider(.{
@@ -1449,7 +1161,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
         .role = .production,
         .reader_generation = 9,
     }, &driver_readings);
-    const counters = try collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, driver_provider.readerProvider());
+    const counters = try testCollectFromReaderProvider(&runtime, &scheduler, driver_provider.readerProvider());
     try std.testing.expect(counters.hardware_evidence.complete());
     try std.testing.expectEqual(@as(u32, 9), counters.hardware_evidence.reader_generation);
     try std.testing.expectEqual(@as(u32, 76_000), counters.thermal_milli_celsius);
@@ -1495,72 +1207,6 @@ test "first target reader provider rejects invalid bridges and validates driver 
     );
     try std.testing.expectEqual(@as(u32, 2), telemetry_provider.liveObservationCount());
     try std.testing.expectEqual(@as(u32, 1), telemetry_provider.rejectedObservationCount());
-}
-
-test "first target hardware proof facts feed production driver callback telemetry" {
-    var executor = userspace_executor.Executor{};
-    var scheduler = userspace_scheduler.Scheduler.init(&executor);
-    var catalog = userspace_loader.Catalog.init();
-    var runtime = task_runtime.Runtime.init();
-    var capabilities = capability.CapabilityTable.init();
-    scheduler.bind(&catalog, &runtime, &capabilities);
-
-    var missing_fadt_facts = testHardwareProofFacts(10);
-    missing_fadt_facts.fadt_firmware = null;
-    var missing_fadt_readings = FirstTargetHardwareProofDriverReadings.init(missing_fadt_facts);
-    var missing_fadt_provider = missing_fadt_readings.driverCallbackProvider();
-    try std.testing.expectError(
-        error.FirstTargetTelemetryIncomplete,
-        collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, missing_fadt_provider.readerProvider()),
-    );
-
-    var missing_memory_facts = testHardwareProofFacts(10);
-    missing_memory_facts.memory_capacity_bytes = 0;
-    var missing_memory_readings = FirstTargetHardwareProofDriverReadings.init(missing_memory_facts);
-    var missing_memory_provider = missing_memory_readings.driverCallbackProvider();
-    try std.testing.expectError(
-        error.FirstTargetTelemetryIncomplete,
-        collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, missing_memory_provider.readerProvider()),
-    );
-
-    var missing_grid_facts = testHardwareProofFacts(10);
-    missing_grid_facts.grid_carbon_intensity_observed = false;
-    var missing_grid_readings = FirstTargetHardwareProofDriverReadings.init(missing_grid_facts);
-    var missing_grid_provider = missing_grid_readings.driverCallbackProvider();
-    try std.testing.expectError(
-        error.FirstTargetTelemetryIncomplete,
-        collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, missing_grid_provider.readerProvider()),
-    );
-
-    const facts = testHardwareProofFacts(10);
-    var proof_readings = FirstTargetHardwareProofDriverReadings.init(facts);
-    var proof_provider = proof_readings.driverCallbackProvider();
-    const counters = try collectFirstTargetLiveCountersFromReaderProvider(&runtime, &scheduler, proof_provider.readerProvider());
-    try std.testing.expect(counters.hardware_evidence.complete());
-    try std.testing.expectEqual(@as(u32, 10), counters.hardware_evidence.reader_generation);
-    try std.testing.expectEqual(@as(usize, units.mebibytes(16)), counters.memory_capacity_bytes);
-    try std.testing.expectEqual(@as(u32, 64_000), counters.thermal_milli_celsius);
-    try std.testing.expectEqual(@as(u8, 55), counters.battery_percent);
-    try std.testing.expect(counters.status.gpu_driver_online);
-    try std.testing.expect(!counters.status.npu_driver_online);
-    try std.testing.expect(counters.status.media_driver_online);
-    try std.testing.expectEqual(@as(u16, 215), counters.grid_carbon_intensity_grams_per_kwh);
-
-    var telemetry_provider = try FirstTargetPlatformTelemetryProvider.initFromReaderProvider(
-        94,
-        94_000,
-        31,
-        &runtime,
-        &scheduler,
-        proof_provider.readerProvider(),
-    );
-    const sample = telemetry_provider.telemetryProvider().read();
-    try std.testing.expect(sample.hardwareReaderEvidenceComplete());
-    try std.testing.expectEqual(@as(u32, 10), sample.hardware_evidence.reader_generation);
-    try std.testing.expectEqual(accelerator_scheduler.ThermalPressure.nominal, sample.thermal_pressure);
-    try std.testing.expect(sample.gpu_available);
-    try std.testing.expect(!sample.npu_available);
-    try std.testing.expect(sample.media_available);
 }
 
 test "first target telemetry provider requires complete hardware reader evidence before accelerator scheduling" {
@@ -1634,26 +1280,15 @@ test "first target telemetry provider requires complete hardware reader evidence
     });
     try std.testing.expect(partial_controller.observedTelemetry());
     try std.testing.expect(!partial_controller.last_hardware_evidence_complete);
-    try std.testing.expectError(error.AcceleratorRequired, partial_controller.claim(.{
-        .task_id = 77,
-        .request = .{
-            .class = .foreground_interactive,
-            .wants_gpu = true,
-        },
-        .require_accelerator = true,
-    }));
+    const gpu_request = accelerator_scheduler.Request{
+        .class = .foreground_interactive,
+        .wants_gpu = true,
+    };
+    try std.testing.expectEqual(accelerator_scheduler.Engine.cpu, partial_controller.plan(gpu_request).engine);
 
     var controller = accelerator_scheduler.Controller.init();
     controller.configureFromProvider(provider.telemetryProvider());
     try std.testing.expect(controller.last_hardware_evidence_complete);
-    const gpu_claim = try controller.claim(.{
-        .task_id = 78,
-        .request = .{
-            .class = .foreground_interactive,
-            .wants_gpu = true,
-        },
-        .require_accelerator = true,
-    });
-    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, gpu_claim.engine);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, controller.plan(gpu_request).engine);
     try std.testing.expectEqual(@as(u32, 2), provider.readCount());
 }

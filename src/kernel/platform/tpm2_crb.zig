@@ -1,6 +1,5 @@
 const std = @import("std");
 const acpi = @import("acpi.zig");
-const endian = @import("../utils/endian.zig");
 
 // TCG ACPI 1.4, table 7; PC Client PTP 1.07, sections 6.4.2 and 6.5.3.
 // Only the direct CRB start method and one device-backed locality page are
@@ -62,8 +61,8 @@ pub fn parseAcpi(table: []const u8) (acpi.SdtError || Error)!Discovery {
     if (!std.mem.eql(u8, &header.signature, SIGNATURE)) return error.BadSignature;
     if (header.revision != 4 and header.revision != 5) return error.UnsupportedRevision;
     if (header.length < 52) return error.InvalidLength;
-    if (endian.readU32Le(table[48..52]) != 7) return error.UnsupportedStartMethod;
-    const control_address = endian.readU64Le(table[40..48]);
+    if (std.mem.readInt(u32, table[48..52], .little) != 7) return error.UnsupportedStartMethod;
+    const control_address = std.mem.readInt(u64, table[40..48], .little);
     if (control_address < PAGE_BYTES or control_address & (PAGE_BYTES - 1) != 0x40 or
         control_address > MAX_PHYSICAL_ADDRESS - PAGE_BYTES)
         return error.InvalidAddress;

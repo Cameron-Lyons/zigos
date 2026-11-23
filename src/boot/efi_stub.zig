@@ -2,6 +2,7 @@ const std = @import("std");
 const uefi = std.os.uefi;
 const efi_elf = @import("efi_elf.zig");
 const efi_handoff = @import("efi_handoff.zig");
+const boot_info = efi_handoff.boot_info;
 const efi_paging = @import("efi_paging.zig");
 const payload = @import("boot_payload");
 const tcg2 = @import("efi_tcg2.zig");
@@ -9,13 +10,7 @@ const cpu_features = @import("../arch/cpu_features.zig");
 const x86 = @import("../arch/x86.zig");
 const cache_policy = @import("../arch/cache_policy.zig");
 
-pub const NATIVE_EFI_LONG_MODE_ENTRY = true;
-pub const DROPS_MULTIBOOT2_PROTECTED_MODE_ENTRY = true;
-
-const HANDOFF_PAGES: usize = 8;
-const MMAP_ENTRY_CAP: usize = 256;
-const RSDP_CAP: usize = 64;
-const HANDOFF_MAX_ADDRESS: usize = 128 * 1024 * 1024;
+const HANDOFF_PAGES: usize = (@sizeOf(boot_info.BootInfo) + 4095) / 4096;
 const PAGING_SIZING_ATTEMPTS: usize = 8;
 var firmware_console_available = true;
 
@@ -35,16 +30,15 @@ pub fn main() uefi.Status {
     x86.readMtrrStateInto(&frozen_cache) catch return bootFailure("cache-mtrr-state", .unsupported);
     frozen_cache.validateWritable() catch return bootFailure("cache-mtrr-operands", .unsupported);
     const cache_view = cache_policy.ValidatedMtrrView.init(&frozen_cache) catch return bootFailure("cache-mtrr-policy", .unsupported);
-    if (!payload.isolated_low_proof and !features.pages_1g) return bootFailure("cpu-pages-1g", .unsupported);
+    if (!features.pages_1g) return bootFailure("cpu-pages-1g", .unsupported);
     boot.setWatchdogTimer(0, 0, null) catch {};
 
     const kernel_bytes = payload.kernel;
-    const image = efi_elf.parseForMode(kernel_bytes, if (payload.isolated_low_proof) .isolated_low_proof else .native_high) catch return .incompatible_version;
+    const image = efi_elf.parse(kernel_bytes) catch return .incompatible_version;
     const cmdline = efi_handoff.embeddedCommandLine(payload.cmdline) catch return .invalid_parameter;
     const authenticated = firmwareAuthenticated(system_table);
 
     const gop = readFramebuffer(boot) catch return bootFailure("framebuffer-extent", .unsupported);
-    const framebuffer = gop.framebuffer;
     const framebuffer_span = (efi_handoff.paging_info.Info{
         .transition_base = 0,
         .transition_pages = 0,
@@ -53,8 +47,6 @@ pub fn main() uefi.Status {
         .framebuffer_base = gop.base,
         .framebuffer_bytes = gop.bytes,
     }).framebufferSpan() catch return bootFailure("framebuffer-extent", .unsupported);
-    var rsdp_buf: [RSDP_CAP]u8 = undefined;
-    const rsdp = readAcpiRsdp(system_table, &rsdp_buf);
 
     // Claim the destination before copying. Firmware, the EFI image itself,
     // and every other live allocation must be outside these disjoint pages.
@@ -96,8 +88,10 @@ pub fn main() uefi.Status {
     var measurement = tcg2.capture(boot, system_table, boot_image, cache_view, framebuffer_span) catch return bootFailure("tpm-measurement", .security_violation);
     defer if (measurement) |captured| boot.freePages(captured.pages) catch {};
 
+    // The kernel copies this record once, through its bootstrap direct-map
+    // alias, before any frame allocation.
     const handoff_pages = boot.allocatePages(
-        .{ .max_address = @ptrFromInt(HANDOFF_MAX_ADDRESS) },
+        .{ .max_address = @ptrFromInt(efi_handoff.image_info.IDENTITY_LIMIT) },
         .loader_data,
         HANDOFF_PAGES,
     ) catch return bootFailure("handoff-reservation", .out_of_resources);
@@ -105,10 +99,16 @@ pub fn main() uefi.Status {
     requireOutsideFramebuffer(framebuffer_span, @intFromPtr(handoff_pages.ptr), handoff_pages.len * 4096) catch
         return bootFailure("handoff-framebuffer-overlap", .unsupported);
     cache_view.requireWriteBack(@intFromPtr(handoff_pages.ptr), handoff_pages.len * 4096) catch return bootFailure("handoff-cache-policy", .unsupported);
-    const handoff_bytes: []u8 = @as([*]u8, @ptrCast(handoff_pages.ptr))[0 .. HANDOFF_PAGES * 4096];
-    const info_addr: u32 = @intCast(@intFromPtr(handoff_bytes.ptr));
+    @memset(@as([*]u8, @ptrCast(handoff_pages.ptr))[0 .. HANDOFF_PAGES * 4096], 0);
+    const info: *boot_info.BootInfo = @ptrCast(handoff_pages.ptr);
+    const info_addr: u64 = @intFromPtr(info);
+    info.image = boot_image;
+    info.framebuffer = gop.framebuffer;
+    info.efi_system_table = @intFromPtr(system_table);
+    @memcpy(info.command_line[0..cmdline.len], cmdline);
+    info.command_line_len = @intCast(cmdline.len);
+    info.rsdp_len = readAcpiRsdp(system_table, &info.rsdp);
 
-    var mmap_entries: [MMAP_ENTRY_CAP]efi_handoff.MmapEntry = undefined;
     var raw_map = allocateMapBuffer(boot, cache_view, framebuffer_span) catch return bootFailure("map-reservation", .out_of_resources);
     defer boot.freePool(raw_map.ptr) catch {};
     var bootstrap_pages: ?[]align(4096) uefi.Page = null;
@@ -117,7 +117,6 @@ pub fn main() uefi.Status {
     defer if (final_pages) |pages| boot.freePages(pages) catch {};
     var paging_info: ?efi_handoff.paging_info.Info = null;
     var sizing_ready = false;
-    const transition_mode: efi_paging.Mode = if (payload.isolated_low_proof) .isolated_low_proof else .native_high;
     // Allocations can split or move EFI descriptors. Count their resulting map
     // again before accepting capacity; growth is bounded and stays before the
     // first ExitBootServices call. No seed allocation reserves the maximum.
@@ -134,28 +133,28 @@ pub fn main() uefi.Status {
             },
             else => return bootFailure("map-read", .out_of_resources),
         };
-        const mmap_count = captureMemoryMap(map_slice, &mmap_entries, paging_info, framebuffer_span) catch return bootFailure("map-invalid", .out_of_resources);
-        const needed = countPagingArenas(transition_mode, image, mmap_entries[0..mmap_count], cache_view, boot_image.heap_base, framebuffer_span) catch return bootFailure("paging-count", .out_of_resources);
-        if (bootstrap_pages != null and final_pages != null and needed.fits(bootstrap_pages.?.len, final_pages.?.len)) {
+        info.memory_map_count = captureMemoryMap(map_slice, &info.memory_map, paging_info, framebuffer_span) catch return bootFailure("map-invalid", .out_of_resources);
+        const needed = countPagingPages(image, info.memoryMap(), cache_view, boot_image.heap_base, framebuffer_span) catch return bootFailure("paging-count", .out_of_resources);
+        if (bootstrap_pages != null and final_pages != null and bootstrap_pages.?.len >= needed and final_pages.?.len >= needed) {
             sizing_ready = true;
             break;
         }
         // Nothing references these inactive arenas yet. Clear each ownership
         // slot after a successful free, so a failed replacement cannot double
         // free a stale receipt while unwinding.
-        if (bootstrap_pages == null or bootstrap_pages.?.len < needed.transition) {
+        if (bootstrap_pages == null or bootstrap_pages.?.len < needed) {
             if (bootstrap_pages) |pages| {
                 boot.freePages(pages) catch return bootFailure("paging-release", .out_of_resources);
                 bootstrap_pages = null;
             }
-            bootstrap_pages = allocatePagingArena(boot, needed.transition, cache_view, framebuffer_span) catch return bootFailure("paging-reservation", .out_of_resources);
+            bootstrap_pages = allocatePagingArena(boot, needed, cache_view, framebuffer_span) catch return bootFailure("paging-reservation", .out_of_resources);
         }
-        if (final_pages == null or final_pages.?.len < needed.final) {
+        if (final_pages == null or final_pages.?.len < needed) {
             if (final_pages) |pages| {
                 boot.freePages(pages) catch return bootFailure("final-paging-release", .out_of_resources);
                 final_pages = null;
             }
-            final_pages = allocatePagingArena(boot, needed.final, cache_view, framebuffer_span) catch return bootFailure("final-paging-reservation", .out_of_resources);
+            final_pages = allocatePagingArena(boot, needed, cache_view, framebuffer_span) catch return bootFailure("final-paging-reservation", .out_of_resources);
         }
         paging_info = .{
             .transition_base = @intFromPtr(bootstrap_pages.?.ptr),
@@ -177,34 +176,26 @@ pub fn main() uefi.Status {
             if (attempt != 0) return .out_of_resources;
             return bootFailure("map-read", .out_of_resources);
         };
-        const mmap_count = captureMemoryMap(map_slice, &mmap_entries, arenas, framebuffer_span) catch |err| {
+        info.memory_map_count = captureMemoryMap(map_slice, &info.memory_map, arenas, framebuffer_span) catch |err| {
             if (attempt != 0) return .out_of_resources;
             return switch (err) {
                 error.BufferTooSmall => bootFailure("map-capacity", .out_of_resources),
                 else => bootFailure("map-invalid", .out_of_resources),
             };
         };
-        var request = efi_handoff.Request{
-            .cmdline = cmdline,
-            .mmap = mmap_entries[0..mmap_count],
-            .framebuffer = framebuffer,
-            .efi_system_table = @intFromPtr(system_table),
-            .acpi_rsdp = rsdp,
-            .boot_image = boot_image,
-            .boot_tpm = if (measurement) |captured| captured.info else null,
-            .boot_paging = arenas,
-        };
+        info.paging = arenas;
+        if (measurement) |captured| info.tpm = captured.info;
+        const mmap = info.memoryMap();
         for (image.segments[0..image.segment_count]) |segment| {
-            efi_paging.requireRamRange(request.mmap, segment.phys_addr, segment.pageCount() * 4096) catch return bootFailure("kernel-ram-ownership", .unsupported);
+            efi_paging.requireRamRange(mmap, segment.phys_addr, segment.pageCount() * 4096) catch return bootFailure("kernel-ram-ownership", .unsupported);
         }
-        efi_paging.requireRamRange(request.mmap, arenas.transition_base, arenas.transitionBytes()) catch return bootFailure("paging-ram-ownership", .unsupported);
-        efi_paging.requireRamRange(request.mmap, arenas.final_base, arenas.finalBytes()) catch return bootFailure("paging-ram-ownership", .unsupported);
-        const needed = countPagingArenas(transition_mode, image, request.mmap, cache_view, boot_image.heap_base, framebuffer_span) catch return bootFailure("paging-count", .out_of_resources);
-        if (!needed.fits(arenas.transition_pages, arenas.final_pages)) return bootFailure("paging-capacity-changed", .out_of_resources);
-        efi_paging.requireRamRange(request.mmap, boot_image.heap_base, efi_handoff.image_info.KERNEL_HEAP_BYTES) catch return bootFailure("heap-ram-ownership", .unsupported);
-        efi_paging.requireRamRange(request.mmap, info_addr, HANDOFF_PAGES * 4096) catch return bootFailure("handoff-ram-ownership", .unsupported);
-        if (measurement) |captured| efi_paging.requireRamRange(request.mmap, captured.info.log_address, captured.pages.len * 4096) catch return bootFailure("tpm-ram-ownership", .unsupported);
-        _ = efi_handoff.encode(handoff_bytes, request) catch return .load_error;
+        efi_paging.requireRamRange(mmap, arenas.transition_base, arenas.transitionBytes()) catch return bootFailure("paging-ram-ownership", .unsupported);
+        efi_paging.requireRamRange(mmap, arenas.final_base, arenas.finalBytes()) catch return bootFailure("paging-ram-ownership", .unsupported);
+        const needed = countPagingPages(image, mmap, cache_view, boot_image.heap_base, framebuffer_span) catch return bootFailure("paging-count", .out_of_resources);
+        if (needed > arenas.transition_pages or needed > arenas.final_pages) return bootFailure("paging-capacity-changed", .out_of_resources);
+        efi_paging.requireRamRange(mmap, boot_image.heap_base, efi_handoff.image_info.KERNEL_HEAP_BYTES) catch return bootFailure("heap-ram-ownership", .unsupported);
+        efi_paging.requireRamRange(mmap, info_addr, HANDOFF_PAGES * 4096) catch return bootFailure("handoff-ram-ownership", .unsupported);
+        if (measurement) |captured| efi_paging.requireRamRange(mmap, captured.info.log_address, captured.pages.len * 4096) catch return bootFailure("tpm-ram-ownership", .unsupported);
         // The last firmware calls can change privileged CPU state. Admission
         // owns the full selector contract before creating any native alias.
         cpu_features.validateBootstrapCache() catch |err| return cacheAdmissionFailure(err);
@@ -212,7 +203,7 @@ pub fn main() uefi.Status {
         x86.readMtrrStateInto(&current_cache) catch return bootFailure("cache-mtrr-state", .unsupported);
         if (!frozen_cache.sameConfiguration(&current_cache)) return bootFailure("cache-policy-changed", .unsupported);
         const pre_exit_root: *const [512]u64 = @ptrFromInt(readCr3() & efi_paging.PHYSICAL_ADDRESS_MASK);
-        _ = efi_paging.buildForMode(bootstrap_pages.?, bootstrap_physical, pre_exit_root, transition_mode, image, request.mmap, cache_view, boot_image.heap_base, arenas) catch return bootFailure("paging-bootstrap", .unsupported);
+        _ = efi_paging.build(bootstrap_pages.?, bootstrap_physical, pre_exit_root, image, mmap, cache_view, boot_image.heap_base, arenas) catch return bootFailure("paging-bootstrap", .unsupported);
         firmware_console_available = false;
         boot.exitBootServices(uefi.handle, map_slice.info.key) catch continue;
         // No firmware calls or allocations after this point. Keep the firmware
@@ -220,9 +211,7 @@ pub fn main() uefi.Status {
         asm volatile ("cli" ::: .{ .memory = true });
         if (measurement) |*captured| {
             captured.finish(boot_image) catch haltAfterExit("tpm-final-events");
-            request.boot_tpm = captured.info;
-            // This exact-sized encoding already succeeded before firmware exit.
-            _ = efi_handoff.encode(handoff_bytes, request) catch haltAfterExit("tpm-final-events");
+            info.tpm = captured.info;
         }
         cpu_features.validateBootstrapCache() catch |err| switch (err) {
             error.PatUnsupported => haltAfterExit("cache-pat-unsupported"),
@@ -233,7 +222,7 @@ pub fn main() uefi.Status {
         x86.readMtrrStateInto(&current_cache) catch haltAfterExit("cache-mtrr-state");
         if (!frozen_cache.sameConfiguration(&current_cache)) haltAfterExit("cache-policy-changed");
         const active_root: *const [512]u64 = @ptrFromInt(readCr3() & efi_paging.PHYSICAL_ADDRESS_MASK);
-        const bootstrap_cr3 = efi_paging.buildForMode(bootstrap_pages.?, bootstrap_physical, active_root, transition_mode, image, mmap_entries[0..mmap_count], cache_view, boot_image.heap_base, arenas) catch haltAfterExit("paging-bootstrap");
+        const bootstrap_cr3 = efi_paging.build(bootstrap_pages.?, bootstrap_physical, active_root, image, mmap, cache_view, boot_image.heap_base, arenas) catch haltAfterExit("paging-bootstrap");
         x86.enableNoExecute();
         x86.writeCr0(x86.readCr0() | x86.CR0_WP);
         if (x86.readCr0() & x86.CR0_WP == 0) haltAfterExit("write-protect");
@@ -242,23 +231,13 @@ pub fn main() uefi.Status {
     return .aborted;
 }
 
-const PagingNeeds = struct {
-    transition: usize,
-    final: usize,
-
-    inline fn fits(self: PagingNeeds, transition: usize, final: usize) bool {
-        return self.transition <= transition and self.final <= final;
-    }
-};
-
-fn countPagingArenas(mode: efi_paging.Mode, image: efi_elf.Image, entries: []const efi_handoff.MmapEntry, cache: cache_policy.ValidatedMtrrView, heap_base: u64, framebuffer_span: ?efi_handoff.paging_info.Span) !PagingNeeds {
-    var transition: efi_paging.sparse.Counts = undefined;
-    try efi_paging.countForModeInto(mode, image, entries, cache, heap_base, framebuffer_span, &transition);
-    var final = transition;
-    if (mode != .native_high) try efi_paging.countForModeInto(.native_high, image, entries, cache, heap_base, framebuffer_span, &final);
-    if (transition.used_pages < 3 or transition.used_pages > efi_paging.MAX_PAGE_COUNT or final.used_pages < 3 or final.used_pages > efi_paging.MAX_PAGE_COUNT)
-        return error.InvalidArena;
-    return .{ .transition = transition.used_pages, .final = final.used_pages };
+// The kernel rebuilds the transition's native geometry in the final arena, so
+// both arenas need the same page count.
+fn countPagingPages(image: efi_elf.Image, entries: []const boot_info.MemoryMapEntry, cache: cache_policy.ValidatedMtrrView, heap_base: u64, framebuffer_span: ?efi_handoff.paging_info.Span) !usize {
+    var counts: efi_paging.sparse.Counts = undefined;
+    try efi_paging.countInto(image, entries, cache, heap_base, framebuffer_span, &counts);
+    if (counts.used_pages < 3 or counts.used_pages > efi_paging.MAX_PAGE_COUNT) return error.InvalidArena;
+    return counts.used_pages;
 }
 
 fn allocatePagingArena(boot: *uefi.tables.BootServices, count: usize, cache: cache_policy.ValidatedMtrrView, framebuffer_span: ?efi_handoff.paging_info.Span) ![]align(4096) uefi.Page {
@@ -272,7 +251,7 @@ fn allocatePagingArena(boot: *uefi.tables.BootServices, count: usize, cache: cac
 
 fn allocateMapBuffer(boot: *uefi.tables.BootServices, cache: cache_policy.ValidatedMtrrView, framebuffer_span: ?efi_handoff.paging_info.Span) ![]align(@alignOf(uefi.tables.MemoryDescriptor)) u8 {
     const info = try boot.getMemoryMapInfo();
-    if (info.len > MMAP_ENTRY_CAP or info.descriptor_size < @sizeOf(uefi.tables.MemoryDescriptor) or info.descriptor_size > 4096)
+    if (info.len > boot_info.MAX_MEMORY_MAP_ENTRIES or info.descriptor_size < @sizeOf(uefi.tables.MemoryDescriptor) or info.descriptor_size > 4096)
         return error.BufferTooSmall;
     // Two paging allocations can split descriptors. Keep bounded space for
     // those changes and exit notifications without a post-exit allocation.
@@ -364,7 +343,7 @@ fn readFirmwareByte(system_table: *uefi.tables.SystemTable, comptime name: []con
 }
 
 const GopCapture = struct {
-    framebuffer: ?efi_handoff.Framebuffer = null,
+    framebuffer: boot_info.Framebuffer = .{},
     base: u64 = 0,
     bytes: u64 = 0,
 };
@@ -380,20 +359,22 @@ fn readFramebuffer(boot: *uefi.tables.BootServices) !GopCapture {
     if (result.bytes == 0) return result;
     const info = mode.info;
     if (info.horizontal_resolution == 0 or info.vertical_resolution == 0) return result;
-    const rgb = switch (info.pixel_format) {
-        .red_green_blue_reserved_8_bit_per_color => efi_handoff.rgbFromMasks(0, 8, 16),
-        .blue_green_red_reserved_8_bit_per_color => efi_handoff.rgbFromMasks(16, 8, 0),
+    const rgb: [3]u32 = switch (info.pixel_format) {
+        .red_green_blue_reserved_8_bit_per_color => .{ 0x0000ff, 0x00ff00, 0xff0000 },
+        .blue_green_red_reserved_8_bit_per_color => .{ 0xff0000, 0x00ff00, 0x0000ff },
         else => return result,
     };
     const pitch = try std.math.mul(u32, info.pixels_per_scan_line, 4);
     const visible_bytes = try std.math.mul(u64, pitch, info.vertical_resolution);
     if (info.pixels_per_scan_line < info.horizontal_resolution or visible_bytes > result.bytes) return error.InvalidFramebuffer;
     result.framebuffer = .{
-        .addr = mode.frame_buffer_base,
+        .base = mode.frame_buffer_base,
         .pitch = pitch,
         .width = info.horizontal_resolution,
         .height = info.vertical_resolution,
-        .rgb = rgb,
+        .red_mask = rgb[0],
+        .green_mask = rgb[1],
+        .blue_mask = rgb[2],
     };
     return result;
 }
@@ -404,7 +385,7 @@ fn requireOutsideFramebuffer(span: ?efi_handoff.paging_info.Span, start: u64, by
     if (start < device.end and device.start < end) return error.InvalidFramebuffer;
 }
 
-fn readAcpiRsdp(system_table: *uefi.tables.SystemTable, buffer: []u8) []const u8 {
+fn readAcpiRsdp(system_table: *uefi.tables.SystemTable, buffer: []u8) u32 {
     var index: usize = 0;
     while (index < system_table.number_of_table_entries) : (index += 1) {
         const entry = system_table.configuration_table[index];
@@ -414,27 +395,27 @@ fn readAcpiRsdp(system_table: *uefi.tables.SystemTable, buffer: []u8) []const u8
         const rsdp: [*]const u8 = @ptrCast(entry.vendor_table);
         const length = if (std.mem.eql(u8, rsdp[0..8], "RSD PTR "))
             @max(
-                efi_handoff.ACPI_RSDP_V2_MIN_BYTES,
+                boot_info.ACPI_RSDP_V2_MIN_BYTES,
                 @as(u32, rsdp[20]) |
                     (@as(u32, rsdp[21]) << 8) |
                     (@as(u32, rsdp[22]) << 16) |
                     (@as(u32, rsdp[23]) << 24),
             )
         else
-            efi_handoff.ACPI_RSDP_V2_MIN_BYTES;
+            boot_info.ACPI_RSDP_V2_MIN_BYTES;
         const copied = @min(length, buffer.len);
         @memcpy(buffer[0..copied], rsdp[0..copied]);
-        return buffer[0..copied];
+        return @intCast(copied);
     }
-    return &.{};
+    return 0;
 }
 
 fn captureMemoryMap(
     slice: uefi.tables.MemoryMapSlice,
-    entries: []efi_handoff.MmapEntry,
+    entries: []boot_info.MemoryMapEntry,
     paging_info: ?efi_handoff.paging_info.Info,
     framebuffer_span: ?efi_handoff.paging_info.Span,
-) !usize {
+) !u32 {
     var count: usize = 0;
     var iterator = slice.iterator();
     while (iterator.next()) |descriptor| {
@@ -444,10 +425,10 @@ fn captureMemoryMap(
         try efi_paging.appendMemoryDescriptor(entries, &count, descriptor.physical_start, length, efi_handoff.kindFromEfiMemoryType(@backingInt(descriptor.type)), @backingInt(descriptor.type), @as(u64, @bitCast(descriptor.attribute)), paging_info);
     }
     if (count == 0) return error.InvalidParameter;
-    efi_paging.sortEntries(entries[0..count]);
-    var regions: [256]efi_paging.sparse.Region = undefined;
+    boot_info.sortMemoryMap(entries[0..count]);
+    var regions: [boot_info.MAX_MEMORY_MAP_ENTRIES]efi_paging.sparse.Region = undefined;
     _ = try efi_paging.ramRegions(entries[0..count], &regions, framebuffer_span);
-    return count;
+    return @intCast(count);
 }
 
 fn readCr3() u64 {
@@ -468,7 +449,7 @@ fn readStackPointer() u64 {
     );
 }
 
-fn enterKernel(entry: u64, info_addr: u32, physical_cr3: u64) noreturn {
+fn enterKernel(entry: u64, info_addr: u64, physical_cr3: u64) noreturn {
     asm volatile (
         \\cli
         \\movq %%cr4, %%rax
@@ -480,7 +461,7 @@ fn enterKernel(entry: u64, info_addr: u32, physical_cr3: u64) noreturn {
         \\movq %[info], %%rdi
         \\jmpq *%[entry]
         :
-        : [info] "r" (@as(u64, info_addr)),
+        : [info] "r" (info_addr),
           [entry] "r" (entry),
           [root] "r" (physical_cr3),
         : .{ .rax = true, .rcx = true, .rdi = true, .memory = true });

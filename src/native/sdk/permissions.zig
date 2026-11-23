@@ -7,8 +7,6 @@ const ui = @import("ui.zig");
 
 pub const MAX_REVIEW_NODES: usize = permission_review.MAX_REVIEW_DECISIONS + 4;
 pub const MAX_REVIEW_TEXT_BYTES: usize = ui.MAX_RENDER_BYTES;
-pub const COMPACT_PERMISSION_REVIEW_METADATA = true;
-pub const DERIVES_HARNESS_COMMAND_COUNT = true;
 pub const REVIEW_PLAN_SIZE_CEILING_BYTES: usize = 3_296;
 pub const HARNESS_RESULT_SIZE_CEILING_BYTES: usize = 3_304;
 pub const HARNESS_SIZE_CEILING_BYTES: usize = 208;
@@ -162,13 +160,6 @@ pub fn buildReviewPlan(
     return plan;
 }
 
-pub fn renderReviewText(
-    plan: *const ReviewPlan,
-    out: []u8,
-) ![]const u8 {
-    return permission_review.renderToBuffer(out, &plan.session);
-}
-
 pub fn renderReviewUi(plan: *const ReviewPlan, out: []u8) ![]const u8 {
     var child_refs: [MAX_REVIEW_NODES]*const ui.Node = undefined;
     for (plan.nodes[0..@as(usize, plan.node_count)], 0..) |*node, index| {
@@ -199,7 +190,6 @@ fn defaultCommand(request: manifest.PermissionRequest) ReviewCommand {
 }
 
 test "permission SDK keeps bounded review results compact" {
-    try std.testing.expect(DERIVES_HARNESS_COMMAND_COUNT);
     try std.testing.expect(!@hasField(Harness, "command_count"));
     try std.testing.expect(@hasDecl(Harness, "commandCount"));
     try std.testing.expectEqual(u8, @FieldType(ReviewPlan, "grant_count"));
@@ -218,10 +208,6 @@ test "permission SDK builds grants and a native UI review tree" {
     const package = examples.firstPartyStudio();
     const plan = try buildReviewPlan(77, &package.bundle, &.{});
     try @import("std").testing.expect(plan.grant_count >= manifest.requiredPermissionCount(package.bundle));
-
-    var text_buffer: [MAX_REVIEW_TEXT_BYTES]u8 = undefined;
-    const rendered_text = try renderReviewText(&plan, &text_buffer);
-    try @import("std").testing.expect(@import("std").mem.indexOf(u8, rendered_text, "Zigos Studio") != null);
 
     var ui_buffer: [ui.MAX_RENDER_BYTES]u8 = undefined;
     const rendered_ui = try renderReviewUi(&plan, &ui_buffer);

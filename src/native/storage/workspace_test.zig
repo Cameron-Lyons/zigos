@@ -16,6 +16,37 @@ const MAX_WORKSPACE_ENTRY_MUTATIONS = workspace_model.MAX_WORKSPACE_ENTRY_MUTATI
 const ResharePolicy = workspace_model.ResharePolicy;
 const ShareNetworkScope = workspace_model.ShareNetworkScope;
 const workspaceRootAddress = workspace_model.workspaceRootAddress;
+const WorkspaceRecord = workspace_model.WorkspaceRecord;
+
+/// A by-value copy of a workspace record and of the heap tables behind its
+/// lazy backings. `expectEqualDeep` on two `WorkspaceRecord` values follows
+/// both handles to the same live tables, so it cannot see in-place changes.
+const WorkspaceDeepSnapshot = struct {
+    record: WorkspaceRecord,
+    entry_state: ?@FieldType(@FieldType(WorkspaceRecord, "path_index"), "entry_backing").Target,
+    mutation_log: ?@FieldType(@FieldType(WorkspaceRecord, "mutation_log"), "backing").Target,
+    share_table: ?@FieldType(@FieldType(WorkspaceRecord, "share_table"), "backing").Target,
+    recoverable_deletes: ?@FieldType(@FieldType(WorkspaceRecord, "recoverable_deletes"), "backing").Target,
+
+    fn tableCopy(lazy: anytype) ?@TypeOf(lazy.*).Target {
+        const table = lazy.get() orelse return null;
+        return table.*;
+    }
+
+    fn capture(workspace: *const WorkspaceRecord) WorkspaceDeepSnapshot {
+        return .{
+            .record = workspace.*,
+            .entry_state = tableCopy(&workspace.path_index.entry_backing),
+            .mutation_log = tableCopy(&workspace.mutation_log.backing),
+            .share_table = tableCopy(&workspace.share_table.backing),
+            .recoverable_deletes = tableCopy(&workspace.recoverable_deletes.backing),
+        };
+    }
+
+    fn expectUnchanged(self: *const WorkspaceDeepSnapshot, workspace: *const WorkspaceRecord) !void {
+        try std.testing.expectEqualDeep(self.*, capture(workspace));
+    }
+};
 
 fn completeReplacementEntries(prefix: []const u8, version_base: u64) ![MAX_WORKSPACE_ENTRIES]Entry {
     var entries: [MAX_WORKSPACE_ENTRIES]Entry = undefined;
@@ -120,6 +151,46 @@ test "complete workspace replacement rejects invalid targets and active transact
     try std.testing.expectError(error.WorkspaceGenerationExhausted, directory.replaceEntries(workspace.id, &.{}, 3));
     try std.testing.expectEqual(@as(u32, std.math.maxInt(u32) - 1), workspace.generation);
     try std.testing.expectEqualDeep(original, try directory.resolve(workspace.id, original.pathSlice()));
+}
+
+test "identical workspace replacement keeps its generation, root and clean state" {
+    var directory = Directory.init();
+    defer directory.reset();
+    const workspace = try directory.create(.{ .owner = .{ .kind = .service, .serial = 1 }, .label = "unchanged" });
+    const entries = try completeReplacementEntries("same", 1);
+    _ = try directory.replaceEntries(workspace.id, &entries, 1);
+    directory.clearDirty();
+    const generation = workspace.generation;
+    const root = workspace.rootAddress();
+    const mutations = workspace.counts.entry_mutation_count;
+    try std.testing.expectEqual(generation, try directory.replaceEntries(workspace.id, &entries, 2));
+    try std.testing.expectEqual(generation, workspace.generation);
+    try std.testing.expectEqualDeep(root, workspace.rootAddress());
+    try std.testing.expectEqual(mutations, workspace.counts.entry_mutation_count);
+    try std.testing.expectEqual(@as(usize, 0), directory.dirtyWorkspaceIds().len);
+}
+
+test "incremental workspace replacement leaf hashes match a full index rebuild" {
+    var directory = Directory.init();
+    defer directory.reset();
+    const workspace = try directory.create(.{ .owner = .{ .kind = .service, .serial = 1 }, .label = "leaves" });
+    const entries = try completeReplacementEntries("mix", 1);
+    _ = try directory.replaceEntries(workspace.id, entries[0..64], 1);
+    // Drop the first eight, append eight new paths and change one survivor.
+    var target: [64]Entry = undefined;
+    @memcpy(&target, entries[8..72]);
+    target[10].version_id = ids.version(999);
+    _ = try directory.replaceEntries(workspace.id, &target, 2);
+    const incremental_root = workspace.rootAddress();
+    const incremental_leaves = workspace.path_index.leafHashes().*;
+    try std.testing.expectEqualDeep(workspaceRootAddress(&target), incremental_root);
+    directory.rebuildDerivedIndexes();
+    try std.testing.expectEqualDeep(incremental_root, workspace.rootAddress());
+    try std.testing.expectEqualDeep(incremental_leaves, workspace.path_index.leafHashes().*);
+    for (target) |entry| {
+        try std.testing.expectEqualDeep(entry, try directory.resolve(workspace.id, entry.pathSlice()));
+        try std.testing.expectEqualDeep(entry, try directory.resolveObject(workspace.id, entry.object_id));
+    }
 }
 
 test "workspace transactions, snapshot restore, delete recovery, and signed export import work" {
@@ -497,9 +568,9 @@ test "reviving a staged deletion rejects overflow without changing the transacti
     try directory.beginTransaction(workspace.id);
     try directory.stageDelete(workspace.id, "m-095");
     try directory.stagePut(workspace.id, "a-first", ids.object(200), ids.version(200), .document);
-    const before = workspace.*;
+    const before = WorkspaceDeepSnapshot.capture(workspace);
     try std.testing.expectError(error.EntryTableFull, directory.stagePut(workspace.id, "m-095", ids.object(96), ids.version(96), .document));
-    try std.testing.expectEqualDeep(before, workspace.*);
+    try before.expectUnchanged(workspace);
 
     _ = try directory.commit(workspace.id, 2);
     try std.testing.expectEqual(MAX_WORKSPACE_ENTRIES, (try directory.entries(workspace.id)).len);
@@ -524,9 +595,9 @@ test "workspace commit preflights invalid deletions before publishing any change
     const malformed = &workspace.mutation_log.entries()[workspace.counts.entry_mutation_count + 1].entry;
     malformed.object_id = ids.ObjectId.zero;
     malformed.version_id = ids.VersionId.zero;
-    const before = workspace.*;
+    const before = WorkspaceDeepSnapshot.capture(workspace);
     try std.testing.expectError(error.EntryNotFound, directory.commit(workspace.id, 2));
-    try std.testing.expectEqualDeep(before, workspace.*);
+    try before.expectUnchanged(workspace);
     try directory.abortTransaction(workspace.id);
     try std.testing.expectEqual(ids.object(1), (try directory.resolve(workspace.id, "a-first")).object_id);
 }
@@ -539,11 +610,11 @@ test "workspace puts reject zero object and version identifiers without changing
     });
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, "note", ids.object(1), ids.version(1), .document);
-    const before = workspace.*;
+    const before = WorkspaceDeepSnapshot.capture(workspace);
     try std.testing.expectError(error.InvalidEntry, directory.stagePut(workspace.id, "note", ids.ObjectId.zero, ids.VersionId.zero, .blob));
     try std.testing.expectError(error.InvalidEntry, directory.stagePut(workspace.id, "note", ids.ObjectId.zero, ids.version(1), .document));
     try std.testing.expectError(error.InvalidEntry, directory.stagePut(workspace.id, "new-note", ids.object(1), ids.VersionId.zero, .document));
-    try std.testing.expectEqualDeep(before, workspace.*);
+    try before.expectUnchanged(workspace);
     try directory.stageDelete(workspace.id, "note");
     try std.testing.expectEqual(@as(usize, 0), workspace.staging.staged_effective_entry_count);
     _ = try directory.commit(workspace.id, 1);
@@ -571,16 +642,16 @@ test "workspace generation exhaustion leaves commits restore and recovery unchan
 
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, "new-note", ids.object(2), ids.version(2), .document);
-    const staged_before = workspace.*;
+    const staged_before = WorkspaceDeepSnapshot.capture(workspace);
     try std.testing.expectError(error.WorkspaceGenerationExhausted, directory.commit(workspace.id, 3));
-    try std.testing.expectEqualDeep(staged_before, workspace.*);
+    try staged_before.expectUnchanged(workspace);
     try directory.abortTransaction(workspace.id);
 
-    const before = workspace.*;
+    const before = WorkspaceDeepSnapshot.capture(workspace);
     try std.testing.expectError(error.WorkspaceGenerationExhausted, directory.recoverDeleted(workspace.id, "note", 4));
-    try std.testing.expectEqualDeep(before, workspace.*);
+    try before.expectUnchanged(workspace);
     try std.testing.expectError(error.WorkspaceGenerationExhausted, directory.restore(workspace.id, baseline.id, 5));
-    try std.testing.expectEqualDeep(before, workspace.*);
+    try before.expectUnchanged(workspace);
 }
 
 fn createFullWorkspace(directory: *Directory, label: []const u8) !*workspace_model.WorkspaceRecord {

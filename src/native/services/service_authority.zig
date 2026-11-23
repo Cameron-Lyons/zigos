@@ -116,6 +116,6 @@ test "service authority writes allow and denial provenance" {
         .trace = &denied_trace,
     }, .object_read));
     try std.testing.expectEqual(debug_contract.Decision.denied, denied_trace.decision);
-    try std.testing.expectEqual(abi.DenialReason.scope_violation, denied_trace.denial.reason);
-    try std.testing.expect(denied_trace.denial.fingerprint != 0);
+    try std.testing.expectEqual(abi.DenialReason.scope_violation, denied_trace.denial_reason);
+    try std.testing.expect(denied_trace.denial_fingerprint != 0);
 }

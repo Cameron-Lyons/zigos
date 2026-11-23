@@ -4,17 +4,12 @@ const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
-const measured_boot = @import("../platform/measured_boot.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
-const signing = @import("../core/signing.zig");
 
 pub const MAX_POLICIES: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_TARGET_BYTES: usize = 64;
-pub const COMPACT_POLICY_METADATA = true;
-pub const DENSE_POLICY_IDS = true;
-pub const DERIVES_POLICY_IDS_FROM_DENSE_SLOTS = true;
 pub const POLICY_RECORD_SIZE_CEILING_BYTES: usize = 224;
 pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 4_312;
 const POLICY_REQUEST_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
@@ -128,29 +123,6 @@ pub const ConnectionEvidence = struct {
     attestation_verifier_metadata_digest_present: bool = false,
     attestation_verifier_metadata_digest_bound: bool = false,
     attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
-
-    pub fn fromVerifiedRemoteAttestation(
-        destination: Destination,
-        response: attestation_service.RemoteAttestationResponse,
-        request: attestation_service.RemoteAttestationRequest,
-        boot: *const measured_boot.BootRecord,
-        trusted_root: signing.PublicIdentity,
-    ) ?ConnectionEvidence {
-        if (!attestation_service.Service.verifyRemoteAttestationResponse(response, request, boot, trusted_root)) return null;
-        if (!destinationMatchesRemoteParty(destination, request.remotePartySlice())) return null;
-        return .{
-            .destination = destination,
-            .attested = true,
-            .verified_remote_attestation = true,
-            .attestation_request_digest_present = true,
-            .attestation_request_digest = request.digest(),
-            .peer_root_digest_present = true,
-            .peer_root_digest = response.statement.root_digest,
-            .attestation_verifier_metadata_digest_present = response.attestation_verifier_metadata_digest_present,
-            .attestation_verifier_metadata_digest_bound = request.attestation_verifier_metadata_digest_required,
-            .attestation_verifier_metadata_digest = response.attestation_verifier_metadata_digest,
-        };
-    }
 
     pub fn fromTpmAttestation(
         destination: Destination,
@@ -1126,8 +1098,6 @@ test "network policy ids address their dense slots directly" {
         .label = "full",
         .mode = .local_network,
     }));
-    try std.testing.expect(DERIVES_POLICY_IDS_FROM_DENSE_SLOTS);
-    try std.testing.expect(!@hasField(Directory, "next_policy_id"));
     try std.testing.expectEqual(@as(usize, DIRECTORY_SIZE_CEILING_BYTES), @sizeOf(Directory));
 }
 

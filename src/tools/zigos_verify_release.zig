@@ -587,7 +587,7 @@ fn loadDigestManifestSource(
         const separator = std.mem.indexOf(u8, line, "  ") orelse return error.InvalidDigestManifestLine;
         const digest = line[0..separator];
         const path = std.mem.trimStart(u8, line[separator + 2 ..], " ");
-        if (!isSha256Hex(digest)) return error.InvalidDigestHex;
+        trust.validateSha256Hex(digest) catch return error.InvalidDigestHex;
         if (!catalog.isSafeRelativePath(path)) return error.UnsafeArtifactPath;
         const gop = try out.getOrPut(try allocator.dupe(u8, path));
         if (gop.found_existing) return error.DuplicateDigestEntry;
@@ -669,7 +669,7 @@ fn verifyDsseProvenanceSources(
             return error.SlsaStartedOnOutsideReleaseWindow;
         }
         for (envelope.value.signatures) |signature| {
-            const key = findReleaseKey(policy, signature.keyid) orelse return error.ReleaseKeyNotFound;
+            const key = trust.findReleaseKey(policy, signature.keyid) orelse return error.ReleaseKeyNotFound;
             if (statement.started_at < key.notBefore or statement.started_at >= key.notAfter) {
                 return error.ReleaseKeyInvalidForSlsaStartedOn;
             }
@@ -689,14 +689,14 @@ fn verifyProvenanceSignatures(
     summary: *VerificationSummary,
 ) !void {
     if (envelope.signatures.len < policy.releaseRole.threshold) return error.SignatureThresholdNotMet;
-    const pae = try dssePreauthEncoding(allocator, envelope.payloadType, payload);
+    const pae = try trust.dssePreauthEncoding(allocator, envelope.payloadType, payload);
     for (envelope.signatures, 0..) |signature, index| {
         for (envelope.signatures[0..index]) |earlier| {
             if (std.mem.eql(u8, earlier.keyid, signature.keyid)) return error.DuplicateSigner;
         }
         try requireAuthorizedReleaseKey(policy, signature.keyid, now_unix);
-        const key = findReleaseKey(policy, signature.keyid) orelse return error.ReleaseKeyNotFound;
-        const public_key_bytes = try decodeHexFixed(Ed25519.PublicKey.encoded_length, key.publicKey);
+        const key = trust.findReleaseKey(policy, signature.keyid) orelse return error.ReleaseKeyNotFound;
+        const public_key_bytes = try trust.decodeHexFixed(Ed25519.PublicKey.encoded_length, key.publicKey);
         const signature_bytes = try decodeBase64Alloc(allocator, signature.sig);
         if (signature_bytes.len != Ed25519.Signature.encoded_length) return error.InvalidSignatureLength;
         const public_key = Ed25519.PublicKey.fromBytes(public_key_bytes) catch return error.InvalidPublicKey;
@@ -704,11 +704,6 @@ fn verifyProvenanceSignatures(
         signature_value.verify(pae, public_key) catch return error.InvalidSignature;
         summary.dsse_signatures += 1;
     }
-}
-
-fn findReleaseKey(policy: *const trust.TrustPolicy, key_id: []const u8) ?*const trust.ReleaseKey {
-    for (policy.releaseKeys) |*key| if (std.mem.eql(u8, key.keyId, key_id)) return key;
-    return null;
 }
 
 fn verifySlsaStatement(
@@ -1115,11 +1110,6 @@ fn nextNonEmptyLine(iterator: *std.mem.SplitIterator(u8, .scalar)) ?[]const u8 {
     return null;
 }
 
-fn dssePreauthEncoding(allocator: std.mem.Allocator, payload_type: []const u8, payload: []const u8) ![]u8 {
-    const prefix = try std.fmt.allocPrint(allocator, "DSSEv1 {d} {s} {d} ", .{ payload_type.len, payload_type, payload.len });
-    return std.mem.concat(allocator, u8, &.{ prefix, payload });
-}
-
 fn decodeBase64Alloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     const size = std.base64.standard.Decoder.calcSizeForSlice(text) catch return error.InvalidBase64;
     const output = try allocator.alloc(u8, size);
@@ -1145,35 +1135,12 @@ fn authenticatedPayloadSha256(
     return trust.sha256Hex(payload, output);
 }
 
-fn decodeHexFixed(comptime len: usize, value: []const u8) ![len]u8 {
-    if (value.len != len * 2) return error.InvalidHexLength;
-    var output: [len]u8 = undefined;
-    for (&output, 0..) |*byte, index| {
-        const high = hexValue(value[index * 2]) orelse return error.InvalidHexDigit;
-        const low = hexValue(value[index * 2 + 1]) orelse return error.InvalidHexDigit;
-        byte.* = (high << 4) | low;
-    }
-    return output;
-}
-
-fn hexValue(byte: u8) ?u8 {
-    if (byte >= '0' and byte <= '9') return byte - '0';
-    if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
-    return null;
-}
-
 fn sha256HexAlloc(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
     const output = try allocator.alloc(u8, sha256_hex_len);
     var digest: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(data, &digest, .{});
     trust.encodeHexLower(&digest, output);
     return output;
-}
-
-fn isSha256Hex(value: []const u8) bool {
-    if (value.len != sha256_hex_len) return false;
-    for (value) |byte| if (!((byte >= '0' and byte <= '9') or (byte >= 'a' and byte <= 'f'))) return false;
-    return true;
 }
 
 fn looksLikeJjChangeId(value: []const u8) bool {
@@ -2054,7 +2021,7 @@ fn signedEnvelopeAlloc(
     key_ids: []const []const u8,
 ) ![]u8 {
     if (key_pairs.len != key_ids.len or key_pairs.len == 0) return error.InvalidFixtureSignerSet;
-    const pae = try dssePreauthEncoding(allocator, payload_type, payload);
+    const pae = try trust.dssePreauthEncoding(allocator, payload_type, payload);
     const payload_base64 = try encodeBase64Alloc(allocator, payload);
     const signatures = try allocator.alloc(TestEnvelopeSignature, key_pairs.len);
     for (key_pairs, key_ids, 0..) |key_pair, key_id, index| {

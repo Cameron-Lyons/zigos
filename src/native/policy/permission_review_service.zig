@@ -16,6 +16,7 @@ const policy_mediation = @import("policy_mediation.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
 const xhci = @import("../../kernel/drivers/xhci.zig");
+const modeled_xhci = @import("../session/proofs/modeled_xhci.zig");
 
 const REVIEW_RENDER_BUFFER_BYTES: usize = units.kibibytes(4);
 const REVIEW_CARD_BUFFER_BYTES: usize = 512;
@@ -59,11 +60,6 @@ pub const MAX_REVIEW_DECISIONS: usize = permission_review.MAX_REVIEW_DECISIONS;
 pub const MAX_INPUT_LINE: usize = 96;
 pub const MAX_PHYSICAL_INPUT_COMMANDS: usize = MAX_REVIEW_DECISIONS;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
-pub const COMPACT_COMMAND_QUEUE_METADATA = true;
-pub const COMPACT_REVIEW_PROGRESS_METADATA = true;
-pub const IN_PLACE_MODELED_INPUT_INITIALIZATION = true;
-pub const RENDERED_BEGIN_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
-pub const BATCH_REVIEW_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const COMMAND_INPUT_SIZE_CEILING_BYTES: usize = 1_664;
 pub const RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES: usize = 1_144;
 
@@ -198,7 +194,7 @@ pub const CommandInput = struct {
 };
 
 pub const ModeledInputSource = struct {
-    controller: xhci.HidController,
+    controller: modeled_xhci.HidController,
     commands: CommandInput = .{},
     decoder: input_driver_task.Decoder = .{},
     reports_consumed: usize = 0,
@@ -229,9 +225,9 @@ pub const ModeledInputSource = struct {
         self.commands.initializeAllocated();
         self.decoder = .{};
         self.reports_consumed = 0;
-        const descriptor = xhci.bootKeyboardConfigurationDescriptor(xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
+        const descriptor = modeled_xhci.bootKeyboardConfigurationDescriptor(modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
         _ = try self.controller.attachBootKeyboard(
-            xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+            modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
             descriptor[0..],
         );
     }
@@ -286,15 +282,15 @@ pub const ModeledInputSource = struct {
         ch: u8,
     ) InputError!void {
         const key = hidKeyForAscii(ch) orelse return error.UnsupportedTextInput;
-        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, key.modifiers, &.{key.usage}));
-        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, 0, &.{}));
+        try self.submitKeyboardReport(device_id, endpoint_id, try modeled_xhci.bootKeyboardReport(device_id, endpoint_id, key.modifiers, &.{key.usage}));
+        try self.submitKeyboardReport(device_id, endpoint_id, try modeled_xhci.bootKeyboardReport(device_id, endpoint_id, 0, &.{}));
     }
 
     fn submitKeyboardReport(
         self: *ModeledInputSource,
         device_id: u64,
         endpoint_id: u8,
-        report: xhci.HidReport,
+        report: modeled_xhci.HidReport,
     ) InputError!void {
         const boot_keyboard = self.controller.configuredBootKeyboard() orelse return error.MissingBootKeyboardInterface;
         if (boot_keyboard.device_id != device_id) return error.UnknownHidDevice;
@@ -314,23 +310,13 @@ pub const ModeledInputSource = struct {
         }
     }
 
-    fn pollReport(self: *ModeledInputSource) InputError!?xhci.HidReport {
+    fn pollReport(self: *ModeledInputSource) InputError!?modeled_xhci.HidReport {
         return self.controller.pollHidReport() catch |err| switch (err) {
             error.EventRingEmpty => null,
             else => return err,
         };
     }
 };
-
-var system_input_router: ?*input_router.Router = null;
-
-pub fn bindSystemInputRouter(router: *input_router.Router) void {
-    system_input_router = router;
-}
-
-pub fn clearSystemInputRouter() void {
-    system_input_router = null;
-}
 
 const TestHardwareReportFeed = struct {
     reports: [3]xhci.HardwareBootKeyboardReport = @as([3]xhci.HardwareBootKeyboardReport, @splat(.{})),
@@ -658,14 +644,12 @@ pub const Service = struct {
         runtime: *task_runtime.Runtime,
         scripted_inputs: []const []const u8,
     ) Service {
-        var service = Service{
+        return .{
             .service_id = service_id,
             .task_id = task_id,
             .runtime = runtime,
             .scripted_inputs = scripted_inputs,
         };
-        service.focused_input = system_input_router;
-        return service;
     }
 
     pub fn initConfigured(
@@ -1360,8 +1344,8 @@ test "review service consumes xHCI keyboard reports for physical permission comm
     var runtime = task_runtime.Runtime.init();
     const task = try createReviewTestTask(&runtime, 14, 37);
     var modeled_input = try ModeledInputSource.initDefault();
-    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
-    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
+    try modeled_input.enqueueTextCommand(modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
+    try modeled_input.enqueueTextCommand(modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
 
     var compositor = compositor_session.Session.init();
     var checkpoint_store = compositor_session.CheckpointStore{};
@@ -1424,17 +1408,15 @@ test "permission input consumes only centrally routed events for its focused tas
         .input_proof = noTestHardwareInputProof,
     });
     router.bindCompositor(&compositor, 3);
-    bindSystemInputRouter(&router);
-    defer clearSystemInputRouter();
     var service = Service.init(1, 2, &runtime, &.{});
+    service.bindFocusedInput(&router);
     var modeled_input = try ModeledInputSource.initDefault();
     try modeled_input.enqueueTextCommand(
-        xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
-        xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
         "deny",
     );
     service.bindModeledInput(&modeled_input);
-    try std.testing.expect(service.focused_input != null);
     var command_buffer: [MAX_INPUT_LINE]u8 = undefined;
     var bundle = manifest_fixtures.notesBundle();
     bundle.requested_permissions = manifest_fixtures.notes_permissions[0..1];
@@ -1450,21 +1432,19 @@ test "hosted modeled xHCI reports still count when a focused router is bound" {
     var runtime = task_runtime.Runtime.init();
     const task = try createReviewTestTask(&runtime, 14, 37);
     var modeled_input = try ModeledInputSource.initDefault();
-    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
-    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
+    try modeled_input.enqueueTextCommand(modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
+    try modeled_input.enqueueTextCommand(modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
 
     var compositor = compositor_session.Session.init();
     var checkpoint_store = compositor_session.CheckpointStore{};
     var compositor_service = compositor_session.Service.initWithCheckpoint(17, 18, &runtime, &compositor, &checkpoint_store);
     var router = input_router.Router{};
     router.bindCompositor(&compositor, compositor_service.task_id);
-    bindSystemInputRouter(&router);
-    defer clearSystemInputRouter();
 
     var service = Service.init(17, 18, &runtime, &[_][]const u8{});
+    service.bindFocusedInput(&router);
     service.bindCompositorService(&compositor_service);
     service.bindModeledInput(&modeled_input);
-    try std.testing.expect(service.focused_input != null);
 
     const permissions = [_]manifest.PermissionRequest{
         .{
@@ -1503,13 +1483,13 @@ test "physical input command editing honors shift punctuation and backspace" {
     try std.testing.expectEqual(@as(u8, 0), source.commands.pending_command_count);
     try std.testing.expectEqual(@as(usize, 0), source.commands.commands_completed);
     try source.enqueueTextCommand(
-        xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
-        xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
         "Allow_Local+1?",
     );
     try source.enqueueTextCommand(
-        xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
-        xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
         "denyx\x08",
     );
     var command_buffer: [MAX_INPUT_LINE]u8 = undefined;
@@ -1610,6 +1590,7 @@ test "rendered permission review surface drives allow deny controls through comp
             .policy_service_id = 45_002,
             .service_registry_id = 45_003,
         },
+        .{ .directory = &@import("policy_object.zig").unattached },
     );
     mediator.attachLedger(&ledger);
     const summary = try mediator.applyManifest(task.id, bundle, grants, 55);

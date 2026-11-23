@@ -32,33 +32,6 @@ ReleaseFast build and KVM. All values are cycles per complete operation:
 
 The standard 50% regression allowance applies to both baselines.
 
-`accelerator_scheduler.claim_release` creates, claims, releases and revokes a
-64 KiB CPU/GPU shared-memory object on every iteration. Owned physical backing
-now allocates 16 frames, initializes all 64 KiB before publication, and securely
-erases all 64 KiB before returning the frames. The previous implementation only
-advanced a physical-address metadata cursor, so its 4138.79-cycle baseline and
-7200-cycle ceiling did not cover this memory lifecycle.
-
-The replacement baseline was captured on 2026-10-11 with pinned Zig 0.17.0
-`fast` and GitHub-hosted Ubuntu 24.04 KVM. Three consecutive invocations used
-the same revision, `95bd2fbc3d5178884a36de3ae969e13b2af2e52c`, in
-[CI run 38151161073](https://github.com/Cameron-Lyons/zigos/actions/runs/38151161073).
-Each invocation reports its best of three timed passes; calibration takes the
-slowest invocation. Every invocation reported all 34 cases and passed all 10
-quality gates. Values are cycles per complete create/claim/release/revoke:
-
-| Workload | Attempt 1 (centralus) | Attempt 2 (westus3) | Attempt 3 (westus2) | Baseline | Ceiling |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Backed accelerator lifecycle | 6865.38 | 8268.46 | 4481.98 | 8268.46 | 10000 |
-
-The standard 50% regression allowance remains; the 10000-cycle hard ceiling
-is tighter than that allowance and leaves about 21% above the slowest measured
-invocation. Allocation initialization and secure erasure remain part of the
-measured work. All quality gates remain enforced. Other workloads retained their existing baselines and
-ceilings at that calibration, including the heap and syscall workloads. Attempt 2 exceeded
-the heap allowance and attempt 3 exceeded the syscall allowance; these samples
-calibrate only the changed accelerator lifecycle.
-
 `syscall.fast_entry_roundtrip` now executes the upper-half runtime with per-CPU
 entry ownership and preserves x87, SSE and AVX/YMM state. Its xstate image grew
 from 576 to 832 bytes; the previous 800.10-cycle baseline covered the earlier
@@ -223,10 +196,10 @@ and optimization settings, then run the resulting executable:
 
 ```sh
 zig build-exe -O ReleaseFast -target x86_64-macos \
-  -mcpu x86_64_v3+aes+pclmul+sha --dep text_layout \
+  -mcpu x86_64_v3+aes+pclmul+sha --dep host_benchmarks \
   -Mroot=tools/benchmark_text_layout.zig \
   -O ReleaseFast -target x86_64-macos -mcpu x86_64_v3+aes+pclmul+sha \
-  -Mtext_layout=src/text_layout_benchmark.zig \
+  -Mhost_benchmarks=src/host_benchmarks.zig \
   -femit-bin=/tmp/zigos-text-boundaries-amd64
 /tmp/zigos-text-boundaries-amd64 --boundaries-only
 ```
@@ -255,7 +228,8 @@ It measures small-allocation reuse, successful and exhausted searches through
 a permutation. The batch checks live payload bytes before release and exercises
 allocation-start lookup and adjacent-span coalescing. Results report the median
 of five samples and allocator array metadata, excluding scalar globals.
-The same tool can import an earlier `heap_benchmark.zig` for comparison.
+Pointing `heap` in `src/host_benchmarks.zig` at an earlier allocator compares
+it with the same tool.
 
 The large-span cases hold 1,024 separated eight-KiB holes behind live guards
 and reserve one 32-KiB candidate. `large_fragmented_fit` frees that candidate
@@ -327,57 +301,6 @@ revisions with the current harness before comparing new timings with this table.
 | One task, reactivated | 24.77 ns | 20.45 ns | 17.4% |
 | 128 tasks, reactivated | 28.63 ns | 23.77 ns | 17.0% |
 
-`zig build storage-checksum-benchmark` compares the previous FNV-1a corruption
-checksum with root-v6 seed-zero XXH64 in the same native host `fast` build.
-Each case warms the exact input, checks every repeated result, and reports the
-median of five samples over at least 32 MiB or 100 hashes. The buffers cover a
-small record, one volume block, and one complete inactive checkpoint region.
-On 2026-10-09, Zig 0.17.0 on an Apple Silicon host measured:
-
-| Buffer | FNV-1a | XXH64 | Speedup |
-| --- | ---: | ---: | ---: |
-| 128 bytes | 117.51 ns | 10.92 ns | 10.8× |
-| 4096 bytes | 5407.35 ns | 326.14 ns | 16.6× |
-| 389120 bytes | 518364.58 ns | 28140.41 ns | 18.4× |
-
-A second same-build comparison using the OS's x86-64-v3 plus AES/PCLMUL/SHA
-target under Rosetta measured 110.72/13.45 ns, 5248.72/244.06 ns, and
-500822.09/21732.92 ns for FNV-1a/XXH64 at the same buffer sizes. Reproduce this
-hosted target with:
-
-```sh
-zig run -O ReleaseFast -target x86_64-macos -mcpu=x86_64_v3+aes+pclmul+sha \
-  --dep volume_checksum -Mroot=tools/benchmark_storage_checksum.zig \
-  -O ReleaseFast -target x86_64-macos -mcpu=x86_64_v3+aes+pclmul+sha \
-  -Mvolume_checksum=src/native/storage/volume/checksum.zig
-```
-
-These timings cover only checksumming, not complete storage operations or device
-latency. XXH64 detects accidental corruption; content addresses and metadata
-authentication continue to use SHA-256 and signatures. The new root format
-rejects earlier formats on load and save rather than migrating stored data.
-Fixed known answers, unaligned slices, stripe boundaries, mutation checks, and
-the x86-64 QEMU known answer cover the portable checksum contract.
-
-`zig build storage-quota-benchmark` compares the previous separate count and
-maximum-entry scans with one pass over each workspace/snapshot arena. Both paths
-use the real Store/Directory layouts and identical persistability predicates;
-the current path calls the production quota function. Changing entry counts
-checks exact usage before timing and prevents constant-input elimination.
-Seven alternating-order samples each evaluate 1,000,000 states. A Zig 0.17.0
-`fast` build on Apple Silicon on 2026-10-09 measured:
-
-| State | Previous | Single pass |
-| --- | ---: | ---: |
-| Empty | 18.01 ns | 9.35 ns |
-| Sparse | 17.99 ns | 9.23 ns |
-| Full | 35.60 ns | 19.93 ns |
-| Malformed | 31.57 ns | 17.55 ns |
-
-Checksums matched. These hosted timings include the shared changing-entry
-fixture writes and supplement the persistence and quota policy regressions;
-they do not measure complete saves or device latency.
-
 `zig build workspace-index-benchmark` measures 192 path buckets
 and 96 object buckets with 64 live entries. Cases cover hits, empty misses after
 every home bucket has been occupied and retired, and steady insertion/deletion.
@@ -422,10 +345,10 @@ run this SHA workload under the available Rosetta runtime; the production floor
 remains unchanged. To run only hash comparisons on the native host:
 
 ```sh
-zig run -O ReleaseFast --dep object_chunks \
+zig run -O ReleaseFast --dep host_benchmarks \
   -Mroot=tools/benchmark_object_chunks.zig \
   -O ReleaseFast --dep binary_cursor \
-  -Mobject_chunks=src/object_chunk_benchmark.zig \
+  -Mhost_benchmarks=src/host_benchmarks.zig \
   -O ReleaseFast -Mbinary_cursor=src/native/core/binary_cursor.zig -- --hashes-only
 ```
 

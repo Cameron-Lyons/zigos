@@ -2,17 +2,16 @@ const builtin = @import("builtin");
 const native_util = @import("../core/util.zig");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
+const config = @import("../../kernel/config.zig");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const driver_service = @import("../drivers/driver_service.zig");
-const base_boot_selector = @import("../platform/base_boot_selector.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
-const immutable_base = @import("../platform/immutable_base.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const measured_boot_console = @import("../platform/measured_boot_console.zig");
 const native_service_registry = @import("../services/service_registry.zig");
-const typed_component_abi = @import("../services/typed_component_abi.zig");
+const component_abi_schema = @import("../services/component_abi_schema.zig");
 const native_store_mount = @import("native_store_mount.zig");
 const principal = @import("../core/principal.zig");
 const storage_volume = @import("../storage/storage_volume.zig");
@@ -22,19 +21,11 @@ const session_bootstrap = @import("session_bootstrap.zig");
 const session_contexts = @import("session_manager_contexts.zig");
 const signing = @import("../core/signing.zig");
 const supervisor_mod = @import("supervisor.zig");
-const sync_service = @import("../sync/sync_service.zig");
-const transient_sync_service = @import("../sync/transient_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
-const update_health = @import("../platform/update_health.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const volume_backend = @import("../storage/volume/backend.zig");
 
 const build_bootloader_measurement_label = "efi:zigos_native";
-const BASE_SELECTOR_LINE_BUFFER_BYTES: usize = 128;
-const BASE_IMAGE_DIGEST_OFFSET: usize = 0;
-const POLICY_DIGEST_OFFSET: usize = crypto_hash.digest_bytes;
-const BASE_IMAGE_SLOT_INDEX_OFFSET: usize = crypto_hash.digest_bytes * 2;
-const BASE_IMAGE_SLOT_PAYLOAD_BYTES: usize = BASE_IMAGE_SLOT_INDEX_OFFSET + @sizeOf(u64);
 const critical_service_classes = [_]service_catalog.ServiceClass{
     .policy_mediation,
     .storage_object,
@@ -90,298 +81,9 @@ pub const TrustBoot = struct {
         };
     }
 
-    pub fn verifyProductionArtifactManifest(
-        self: *const TrustBoot,
-        graph: *const service_graph_builder_mod.ServiceGraph,
-    ) bool {
-        const artifact_manifest = self.buildProductionArtifactManifest(graph) catch return false;
-        if (builtin.target.os.tag == .freestanding) {
-            if (!self.verifyGeneratedProductionArtifactManifest(true)) return false;
-            common.printBootMarker(boot_markers.platform_artifact_manifest_verified);
-            return true;
-        }
-        const signed_manifest = signProductionArtifactManifest(artifact_manifest) catch return false;
-        if (!measured_boot.verifySignedArtifactManifest(
-            &signed_manifest,
-            measured_boot.production_artifact_manifest_signer,
-        )) return false;
+    pub fn verifyProductionArtifactManifest(self: *const TrustBoot) bool {
+        if (!self.verifyGeneratedProductionArtifactManifest()) return false;
         common.printBootMarker(boot_markers.platform_artifact_manifest_verified);
-        return true;
-    }
-
-    pub fn proveProductionAbImageRollback(
-        self: *TrustBoot,
-        graph: *const service_graph_builder_mod.ServiceGraph,
-    ) bool {
-        const state_signer = signing.SignerIdentity{
-            .label = "zigos-base-state",
-            .seed = signing.seedFromByte(0xA1),
-        };
-        const image_signer = signing.SignerIdentity{
-            .label = "zigos-base-image",
-            .seed = signing.seedFromByte(0xA2),
-        };
-
-        var base_manager = immutable_base.Manager.init(
-            &self.native_store.storage_service_instance,
-            graph.state.ids.package_service,
-            state_signer,
-        ) catch return false;
-
-        var selector = base_boot_selector.Selector.init();
-        const loaded_selector_before_boot = loadPersistentBaseSelector(&selector);
-        const cold_reboot_selector_verified = loaded_selector_before_boot and
-            selector.activeSlotIndex() != null and
-            selector.activeSlotIndex().? == 0 and
-            selector.coldRebootVerified(0, selector.activation_generation);
-
-        const stable_payload = self.productionBaseImageSlotPayload(graph, 0);
-        _ = base_manager.stageImage(0, "stable-a", &stable_payload, image_signer, 70) catch return false;
-        const stable = base_manager.activate(0, .{}, 71) catch return false;
-        if (stable.rolled_back or stable.active_slot == null or stable.active_slot.? != 0) return false;
-
-        _ = selector.bindStable(&base_manager, base_manager.selectVerifiedBootImage() catch return false, 71) catch return false;
-        if (!persistPersistentBaseSelector(&selector)) return false;
-
-        const candidate_payload = self.productionBaseImageSlotPayload(graph, 1);
-        _ = base_manager.stageImage(1, "stable-b", &candidate_payload, image_signer, 72) catch return false;
-        base_manager.beginActivation(1, 73) catch return false;
-        const candidate = base_manager.selectVerifiedBootImage() catch return false;
-        _ = selector.stageCandidate(&base_manager, candidate, 73) catch return false;
-        const boot_candidate = selector.selectBootCandidate(&base_manager) catch return false;
-        if (boot_candidate.slot_index != 1) return false;
-        if (!persistPersistentBaseSelector(&selector)) return false;
-
-        if (smokeFaultModeIs("rollback_slot_failure")) {
-            base_manager.slots[0].measurement[0] ^= 0xA5;
-            const rejected_rollback = base_manager.finalizeActivation(.{ .network_ok = false }, 74) catch return false;
-            const rejected_selector = selector.finalizeBoot(.{ .network_ok = false }, false, 74) catch return false;
-            if (!rejected_rollback.rolled_back or rejected_rollback.active_slot == null or rejected_rollback.active_slot.? != 0) return false;
-            if (!rejected_selector.rolled_back or rejected_selector.active_slot == null or rejected_selector.active_slot.? != 0) return false;
-            if (base_manager.verifyActiveImage()) return false;
-            if (base_manager.selectVerifiedBootImage()) |_| {
-                return false;
-            } else |err| {
-                if (err != error.ImageVerificationFailed) return false;
-            }
-            common.printBootMarker(boot_markers.platform_base_selector_rollback_slot_failure_rejected);
-            return false;
-        }
-
-        const rolled_back = base_manager.finalizeActivation(.{ .network_ok = false }, 74) catch return false;
-        const selector_rollback = selector.finalizeBoot(.{ .network_ok = false }, false, 74) catch return false;
-        if (!rolled_back.rolled_back) return false;
-        if (rolled_back.active_slot == null or rolled_back.active_slot.? != 0) return false;
-        if (!selector_rollback.rolled_back or selector_rollback.active_slot == null or selector_rollback.active_slot.? != 0) return false;
-        if (selector_rollback.activation_generation != rolled_back.activation_generation) return false;
-        if (selector_rollback.rollback_generation != rolled_back.rollback_generation) return false;
-        if (!persistPersistentBaseSelector(&selector)) return false;
-        if (!base_manager.verifyActiveImage()) return false;
-        const selected = base_manager.selectVerifiedBootImage() catch return false;
-        const selector_selected = selector.activeSelection() orelse return false;
-        if (selected.slot_index != 0 or selected.activation_generation != rolled_back.activation_generation) return false;
-        if (selected.rollback_generation != rolled_back.rollback_generation) return false;
-        if (!baseSelectionMatches(selected, selector_selected)) return false;
-
-        common.printBootMarker(boot_markers.platform_immutable_base_active);
-        common.printBootMarker(boot_markers.platform_immutable_base_boot_selection);
-        common.printBootMarker(boot_markers.platform_activation_rollback_ok);
-        common.printBootMarker(boot_markers.platform_ab_image_rollback_ok);
-        common.printBootMarker(boot_markers.platform_base_selector_active_slot_verified);
-        common.printBootMarker(boot_markers.platform_base_selector_rollback_before_service);
-        if (cold_reboot_selector_verified) {
-            common.printBootMarker(boot_markers.platform_base_selector_cold_reboot_slot_verified);
-        }
-        printBaseSelectorActiveSlot(selected);
-        return true;
-    }
-
-    pub fn proveProductionPostActivationHealthChecks(
-        self: *TrustBoot,
-        graph: *const service_graph_builder_mod.ServiceGraph,
-    ) bool {
-        const owner = graph.state.ids.package_service;
-        const state_signer = signing.SignerIdentity{
-            .label = "zigos-base-state",
-            .seed = signing.seedFromByte(0xA1),
-        };
-        const image_signer = signing.SignerIdentity{
-            .label = "zigos-base-image",
-            .seed = signing.seedFromByte(0xA2),
-        };
-
-        var manager = immutable_base.Manager.init(
-            &self.native_store.storage_service_instance,
-            owner,
-            state_signer,
-        ) catch return false;
-        const workspace_id = manager.workspace_id;
-        const sync_record = self.supervisor.findByClass(.sync_replication) orelse return false;
-        const sync_resident_state = self.native_store.syncResidentStatePtr() catch return false;
-        var sync_instance_storage: transient_sync_service.Instance = undefined;
-        sync_instance_storage.initInto(
-            sync_record.id,
-            graph.service_bindings.bindingFor(.sync_replication).task_id,
-            sync_record.owner,
-            &self.native_store.storage_service_instance,
-            sync_resident_state,
-        ) catch return false;
-        defer sync_instance_storage.deinit();
-        const sync_instance = sync_instance_storage.ptr();
-        const network_probe = self.seedProductionHealthNetworkProbe(sync_instance, workspace_id, 81) catch return false;
-        const compositor_task = self.runtime.find(graph.service_bindings.bindingFor(.compositor_ui_session).task_id) orelse return false;
-        var compositor_snapshot: compositor_session.SessionSnapshot = undefined;
-        self.compositor.snapshotInto(&compositor_snapshot);
-        defer self.compositor.restoreFromSnapshot(&compositor_snapshot) catch |err|
-            native_util.impossibleByInvariantError("activation health restores its retained compositor snapshot", err);
-        _ = self.compositor.openTaskView(compositor_task, "Post-Activation Health") catch return false;
-
-        const policy_service_id = (self.supervisor.findByClass(.policy_mediation) orelse return false).id;
-        const package_service_id = (self.supervisor.findByClass(.package_install_update) orelse return false).id;
-        const sync_service_id = sync_record.id;
-        const network_service_id = (self.supervisor.findByClass(.network_stack) orelse return false).id;
-        const ui_service_id = (self.supervisor.findByClass(.compositor_ui_session) orelse return false).id;
-        const core_service_ids = [_]u64{ policy_service_id, package_service_id, sync_service_id };
-        const healthy_request = update_health.CheckRequest{
-            .core_service_ids = core_service_ids[0..],
-            .storage_workspace_id = workspace_id,
-            .storage_probe_path = "state/activation",
-            .network_service_id = network_service_id,
-            .ui_service_id = ui_service_id,
-            .network_probe = network_probe,
-            .ui_probe = .{ .session = self.compositor },
-            .require_service_path_probes = true,
-        };
-
-        const stable_payload = self.productionBaseImageSlotPayload(graph, 0);
-        _ = manager.stageImage(0, "stable-a", &stable_payload, image_signer, 82) catch return false;
-        manager.beginActivation(0, 83) catch return false;
-        update_health.recordBootSuccess(&manager, 84) catch return false;
-        const first_activation = update_health.validatePendingActivation(
-            &manager,
-            self.supervisor,
-            &self.native_store.storage_service_instance,
-            healthy_request,
-            null,
-            85,
-        ) catch return false;
-        if (first_activation.activation.rolled_back or first_activation.activation.active_slot == null or first_activation.activation.active_slot.? != 0) return false;
-
-        const candidate_payload = self.productionBaseImageSlotPayload(graph, 1);
-        _ = manager.stageImage(1, "stable-b", &candidate_payload, image_signer, 86) catch return false;
-
-        const FailureCase = struct {
-            expected: immutable_base.HealthFailure,
-            request: update_health.CheckRequest,
-            crash_service_id: ?u64 = null,
-            marker: []const u8,
-        };
-        const cases = [_]FailureCase{
-            .{
-                .expected = .boot,
-                .request = healthy_request,
-                .marker = boot_markers.platform_health_checks_boot_rollback,
-            },
-            .{
-                .expected = .core_service,
-                .request = healthy_request,
-                .crash_service_id = sync_service_id,
-                .marker = boot_markers.platform_health_checks_core_rollback,
-            },
-            .{
-                .expected = .storage,
-                .request = .{
-                    .core_service_ids = core_service_ids[0..],
-                    .storage_workspace_id = workspace_id,
-                    .storage_probe_path = "health/missing.txt",
-                    .network_service_id = network_service_id,
-                    .ui_service_id = ui_service_id,
-                    .network_probe = network_probe,
-                    .ui_probe = .{ .session = self.compositor },
-                    .require_service_path_probes = true,
-                },
-                .marker = boot_markers.platform_health_checks_storage_rollback,
-            },
-            .{
-                .expected = .network,
-                .request = .{
-                    .core_service_ids = core_service_ids[0..],
-                    .storage_workspace_id = workspace_id,
-                    .storage_probe_path = "state/activation",
-                    .network_service_id = network_service_id,
-                    .ui_service_id = ui_service_id,
-                    .ui_probe = .{ .session = self.compositor },
-                    .require_service_path_probes = true,
-                },
-                .marker = boot_markers.platform_health_checks_network_rollback,
-            },
-            .{
-                .expected = .ui,
-                .request = .{
-                    .core_service_ids = core_service_ids[0..],
-                    .storage_workspace_id = workspace_id,
-                    .storage_probe_path = "state/activation",
-                    .network_service_id = network_service_id,
-                    .ui_service_id = ui_service_id,
-                    .network_probe = network_probe,
-                    .require_service_path_probes = true,
-                },
-                .marker = boot_markers.platform_health_checks_ui_rollback,
-            },
-        };
-
-        for (cases, 0..) |case, index| {
-            const tick_base = 90 + @as(u64, @intCast(index * 10));
-            manager.beginActivation(1, tick_base) catch return false;
-            if (case.expected != .boot) {
-                update_health.recordBootSuccess(&manager, tick_base + 1) catch return false;
-            }
-            if (case.crash_service_id) |service_id| {
-                if (!self.supervisor.recordCrash(service_id, tick_base + 2, 0xB007_1000 + @as(u32, @intCast(index)))) return false;
-            }
-            const result = update_health.validatePendingActivation(
-                &manager,
-                self.supervisor,
-                &self.native_store.storage_service_instance,
-                case.request,
-                null,
-                tick_base + 3,
-            ) catch return false;
-            if (!result.activation.rolled_back) return false;
-            if (result.activation.failure != case.expected) return false;
-            if (result.activation.active_slot == null or result.activation.active_slot.? != 0) return false;
-            if (case.crash_service_id) |service_id| {
-                if (!self.supervisor.markHealthy(service_id)) return false;
-            }
-            common.printBootMarker(case.marker);
-        }
-
-        manager.beginActivation(1, 150) catch return false;
-        update_health.recordBootSuccess(&manager, 151) catch return false;
-        const success = update_health.validatePendingActivation(
-            &manager,
-            self.supervisor,
-            &self.native_store.storage_service_instance,
-            healthy_request,
-            null,
-            152,
-        ) catch return false;
-        if (success.activation.rolled_back or success.activation.active_slot == null or success.activation.active_slot.? != 1) return false;
-        if (!success.evaluation.report.isHealthy()) return false;
-        if (!manager.verifyActiveImage()) return false;
-        common.printBootMarker(boot_markers.platform_health_checks_promote_ok);
-
-        manager.beginActivation(0, 153) catch return false;
-        update_health.recordBootSuccess(&manager, 154) catch return false;
-        const restored = update_health.validatePendingActivation(
-            &manager,
-            self.supervisor,
-            &self.native_store.storage_service_instance,
-            healthy_request,
-            null,
-            155,
-        ) catch return false;
-        if (restored.activation.rolled_back or restored.activation.active_slot == null or restored.activation.active_slot.? != 0) return false;
         return true;
     }
 
@@ -389,78 +91,69 @@ pub const TrustBoot = struct {
         self: *TrustBoot,
         graph: *const service_graph_builder_mod.ServiceGraph,
     ) bool {
-        const artifact_manifest = self.buildProductionArtifactManifest(graph) catch return false;
-        const signed_manifest = signProductionArtifactManifest(artifact_manifest) catch return false;
-        if (!measured_boot.verifySignedArtifactManifest(
-            &signed_manifest,
-            measured_boot.production_artifact_manifest_signer,
-        )) return false;
-        if (builtin.target.os.tag == .freestanding) {
-            if (!self.verifyGeneratedProductionArtifactManifest(false)) return false;
-        }
-
         var measured = measured_boot.Recorder.init();
         measured.begin(1);
-        const kernel_digest = productionKernelMeasurementDigest() catch return false;
-        const base_manifest_digest = self.productionBaseImageManifestDigest(graph);
-        const policy_digest = self.productionPolicyDigest(graph);
-        measured.add(.kernel, "bootloader+kernel-zigos-native", &kernel_digest) catch return false;
-        measured.add(.base_image, "production-native-base", &base_manifest_digest) catch return false;
-        measured.add(.policy, "production-policy-set", &policy_digest) catch return false;
+        var artifact_manifest = measured_boot.ArtifactManifest.init(1);
+        self.measureProductionArtifacts(graph, &measured, &artifact_manifest) catch return false;
 
-        for (critical_service_classes) |class| {
-            const service_record = self.supervisor.findByClass(class) orelse return false;
-            const image = self.criticalServiceImage(service_record) orelse return false;
-            measured.addCriticalServiceImage(service_record, image) catch return false;
-        }
-        measured.addDriverSet("production-driver-set", self.driver_directory) catch return false;
-
-        var boot = measured.finalize();
-        if (builtin.target.os.tag == .freestanding) {
-            const handoff = measured_boot.MeasurementSnapshot.fromBootRecord(&boot) catch return false;
-            if (smokeFaultModeIs("tampered_artifact_manifest")) {
-                var tampered_manifest = signed_manifest;
-                tampered_manifest.manifest.entries[0].digest[0] ^= 0x5A;
-                if (measured_boot.verifyMeasurementSnapshot(
-                    &handoff,
-                    &tampered_manifest,
-                    measured_boot.production_artifact_manifest_signer,
-                    productionRootProvenance(),
-                )) |_| {
-                    return false;
-                } else |err| switch (err) {
-                    error.UntrustedArtifactManifest, error.ManifestMismatch => {
-                        common.printBootMarker(boot_markers.platform_artifact_manifest_tamper_rejected);
-                        return false;
-                    },
-                    else => return false,
-                }
-            }
-            if (directArtifactTamperFixture()) |fixture| {
-                if (!rejectDirectArtifactTamper(&handoff, &signed_manifest, fixture.kind, fixture.marker)) return false;
-                return false;
-            }
-            boot = measured_boot.verifyMeasurementSnapshot(
+        const recorded = measured.finalize();
+        const handoff = measured_boot.MeasurementSnapshot.fromBootRecord(&recorded) catch return false;
+        if (config.smokeFaultIs(.tampered_artifact_manifest)) {
+            var tampered_manifest = artifact_manifest;
+            tampered_manifest.entries[0].digest[0] ^= 0x5A;
+            if (measured_boot.verifyMeasurementSnapshot(
                 &handoff,
-                &signed_manifest,
-                measured_boot.production_artifact_manifest_signer,
+                &tampered_manifest,
                 productionRootProvenance(),
-            ) catch return false;
-            common.printBootMarker(boot_markers.platform_measurement_snapshot_verified);
-        } else {
-            measured_boot.verifyBootRecordAgainstManifest(
-                &boot,
-                &artifact_manifest,
-                productionRootProvenance(),
-            ) catch return false;
+            )) |_| {
+                return false;
+            } else |err| switch (err) {
+                error.ManifestMismatch => {
+                    common.printBootMarker(boot_markers.platform_artifact_manifest_tamper_rejected);
+                    return false;
+                },
+                else => return false,
+            }
         }
+        if (directArtifactTamperFixture()) |fixture| {
+            rejectDirectArtifactTamper(&handoff, &artifact_manifest, fixture.kind, fixture.marker);
+            return false;
+        }
+        const boot = measured_boot.verifyMeasurementSnapshot(
+            &handoff,
+            &artifact_manifest,
+            productionRootProvenance(),
+        ) catch return false;
+        common.printBootMarker(boot_markers.platform_measurement_snapshot_verified);
         measured_boot_console.printMeasurementSummary(&boot);
         supportMeasuredBootShape(&boot);
-        self.recordMeasurementComparison(&boot);
-        return true;
+        return self.recordMeasurementComparison(&boot);
     }
 
-    fn verifyGeneratedProductionArtifactManifest(self: *const TrustBoot, print_markers: bool) bool {
+    /// Hashes every boot artifact once, recording the same digests in the boot
+    /// record and in the expected manifest that the snapshot is checked against.
+    fn measureProductionArtifacts(
+        self: *const TrustBoot,
+        graph: *const service_graph_builder_mod.ServiceGraph,
+        recorder: *measured_boot.Recorder,
+        artifact_manifest: *measured_boot.ArtifactManifest,
+    ) !void {
+        const kernel_digest = try productionKernelMeasurementDigest();
+        const base_manifest_digest = self.productionBaseImageManifestDigest(graph);
+        const policy_digest = self.productionPolicyDigest(graph);
+        try measured_boot.addMeasuredArtifact(recorder, artifact_manifest, .kernel, "bootloader+kernel-zigos-native", &kernel_digest);
+        try measured_boot.addMeasuredArtifact(recorder, artifact_manifest, .base_image, "production-native-base", &base_manifest_digest);
+        try measured_boot.addMeasuredArtifact(recorder, artifact_manifest, .policy, "production-policy-set", &policy_digest);
+
+        for (critical_service_classes) |class| {
+            const service = self.supervisor.findByClass(class) orelse return error.MissingBootstrapLaunch;
+            const image = self.criticalServiceImage(service) orelse return error.MissingUserspaceImage;
+            try measured_boot.addMeasuredCriticalServiceImage(recorder, artifact_manifest, service, image);
+        }
+        try measured_boot.addMeasuredDriverSet(recorder, artifact_manifest, "production-driver-set", self.driver_directory);
+    }
+
+    fn verifyGeneratedProductionArtifactManifest(self: *const TrustBoot) bool {
         if (builtin.target.os.tag != .freestanding) return true;
 
         const root = @import("root");
@@ -471,8 +164,8 @@ pub const TrustBoot = struct {
         measured_boot.buildArtifactManifestFromGeneratedInto(&generated_manifest, root.production_artifact_manifest) catch {
             return failGeneratedArtifactManifest("generated_manifest_invalid");
         };
-        if (!measured_boot.verifyBuildArtifactManifest(&generated_manifest)) {
-            return failGeneratedArtifactManifest("generated_manifest_untrusted");
+        if (!generated_manifest.hasRequiredShape()) {
+            return failGeneratedArtifactManifest("generated_manifest_incomplete");
         }
 
         const bootloader_source_digest = bootloaderSourceDigest() catch {
@@ -488,7 +181,7 @@ pub const TrustBoot = struct {
         const bootloader_measurement_digest = bootDescriptorDigest() catch {
             return failGeneratedArtifactManifest("bootloader_measurement_digest");
         };
-        if (smokeFaultModeIs("tampered_bootloader_measurement")) {
+        if (config.smokeFaultIs(.tampered_bootloader_measurement)) {
             var tampered_measurement_digest = bootloader_measurement_digest;
             tampered_measurement_digest[0] ^= 0x7B;
             if (measured_boot.buildArtifactDigestMatches(
@@ -523,37 +216,12 @@ pub const TrustBoot = struct {
             return failGeneratedArtifactManifest("userspace_image_count_mismatch");
         }
 
-        if (print_markers) {
-            common.printBootMarker(boot_markers.platform_boot_descriptor_verified);
-            common.printBootMarker(boot_markers.platform_build_artifact_manifest_verified);
-        }
+        common.printBootMarker(boot_markers.platform_boot_descriptor_verified);
+        common.printBootMarker(boot_markers.platform_build_artifact_manifest_verified);
         return true;
     }
 
-    fn buildProductionArtifactManifest(
-        self: *const TrustBoot,
-        graph: *const service_graph_builder_mod.ServiceGraph,
-    ) !measured_boot.ArtifactManifest {
-        var manifest_record = measured_boot.ArtifactManifest.init(1);
-        const kernel_digest = try productionKernelMeasurementDigest();
-        const base_manifest_digest = self.productionBaseImageManifestDigest(graph);
-        const policy_digest = self.productionPolicyDigest(graph);
-        try manifest_record.add(.kernel, "bootloader+kernel-zigos-native", &kernel_digest);
-        try manifest_record.add(.base_image, "production-native-base", &base_manifest_digest);
-        try manifest_record.add(.policy, "production-policy-set", &policy_digest);
-
-        for (critical_service_classes) |class| {
-            const service = self.supervisor.findByClass(class) orelse return error.MissingBootstrapLaunch;
-            const bundle_id = service_catalog.bundleIdForServiceClass(service.class) orelse return error.MissingBootstrapLaunch;
-            const image = self.userspace_catalog.findByBundleId(bundle_id) orelse return error.MissingUserspaceImage;
-            try manifest_record.addCriticalServiceImage(service, image);
-        }
-
-        try manifest_record.addDriverSet("production-driver-set", self.driver_directory);
-        return manifest_record;
-    }
-
-    fn productionBaseImageManifestDigest(
+    pub fn productionBaseImageManifestDigest(
         self: *const TrustBoot,
         graph: *const service_graph_builder_mod.ServiceGraph,
     ) crypto_hash.Digest {
@@ -583,21 +251,7 @@ pub const TrustBoot = struct {
         return crypto_hash.finalize(&hasher);
     }
 
-    fn productionBaseImageSlotPayload(
-        self: *const TrustBoot,
-        graph: *const service_graph_builder_mod.ServiceGraph,
-        slot_index: u8,
-    ) [BASE_IMAGE_SLOT_PAYLOAD_BYTES]u8 {
-        const base_digest = self.productionBaseImageManifestDigest(graph);
-        const policy_digest = self.productionPolicyDigest(graph);
-        var payload = @as([BASE_IMAGE_SLOT_PAYLOAD_BYTES]u8, @splat(0));
-        @memcpy(payload[BASE_IMAGE_DIGEST_OFFSET..][0..crypto_hash.digest_bytes], &base_digest);
-        @memcpy(payload[POLICY_DIGEST_OFFSET..][0..crypto_hash.digest_bytes], &policy_digest);
-        std.mem.writeInt(u64, payload[BASE_IMAGE_SLOT_INDEX_OFFSET..][0..@sizeOf(u64)], slot_index, .little);
-        return payload;
-    }
-
-    fn productionPolicyDigest(
+    pub fn productionPolicyDigest(
         self: *const TrustBoot,
         graph: *const service_graph_builder_mod.ServiceGraph,
     ) crypto_hash.Digest {
@@ -613,7 +267,7 @@ pub const TrustBoot = struct {
         }
         for (&self.service_directory.registry.bindings, 0..) |*binding, interface_index| {
             if (binding.service_id == 0) continue;
-            const contract = &typed_component_abi.contracts[interface_index];
+            const contract = &component_abi_schema.contracts[interface_index];
             crypto_hash.updateInt(&hasher, "registry-service-id", binding.service_id);
             crypto_hash.updateInt(&hasher, "registry-owner-task-id", self.registeredServiceOwnerTaskId(binding));
             crypto_hash.updateInt(&hasher, "registry-endpoint-id", binding.endpoint_id);
@@ -638,40 +292,32 @@ pub const TrustBoot = struct {
     }
 
     fn criticalServiceImage(
-        self: *TrustBoot,
+        self: *const TrustBoot,
         service_record: *const supervisor_mod.ServiceRecord,
     ) ?*const userspace_loader.ImageRecord {
         const bundle_id = service_catalog.bundleIdForServiceClass(service_record.class) orelse return null;
         return self.userspace_catalog.findByBundleId(bundle_id);
     }
 
-    fn recordMeasurementComparison(self: *TrustBoot, boot: *const measured_boot.BootRecord) void {
+    fn recordMeasurementComparison(self: *TrustBoot, boot: *const measured_boot.BootRecord) bool {
         const measurement_signer = signing.SignerIdentity{
             .label = "zigos-measured-boot-state",
             .seed = signing.seedFromByte(0xA6),
         };
-        const direct_previous = loadDirectMeasuredBootSummary(self.native_store.storage_service_instance.service_id);
+        const storage = &self.native_store.storage_service_instance;
         var journal = measured_boot.MeasurementJournal.init(
-            &self.native_store.storage_service_instance,
+            storage,
             session_bootstrap.principals().package_service,
             measurement_signer,
-        ) catch |err| native_util.bootProofFailure("trust boot", err);
-        var comparison = journal.record(boot.*, 130) catch |err| native_util.bootProofFailure("trust boot", err);
-        const current_summary = measured_boot.BootSummary.fromRecord(boot);
-        if (comparison.previous == null) {
-            if (direct_previous) |previous| {
-                comparison.previous = previous;
-                comparison.same_root_digest = std.mem.eql(u8, &previous.root_digest, &current_summary.root_digest);
-                comparison.same_generation = previous.generation == current_summary.generation;
-                comparison.same_record_shape = previous.record_count == current_summary.record_count and
-                    std.mem.eql(u16, &previous.kind_counts, &current_summary.kind_counts);
-            }
+        ) catch return false;
+        var comparison = journal.record(boot.*, 130) catch return false;
+        if (comptime includesVerificationEvidence()) {
+            recordDirectMeasuredBootSummary(storage.service_id, &comparison);
         }
-        _ = storeDirectMeasuredBootSummary(self.native_store.storage_service_instance.service_id, current_summary);
         self.native_store.checkpoint();
         if (comparison.previous == null) {
             common.printBootMarker(boot_markers.platform_measured_boot_first);
-            return;
+            return true;
         }
         if (comparison.same_root_digest) {
             common.printBootMarker(boot_markers.platform_measured_boot_same_root);
@@ -679,111 +325,9 @@ pub const TrustBoot = struct {
         if (comparison.same_record_shape) {
             common.printBootMarker(boot_markers.platform_measured_boot_same_shape);
         }
-    }
-
-    fn seedProductionHealthNetworkProbe(
-        self: *TrustBoot,
-        sync: *sync_service.Service,
-        workspace_id: u64,
-        tick_base: u64,
-    ) !update_health.NetworkProbe {
-        const user = principal.PrincipalId{ .kind = .user, .serial = 82_201 };
-        const source_device = principal.PrincipalId{ .kind = .device, .serial = 82_202 };
-        const target_device = principal.PrincipalId{ .kind = .device, .serial = 82_203 };
-        const user_signer = signing.SignerIdentity{
-            .label = "zigos-health-user",
-            .seed = signing.seedFromByte(0xB4),
-        };
-        const source_signer = signing.SignerIdentity{
-            .label = "zigos-health-source",
-            .seed = signing.seedFromByte(0xB5),
-        };
-        const target_signer = signing.SignerIdentity{
-            .label = "zigos-health-target",
-            .seed = signing.seedFromByte(0xB6),
-        };
-
-        const authority_capability = try sync_service.mintEndpointConnectAuthority(self.capability_table, sync, tick_base, tick_base + 1_000);
-        var port = sync_service.SyncPort.init(sync, self.capability_table);
-        const authority = sync_service.authorityContext(sync, authority_capability, tick_base);
-
-        _ = try port.ensureUserRoot(authority, user, "production-health", user_signer);
-        _ = try port.enrollTrustedDevice(authority, user, source_device, "source", user_signer, source_signer, tick_base + 1);
-        _ = try port.enrollTrustedDevice(authority, user, target_device, "target", user_signer, target_signer, tick_base + 2);
-
-        const local_policy = try port.createNetworkPolicy(authority, .{
-            .owner = sync.owner,
-            .workspace_id = workspace_id,
-            .label = "production-health-local",
-            .mode = .local_network,
-        });
-        const overlay_policy = try port.createNetworkPolicy(authority, .{
-            .owner = sync.owner,
-            .workspace_id = workspace_id,
-            .label = "production-health-overlay",
-            .mode = .named_service_identity,
-            .target = "overlay.production.health",
-        });
-        _ = try port.configureWorkspacePolicy(authority, .{
-            .workspace_id = workspace_id,
-            .owner = user,
-            .device_to_device_policy_id = local_policy.id,
-            .overlay_policy_id = overlay_policy.id,
-        });
-        _ = try port.configureOverlay(authority, workspace_id, source_device, "overlay.production.health", true);
-
-        return .{
-            .sync = sync,
-            .capability_table = self.capability_table,
-            .authority = authority,
-            .workspace_id = workspace_id,
-            .source_device = source_device,
-            .target_device = target_device,
-            .tick = tick_base + 3,
-        };
+        return true;
     }
 };
-
-fn loadPersistentBaseSelector(selector: *base_boot_selector.Selector) bool {
-    if (builtin.target.os.tag != .freestanding) return false;
-    selector.loadFromRootVolume() catch return false;
-    return true;
-}
-
-fn persistPersistentBaseSelector(selector: *const base_boot_selector.Selector) bool {
-    if (builtin.target.os.tag != .freestanding) return true;
-    selector.persistToRootVolume() catch return false;
-    return true;
-}
-
-fn baseSelectionMatches(
-    left: immutable_base.BootSelection,
-    right: immutable_base.BootSelection,
-) bool {
-    return left.slot_index == right.slot_index and
-        left.object_id == right.object_id and
-        left.version_id == right.version_id and
-        left.activation_generation == right.activation_generation and
-        left.rollback_generation == right.rollback_generation and
-        std.mem.eql(u8, &left.measurement, &right.measurement) and
-        left.signer_len == right.signer_len and
-        std.mem.eql(u8, left.signerSlice(), right.signerSlice());
-}
-
-fn printBaseSelectorActiveSlot(selection: immutable_base.BootSelection) void {
-    var buffer: [BASE_SELECTOR_LINE_BUFFER_BYTES]u8 = undefined;
-    const line = std.fmt.bufPrint(
-        &buffer,
-        "{s}{d} generation={d} rollback={d}\n",
-        .{
-            base_boot_selector.active_slot_line_prefix,
-            selection.slot_index,
-            selection.activation_generation,
-            selection.rollback_generation,
-        },
-    ) catch return;
-    console.print(line);
-}
 
 fn productionKernelMeasurementDigest() !crypto_hash.Digest {
     var hasher = crypto_hash.init();
@@ -889,7 +433,6 @@ fn hashPrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, id: principal.Pri
 fn hashServiceRecord(hasher: *crypto_hash.Hasher, service: *const supervisor_mod.ServiceRecord) void {
     const descriptor = service.descriptor();
     crypto_hash.updateInt(hasher, "service-id", service.id);
-    crypto_hash.updateInt(hasher, "service-isolation-domain-id", service.isolationDomainId());
     crypto_hash.updateEnum(hasher, "service-class", service.class);
     crypto_hash.updateEnum(hasher, "service-boundary", descriptor.boundary);
     hashPrincipal(hasher, "service-owner", service.owner);
@@ -946,124 +489,43 @@ test "production policy measurement excludes runtime resource grants" {
     try std.testing.expect(capabilityTargetAffectsProductionPolicy(.policy));
 }
 
-fn smokeFaultModeIs(comptime mode_name: []const u8) bool {
+fn includesVerificationEvidence() bool {
     if (builtin.target.os.tag != .freestanding) return false;
-    const config = @import("../../kernel/config.zig");
-    return std.mem.eql(u8, @tagName(config.smokeFaultMode()), mode_name);
-}
-
-const ArtifactManifestSigningBackend = struct {
-    seed: signing.Seed,
-
-    fn sign(context: *anyopaque, key: signing.ReleaseRootKeyHandle, message: []const u8) ![signing.SIGNATURE_BYTES]u8 {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        const key_pair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(self.seed);
-        if (!std.mem.eql(u8, &key.public_key, &key_pair.public_key.toBytes())) {
-            return error.ReleaseKeyIdentityMismatch;
-        }
-        return (try key_pair.sign(message, null)).toBytes();
-    }
-};
-
-fn signProductionArtifactManifest(
-    artifact_manifest: measured_boot.ArtifactManifest,
-) !measured_boot.SignedArtifactManifest {
-    const identity = measured_boot.production_artifact_manifest_signer;
-    var backend = ArtifactManifestSigningBackend{ .seed = identity.seed };
-    var provider_impl = try signing.ExternalReleaseProvider.init(
-        .{
-            .name = "smoke-kms-artifact-manifest",
-            .profile = .ed25519,
-            .role = .production,
-            .provider_boundary = .cloud_kms,
-            .custody = .cloud_kms,
-            .hardware_backed = true,
-            .rotation_supported = true,
-            .revocation_supported = true,
-            .customer_verifiable = true,
-            .verifier_protocol = .dsse_in_toto_slsa,
-        },
-        .{
-            .key_id = "kms://zigos/smoke/artifact-manifest/1",
-            .label = identity.label,
-            .public_key = try signing.publicKey(identity),
-            .generation = 1,
-            .provider_boundary = .cloud_kms,
-            .custody = .cloud_kms,
-        },
-        &backend,
-        ArtifactManifestSigningBackend.sign,
-    );
-    return measured_boot.signArtifactManifestWithProvider(
-        artifact_manifest,
-        identity,
-        provider_impl.provider(),
-    );
+    return @import("../../kernel/config.zig").includesVerificationEvidence();
 }
 
 const DirectArtifactTamperFixture = struct {
-    mode_name: []const u8,
     kind: measured_boot.MeasurementKind,
     marker: []const u8,
 };
 
-const direct_artifact_tamper_fixtures = [_]DirectArtifactTamperFixture{
-    .{
-        .mode_name = "tampered_kernel",
-        .kind = .kernel,
-        .marker = boot_markers.platform_artifact_kernel_tamper_rejected,
-    },
-    .{
-        .mode_name = "tampered_userspace_image",
-        .kind = .critical_service,
-        .marker = boot_markers.platform_artifact_userspace_image_tamper_rejected,
-    },
-    .{
-        .mode_name = "tampered_policy",
-        .kind = .policy,
-        .marker = boot_markers.platform_artifact_policy_tamper_rejected,
-    },
-    .{
-        .mode_name = "tampered_driver_set",
-        .kind = .driver_set,
-        .marker = boot_markers.platform_artifact_driver_set_tamper_rejected,
-    },
-};
-
-fn directArtifactTamperFixture() ?DirectArtifactTamperFixture {
-    inline for (direct_artifact_tamper_fixtures) |fixture| {
-        if (smokeFaultModeIs(fixture.mode_name)) return fixture;
-    }
+inline fn directArtifactTamperFixture() ?DirectArtifactTamperFixture {
+    if (config.smokeFaultIs(.tampered_kernel)) return .{ .kind = .kernel, .marker = boot_markers.platform_artifact_kernel_tamper_rejected };
+    if (config.smokeFaultIs(.tampered_userspace_image)) return .{ .kind = .critical_service, .marker = boot_markers.platform_artifact_userspace_image_tamper_rejected };
+    if (config.smokeFaultIs(.tampered_policy)) return .{ .kind = .policy, .marker = boot_markers.platform_artifact_policy_tamper_rejected };
+    if (config.smokeFaultIs(.tampered_driver_set)) return .{ .kind = .driver_set, .marker = boot_markers.platform_artifact_driver_set_tamper_rejected };
     return null;
 }
 
 fn rejectDirectArtifactTamper(
     handoff: *const measured_boot.MeasurementSnapshot,
-    signed_manifest: *const measured_boot.SignedArtifactManifest,
+    artifact_manifest: *const measured_boot.ArtifactManifest,
     kind: measured_boot.MeasurementKind,
     marker: []const u8,
-) bool {
+) void {
     var tampered_handoff = handoff.*;
-    if (!tamperFirstHandoffRecord(&tampered_handoff, kind)) return false;
+    if (!tamperFirstHandoffRecord(&tampered_handoff, kind)) return;
 
-    if (measured_boot.verifyMeasurementSnapshot(
+    _ = measured_boot.verifyMeasurementSnapshot(
         &tampered_handoff,
-        signed_manifest,
-        measured_boot.production_artifact_manifest_signer,
+        artifact_manifest,
         productionRootProvenance(),
-    )) |_| {
-        return false;
-    } else |err| {
-        switch (err) {
-            error.ManifestMismatch,
-            error.UntrustedArtifactManifest,
-            error.UntrustedRootProvenance,
-            => {},
-            else => return false,
-        }
-        common.printBootMarker(marker);
-        return true;
-    }
+    ) catch |err| switch (err) {
+        error.ManifestMismatch,
+        error.UntrustedRootProvenance,
+        => common.printBootMarker(marker),
+        else => {},
+    };
 }
 
 fn tamperFirstHandoffRecord(
@@ -1094,6 +556,24 @@ fn supportMeasuredBootShape(boot: *const measured_boot.BootRecord) void {
             common.printBootMarker(boot_markers.platform_boot_image_unverified);
         }
     }
+}
+
+/// Verification kernels leave storage checkpointing disabled, so their measured
+/// boot journal does not survive a cold reboot. They carry the boot summary in
+/// a raw sector instead and fall back to it when the journal has no previous
+/// record. Production kernels rely on the checkpointed journal alone.
+fn recordDirectMeasuredBootSummary(storage_service_id: u64, comparison: *measured_boot.BootComparison) void {
+    const current = comparison.current;
+    if (comparison.previous == null) {
+        if (loadDirectMeasuredBootSummary(storage_service_id)) |previous| {
+            comparison.previous = previous;
+            comparison.same_root_digest = std.mem.eql(u8, &previous.root_digest, &current.root_digest);
+            comparison.same_generation = previous.generation == current.generation;
+            comparison.same_record_shape = previous.record_count == current.record_count and
+                std.mem.eql(u16, &previous.kind_counts, &current.kind_counts);
+        }
+    }
+    _ = storeDirectMeasuredBootSummary(storage_service_id, current);
 }
 
 const direct_measured_boot_lba: u64 = 1536;

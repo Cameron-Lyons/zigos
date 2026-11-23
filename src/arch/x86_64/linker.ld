@@ -29,19 +29,24 @@ SECTIONS
     .rodata ALIGN(4K) : AT(ADDR(.rodata) - __kernel_image_bias)
     {
         __kernel_rodata_start = .;
-        *(.rodata.boot)
         *(.rodata)
         *(.rodata.cst*)
         *(.rodata.str*)
         *(.rodata.*)
-        *(.eh_frame)
-        *(.eh_frame.*)
-        *(.gcc_except_table)
-        *(.gcc_except_table.*)
         . = ALIGN(4K);
         __kernel_rodata_end = .;
     } :readonly
     __kernel_measure_end = .;
+
+    /* Panics walk frame pointers; nothing consumes unwind tables, so they
+       must not enter the measured image. */
+    /DISCARD/ :
+    {
+        *(.eh_frame)
+        *(.eh_frame.*)
+        *(.gcc_except_table)
+        *(.gcc_except_table.*)
+    }
 
     .zigos_userspace_archive ALIGN(4K) : AT(ADDR(.zigos_userspace_archive) - __kernel_image_bias)
     {
@@ -82,8 +87,6 @@ SECTIONS
     } :writable
 
     __kernel_end = .;
-    /* Keep synchronized with PRECISE_IDENTITY_BYTES in paging64.zig. */
-    __kernel_precise_image_physical_end = 64M;
 
     ASSERT(__kernel_start == __kernel_text_start,
            "unexpected loadable section before kernel text")
@@ -99,8 +102,6 @@ SECTIONS
            "unexpected loadable section between kernel data and bss")
     ASSERT(__kernel_bss_end == __kernel_end,
            "unexpected loadable section after kernel bss")
-    ASSERT(__kernel_relro_end - __kernel_image_bias <= __kernel_precise_image_physical_end,
-           "immutable kernel image exceeds the precise mapping region")
     ASSERT(__kernel_start - __kernel_image_bias == 32M,
            "kernel physical load must start at 32 MiB")
     ASSERT(__kernel_end - __kernel_image_bias <= 0x40000000,

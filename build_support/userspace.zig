@@ -1,22 +1,17 @@
 const std = @import("std");
 const native_modules = @import("native_modules.zig");
+const shared = @import("shared.zig");
 const production_registry = @import("../src/native/task/userspace_registry.zig");
 const verification_registry = @import("../src/native/task/userspace_verification_registry.zig");
-const bootloader_source_path = "src/boot/efi_stub.zig";
 
 pub const production_artifact_count = production_registry.production_build_image_specs.len;
 pub const verification_only_artifact_count = verification_registry.verification_only_build_image_specs.len;
 
 pub const ArtifactSet = struct {
-    step: *std.Build.Step,
     production_step: *std.Build.Step,
     verification_step: *std.Build.Step,
-    production_count: usize,
-    verification_count: usize,
     production_compile_steps: [production_artifact_count]*std.Build.Step.Compile,
     verification_only_compile_steps: [verification_only_artifact_count]*std.Build.Step.Compile,
-    production_install_steps: [production_artifact_count]*std.Build.Step,
-    verification_only_install_steps: [verification_only_artifact_count]*std.Build.Step,
     production_archive_module: *std.Build.Module,
     production_manifest_module: *std.Build.Module,
     verification_archive_module: *std.Build.Module,
@@ -37,7 +32,7 @@ pub fn addUserspaceArtifacts(
     const step = b.step("userspace-images", "Build userspace image artifacts");
     const production_step = b.step("userspace-production-images", "Build production userspace image artifacts");
     const verification_step = b.step("userspace-verification-images", "Build production and verification userspace image artifacts");
-    const userspace_modules = native_modules.addUserspaceRuntimeModules(b, target, optimize);
+    const userspace_runtime = native_modules.addUserspaceRuntimeModule(b, target, optimize);
     const native_archive_deps_module = b.createModule(.{
         .root_source_file = b.path("src/archive_generator_deps.zig"),
     });
@@ -48,8 +43,8 @@ pub fn addUserspaceArtifacts(
     const production_manifest_source = production_archive_dir.path(b, "production_artifact_manifest.zig");
     production_archive_run.addArg("zigos_native");
     production_archive_run.addArg("production");
-    production_archive_run.addArg(bootloader_source_path);
-    production_archive_run.addFileArg(b.path(bootloader_source_path));
+    production_archive_run.addArg(shared.bootloader_source_path);
+    production_archive_run.addFileArg(b.path(shared.bootloader_source_path));
 
     const verification_archive_run = b.addRunArtifact(archive_generator);
     const verification_archive_dir = verification_archive_run.addOutputDirectoryArg("userspace-verification-archive");
@@ -57,18 +52,15 @@ pub fn addUserspaceArtifacts(
     const verification_manifest_source = verification_archive_dir.path(b, "verification_artifact_manifest.zig");
     verification_archive_run.addArg("zigos_native");
     verification_archive_run.addArg("verification");
-    verification_archive_run.addArg(bootloader_source_path);
-    verification_archive_run.addFileArg(b.path(bootloader_source_path));
+    verification_archive_run.addArg(shared.bootloader_source_path);
+    verification_archive_run.addFileArg(b.path(shared.bootloader_source_path));
 
     var production_compile_steps: [production_artifact_count]*std.Build.Step.Compile = undefined;
     var verification_only_compile_steps: [verification_only_artifact_count]*std.Build.Step.Compile = undefined;
-    var production_install_steps: [production_artifact_count]*std.Build.Step = undefined;
-    var verification_only_install_steps: [verification_only_artifact_count]*std.Build.Step = undefined;
 
     for (production_registry.production_build_image_specs, 0..) |spec, artifact_index| {
-        const artifact = addUserspaceArtifact(b, target, optimize, userspace_modules, spec);
+        const artifact = addUserspaceArtifact(b, target, optimize, userspace_runtime, spec);
         production_compile_steps[artifact_index] = artifact.compile_step;
-        production_install_steps[artifact_index] = artifact.install_step;
         production_archive_run.addArg(spec.image.bundleId());
         production_archive_run.addArtifactArg(artifact.compile_step);
         verification_archive_run.addArg(spec.image.bundleId());
@@ -77,9 +69,8 @@ pub fn addUserspaceArtifacts(
         verification_step.dependOn(artifact.install_step);
     }
     for (verification_registry.verification_only_build_image_specs, 0..) |spec, artifact_index| {
-        const artifact = addUserspaceArtifact(b, target, optimize, userspace_modules, spec);
+        const artifact = addUserspaceArtifact(b, target, optimize, userspace_runtime, spec);
         verification_only_compile_steps[artifact_index] = artifact.compile_step;
-        verification_only_install_steps[artifact_index] = artifact.install_step;
         verification_archive_run.addArg(spec.image.bundleId());
         verification_archive_run.addArtifactArg(artifact.compile_step);
         verification_step.dependOn(artifact.install_step);
@@ -88,19 +79,12 @@ pub fn addUserspaceArtifacts(
     verification_step.dependOn(&verification_archive_run.step);
     step.dependOn(production_step);
     step.dependOn(verification_step);
-    const x86_64_compile_check = b.step("userspace-x86_64-compile-check", "Compile and inspect the complete production userspace catalog for the long-mode target");
-    x86_64_compile_check.dependOn(production_step);
 
     return .{
-        .step = step,
         .production_step = production_step,
         .verification_step = verification_step,
-        .production_count = production_registry.production_build_image_specs.len,
-        .verification_count = verification_registry.verification_boot_image_specs.len,
         .production_compile_steps = production_compile_steps,
         .verification_only_compile_steps = verification_only_compile_steps,
-        .production_install_steps = production_install_steps,
-        .verification_only_install_steps = verification_only_install_steps,
         .production_archive_module = b.createModule(.{
             .root_source_file = production_archive_source,
         }),
@@ -132,27 +116,18 @@ fn addArchiveGenerator(
     return archive_generator;
 }
 
-pub fn gateArtifactInstalls(artifacts: ArtifactSet, validation_step: *std.Build.Step) void {
-    for (artifacts.production_install_steps) |install_step| {
-        install_step.dependOn(validation_step);
-    }
-    for (artifacts.verification_only_install_steps) |install_step| {
-        install_step.dependOn(validation_step);
-    }
-}
-
 fn addUserspaceArtifact(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
-    userspace_modules: native_modules.UserspaceRuntimeModules,
+    userspace_runtime: *std.Build.Module,
     spec: production_registry.BuildImageSpec,
 ) BuiltArtifact {
     const artifact = addUserspaceCompile(
         b,
         target,
         optimize,
-        userspace_modules,
+        userspace_runtime,
         spec.image,
         @backingInt(spec.service_kind),
         spec.source_path,
@@ -169,7 +144,7 @@ fn addUserspaceCompile(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
-    userspace_modules: native_modules.UserspaceRuntimeModules,
+    userspace_runtime: *std.Build.Module,
     spec: production_registry.ImageSpec,
     service_kind: u8,
     source_path: []const u8,
@@ -194,7 +169,7 @@ fn addUserspaceCompile(
     module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
     module.addAssemblyFile(b.path("src/arch/x86/userspace_start.S"));
     module.addOptions("build_options", options);
-    module.addImport("userspace_runtime", userspace_modules.runtime);
+    module.addImport("userspace_runtime", userspace_runtime);
 
     const image_base = production_registry.imageBaseForBundle(spec.bundleId());
     const artifact = b.addExecutable(.{
@@ -245,7 +220,6 @@ fn addUserspaceLinkerScript(
         \\        *(.eh_frame.*)
         \\    }} :rodata
         \\
-        \\    . = ALIGN(4K);
         \\    . = ALIGN(4K);
         \\    .zigos_userspace_bootstrap :
         \\    {{

@@ -33,7 +33,7 @@ pub fn run(manager: anytype, io: anytype, request: provisioning.Request, pin: []
         identity_proof.sendInput(manager, 0, 0, clock.now());
         if (previous_compositor) |compositor| router.bindCompositor(compositor, previous_task_id) else router.clearCompositor();
         if (previous_source) |source| router.bindHardwareSource(source) else router.clearHardwareSource();
-        _ = display.present(manager.compositorSessionPtr());
+        display.present(manager.compositorSessionPtr());
     }
     var saved = recovery.Record{};
     defer saved.erase();
@@ -141,13 +141,13 @@ pub fn runBoot(manager: anytype, io: anytype, request: provisioning.Request, pin
         identity_proof.sendInput(manager, 0, 0, clock.now());
         if (previous_compositor) |compositor| router.bindCompositor(compositor, previous_task_id) else router.clearCompositor();
         if (previous_source) |source| router.bindHardwareSource(source) else router.clearHardwareSource();
-        _ = display.present(manager.compositorSessionPtr());
+        display.present(manager.compositorSessionPtr());
     }
     _ = manager.servicePendingInputWork(clock.now());
     while (owner.setup.busy() or owner.setup.pending != null) try service(manager, &owner.setup, clock);
     if (!owner.authentication_ready or owner.authentication.view.status != .entering or owner.session.replay.active or
         !std.meta.eql(owner.adapter.recovery_pin.?, trusted) or owner.setup_worker.stack != null) return error.BootOwnerDidNotAuthenticateEnrollment;
-    if (owner.policies.policies.countInUse() != 1 or !owner.policies.verify(1) or
+    if (owner.policies.count() != 1 or !owner.policies.verify(1) or
         owner.adapter.lifetime_ticks != request.max_session_ticks) return error.BootOwnerMissingPolicy;
     const policy_object = owner.policies.activeForScope(.user, request.owner.serial) orelse return error.BootOwnerMissingPolicy;
     const before = io.commands;

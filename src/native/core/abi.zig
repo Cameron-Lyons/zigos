@@ -1,10 +1,8 @@
 const std = @import("std");
 pub const text_layout = @import("text_layout.zig");
 
-pub const ABI_VERSION: u16 = 23;
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
-pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
 
 pub const InputByte = struct {
     // bytes[1..length] carries one supported UTF-8 scalar (1..4 bytes).
@@ -88,7 +86,6 @@ pub const SyscallStatus = enum(u32) {
     invalid_response_buffer,
     buffer_too_small,
     unsupported_operation,
-    unsupported_abi_version,
     denied,
     not_found,
     conflict,
@@ -132,6 +129,8 @@ pub const ScopeFlags = packed struct(u32) {
 pub const RequestHeader = @import("request_header_wire.zig").RequestHeader;
 pub const syscall_wire = @import("syscall_wire.zig");
 pub const TaskTerminateWireRequest = syscall_wire.TaskTerminateWireRequest;
+pub const EndpointFlags = syscall_wire.EndpointFlags;
+pub const ENDPOINT_CREATE_KNOWN_FLAGS = syscall_wire.ENDPOINT_CREATE_KNOWN_FLAGS;
 pub const EndpointCreateWireRequest = syscall_wire.EndpointCreateWireRequest;
 pub const EndpointConnectWireRequest = syscall_wire.EndpointConnectWireRequest;
 pub const EndpointCloseWireRequest = syscall_wire.EndpointCloseWireRequest;
@@ -148,7 +147,6 @@ pub const InputRecvWireRequest = syscall_wire.InputRecvWireRequest;
 pub const SurfacePresentWireRequest = syscall_wire.SurfacePresentWireRequest;
 pub const DeviceDescribeWireRequest = syscall_wire.DeviceDescribeWireRequest;
 pub const DeviceMmioWindowWireRequest = syscall_wire.DeviceMmioWindowWireRequest;
-pub const SurfaceTextWire = syscall_wire.SurfaceTextWire;
 pub const TaskCreateWireRequest = @import("task_create_wire.zig").TaskCreateWireRequest;
 pub const ExecutableImageWireSpec = @import("task_create_wire.zig").ExecutableImageWireSpec;
 pub const CapabilityMintWireRequest = @import("capability_wire.zig").CapabilityMintWireRequest;
@@ -171,7 +169,7 @@ pub const EndpointSendWireRequest = extern struct {
     attached_capability_id: u64 = 0,
 
     pub inline fn validEncoding(self: @This()) bool {
-        return self.header.operation == opcode(.endpoint_send) and self.header.flags == 0 and self.header.reserved == 0 and
+        return self.header.admits(opcode(.endpoint_send)) and
             self.header.subject_task_id != 0 and self.flags & ~ENDPOINT_SEND_MOVE_ATTACHMENT == 0 and
             self.reserved == 0 and self.payload_bytes <= ENDPOINT_INLINE_BYTES and
             (self.flags & ENDPOINT_SEND_MOVE_ATTACHMENT == 0 or self.attached_capability_id != 0);
@@ -188,7 +186,7 @@ pub const EndpointRecvWireRequest = extern struct {
     attached_capability_address: u64,
 
     pub inline fn validEncoding(self: @This()) bool {
-        return self.header.operation == opcode(.endpoint_recv) and self.header.flags == 0 and self.header.reserved == 0 and
+        return self.header.admits(opcode(.endpoint_recv)) and
             self.header.subject_task_id != 0 and self.reserved == 0 and self.payload_capacity <= ENDPOINT_INLINE_BYTES;
     }
 };
@@ -306,16 +304,11 @@ test "input viewport and caret affinity preserve fixed native wire sizes" {
     try std.testing.expect(!text.isCanonical());
 }
 
+// A presented revision of one task surface. Its content is the bounded
+// SurfaceText snapshot; the kernel compositor draws every pixel itself.
 pub const SurfacePresentation = extern struct {
     surface_id: u64,
     revision: u64,
-    buffer_object_id: u64,
-    buffer_offset: u32,
-    buffer_bytes: u32,
-
-    pub fn presentsByHandle(self: *const SurfacePresentation) bool {
-        return self.buffer_object_id != 0 and self.buffer_bytes != 0;
-    }
 };
 
 // Bounded text surfaces are copied once from task-owned memory. The compositor
@@ -488,15 +481,11 @@ pub fn taskFlagsResourceClass(flags: u16) u8 {
     return @intCast((flags & TASK_RESOURCE_CLASS_MASK) >> TASK_RESOURCE_CLASS_SHIFT);
 }
 
-pub fn serviceFlagsHas(flags: u16, mask: u16) bool {
-    return (flags & mask) != 0;
-}
-
 pub fn isCanonicalSurfacePresentation(presentation: *const SurfacePresentation) bool {
-    return presentation.surface_id != 0 and presentation.revision != 0 and presentation.presentsByHandle();
+    return presentation.surface_id != 0 and presentation.revision != 0;
 }
 
-test "native ABI23 keeps all 23 retained opcodes and rejects the removed wait opcode" {
+test "native ABI keeps all 23 retained opcodes and rejects the removed wait opcode" {
     const expected = [_]struct { operation: NativeOperation, opcode: u16 }{
         .{ .operation = .task_create, .opcode = 0x100 },
         .{ .operation = .task_terminate, .opcode = 0x101 },
@@ -523,7 +512,6 @@ test "native ABI23 keeps all 23 retained opcodes and rejects the removed wait op
         .{ .operation = .surface_present, .opcode = 0x116 },
     };
     try std.testing.expectEqual(@as(usize, 23), @typeInfo(NativeOperation).@"enum".field_names.len);
-    try std.testing.expectEqual(@as(u16, 23), ABI_VERSION);
     for (expected) |entry| {
         try std.testing.expectEqual(entry.opcode, opcode(entry.operation));
         try std.testing.expectEqual(entry.operation, std.enums.fromInt(NativeOperation, entry.opcode).?);
@@ -535,15 +523,13 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 23), ABI_VERSION);
-    try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expectEqual(@as(usize, 88), ENDPOINT_INLINE_BYTES);
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ResourceDescriptor));
     try std.testing.expectEqual(@as(usize, 56), @sizeOf(InputEventDescriptor));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(InputRecvResponse));
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(SurfacePresentation));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(SurfacePresentation));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(DeviceDescriptor));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceMmioWindowDescriptor));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(BoolResponse));
@@ -552,18 +538,15 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expectEqual(@as(usize, 104), @sizeOf(SharedMemoryCreateResponse));
     try std.testing.expect(taskFlagsHas(TASK_FLAG_LOCAL_ONLY, TASK_FLAG_LOCAL_ONLY));
     try std.testing.expectEqual(@as(u8, 3), taskFlagsResourceClass(@as(u16, 3) << TASK_RESOURCE_CLASS_SHIFT));
-    try std.testing.expect(serviceFlagsHas(SERVICE_CONNECTION_FLAG_USERSPACE_OWNER, SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
     const packet = inputPacket(InputByte.text, 'a');
     try std.testing.expectEqual(InputByte.text, packet[0]);
     try std.testing.expectEqual(@as(u8, 'a'), packet[1]);
 
-    var presentation = std.mem.zeroes(SurfacePresentation);
-    presentation.surface_id = 9;
-    presentation.revision = 1;
-    presentation.buffer_object_id = 9;
-    presentation.buffer_bytes = 4096;
+    var presentation = SurfacePresentation{ .surface_id = 9, .revision = 1 };
     try std.testing.expect(isCanonicalSurfacePresentation(&presentation));
-    presentation.buffer_object_id = 0;
+    presentation.revision = 0;
+    try std.testing.expect(!isCanonicalSurfacePresentation(&presentation));
+    presentation = .{ .surface_id = 0, .revision = 1 };
     try std.testing.expect(!isCanonicalSurfacePresentation(&presentation));
 }
 

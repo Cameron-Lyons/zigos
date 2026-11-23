@@ -61,7 +61,6 @@ pub fn createBootedServiceTask(
         .launch = .{
             .boundary = .userspace_process,
             .image_id = image_id,
-            .component_abi_version = abi.ABI_VERSION,
             .signed = true,
             .bundle_id = bundle_id,
         },
@@ -114,7 +113,6 @@ pub fn createBootedProbeTask(
         .launch = .{
             .boundary = .userspace_process,
             .image_id = image_id,
-            .component_abi_version = abi.ABI_VERSION,
             .signed = true,
             .bundle_id = bundle_id,
         },

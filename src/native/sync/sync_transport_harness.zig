@@ -1,47 +1,27 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const transport_crypto = @import("../core/transport_crypto.zig");
-const attestation_service = @import("../platform/attestation_service.zig");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const hash_seeds = @import("../core/hash_seeds.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
-const measured_boot = @import("../platform/measured_boot.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const network_policy = @import("network_policy.zig");
 const sync_state = @import("sync_state_support.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/memory/memory.zig")
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 pub const MAX_PACKET_BYTES: usize = 256;
 pub const MAX_RELAY_PACKETS: usize = 16;
-pub const COMPACT_RELAY_METADATA = true;
-pub const COMPACT_TRANSPORT_TELEMETRY = true;
-pub const HEAP_BACKED_RELAY_QUEUE_ON_FREESTANDING = true;
 pub const TelemetryCount = u32;
 pub const ENCRYPTED_PACKET_SIZE_CEILING_BYTES: usize = 352;
 pub const SIGNED_ENCRYPTED_FRAME_SIZE_CEILING_BYTES: usize = 504;
 pub const RELAY_PACKET_SLOT_SIZE_CEILING_BYTES: usize = 368;
-pub const HOST_RELAY_SIZE_CEILING_BYTES: usize = 6_816;
-pub const FREESTANDING_RELAY_SIZE_CEILING_BYTES: usize = 16;
-pub const RELAY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
-    FREESTANDING_RELAY_SIZE_CEILING_BYTES
-else
-    HOST_RELAY_SIZE_CEILING_BYTES;
-pub const HOST_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 6_912;
-pub const FREESTANDING_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 112;
-pub const BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
-    FREESTANDING_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES
-else
-    HOST_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES;
-pub const TRANSPORT_SESSION_SIZE_CEILING_BYTES: usize = 288;
+pub const RELAY_SIZE_CEILING_BYTES: usize = 16;
+pub const BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 112;
+pub const TRANSPORT_SESSION_SIZE_CEILING_BYTES: usize = 320;
 pub const HARNESS_SIZE_CEILING_BYTES: usize = 24;
-pub const EMULATED_NATIVE_TRANSPORT_SIZE_CEILING_BYTES: usize = 40;
 
 comptime {
     if (MAX_PACKET_BYTES > std.math.maxInt(u16) or network_policy.MAX_TARGET_BYTES > std.math.maxInt(u8)) {
@@ -105,19 +85,6 @@ pub const SessionTrustPosture = enum(u8) {
     production_attested,
 };
 
-pub const VerifiedServiceIdentityOpenRequest = struct {
-    task_id: u64,
-    principal_id: principal.PrincipalId,
-    capability_id: u64,
-    policy_id: u64,
-    service_identity: []const u8,
-    attestation_response: attestation_service.RemoteAttestationResponse,
-    attestation_request: attestation_service.RemoteAttestationRequest,
-    attested_boot: *const measured_boot.BootRecord,
-    trusted_root: signing.PublicIdentity,
-    now_ticks: u64,
-};
-
 const RelayPacketSlot = struct {
     in_use: bool = false,
     packet_id: u64 = 0,
@@ -138,18 +105,8 @@ const RelayQueueState = struct {
     packets: RelayPacketArena = RelayPacketArena.init(),
     session_index: RelaySessionIndex = RelaySessionIndex.init(),
 
-    fn initializeAllocated(self: *RelayQueueState) void {
-        @memset(std.mem.asBytes(self), 0);
+    fn initializeZeroed(self: *RelayQueueState) void {
         self.next_packet_id = 1;
-        const no_packet_index = indexed_arena.reusableNoIndex(MAX_RELAY_PACKETS);
-        @memset(self.packets.free_next[0..], no_packet_index);
-        self.packets.free_head = no_packet_index;
-
-        const SessionIndex = @FieldType(RelayQueueState, "session_index");
-        const CompactIndex = @FieldType(SessionIndex, "free_bucket_head");
-        const no_session_bucket: CompactIndex = @intCast(@max(self.session_index.links.len, self.session_index.buckets.len));
-        for (&self.session_index.links) |*link| link.bucket = no_session_bucket;
-        self.session_index.free_bucket_head = no_session_bucket;
     }
 
     fn pendingPacketId(self: *const RelayQueueState) Error!u64 {
@@ -158,20 +115,8 @@ const RelayQueueState = struct {
     }
 };
 
-const heap_backed_relay_queue = HEAP_BACKED_RELAY_QUEUE_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
-const RelayQueueBacking = if (heap_backed_relay_queue) ?*RelayQueueState else RelayQueueState;
-
-pub const relay_queue_layout = .{
-    .heap_backs_queue_on_freestanding = HEAP_BACKED_RELAY_QUEUE_ON_FREESTANDING,
-    .freestanding_handle_size_bytes = @sizeOf(?*RelayQueueState),
-    .backing_size_bytes = @sizeOf(RelayQueueState),
-    .freestanding_resident_savings_bytes = @sizeOf(RelayQueueState) - @sizeOf(?*RelayQueueState),
-    .uses_packet_arena = @hasField(RelayQueueState, "packets"),
-    .uses_session_index = @hasField(RelayQueueState, "session_index"),
-};
-
 pub const Relay = struct {
-    queue: RelayQueueBacking = if (heap_backed_relay_queue) null else .{},
+    queue: table_backing.Lazy(RelayQueueState, RelayQueueState.initializeZeroed) = .{},
     accepted_packets: TelemetryCount = 0,
     delivered_packets: TelemetryCount = 0,
 
@@ -243,37 +188,19 @@ pub const Relay = struct {
     }
 
     fn ensureQueue(self: *Relay) error{NoSpaceLeft}!*RelayQueueState {
-        if (comptime heap_backed_relay_queue) {
-            if (self.queue) |queue| return queue;
-            const allocation = kernel_memory.kmalloc(@sizeOf(RelayQueueState)) orelse return error.NoSpaceLeft;
-            const queue: *RelayQueueState = @ptrCast(@alignCast(allocation));
-            queue.initializeAllocated();
-            self.queue = queue;
-            return queue;
-        }
-        return &self.queue;
+        return self.queue.ensure();
     }
 
     fn queueState(self: *Relay) ?*RelayQueueState {
-        if (comptime heap_backed_relay_queue) return self.queue;
-        return &self.queue;
+        return self.queue.get();
     }
 
     fn queueStateConst(self: *const Relay) ?*const RelayQueueState {
-        if (comptime heap_backed_relay_queue) return self.queue;
-        return &self.queue;
+        return self.queue.get();
     }
 
     pub fn deinit(self: *Relay) void {
-        if (comptime heap_backed_relay_queue) {
-            if (self.queue) |queue| {
-                @memset(std.mem.asBytes(queue), 0);
-                kernel_memory.kfree(@ptrCast(queue));
-                self.queue = null;
-            }
-        } else {
-            self.queue = .{};
-        }
+        self.queue.release();
         self.accepted_packets = 0;
         self.delivered_packets = 0;
     }
@@ -409,6 +336,7 @@ pub const TransportSession = struct {
     relay_domain_len: u8 = 0,
     relay_domain: [network_policy.MAX_TARGET_BYTES]u8 = @as([network_policy.MAX_TARGET_BYTES]u8, @splat(0)),
     key: crypto_hash.Digest,
+    mac_key: crypto_hash.Digest,
     egress_decision: network_policy.EgressDecision,
     trust_posture: SessionTrustPosture = .local_lab_only,
     verified_remote_attestation: bool = false,
@@ -500,37 +428,6 @@ pub const Harness = struct {
             target_device,
             "",
         );
-    }
-
-    pub fn openVerifiedServiceIdentity(
-        self: *Harness,
-        broker: *network_policy.EgressBroker,
-        request: VerifiedServiceIdentityOpenRequest,
-        source_device: principal.PrincipalId,
-        target_device: principal.PrincipalId,
-    ) Error!TransportSession {
-        if (!request.attestation_response.statement.device.eql(target_device)) {
-            self.denied_sessions +|= 1;
-            return error.ProductionAttestationRequired;
-        }
-        const evidence = network_policy.ConnectionEvidence.fromVerifiedRemoteAttestation(
-            .{ .service_identity = request.service_identity },
-            request.attestation_response,
-            request.attestation_request,
-            request.attested_boot,
-            request.trusted_root,
-        ) orelse {
-            self.denied_sessions +|= 1;
-            return error.ProductionAttestationRequired;
-        };
-        return self.openServiceIdentity(broker, .{
-            .task_id = request.task_id,
-            .principal_id = request.principal_id,
-            .capability_id = request.capability_id,
-            .policy_id = request.policy_id,
-            .evidence = evidence,
-            .now_ticks = request.now_ticks,
-        }, source_device, target_device);
     }
 
     pub fn openTpmServiceIdentity(
@@ -659,6 +556,8 @@ pub const Harness = struct {
         const session_id = try self.pendingSessionId();
         const trust_posture = sessionTrustPosture(request.evidence, decision.policy_decision);
 
+        var key = try transport_crypto.freshKey(sessionContext(transport, trust_posture, request, source_device, target_device, relay_domain));
+        defer std.crypto.secureZero(u8, &key);
         var session = TransportSession{
             .id = session_id,
             .task_id = request.task_id,
@@ -667,7 +566,8 @@ pub const Harness = struct {
             .capability_id = request.capability_id,
             .source_device = source_device,
             .target_device = target_device,
-            .key = try transport_crypto.freshKey(sessionContext(transport, trust_posture, request, source_device, target_device, relay_domain)),
+            .key = key,
+            .mac_key = transport_crypto.wireMacKey(key),
             .egress_decision = decision,
             .trust_posture = trust_posture,
             .verified_remote_attestation = request.evidence.verified_remote_attestation,
@@ -703,71 +603,6 @@ fn nextMonotonicId(id: u64) u64 {
     std.debug.assert(id != 0);
     return if (id == std.math.maxInt(u64)) 0 else id + 1;
 }
-
-pub const EmulatedNativeTransport = struct {
-    harness: Harness = Harness.init(),
-    attempted_connections: TelemetryCount = 0,
-    denied_before_transmit: TelemetryCount = 0,
-    transmitted_packets: TelemetryCount = 0,
-
-    pub fn init() EmulatedNativeTransport {
-        return .{};
-    }
-
-    pub fn openServiceIdentity(
-        self: *EmulatedNativeTransport,
-        broker: *network_policy.EgressBroker,
-        request: network_policy.EgressConnectionRequest,
-        source_device: principal.PrincipalId,
-        target_device: principal.PrincipalId,
-    ) Error!TransportSession {
-        self.attempted_connections +|= 1;
-        return self.harness.openServiceIdentity(
-            broker,
-            request,
-            source_device,
-            target_device,
-        ) catch |err| {
-            self.denied_before_transmit +|= 1;
-            return err;
-        };
-    }
-
-    pub fn openVerifiedServiceIdentity(
-        self: *EmulatedNativeTransport,
-        broker: *network_policy.EgressBroker,
-        request: VerifiedServiceIdentityOpenRequest,
-        source_device: principal.PrincipalId,
-        target_device: principal.PrincipalId,
-    ) Error!TransportSession {
-        self.attempted_connections +|= 1;
-        return self.harness.openVerifiedServiceIdentity(
-            broker,
-            request,
-            source_device,
-            target_device,
-        ) catch |err| {
-            self.denied_before_transmit +|= 1;
-            return err;
-        };
-    }
-
-    pub fn send(
-        self: *EmulatedNativeTransport,
-        session: *const TransportSession,
-        plaintext: []const u8,
-    ) Error!EncryptedPacket {
-        const packet = try self.harness.encryptPacket(session, plaintext);
-        self.transmitted_packets +|= 1;
-        return packet;
-    }
-
-    comptime {
-        if (@sizeOf(@This()) > EMULATED_NATIVE_TRANSPORT_SIZE_CEILING_BYTES) {
-            @compileError("emulated native transport exceeds its compact size ceiling");
-        }
-    }
-};
 
 pub fn signPacket(
     packet: EncryptedPacket,
@@ -1376,7 +1211,7 @@ test "encrypted transport harness binds device sessions to attested identity and
     try std.testing.expectEqual(@as(usize, 1), harness.denied_sessions);
 }
 
-test "emulated native transport denies service identity before packet transmission" {
+test "service identity sessions are denied before any packet is encrypted" {
     var policies = network_policy.Directory.init();
     var capabilities = capability.CapabilityTable.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 5 };
@@ -1408,7 +1243,7 @@ test "emulated native transport denies service identity before packet transmissi
     });
 
     var broker = network_policy.EgressBroker.init(&policies, &capabilities);
-    var transport = EmulatedNativeTransport.init();
+    var transport = Harness.init();
 
     try std.testing.expectError(error.EgressDenied, transport.openServiceIdentity(&broker, .{
         .task_id = 44,
@@ -1439,10 +1274,8 @@ test "emulated native transport denies service identity before packet transmissi
         .now_ticks = 5,
     }, source, target));
 
-    try std.testing.expectEqual(@as(usize, 2), transport.attempted_connections);
-    try std.testing.expectEqual(@as(usize, 2), transport.denied_before_transmit);
-    try std.testing.expectEqual(@as(usize, 0), transport.transmitted_packets);
-    try std.testing.expectEqual(@as(usize, 0), transport.harness.created_sessions);
+    try std.testing.expectEqual(@as(usize, 2), transport.denied_sessions);
+    try std.testing.expectEqual(@as(usize, 0), transport.created_sessions);
 
     const session = try transport.openServiceIdentity(&broker, .{
         .task_id = 44,
@@ -1474,30 +1307,19 @@ test "emulated native transport denies service identity before packet transmissi
     try std.testing.expect(session.attestation_verifier_metadata_digest_bound);
     try std.testing.expect(std.mem.eql(u8, &metadata_digest, &session.attestation_verifier_metadata_digest));
 
-    const packet = try transport.send(&session, "attested payload");
+    const packet = try transport.encryptPacket(&session, "attested payload");
     try std.testing.expect(packet.encrypted);
     try std.testing.expect(packet.egress_allowed);
     try std.testing.expect(!std.mem.eql(u8, packet.ciphertextSlice(), "attested payload"));
-    try std.testing.expectEqual(@as(usize, 3), transport.attempted_connections);
-    try std.testing.expectEqual(@as(usize, 2), transport.denied_before_transmit);
-    try std.testing.expectEqual(@as(usize, 1), transport.transmitted_packets);
-    try std.testing.expectEqual(@as(usize, 1), transport.harness.created_sessions);
+    try std.testing.expectEqual(@as(usize, 2), transport.denied_sessions);
+    try std.testing.expectEqual(@as(usize, 1), transport.created_sessions);
 }
 
 test "compact relay metadata preserves exact packet and domain capacities" {
-    try std.testing.expect(COMPACT_TRANSPORT_TELEMETRY);
     try std.testing.expectEqual(TelemetryCount, @FieldType(Relay, "accepted_packets"));
     try std.testing.expectEqual(TelemetryCount, @FieldType(BootedOverlayRelayService, "rejected_packets"));
     try std.testing.expectEqual(TelemetryCount, @FieldType(Harness, "created_sessions"));
-    try std.testing.expectEqual(TelemetryCount, @FieldType(EmulatedNativeTransport, "attempted_connections"));
     try std.testing.expectEqual(@as(usize, HARNESS_SIZE_CEILING_BYTES), @sizeOf(Harness));
-    try std.testing.expectEqual(@as(usize, EMULATED_NATIVE_TRANSPORT_SIZE_CEILING_BYTES), @sizeOf(EmulatedNativeTransport));
-    try std.testing.expect(relay_queue_layout.heap_backs_queue_on_freestanding);
-    try std.testing.expectEqual(@sizeOf(?*anyopaque), relay_queue_layout.freestanding_handle_size_bytes);
-    try std.testing.expectEqual(@as(usize, 6_808), relay_queue_layout.backing_size_bytes);
-    try std.testing.expectEqual(@as(usize, 6_800), relay_queue_layout.freestanding_resident_savings_bytes);
-    try std.testing.expect(relay_queue_layout.uses_packet_arena);
-    try std.testing.expect(relay_queue_layout.uses_session_index);
     try std.testing.expect(@sizeOf(Relay) <= RELAY_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(@as(usize, RELAY_SIZE_CEILING_BYTES), @sizeOf(Relay));
     try std.testing.expect(@sizeOf(BootedOverlayRelayService) <= BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES);

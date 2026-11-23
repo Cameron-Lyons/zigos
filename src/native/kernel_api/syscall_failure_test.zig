@@ -361,7 +361,7 @@ test "syscall failure shared mapping outputs precede budget and preserve mapping
         for (failures) |failure| {
             const output = fixture.badResponse(Response, failure);
             const user_before = fixture.user;
-            const shared_before = fixture.shared;
+            const shared_before = fixture.shared.backing.get().?.*;
             const capabilities_before = fixture.capabilities;
             const task_before = task.*;
             const task_generation = task.capabilityGeneration();
@@ -369,7 +369,7 @@ test "syscall failure shared mapping outputs precede budget and preserve mapping
             try std.testing.expectEqual(if (failure == .short) abi.SyscallStatus.buffer_too_small else abi.SyscallStatus.invalid_response_buffer, result.status);
             try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
             try std.testing.expectEqualSlices(u8, &user_before, &fixture.user);
-            try std.testing.expectEqualDeep(shared_before, fixture.shared);
+            try std.testing.expectEqualDeep(shared_before, fixture.shared.backing.get().?.*);
             try std.testing.expectEqualDeep(capabilities_before, fixture.capabilities);
             try std.testing.expectEqualDeep(task_before, task.*);
             try std.testing.expectEqual(task_generation, task.capabilityGeneration());
@@ -377,12 +377,12 @@ test "syscall failure shared mapping outputs precede budget and preserve mapping
         }
         fixture.mapUser();
         if (operation == .shared_memory_map) {
-            const shared_before = fixture.shared;
+            const shared_before = fixture.shared.backing.get().?.*;
             const user_before = fixture.user;
             const denied = fixture.call(operation, 11, address, fixture.responseAddress(), @sizeOf(Response));
             try std.testing.expectEqual(abi.SyscallStatus.conflict, denied.status);
             try std.testing.expectEqual(abi.DenialReason.budget_exhausted, denied.denial_reason);
-            try std.testing.expectEqualDeep(shared_before, fixture.shared);
+            try std.testing.expectEqualDeep(shared_before, fixture.shared.backing.get().?.*);
             try std.testing.expectEqualSlices(u8, &user_before, &fixture.user);
             task.budget.shared_memory_bytes = shared_memory.PAGE_SIZE;
         }
@@ -1624,9 +1624,8 @@ test "syscall failure close rejects reserved header flags before queued authorit
                 const ring_before = try std.testing.allocator.dupe(u8, slot.endpoint.data_ring);
                 defer std.testing.allocator.free(ring_before);
                 const result = fixture.call(.endpoint_close, 12, request_addr, std.math.maxInt(usize), std.math.maxInt(usize));
-                const opcode_wrong = case == .opcode or case == .opcode_and_flags;
-                try std.testing.expectEqual(if (opcode_wrong) abi.SyscallStatus.unsupported_operation else abi.SyscallStatus.invalid_request_pointer, result.status);
-                try std.testing.expectEqual(if (opcode_wrong) abi.DenialReason.unsupported_operation else abi.DenialReason.invalid_target, result.denial_reason);
+                try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, result.status);
+                try std.testing.expectEqual(abi.DenialReason.invalid_target, result.denial_reason);
                 try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
                 try before.expectPreserved(fixture, queued);
                 const retained = fixture.endpoints.arena.getByHandle(.{ .value = queued.endpoint_id }).?;

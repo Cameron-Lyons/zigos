@@ -78,17 +78,6 @@
     "20. One-sentence summary"
   ],
   "one_sentence_summary": "Zigos is a capability-based, local-first, multi-device operating system with an immutable core, versioned object storage, strong sandboxing, explicit identity, and first-class support for modern accelerators.",
-  "floor_2026": [
-    "kernel_tcb_forbids_product_imports",
-    "yield_plus_sealed_rings",
-    "userspace_nvme_dataplane",
-    "userspace_i225_dataplane",
-    "userspace_xhci_dataplane",
-    "userspace_gop_dataplane",
-    "eight_address_spaces_pku",
-    "efi_only_production_boot",
-    "checkpoint_only_cold_load"
-  ],
   "sections": [
     {
       "id": "1",
@@ -196,7 +185,7 @@
           "name": "syscall surface dispatches typed task creation requests"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ],
@@ -223,8 +212,8 @@
           "name": "spec 5.2 7.5 and 12 keep attestation secrets and accelerator policy explicit"
         },
         {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service can use a provisioned hardware-backed root for visible remote requests"
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation binds verifier policy enrollment PCR and nonce with one use"
         }
       ],
       "requirements": [
@@ -334,7 +323,7 @@
           "name": "sync port requires service-scoped authority before device graph mutation"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -411,7 +400,7 @@
           "name": "sync service persists platform-backed device key bindings across restart"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -447,19 +436,19 @@
           "name": "network policy connections can require remote attestation and pinned service identities"
         },
         {
-          "file": "src/native/drivers/network_driver_task.zig",
-          "name": "native network stack gates service identity packets on attested policy capability"
+          "file": "src/native/sync/sync_transport_harness.zig",
+          "name": "service identity sessions are denied before any packet is encrypted"
         },
         {
-          "file": "src/native/drivers/network_driver_task.zig",
-          "name": "native network stack requires scoped local discovery before discovery broadcast"
+          "file": "src/native/sync/sync_transport.zig",
+          "name": "native sync transport rejects revoked trusted devices and unattested production sessions"
         },
         {
           "file": "src/native/sync/sync_service_test.zig",
           "name": "overlay sessions cover sync remote access private service publishing and encrypted relay"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ],
@@ -502,7 +491,7 @@
           "name": "compositor display framebuffer renders windows switching recovery and permission decisions"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -546,8 +535,8 @@
           "name": "spec 12.3 and 14.3 preserve responsiveness while native app updates stay explicit and reversible"
         },
         {
-          "file": "src/native/task/accelerator_scheduler.zig",
-          "name": "accelerator scheduler tracks exclusive engine claims and zero-copy attachments"
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler separates accelerator claim queues from cpu ready queues"
         },
         {
           "file": "src/native/platform/platform_policy_signals.zig",
@@ -578,7 +567,7 @@
           "name": "shared memory rejects stale task and accelerator descriptors after generation changes"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ],
@@ -605,7 +594,7 @@
           "name": "driver services require signed least-privilege device authority"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -718,20 +707,12 @@
           "name": "policy objects remain signed scoped and enforce enterprise controls"
         },
         {
-          "file": "src/native/policy/policy_example_enforcement.zig",
-          "name": "policy examples route package network removable and sync denials through subsystem gates"
+          "file": "src/native/services/package_service.zig",
+          "name": "package install composes device scope policy and refuses tampered policy"
         },
         {
-          "file": "src/native/policy/policy_example_enforcement.zig",
-          "name": "policy examples deny screen capture grants and enforce retention audit requirements"
-        },
-        {
-          "file": "src/native/policy/enterprise_management.zig",
-          "name": "enterprise management applies overrides revokes and audits organization policy"
-        },
-        {
-          "file": "src/native/policy/enterprise_management.zig",
-          "name": "enterprise management gates device trust administration through existing graph and audits it"
+          "file": "src/native/policy/policy_mediation.zig",
+          "name": "policy mediation applies signed organization policy before user grants"
         }
       ],
       "requirements": [
@@ -954,26 +935,18 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/session/service_catalog.zig",
-        "src/native/session/contract.zig",
         "src/native/drivers/driver_service.zig",
-        "src/native/services/userspace_service_ipc.zig",
         "src/native/session/session_manager_boot_flow.zig",
         "src/native/session/service_graph_builder.zig",
         "src/native/session/session_service_bootstrap.zig",
-        "src/native/session/service_path_proofs.zig",
-        "src/kernel/net/ethernet.zig",
+        "src/native/session/proofs/service_path_proofs.zig",
         "src/kernel/net/link_port.zig",
-        "src/kernel/boot/init/devices.zig",
-        "src/kernel/boot/init/data_plane_boundary.zig"
+        "src/kernel/boot/init/devices.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        },
-        {
-          "file": "src/kernel/boot/init/data_plane_boundary.zig",
-          "name": "kernel device init boundary rejects excluded subsystem data planes"
         }
       ]
     },
@@ -1019,8 +992,8 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service does not count hidden requests and detects tampering"
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation binds verifier policy enrollment PCR and nonce with one use"
         },
         {
           "file": "src/native/platform/os_identity.zig",
@@ -1076,7 +1049,7 @@
       "negative_tests": [
         {
           "file": "src/native/task/task_runtime.zig",
-          "name": "task runtime crosses the first task slab page with indexed handles"
+          "name": "task runtime resolves indexed handles across many tasks"
         },
         {
           "file": "src/native/task/task_runtime_service.zig",
@@ -1087,31 +1060,24 @@
     "REQ-KERNEL-TYPE-AND-BOUNDARY": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/session/contract.zig",
         "src/native/kernel_api/native_kernel.zig",
         "src/native/kernel_api/syscall_surface.zig",
         "src/native/session/service_catalog.zig",
         "src/native/drivers/bootstrap_driver_port.zig",
         "src/native/drivers/network_driver_task.zig",
         "src/native/session/session_service_bootstrap.zig",
-        "src/native/session/service_path_proofs.zig",
-        "src/kernel/net/ethernet.zig",
+        "src/native/session/proofs/service_path_proofs.zig",
         "src/kernel/net/link_port.zig",
-        "src/kernel/boot/init/devices.zig",
-        "src/kernel/boot/init/data_plane_boundary.zig"
+        "src/kernel/boot/init/devices.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
           "file": "src/native/kernel_api/syscall_surface.zig",
-          "name": "syscall surface binds the caller from the trap, not the request header"
-        },
-        {
-          "file": "src/kernel/boot/init/data_plane_boundary.zig",
-          "name": "kernel device init boundary rejects excluded subsystem data planes"
+          "name": "syscall surface rejects request headers whose subject is not the trap caller"
         }
       ]
     },
@@ -1122,11 +1088,11 @@
         "src/native/kernel_api/endpoint.zig",
         "src/native/kernel_api/shared_memory.zig",
         "src/native/kernel_api/native_kernel.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -1167,6 +1133,7 @@
         "src/boot/efi_stub.zig",
         "src/boot/efi_elf.zig",
         "src/boot/image_info.zig",
+        "src/boot/boot_info.zig",
         "tools/host/qemu.zig",
         "src/boot/efi_tcg2.zig",
         "src/boot/tcg_event_log.zig",
@@ -1177,7 +1144,7 @@
       "negative_tests": [
         {
           "file": "src/native/platform/measured_boot.zig",
-          "name": "measurement snapshot rejects unsigned manifests and tampered startup artifacts"
+          "name": "measurement snapshot rejects tampered manifests and startup artifacts"
         },
         {
           "file": "src/native/platform/measured_boot.zig",
@@ -1200,8 +1167,8 @@
           "name": "EFI authentication requires complete enforcing firmware state"
         },
         {
-          "file": "src/kernel/boot/multiboot2.zig",
-          "name": "EFI image provenance rejects duplicates and invalid encoded claims"
+          "file": "src/boot/boot_info.zig",
+          "name": "EFI image provenance rejects zero digests and an invalid authentication byte"
         },
         {
           "file": "src/native/sync/sync_state_store.zig",
@@ -1232,8 +1199,8 @@
           "name": "PCR read rejects substituted banks, extra selections and malformed replies"
         },
         {
-          "file": "src/kernel/boot/multiboot2.zig",
-          "name": "EFI TPM log handoff rejects duplicate and malformed measurement tags"
+          "file": "src/boot/tpm_info.zig",
+          "name": "EFI TPM log handoff rejects malformed copied log receipts"
         },
         {
           "file": "src/kernel/memory/firmware_memory_map.zig",
@@ -1291,34 +1258,6 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service can use a provisioned hardware-backed root for visible remote requests"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service rejects emulator and unauthenticated measured roots for remote attestations"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation verification rejects measured state and statement tampering"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation response cannot be relabeled for another verifier policy"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation signatures bind every request restriction and actual verifier metadata"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation rejects malformed bounded records before hashing or signing"
-        },
-        {
-          "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation signing and provisioning failures leave committed state unchanged"
-        },
-        {
           "file": "src/native/platform/tpm_attestation.zig",
           "name": "TPM remote attestation binds verifier policy enrollment PCR and nonce with one use"
         },
@@ -1332,7 +1271,7 @@
         },
         {
           "file": "src/native/sync/tpm_attestation_test.zig",
-          "name": "TPM remote attestation gates native driver and endpoint connections before transmission"
+          "name": "TPM remote attestation gates native transport connections before transmission"
         },
         {
           "file": "src/native/platform/tpm_attestation.zig",
@@ -1412,8 +1351,7 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/recovery_environment.zig",
-        "src/kernel/boot/recovery_suite.zig",
-        "src/kernel/boot/profiles/recovery.zig"
+        "src/kernel/boot/recovery_suite.zig"
       ],
       "negative_tests": [
         {
@@ -1449,8 +1387,8 @@
         "src/native/task/userspace_executor.zig",
         "src/native/kernel_api/native_kernel_access.zig",
         "src/native/kernel_api/syscall_surface.zig",
-        "src/native/session/runtime_negative_proofs.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/runtime_negative_proofs.zig",
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1470,11 +1408,11 @@
           "name": "syscall surface denies task creation without signed userspace launch provenance"
         },
         {
-          "file": "src/native/session/runtime_negative_proofs.zig",
+          "file": "src/native/session/proofs/runtime_negative_proofs.zig",
           "name": "runtime negative proofs reject modeled bypasses"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1483,22 +1421,20 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/services/component_abi_schema.zig",
-        "src/native/services/typed_component_abi.zig",
         "src/native/session/service_catalog.zig",
-        "src/native/task/userspace_contract_registry.zig",
-        "src/native/services/userspace_service_ipc.zig"
+        "src/native/task/userspace_verification_registry.zig"
       ],
       "negative_tests": [
         {
           "file": "src/native/services/component_abi_schema.zig",
-          "name": "component ABI schema emits manifest interfaces and service catalog bindings"
+          "name": "component ABI schema emits manifest interfaces and interface contracts"
         },
         {
-          "file": "src/native/services/typed_component_abi.zig",
-          "name": "typed component ABI derives operation IDs, wire types, and validators from schema"
+          "file": "src/native/services/component_abi_schema.zig",
+          "name": "component ABI rejects incompatible interfaces and malformed messages"
         },
         {
-          "file": "src/native/services/userspace_service_ipc.zig",
+          "file": "src/tests/fixtures/userspace_service_ipc.zig",
           "name": "core userspace service startup protocols run through endpoint syscalls"
         }
       ]
@@ -1525,11 +1461,11 @@
         "src/native/storage/storage_service.zig",
         "src/native/services/package_service.zig",
         "src/native/sync/sync_service.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -1577,8 +1513,8 @@
         "src/native/task/process_isolation.zig",
         "src/native/task/userspace_executor.zig",
         "src/native/kernel_api/syscall_surface.zig",
-        "src/native/session/runtime_negative_proofs.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/runtime_negative_proofs.zig",
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1586,11 +1522,11 @@
           "name": "process isolation denies memory injection window clipboard and hook bypasses without visible entitlements"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove process isolation visible-entitlement gates"
         },
         {
-          "file": "src/native/session/runtime_negative_proofs.zig",
+          "file": "src/native/session/proofs/runtime_negative_proofs.zig",
           "name": "runtime negative proofs reject modeled bypasses"
         }
       ]
@@ -1724,7 +1660,7 @@
         "src/native/sync/sync_adapters.zig",
         "src/native/sync/sync_service_test.zig",
         "src/native/sync/sync_transport_harness.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1732,7 +1668,7 @@
           "name": "sync service replicates payloads to peer storage through booted relay fallback"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1744,7 +1680,7 @@
         "src/native/sync/sync_service.zig",
         "src/native/sync/sync_adapters.zig",
         "src/native/sync/sync_service_test.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1756,7 +1692,7 @@
           "name": "sync service requires database contract before transactional workspace replication"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1787,19 +1723,19 @@
         "src/native/platform/attestation_service.zig",
         "src/native/platform/os_identity.zig",
         "src/native/drivers/network_driver_task.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/drivers/network_driver_task.zig",
-          "name": "native network stack gates service identity packets on attested policy capability"
+          "file": "src/native/sync/sync_transport_harness.zig",
+          "name": "service identity sessions are denied before any packet is encrypted"
         },
         {
-          "file": "src/native/drivers/network_driver_task.zig",
-          "name": "native network stack requires scoped local discovery before discovery broadcast"
+          "file": "src/native/sync/sync_transport.zig",
+          "name": "native sync transport rejects revoked trusted devices and unattested production sessions"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -1828,7 +1764,7 @@
         "src/native/sync/sync_transport_harness.zig",
         "src/native/sync/network_policy.zig",
         "src/native/drivers/network_driver_task.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1840,7 +1776,7 @@
           "name": "overlay sessions cover sync remote access private service publishing and encrypted relay"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1851,23 +1787,13 @@
         "src/native/platform/compositor_session.zig",
         "src/native/task/task_runtime_service.zig",
         "src/native/platform/native_ux.zig",
-        "src/native/platform/rendered_shell/task_shell_service.zig",
-        "src/native/platform/rendered_shell/shell.zig",
         "src/native/platform/event_ledger.zig",
         "src/native/policy/permission_review_service.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/platform/rendered_shell/tests.zig",
-          "name": "task shell service routes controls through compositor service and recovers persistent task state"
-        },
-        {
-          "file": "src/native/platform/rendered_shell/tests.zig",
-          "name": "task shell service rejects out-of-order controls before creating compositor state"
-        },
-        {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1881,7 +1807,7 @@
         "src/native/platform/compositor_session.zig",
         "src/native/session/service_bootstrap.zig",
         "src/native/session/service_catalog.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1909,7 +1835,7 @@
           "name": "compositor display framebuffer rejects undersized surfaces"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1923,7 +1849,7 @@
         "src/native/platform/compositor_display.zig",
         "src/native/platform/compositor_session.zig",
         "src/native/platform/event_ledger.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1931,7 +1857,7 @@
           "name": "rendered permission review surface drives allow deny controls through compositor display and policy grants"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -1943,7 +1869,7 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/services/media_print_service.zig",
+          "file": "src/kernel/boot/benchmark/models/media_print_service.zig",
           "name": "media print service rejects remote printing and hidden jobs stay silent"
         }
       ]
@@ -1955,7 +1881,7 @@
         "src/native/task/userspace_scheduler.zig",
         "src/native/platform/platform_policy_signals.zig",
         "src/native/task/task_runtime_model.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1975,8 +1901,8 @@
           "name": "userspace scheduler applies thermal and battery decisions to live dispatch"
         },
         {
-          "file": "src/native/task/accelerator_scheduler.zig",
-          "name": "accelerator scheduler tracks exclusive engine claims and zero-copy attachments"
+          "file": "src/native/task/userspace_scheduler.zig",
+          "name": "userspace scheduler separates accelerator claim queues from cpu ready queues"
         }
       ]
     },
@@ -1985,7 +1911,7 @@
       "enforcement_modules": [
         "src/native/kernel_api/shared_memory.zig",
         "src/native/task/accelerator_scheduler.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -1993,7 +1919,7 @@
           "name": "shared memory rejects stale task and accelerator descriptors after generation changes"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         }
       ]
@@ -2005,7 +1931,7 @@
         "src/native/task/accelerator_scheduler.zig",
         "src/native/task/userspace_scheduler.zig",
         "src/native/task/task_runtime_model.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
@@ -2034,17 +1960,16 @@
         "src/native/drivers/device_inventory.zig",
         "src/native/session/service_catalog.zig",
         "src/native/session/session_service_bootstrap.zig",
-        "src/native/session/service_path_proofs.zig",
+        "src/native/session/proofs/service_restart_proofs.zig",
+        "src/native/session/proofs/service_path_proofs.zig",
         "src/native/drivers/bootstrap_driver_port.zig",
         "src/native/drivers/network_driver_task.zig",
-        "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
-        "src/kernel/boot/init/devices.zig",
-        "src/kernel/boot/init/data_plane_boundary.zig"
+        "src/kernel/boot/init/devices.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -2054,10 +1979,6 @@
         {
           "file": "src/tests/spec/drivers_storage_sync.zig",
           "name": "publishedDriversActivateScopedTransports"
-        },
-        {
-          "file": "src/kernel/boot/init/data_plane_boundary.zig",
-          "name": "kernel device init boundary rejects excluded subsystem data planes"
         }
       ]
     },
@@ -2066,11 +1987,11 @@
       "enforcement_modules": [
         "src/native/drivers/driver_service.zig",
         "src/native/kernel_api/device_broker.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -2091,11 +2012,11 @@
         "src/native/session/session_service_bootstrap.zig",
         "src/native/session/session_manager_boot_flow.zig",
         "src/native/platform/event_ledger.zig",
-        "src/native/session/service_path_proofs.zig"
+        "src/native/session/proofs/service_path_proofs.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted driver hot-swap and crash recovery rebind live brokered device authority"
         },
         {
@@ -2151,7 +2072,7 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/update_health.zig",
-        "src/native/session/service_path_proofs.zig",
+        "src/native/session/proofs/service_path_proofs.zig",
         "src/native/session/trust_boot.zig",
         "src/native_smoke_markers.zig",
         "tools/host/qemu.zig"
@@ -2162,7 +2083,7 @@
           "name": "update health failures trigger rollback for each required post-activation check"
         },
         {
-          "file": "src/native/session/service_path_proofs.zig",
+          "file": "src/native/session/proofs/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
         },
         {
@@ -2235,13 +2156,12 @@
     "REQ-POLICY-OBJECTS": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/policy/policy_object.zig",
-        "src/native/services/agent_delegation_service.zig"
+        "src/native/policy/policy_object.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/services/agent_delegation_service.zig",
-          "name": "agent delegation service kill switch revokes stale generations and blocks reuse"
+          "file": "src/native/policy/policy_object.zig",
+          "name": "policy directory gates agent delegation budgets confirmation and audit"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
@@ -2256,7 +2176,6 @@
     "REQ-POLICY-EXAMPLES": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/policy/policy_example_enforcement.zig",
         "src/native/policy/policy_object.zig",
         "src/native/services/package_service.zig",
         "src/native/sync/network_policy.zig",
@@ -2265,32 +2184,43 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/policy/policy_example_enforcement.zig",
-          "name": "policy examples route package network removable and sync denials through subsystem gates"
+          "file": "src/native/services/package_service.zig",
+          "name": "package install composes device scope policy and refuses tampered policy"
         },
         {
-          "file": "src/native/policy/policy_example_enforcement.zig",
-          "name": "policy examples deny screen capture grants and enforce retention audit requirements"
+          "file": "src/native/services/package_service.zig",
+          "name": "package service enforces package supply chain policy before install"
+        },
+        {
+          "file": "src/native/policy/policy_mediation.zig",
+          "name": "policy mediation applies signed organization policy before user grants"
+        },
+        {
+          "file": "src/native/sync/network_policy.zig",
+          "name": "network policy objects enforce discovery inbound service domain and explicit internet grants"
         }
       ]
     },
     "REQ-ENTERPRISE-SUPPORT": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/policy/enterprise_management.zig",
         "src/native/policy/policy_object.zig",
-        "src/native/policy/policy_example_enforcement.zig",
-        "src/native/platform/event_ledger.zig",
+        "src/native/policy/policy_mediation.zig",
+        "src/native/services/package_service.zig",
         "src/native/sync/device_graph.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/policy/enterprise_management.zig",
-          "name": "enterprise management applies overrides revokes and audits organization policy"
+          "file": "src/native/policy/policy_object.zig",
+          "name": "policy directory composes active user device workspace and organization policy"
         },
         {
-          "file": "src/native/policy/enterprise_management.zig",
-          "name": "enterprise management gates device trust administration through existing graph and audits it"
+          "file": "src/native/policy/policy_mediation.zig",
+          "name": "policy mediation applies signed organization policy before user grants"
+        },
+        {
+          "file": "src/native/sync/device_graph.zig",
+          "name": "device graph requires root authority for enrollment retries and revocation"
         }
       ]
     },
@@ -2333,8 +2263,6 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/rendered_shell/production_journey.zig",
-        "src/native/platform/rendered_shell/journey_surface.zig",
-        "src/native/platform/rendered_shell/task_shell_service.zig",
         "src/native/platform/compositor_session.zig",
         "src/native/platform/native_ux.zig",
         "src/native/platform/event_ledger.zig",
@@ -2352,10 +2280,6 @@
         {
           "file": "src/native/platform/compositor_session.zig",
           "name": "compositor service closes task windows during app removal"
-        },
-        {
-          "file": "src/native/platform/rendered_shell/tests.zig",
-          "name": "task shell service rejects out-of-order controls before creating compositor state"
         }
       ]
     },
@@ -2374,7 +2298,6 @@
         "src/native/platform/platform_policy_signals.zig",
         "src/native/task/task_runtime_model.zig",
         "src/native/task/userspace_scheduler.zig",
-        "src/native/platform/rendered_shell.zig",
         "src/native/platform/event_ledger.zig"
       ],
       "negative_tests": [

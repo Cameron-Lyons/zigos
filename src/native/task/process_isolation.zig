@@ -15,9 +15,6 @@ pub const Operation = enum(u8) {
     register_global_hook,
 };
 
-pub const TASK_INDEX_LOOKUPS_PER_UNIQUE_TASK: u8 = 1;
-pub const AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
-
 pub const Request = struct {
     caller_task_id: u64,
     target_task_id: u64 = 0,
@@ -244,7 +241,6 @@ fn createApp(runtime: *task_runtime.Runtime, owner: principal.PrincipalId) !*tas
         .launch = .{
             .boundary = .userspace_process,
             .image_id = owner.serial,
-            .component_abi_version = abi.ABI_VERSION,
             .signed = true,
             .bundle_id = "app.process-isolation-test",
         },

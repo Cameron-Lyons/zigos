@@ -1,6 +1,5 @@
 const std = @import("std");
 const acpi = @import("acpi.zig");
-const endian = @import("../utils/endian.zig");
 const checksum = @import("../utils/checksum.zig");
 
 pub const MCFG_SIGNATURE = "MCFG";
@@ -53,12 +52,12 @@ pub fn segmentZeroAllocation(table: []const u8) Error!Allocation {
     while (offset < table_length) : (offset += ALLOCATION_BYTES) {
         const entry = table[offset .. offset + ALLOCATION_BYTES];
         const allocation = Allocation{
-            .base_address = endian.readU64Le(entry[0..8]),
-            .segment_group = endian.readU16Le(entry[SEGMENT_GROUP_OFFSET..][0..2]),
+            .base_address = std.mem.readInt(u64, entry[0..8], .little),
+            .segment_group = std.mem.readInt(u16, entry[SEGMENT_GROUP_OFFSET..][0..2], .little),
             .start_bus = entry[START_BUS_OFFSET],
             .end_bus = entry[END_BUS_OFFSET],
         };
-        if (!allocationValid(allocation) or endian.readU32Le(entry[RESERVED_OFFSET..][0..4]) != 0) {
+        if (!allocationValid(allocation) or std.mem.readInt(u32, entry[RESERVED_OFFSET..][0..4], .little) != 0) {
             return error.InvalidAllocation;
         }
         if (allocation.segment_group == 0 and allocation.start_bus == 0) {
@@ -80,12 +79,12 @@ fn allocationValid(allocation: Allocation) bool {
 fn validMcfg() [TEST_TABLE_BYTES]u8 {
     var table = @as([TEST_TABLE_BYTES]u8, @splat(0));
     @memcpy(table[0..4], MCFG_SIGNATURE);
-    endian.writeU32Le(table[4..8], table.len);
+    std.mem.writeInt(u32, table[4..8], table.len, .little);
     table[8] = 1;
     @memcpy(table[10..16], "ZIGOS ");
     @memcpy(table[16..24], "PCIEECAM");
-    endian.writeU64Le(table[ALLOCATION_OFFSET..][0..8], 0x0000_0000_B000_0000);
-    endian.writeU16Le(table[ALLOCATION_OFFSET + SEGMENT_GROUP_OFFSET ..][0..2], 0);
+    std.mem.writeInt(u64, table[ALLOCATION_OFFSET..][0..8], 0x0000_0000_B000_0000, .little);
+    std.mem.writeInt(u16, table[ALLOCATION_OFFSET + SEGMENT_GROUP_OFFSET ..][0..2], 0, .little);
     table[ALLOCATION_OFFSET + START_BUS_OFFSET] = 0;
     table[ALLOCATION_OFFSET + END_BUS_OFFSET] = 0xFF;
     checksum.finishSum8Prefix(table[0..], 9, table.len);
@@ -114,7 +113,7 @@ test "MCFG parser rejects malformed allocation metadata" {
     try std.testing.expectError(error.InvalidAllocation, segmentZeroAllocation(reserved[0..]));
 
     var unaligned = validMcfg();
-    endian.writeU64Le(unaligned[ALLOCATION_OFFSET..][0..8], 0xB000_1000);
+    std.mem.writeInt(u64, unaligned[ALLOCATION_OFFSET..][0..8], 0xB000_1000, .little);
     checksum.finishSum8Prefix(unaligned[0..], 9, unaligned.len);
     try std.testing.expectError(error.InvalidAllocation, segmentZeroAllocation(unaligned[0..]));
 
@@ -127,7 +126,7 @@ test "MCFG parser rejects malformed allocation metadata" {
 
 test "MCFG parser requires a root-bus allocation in segment zero" {
     var table = validMcfg();
-    endian.writeU16Le(table[ALLOCATION_OFFSET + SEGMENT_GROUP_OFFSET ..][0..2], 1);
+    std.mem.writeInt(u16, table[ALLOCATION_OFFSET + SEGMENT_GROUP_OFFSET ..][0..2], 1, .little);
     checksum.finishSum8Prefix(table[0..], 9, table.len);
     try std.testing.expectError(error.MissingSegmentZero, segmentZeroAllocation(table[0..]));
 }

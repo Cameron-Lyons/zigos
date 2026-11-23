@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const common = @import("common.zig");
 
-const required_zig_version = "0.17.0";
 const Manager = enum { brew, apt, dnf, pacman };
 const Privilege = enum { direct, sudo };
 const Options = struct { check: bool = false, dry_run: bool = false, manager: ?Manager = null, repair_apt: bool = false, help: bool = false };
@@ -10,23 +9,22 @@ const Command = struct { argv: []const []const u8, fallback: bool = false };
 const apt_options = [_][]const u8{ "-o", "Acquire::Retries=4", "-o", "Acquire::http::Timeout=30", "-o", "Acquire::https::Timeout=30", "-o", "Acquire::ForceIPv4=true" };
 const apt_sources = [_][]const u8{ "/etc/apt/apt-mirrors.txt", "/etc/apt/sources.list", "/etc/apt/sources.list.d/ubuntu.sources" };
 const ovmf_paths = [_][]const u8{
-    "/usr/share/OVMF/OVMF_CODE.fd",                 "/usr/share/OVMF/OVMF_CODE_4M.fd",
-    "/usr/share/edk2/ovmf/OVMF_CODE.fd",            "/usr/share/edk2/ovmf/OVMF_CODE_4M.fd",
-    "/usr/share/edk2/x64/OVMF_CODE.fd",             "/usr/share/qemu/edk2-x86_64-code.fd",
-    "/opt/homebrew/share/qemu/edk2-x86_64-code.fd", "/usr/local/share/qemu/edk2-x86_64-code.fd",
+    "/usr/share/OVMF/OVMF_CODE.fd",              "/usr/share/OVMF/OVMF_CODE_4M.fd",
+    "/usr/share/edk2/ovmf/OVMF_CODE.fd",         "/usr/share/edk2/ovmf/OVMF_CODE_4M.fd",
+    "/usr/share/edk2/x64/OVMF_CODE.fd",          "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
+    "/usr/share/qemu/edk2-x86_64-code.fd",       "/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
+    "/usr/local/share/qemu/edk2-x86_64-code.fd",
 };
 
 pub fn run(ctx: *common.Context, args: []const []const u8) !void {
     const options = try parseOptions(args);
-    if (options.help) return ctx.print("Usage: zig build setup-deps -- [--check | --dry-run [--manager brew|apt|dnf|pacman]]\nRequires preinstalled Zig {s}. --check verifies without installing.\n--dry-run prints command argv and native file repairs without changing the host.\n", .{required_zig_version});
+    if (options.help) return ctx.print("Usage: zig build setup-deps -- [--check | --dry-run [--manager brew|apt|dnf|pacman]]\nRequires the preinstalled Zig that build.zig pins. --check verifies without installing.\n--dry-run prints command argv and native file repairs without changing the host.\n", .{});
     if (options.repair_apt) {
         if (builtin.os.tag != .linux or std.c.geteuid() != 0) return error.AptRepairRequiresRoot;
         return repairAptSources(ctx);
     }
     if (options.check) return verifyTools(ctx);
 
-    // Reject a missing or mismatched compiler before installing other packages.
-    _ = try verifyCompiler(ctx);
     const manager = options.manager orelse try detectManager(ctx);
     const privilege = planPrivilege(manager, std.c.geteuid() == 0, (try ctx.findExecutable("sudo")) != null or options.dry_run) catch |err| {
         try ctx.print("sudo is required when not running as root.\n", .{});
@@ -37,7 +35,7 @@ pub fn run(ctx: *common.Context, args: []const []const u8) !void {
         try ctx.print("Dependency installation plan ({s}); Zig is already installed.\n", .{@tagName(manager)});
         if (manager == .apt) try showAptRepair(ctx, privilege);
         for (commands) |command| try printCommand(ctx, command);
-        try ctx.print("Then verify tools, pinned Zig, x86-64 EFI GRUB modules, and OVMF firmware.\n", .{});
+        try ctx.print("Then verify QEMU, xorriso, OVMF firmware, and the optional swtpm and Python tools.\n", .{});
         return;
     }
 
@@ -118,14 +116,14 @@ fn plannedCommand(allocator: std.mem.Allocator, privilege: Privilege, base: []co
 fn installPlan(allocator: std.mem.Allocator, manager: Manager, privilege: Privilege) ![]const Command {
     var commands = std.ArrayList(Command).empty;
     switch (manager) {
-        .brew => try commands.append(allocator, try plannedCommand(allocator, .direct, &.{ "brew", "install" }, &.{}, &.{ "python", "nasm", "qemu", "dosfstools", "xorriso", "mtools", "x86_64-elf-grub" }, false)),
+        .brew => try commands.append(allocator, try plannedCommand(allocator, .direct, &.{ "brew", "install" }, &.{}, &.{ "python", "qemu", "xorriso", "swtpm" }, false)),
         .apt => {
             try commands.append(allocator, try plannedCommand(allocator, privilege, &.{"apt-get"}, &apt_options, &.{"update"}, false));
-            try commands.append(allocator, try plannedCommand(allocator, privilege, &.{"apt-get"}, &apt_options, &.{ "install", "-y", "python3", "python3-venv", "nasm", "qemu-system-x86", "ovmf", "grub-common", "grub-efi-amd64-bin", "dosfstools", "xorriso", "mtools", "swtpm", "swtpm-tools" }, false));
+            try commands.append(allocator, try plannedCommand(allocator, privilege, &.{"apt-get"}, &apt_options, &.{ "install", "-y", "python3", "python3-venv", "qemu-system-x86", "ovmf", "xorriso", "swtpm", "swtpm-tools" }, false));
         },
-        .dnf => try commands.append(allocator, try plannedCommand(allocator, privilege, &.{ "dnf", "install", "-y" }, &.{}, &.{ "python3", "nasm", "qemu-system-x86", "edk2-ovmf", "grub2-tools", "grub2-tools-extra", "grub2-efi-x64-modules", "dosfstools", "xorriso", "mtools" }, false)),
+        .dnf => try commands.append(allocator, try plannedCommand(allocator, privilege, &.{ "dnf", "install", "-y" }, &.{}, &.{ "python3", "qemu-system-x86", "edk2-ovmf", "xorriso", "swtpm", "swtpm-tools" }, false)),
         .pacman => {
-            try commands.append(allocator, try plannedCommand(allocator, privilege, &.{ "pacman", "-Sy", "--noconfirm" }, &.{}, &.{ "python", "nasm", "grub", "edk2-ovmf", "dosfstools", "xorriso", "mtools" }, false));
+            try commands.append(allocator, try plannedCommand(allocator, privilege, &.{ "pacman", "-Sy", "--noconfirm" }, &.{}, &.{ "python", "edk2-ovmf", "xorriso", "swtpm" }, false));
             for ([_][]const u8{ "qemu-full", "qemu-desktop", "qemu" }, 0..) |package, i| try commands.append(allocator, try plannedCommand(allocator, privilege, &.{ "pacman", "-S", "--noconfirm" }, &.{}, &.{package}, i != 0));
         },
     }
@@ -188,70 +186,32 @@ fn firstRegularFile(ctx: *common.Context, override: ?[]const u8, candidates: []c
     return null;
 }
 
-fn findGrubModules(ctx: *common.Context, executable: []const u8, candidates: []const []const u8) !?[]const u8 {
-    if (ctx.env("GRUB_MODULE_DIR")) |directory| if (directory.len != 0 and regularFile(ctx, try ctx.fmt("{s}/modinfo.sh", .{directory}))) return directory;
-    const bin = std.mem.indexOf(u8, executable, "/bin/") orelse executable.len;
-    const candidate = try ctx.fmt("{s}/lib/x86_64-elf/grub/x86_64-efi", .{executable[0..bin]});
-    if (regularFile(ctx, try ctx.fmt("{s}/modinfo.sh", .{candidate}))) return candidate;
-    for (candidates) |directory| if (regularFile(ctx, try ctx.fmt("{s}/modinfo.sh", .{directory}))) return directory;
-    return null;
-}
-
-fn verifyCompiler(ctx: *common.Context) ![]const u8 {
-    const compiler = ctx.envDefault("ZIG_BIN", "zig");
-    const path = (try ctx.findExecutable(compiler)) orelse {
-        try ctx.print("Missing Zig {s}. Install it exactly or set ZIG_BIN.\n", .{required_zig_version});
-        return error.MissingRequiredZig;
-    };
-    const result = try ctx.capture(&.{ path, "version" });
-    const version = std.mem.trim(u8, result.stdout, " \t\r\n");
-    if (!result.term.success() or !std.mem.eql(u8, version, required_zig_version)) {
-        try ctx.print("Required Zig {s}; {s} reported {s}.\n", .{ required_zig_version, path, version });
-        return error.MissingRequiredZig;
-    }
-    return version;
-}
+const OptionalTool = struct { name: []const u8, purpose: []const u8 };
+const optional_tools = [_]OptionalTool{
+    .{ .name = "swtpm", .purpose = "TPM QEMU tests" },
+    .{ .name = "swtpm_setup", .purpose = "TPM QEMU tests" },
+    .{ .name = "python3", .purpose = "the isolated virt-fw-vars tool used by unified-efi-qemu-test" },
+};
 
 fn verifyTools(ctx: *common.Context) !void {
     try ctx.print("Verifying toolchain...\n", .{});
     var missing = false;
-    for ([_][]const u8{ "python3", "nasm", "qemu-system-x86_64", "xorriso", "mformat", "mcopy", "mmd", "mkfs.fat" }) |name| if ((try ctx.findExecutable(name)) == null) {
+    for ([_][]const u8{ "qemu-system-x86_64", "xorriso" }) |name| if ((try ctx.findExecutable(name)) == null) {
         try ctx.print("Missing command: {s}\n", .{name});
         missing = true;
     };
-    const version: ?[]const u8 = verifyCompiler(ctx) catch |err| switch (err) {
-        error.MissingRequiredZig => blk: {
-            missing = true;
-            break :blk null;
-        },
-        else => return err,
-    };
-    var grub: ?[]const u8 = null;
-    if (ctx.env("GRUB_MKRESCUE")) |name| if (name.len != 0) {
-        grub = try ctx.findExecutable(name);
-    };
-    if (grub == null) for ([_][]const u8{ "x86_64-elf-grub-mkrescue", "grub-mkrescue" }) |name| {
-        grub = try ctx.findExecutable(name);
-        if (grub != null) break;
-    };
-    if (grub == null) {
-        try ctx.print("Missing x86-64 EFI-capable GRUB mkrescue command.\n", .{});
-        missing = true;
-    }
-    const modules = if (grub) |path| try findGrubModules(ctx, path, &.{ "/usr/lib/grub/x86_64-efi", "/usr/lib64/grub/x86_64-efi", "/usr/share/grub/x86_64-efi" }) else null;
-    if (modules) |path| try ctx.print("Using x86-64 EFI GRUB modules: {s}\n", .{path}) else {
-        try ctx.print("Missing x86-64 EFI GRUB modules. Install them or set GRUB_MODULE_DIR.\n", .{});
-        missing = true;
-    }
     if (firstRegularFile(ctx, ctx.env("OVMF_CODE"), &ovmf_paths)) |path| try ctx.print("Using OVMF firmware: {s}\n", .{path}) else {
         try ctx.print("Missing OVMF firmware. Install OVMF/edk2-ovmf or set OVMF_CODE for uefi-qemu-test.\n", .{});
         missing = true;
     }
+    for (optional_tools) |tool| if ((try ctx.findExecutable(tool.name)) == null) {
+        try ctx.print("Optional command {s} is missing; it is needed only for {s}.\n", .{ tool.name, tool.purpose });
+    };
     if (missing) {
         try ctx.print("Dependency verification completed with missing tools.\n", .{});
         return error.MissingDependencies;
     }
-    try ctx.print("Using Zig: {s}\nUsing GRUB mkrescue: {s}\nDependency verification passed.\n", .{ version.?, grub.? });
+    try ctx.print("Using Zig: {s}\nDependency verification passed.\n", .{builtin.zig_version_string});
 }
 
 test "dependency options restrict manager overrides to harmless plans" {
@@ -285,7 +245,7 @@ test "installer argv preserve packages apt retry flags and pacman fallbacks with
     try std.testing.expectEqualStrings("apt-get", apt[0].argv[1]);
     try std.testing.expectEqualSlices([]const u8, &apt_options, apt[0].argv[2..10]);
     try std.testing.expectEqualStrings("update", apt[0].argv[10]);
-    try std.testing.expectEqualSlices([]const u8, &.{ "install", "-y", "python3", "python3-venv", "nasm", "qemu-system-x86", "ovmf", "grub-common", "grub-efi-amd64-bin", "dosfstools", "xorriso", "mtools", "swtpm", "swtpm-tools" }, apt[1].argv[10..]);
+    try std.testing.expectEqualSlices([]const u8, &.{ "install", "-y", "python3", "python3-venv", "qemu-system-x86", "ovmf", "xorriso", "swtpm", "swtpm-tools" }, apt[1].argv[10..]);
     const pacman = try installPlan(arena.allocator(), .pacman, .direct);
     try std.testing.expectEqual(@as(usize, 4), pacman.len);
     try std.testing.expect(!pacman[1].fallback and pacman[2].fallback and pacman[3].fallback);
@@ -332,24 +292,13 @@ test "native apt repair only replaces changed fixture files and retains permissi
     try std.testing.expect(!try repairAptFile(&ctx, try ctx.fmt("{s}/missing", .{temporary}), false));
 }
 
-test "GRUB and OVMF discovery honor existing overrides and reject directories" {
+test "OVMF discovery honors existing overrides and rejects directories" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var environ = std.process.Environ.Map.init(arena.allocator());
     var ctx: common.Context = .{ .allocator = arena.allocator(), .io = std.testing.io, .environ = &environ };
     const temporary = try ctx.tempDir("zigos-dependency-discovery-test");
     defer ctx.removeTree(temporary) catch {};
-    const executable = try ctx.fmt("{s}/bin/grub-mkrescue", .{temporary});
-    const prefix_modules = try ctx.fmt("{s}/lib/x86_64-elf/grub/x86_64-efi", .{temporary});
-    const explicit_modules = try ctx.fmt("{s}/override", .{temporary});
-    const fallback_modules = try ctx.fmt("{s}/fallback", .{temporary});
-    for ([_][]const u8{ prefix_modules, explicit_modules, fallback_modules }) |directory| try ctx.write(try ctx.fmt("{s}/modinfo.sh", .{directory}), "fixture");
-    try environ.put("GRUB_MODULE_DIR", explicit_modules);
-    try std.testing.expectEqualStrings(explicit_modules, (try findGrubModules(&ctx, executable, &.{fallback_modules})).?);
-    try environ.put("GRUB_MODULE_DIR", "missing");
-    try std.testing.expectEqualStrings(prefix_modules, (try findGrubModules(&ctx, executable, &.{fallback_modules})).?);
-    try ctx.removeFile(try ctx.fmt("{s}/modinfo.sh", .{prefix_modules}));
-    try std.testing.expectEqualStrings(fallback_modules, (try findGrubModules(&ctx, executable, &.{fallback_modules})).?);
     const firmware = try ctx.fmt("{s}/firmware.fd", .{temporary});
     const override = try ctx.fmt("{s}/override.fd", .{temporary});
     try ctx.write(firmware, "firmware");

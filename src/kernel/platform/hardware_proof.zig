@@ -6,18 +6,14 @@ const apic = @import("apic.zig");
 const dmar = @import("dmar.zig");
 const fadt = @import("fadt.zig");
 const mcfg = @import("mcfg.zig");
-const framebuffer = @import("framebuffer.zig");
 const smbios = @import("smbios.zig");
-const crash_record = @import("crash_record.zig");
 const handoff = @import("../boot/handoff.zig");
 const console = @import("../utils/console.zig");
+const numfmt = @import("../utils/numfmt.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
-const intel_i225 = @import("../drivers/intel_i225.zig");
 const intel_vtd = @import("intel_vtd.zig");
-const nvme = @import("../drivers/nvme.zig");
 const pci = @import("../drivers/pci.zig");
-const xhci = @import("../drivers/xhci.zig");
 const xhci_hw = @import("../drivers/xhci_hw.zig");
 const hardware_target = @import("../../native/platform/hardware_target.zig");
 
@@ -39,7 +35,7 @@ pub const PROBE_FACTS_SIZE_CEILING_BYTES: usize = 656;
 
 pub const ProbeFacts = struct {
     real_target_sku: bool = false,
-    multiboot_handoff: bool = false,
+    boot_handoff: bool = false,
     memory_map: bool = false,
     memory_capacity_bytes: usize = 0,
     acpi_xsdt: bool = false,
@@ -102,7 +98,7 @@ pub const ProbeFacts = struct {
     attestation_verifier_metadata_digest_bound: bool = false,
 
     pub fn uefiBootReady(self: *const ProbeFacts) bool {
-        return self.real_target_sku and self.multiboot_handoff and self.memory_map and self.framebuffer_gop;
+        return self.real_target_sku and self.boot_handoff and self.memory_map and self.framebuffer_gop;
     }
 
     pub fn acpiTablesReady(self: *const ProbeFacts) bool {
@@ -390,7 +386,7 @@ const RuntimeMarker = enum(u5) {
     evidence_source,
     board_sku,
     smbios_sku,
-    multiboot_memory_map,
+    memory_map,
     acpi_xsdt,
     acpi_madt,
     acpi_fadt,
@@ -574,23 +570,11 @@ pub fn allSubsystemMarkersReady(probe: *const ProbeFacts) bool {
         probe.updateRollbackReady();
 }
 
-pub fn countersReady(probe: *const ProbeFacts) bool {
-    const minimums = hardware_target.first_supported_target.proof_minimums;
-    return probe.cold_boots >= minimums.cold_boots and
-        probe.warm_reboots >= minimums.warm_reboots and
-        probe.storage_write_read_cycles >= minimums.storage_write_read_cycles and
-        probe.network_frame_cycles >= minimums.network_frame_cycles and
-        probe.suspend_resume_cycles >= minimums.suspend_resume_cycles and
-        probe.crash_recovery_cycles >= minimums.crash_recovery_cycles and
-        probe.crash_record_persistence_cycles >= minimums.crash_record_persistence_cycles and
-        probe.update_rollback_cycles >= minimums.update_rollback_cycles;
-}
-
 pub fn captureEarlyBootEvidence() void {
     facts.real_target_sku = false;
     if (handoff.capturedInfo()) |info| {
-        facts.multiboot_handoff = true;
-        if (handoff.capturedMemoryMapSummary(info)) |summary| {
+        facts.boot_handoff = true;
+        if (handoff.summarizeMemoryMap(info.memoryMap()) catch null) |summary| {
             facts.memory_map = summary.hasUsableMemory();
             if (summary.hasUsableMemory()) {
                 const max_usable: u64 = std.math.maxInt(usize);
@@ -598,13 +582,12 @@ pub fn captureEarlyBootEvidence() void {
                 facts.memory_capacity_bytes = @intCast(bounded_usable);
             }
         }
-        _ = handoff.framebufferInfo(info) catch {};
         // Firmware system/configuration tables may occupy boot-services pages.
         // Snapshot the validated identity before the frame allocator reclaims
         // them; later platform probes consume only this kernel-owned result.
-        if (handoff.efi64SystemTableAddress(info)) |address| {
-            smbios.captureTargetSku(address);
-            facts.real_target_sku = smbios.efiSystemTableContainsTargetSku(address, smbios.NUC15CRSU7_SKU);
+        if (info.efi_system_table != 0) {
+            smbios.captureTargetSku(info.efi_system_table);
+            facts.real_target_sku = smbios.efiSystemTableContainsTargetSku(info.efi_system_table, smbios.NUC15CRSU7_SKU);
         }
     }
 
@@ -640,62 +623,16 @@ pub fn recordVtdIsolationProof(proof: intel_vtd.FaultRecord) void {
     printNewMarkers();
 }
 
-pub fn recordInputProof(proof: xhci.InputProof) void {
-    facts.xhci_keyboard_input = facts.xhci_controller and proof.productionHardwareVerified();
-    printNewMarkers();
-}
-
-pub fn recordStorageProof(proof: nvme.IoProof) void {
-    if (facts.nvme_controller and proof.productionHardwareVerified()) {
-        facts.nvme_write_read_io = true;
-        facts.storage_write_read_cycles = @max(facts.storage_write_read_cycles, proof.write_read_cycles);
-    }
-    printNewMarkers();
-}
-
-pub fn recordNetworkProof(proof: intel_i225.PacketProof) void {
-    if (facts.i225_lm_controller and proof.productionHardwareVerified()) {
-        facts.i225_frame_io = true;
-        facts.network_frame_cycles = @max(facts.network_frame_cycles, proof.tx_rx_cycles);
-    }
-    printNewMarkers();
-}
-
-pub fn recordApicTimerProof(proof: apic.TimerInterruptProof) void {
-    if (facts.acpi_madt and proof.productionHardwareVerified()) {
-        facts.apic_timer = true;
-    }
-    printNewMarkers();
-}
-
-pub fn recordFramebufferProof(proof: framebuffer.ScanoutProof) void {
-    if (facts.multiboot_handoff and proof.productionHardwareVerified()) {
-        facts.framebuffer_gop = true;
-    }
+/// Record boot keyboard input delivered by the hardware xHCI event ring.
+/// Only xhci_hw advances this count, so modeled input can never set the fact.
+pub fn recordKeyboardInput(hardware_report_count: u64) void {
+    facts.xhci_keyboard_input = facts.xhci_controller and hardware_report_count != 0;
     printNewMarkers();
 }
 
 pub fn recordPowerCycleCounts(cold_boots: u16, warm_reboots: u16) void {
     facts.cold_boots = @max(facts.cold_boots, cold_boots);
     facts.warm_reboots = @max(facts.warm_reboots, warm_reboots);
-    printNewMarkers();
-}
-
-pub fn recordSuspendResumeProof(proof: fadt.SuspendResumeProof) void {
-    if (facts.acpi_fadt and proof.productionHardwareVerified()) {
-        facts.suspend_resume_power = true;
-        facts.suspend_resume_cycles = @max(facts.suspend_resume_cycles, proof.cycles);
-    }
-    printNewMarkers();
-}
-
-pub fn recordCrashPersistenceProof(proof: crash_record.PersistenceProof) void {
-    if (proof.productionHardwareVerified()) {
-        facts.crash_recovery_record = true;
-        facts.crash_record_persisted = true;
-        facts.crash_recovery_cycles = @max(facts.crash_recovery_cycles, proof.cycles);
-        facts.crash_record_persistence_cycles = @max(facts.crash_record_persistence_cycles, proof.cycles);
-    }
     printNewMarkers();
 }
 
@@ -867,7 +804,7 @@ fn firmwareSupportsTelemetry(firmware: fadt.FixedAcpiDescription) bool {
 
 fn capturedRsdp() ?acpi.Rsdp {
     const info = handoff.capturedInfo() orelse return null;
-    const bytes = handoff.capturedAcpi2Rsdp(info) orelse return null;
+    const bytes = info.acpiRsdp() orelse return null;
     return acpi.parseRsdp(bytes) catch null;
 }
 
@@ -912,7 +849,6 @@ inline fn validatedMadtMapping(comptime map_table: fn (u64, usize) ?[]const u8) 
 }
 
 test "retained MADT remaps firmware after scratch reuse and rejects changed backing" {
-    const endian = @import("../utils/endian.zig");
     const checksum = @import("../utils/checksum.zig");
     const Fixture = struct {
         const physical: u64 = 0x200000;
@@ -932,13 +868,13 @@ test "retained MADT remaps firmware after scratch reuse and rejects changed back
     Fixture.backing = @splat(0);
     Fixture.mappings = 0;
     @memcpy(Fixture.backing[0..4], apic.MADT_SIGNATURE);
-    endian.writeU32Le(Fixture.backing[4..8], Fixture.backing.len);
+    std.mem.writeInt(u32, Fixture.backing[4..8], Fixture.backing.len, .little);
     Fixture.backing[8] = 5;
-    endian.writeU32Le(Fixture.backing[36..40], 0xfee00000);
+    std.mem.writeInt(u32, Fixture.backing[36..40], 0xfee00000, .little);
     Fixture.backing[44] = 0;
     Fixture.backing[45] = 8;
     Fixture.backing[47] = 1;
-    endian.writeU32Le(Fixture.backing[48..52], 1);
+    std.mem.writeInt(u32, Fixture.backing[48..52], 1, .little);
     checksum.finishSum8Prefix(&Fixture.backing, 9, Fixture.backing.len);
     madt_table_physical = Fixture.physical;
     facts.acpi_madt = true;
@@ -973,7 +909,7 @@ fn printNewMarkers() void {
 fn runtimeMarkerReady(marker: RuntimeMarker) bool {
     return switch (marker) {
         .evidence_source, .board_sku, .smbios_sku => true,
-        .multiboot_memory_map => facts.multiboot_handoff and facts.memory_map,
+        .memory_map => facts.boot_handoff and facts.memory_map,
         .acpi_xsdt => facts.acpi_xsdt,
         .acpi_madt => facts.acpi_madt,
         .acpi_fadt => facts.acpi_fadt,
@@ -1024,26 +960,8 @@ fn printMarker(marker: []const u8) void {
 fn printCounter(marker_prefix: []const u8, value: u16) void {
     if (builtin.is_test) return;
     console.print(marker_prefix);
-    printDec(value);
+    numfmt.printDec(value);
     console.print("\n");
-}
-
-fn printDec(value: u16) void {
-    var remaining = value;
-    var digits: [5]u8 = undefined;
-    var count: usize = 0;
-    if (remaining == 0) {
-        console.printChar('0');
-        return;
-    }
-    while (remaining > 0) : (remaining /= 10) {
-        digits[count] = @as(u8, @intCast('0' + (remaining % 10)));
-        count += 1;
-    }
-    while (count > 0) {
-        count -= 1;
-        console.printChar(digits[count]);
-    }
 }
 
 fn testFadtFirmware() fadt.FixedAcpiDescription {
@@ -1086,7 +1004,7 @@ test "hardware proof requires composed NUC subsystem evidence" {
     const target = &hardware_target.first_supported_target;
     const partial = ProbeFacts{
         .real_target_sku = true,
-        .multiboot_handoff = true,
+        .boot_handoff = true,
         .memory_map = true,
         .framebuffer_gop = true,
         .acpi_xsdt = true,
@@ -1118,7 +1036,7 @@ test "hardware proof requires composed NUC subsystem evidence" {
 
     const complete = ProbeFacts{
         .real_target_sku = true,
-        .multiboot_handoff = true,
+        .boot_handoff = true,
         .memory_map = true,
         .framebuffer_gop = true,
         .acpi_xsdt = true,
@@ -1246,340 +1164,17 @@ test "hardware proof records telemetry observations only with real target ACPI a
     try std.testing.expectEqual(@as(u64, 14), factsForTest().acceleratorTelemetryFacts().?.sample_sequence);
 }
 
-test "hardware proof records APIC timer only from verified interrupt proof" {
-    const summary = apic.Summary{
-        .local_apic_address = 0xFEE0_0000,
-        .pc_at_compatible = true,
-        .processor_count = 1,
-        .enabled_processor_count = 1,
-        .io_apic_count = 1,
-        .interrupt_source_override_count = 1,
-    };
-    const observation = apic.TimerInterruptObservation{
-        .local_apic_address = summary.local_apic_address,
-        .vector = 0x40,
-        .initial_count = 10_000,
-        .current_count_before = 8_000,
-        .current_count_after = 6_000,
-        .divide_value = 16,
-        .mode = .periodic,
-        .delivered_interrupts = 2,
-        .eoi_count_before = 9,
-        .eoi_count_after = 11,
-    };
-    const modeled_proof = try apic.proveTimerInterrupt(summary, observation);
-    const hardware_proof = apic.withHardwareTimerEvidence(modeled_proof, .{
-        .source = .hardware_lapic_timer,
-        .initial_count_register_writes = 1,
-        .divide_register_writes = 1,
-        .lvt_timer_register_writes = 1,
-        .current_count_register_reads = 2,
-        .isr_vector_observations = 2,
-        .interrupt_handler_entries = 2,
-        .eoi_register_writes = 2,
-        .tsc_delta_ticks = 100,
-    });
-
+test "hardware proof records xHCI input only for a detected controller with hardware reports" {
     resetForTest();
-    recordApicTimerProof(hardware_proof);
-    try std.testing.expect(!factsForTest().apic_timer);
-
-    resetForTest();
-    facts.acpi_madt = true;
-    recordApicTimerProof(modeled_proof);
-    try std.testing.expect(!factsForTest().apic_timer);
-
-    recordApicTimerProof(hardware_proof);
-    try std.testing.expect(factsForTest().apic_timer);
-
-    var malformed = hardware_proof;
-    malformed.eoi_count = 0;
-    resetForTest();
-    facts.acpi_madt = true;
-    recordApicTimerProof(malformed);
-    try std.testing.expect(!factsForTest().apic_timer);
-}
-
-test "hardware proof records GOP framebuffer only from verified scanout proof" {
-    const info = framebuffer.Info{
-        .physical_address = 0x8000_0000,
-        .width = 64,
-        .height = 16,
-        .pixels_per_scan_line = 64,
-        .format = .bgrx8888,
-        .buffer_bytes = 64 * 16 * 4,
-    };
-    try framebuffer.validate(info);
-    const expected_pixel: u32 = 0x00FF_00FF;
-    var scanline = @as([64 * 4]u8, @splat(0));
-    std.mem.writeInt(u32, scanline[0..4], expected_pixel, .little);
-    const modeled_proof = try framebuffer.proveScanout(info, scanline[0..], expected_pixel);
-    const hardware_proof = framebuffer.withHardwareScanoutEvidence(modeled_proof, .{
-        .source = .hardware_gop_scanout,
-        .gop_mode_info_reads = 1,
-        .framebuffer_base_observations = 1,
-        .framebuffer_stride_observations = 1,
-        .framebuffer_memory_read_bytes = scanline.len,
-        .display_scanout_observations = 1,
-        .expected_pixel_observations = 1,
-        .captured_scanline_bytes = scanline.len,
-        .sink_signal_observations = 1,
-    });
-
-    resetForTest();
-    recordFramebufferProof(hardware_proof);
-    try std.testing.expect(!factsForTest().framebuffer_gop);
-
-    resetForTest();
-    facts.multiboot_handoff = true;
-    recordFramebufferProof(modeled_proof);
-    try std.testing.expect(!factsForTest().framebuffer_gop);
-
-    recordFramebufferProof(hardware_proof);
-    try std.testing.expect(factsForTest().framebuffer_gop);
-
-    var malformed = hardware_proof;
-    malformed.expected_pixel_count = 0;
-    resetForTest();
-    facts.multiboot_handoff = true;
-    recordFramebufferProof(malformed);
-    try std.testing.expect(!factsForTest().framebuffer_gop);
-}
-
-test "hardware proof records xHCI input only from enumerated boot keyboard evidence" {
-    var controller = try xhci.HidController.initWithMmio(xhci.defaultCapabilityRegisters(), .{
-        .command_ring_trbs = 64,
-        .event_ring_trbs = 64,
-        .command_ring_address = 0x1000,
-        .event_ring_address = 0x2000,
-    });
-    const descriptor = xhci.bootKeyboardConfigurationDescriptor(xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
-    const keyboard = try controller.attachBootKeyboard(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, descriptor[0..]);
-    const report = try xhci.bootKeyboardReport(keyboard.device_id, keyboard.endpoint_id, 0, &.{0x04});
-    try controller.submitKeyboardInterruptEvent(keyboard.slot_id, keyboard.endpoint_id, report.reportSlice());
-    const modeled_proof = controller.inputProof().?;
-    const hardware_proof = xhci.withHardwareInputEvidence(modeled_proof, .{
-        .source = .hardware_event_ring,
-        .controller_event_trbs = 1,
-        .event_ring_dma_writes = 1,
-        .device_context_reads_by_controller = 1,
-        .endpoint_context_reads_by_controller = 1,
-        .interrupt_assertions = 1,
-        .port_status_change_events = 1,
-        .input_report_dma_bytes = xhci.HID_BOOT_KEYBOARD_REPORT_BYTES,
-    });
-
-    resetForTest();
-    recordInputProof(hardware_proof);
+    recordKeyboardInput(1);
     try std.testing.expect(!factsForTest().xhci_keyboard_input);
 
     resetForTest();
     facts.xhci_controller = true;
-    recordInputProof(modeled_proof);
+    recordKeyboardInput(0);
     try std.testing.expect(!factsForTest().xhci_keyboard_input);
-
-    recordInputProof(hardware_proof);
+    recordKeyboardInput(1);
     try std.testing.expect(factsForTest().xhci_keyboard_input);
-
-    var malformed = hardware_proof;
-    malformed.mmio.endpoint_context_writes = 0;
-    resetForTest();
-    facts.xhci_controller = true;
-    recordInputProof(malformed);
-    try std.testing.expect(!factsForTest().xhci_keyboard_input);
-}
-
-test "hardware proof records NVMe block cycles only from verified write read proof" {
-    const cap = nvme.ControllerCapabilities{ .raw = (@as(u64, 63) | (@as(u64, 1) << 37)) };
-    var image = @as([nvme.SECTOR_BYTES * 4]u8, @splat(0));
-    var namespaces = [_]nvme.Namespace{.{
-        .id = 1,
-        .sector_count = 4,
-        .image = image[0..],
-    }};
-    var controller = try nvme.Controller.initWithMmio(
-        cap,
-        namespaces[0..],
-        16,
-        nvme.defaultAdminQueuePlan(),
-        nvme.defaultProofPrp1Address(),
-        nvme.SECTOR_BYTES,
-    );
-    const modeled_proof = try controller.proveWriteReadCycles(1, 0, 3);
-    const hardware_proof = nvme.withHardwareCompletionEvidence(modeled_proof, .{
-        .source = .hardware_dma,
-        .controller_completion_writes = 6,
-        .dma_read_bytes = 3 * nvme.SECTOR_BYTES,
-        .dma_write_bytes = 3 * nvme.SECTOR_BYTES,
-        .interrupt_count = 1,
-        .phase_tag_observations = 6,
-    });
-
-    resetForTest();
-    recordStorageProof(hardware_proof);
-    try std.testing.expect(!factsForTest().nvme_write_read_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().storage_write_read_cycles);
-
-    resetForTest();
-    facts.nvme_controller = true;
-    recordStorageProof(modeled_proof);
-    try std.testing.expect(!factsForTest().nvme_write_read_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().storage_write_read_cycles);
-
-    recordStorageProof(hardware_proof);
-    try std.testing.expect(factsForTest().nvme_write_read_io);
-    try std.testing.expectEqual(@as(u16, 3), factsForTest().storage_write_read_cycles);
-
-    var malformed = hardware_proof;
-    malformed.mmio.completed_commands = 0;
-    resetForTest();
-    facts.nvme_controller = true;
-    recordStorageProof(malformed);
-    try std.testing.expect(!factsForTest().nvme_write_read_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().storage_write_read_cycles);
-}
-
-test "hardware proof records I225 network cycles only from verified packet proof" {
-    var adapter = try intel_i225.SoftwareAdapter.initWithMmio(.{
-        .rx_descriptors = 128,
-        .tx_descriptors = 128,
-        .rx_ring_address = 0x1000,
-        .tx_ring_address = 0x2000,
-    }, .{ 0x02, 0x15, 0xF2, 0, 0, 9 }, intel_i225.defaultPhyLinkState(), intel_i225.defaultPacketBufferPlan());
-    const modeled_proof = try adapter.proveFrameCycles(4);
-    const hardware_proof = intel_i225.withHardwarePacketEvidence(modeled_proof, .{
-        .source = .hardware_descriptor_ring,
-        .tx_descriptors_owned_by_device = 4,
-        .rx_descriptors_owned_by_device = 4,
-        .tx_dma_bytes = 4 * intel_i225.MIN_ETHERNET_FRAME_BYTES,
-        .rx_dma_bytes = 4 * intel_i225.MIN_ETHERNET_FRAME_BYTES,
-        .asserted_interrupts = 4,
-        .phy_packet_observations = 4,
-    });
-
-    resetForTest();
-    recordNetworkProof(hardware_proof);
-    try std.testing.expect(!factsForTest().i225_frame_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().network_frame_cycles);
-
-    resetForTest();
-    facts.i225_lm_controller = true;
-    recordNetworkProof(modeled_proof);
-    try std.testing.expect(!factsForTest().i225_frame_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().network_frame_cycles);
-
-    recordNetworkProof(hardware_proof);
-    try std.testing.expect(factsForTest().i225_frame_io);
-    try std.testing.expectEqual(@as(u16, 4), factsForTest().network_frame_cycles);
-
-    var malformed = hardware_proof;
-    malformed.mmio.interrupt_cause_reads = 0;
-    resetForTest();
-    facts.i225_lm_controller = true;
-    recordNetworkProof(malformed);
-    try std.testing.expect(!factsForTest().i225_frame_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().network_frame_cycles);
-}
-
-test "hardware proof records suspend resume only from ACPI backed resume proof" {
-    const firmware = fadt.FixedAcpiDescription{
-        .revision = 6,
-        .dsdt_address = 0x00AB_C000,
-        .sci_interrupt = 9,
-        .pm1a_event_block = 0x1800,
-        .pm1b_event_block = 0,
-        .pm1a_control_block = 0x1804,
-        .pm1b_control_block = 0,
-        .pm_timer_block = 0x1808,
-        .pm1_event_length = 4,
-        .pm1_control_length = 2,
-        .pm_timer_length = 4,
-        .reset_register = null,
-        .reset_value = 0,
-    };
-    const modeled_proof = try fadt.proveSuspendResume(firmware, 3, 10, 40, 3, .{
-        .timer = true,
-        .framebuffer = true,
-        .xhci_input = true,
-        .nvme_block = true,
-        .i225_network = true,
-    });
-    const hardware_proof = fadt.withHardwareSuspendResumeEvidence(modeled_proof, .{
-        .source = .hardware_power_transition,
-        .pm1_control_sleep_writes = 3,
-        .s_state_entry_observations = 3,
-        .s0_resume_observations = 3,
-        .pm_timer_resume_reads = 6,
-        .sci_wake_interrupts = 3,
-        .resumed_timer_probes = 3,
-        .resumed_framebuffer_probes = 3,
-        .resumed_xhci_probes = 3,
-        .resumed_nvme_probes = 3,
-        .resumed_i225_probes = 3,
-    });
-
-    resetForTest();
-    recordSuspendResumeProof(hardware_proof);
-    try std.testing.expect(!factsForTest().suspend_resume_power);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().suspend_resume_cycles);
-
-    resetForTest();
-    facts.acpi_fadt = true;
-    recordSuspendResumeProof(modeled_proof);
-    try std.testing.expect(!factsForTest().suspend_resume_power);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().suspend_resume_cycles);
-
-    recordSuspendResumeProof(hardware_proof);
-    try std.testing.expect(factsForTest().suspend_resume_power);
-    try std.testing.expectEqual(@as(u16, 3), factsForTest().suspend_resume_cycles);
-
-    var malformed = hardware_proof;
-    malformed.wake_sci_count = 0;
-    resetForTest();
-    facts.acpi_fadt = true;
-    recordSuspendResumeProof(malformed);
-    try std.testing.expect(!factsForTest().suspend_resume_power);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().suspend_resume_cycles);
-}
-
-test "hardware proof records crash recovery and persistence only from validated crash record proof" {
-    const record = try crash_record.init(.watchdog, 77, 88, 0x1234, 0x5678, "capability token leaked");
-    var report_buffer: [crash_record.REDACTED_REPORT_BUFFER_BYTES]u8 = undefined;
-    const modeled_proof = try crash_record.provePersistence(record, record, 78, 4, report_buffer[0..]);
-    const hardware_proof = crash_record.withHardwarePersistenceEvidence(modeled_proof, .{
-        .source = .hardware_reboot_persistence,
-        .crash_handler_entries = 4,
-        .persistent_record_writes = 4,
-        .persistent_record_flushes = 4,
-        .reboot_observations = 4,
-        .recovery_boot_reads = 4,
-        .recovered_record_validations = 4,
-        .redacted_report_emissions = 4,
-        .persistent_bytes_written = 4 * @sizeOf(crash_record.Record),
-        .persistent_bytes_read = 4 * @sizeOf(crash_record.Record),
-    });
-
-    resetForTest();
-    recordCrashPersistenceProof(modeled_proof);
-    try std.testing.expect(!factsForTest().crash_recovery_record);
-    try std.testing.expect(!factsForTest().crash_record_persisted);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().crash_recovery_cycles);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().crash_record_persistence_cycles);
-
-    recordCrashPersistenceProof(hardware_proof);
-    try std.testing.expect(factsForTest().crash_recovery_record);
-    try std.testing.expect(factsForTest().crash_record_persisted);
-    try std.testing.expectEqual(@as(u16, 4), factsForTest().crash_recovery_cycles);
-    try std.testing.expectEqual(@as(u16, 4), factsForTest().crash_record_persistence_cycles);
-
-    var malformed = hardware_proof;
-    malformed.recovered_record.tick += 1;
-    resetForTest();
-    recordCrashPersistenceProof(malformed);
-    try std.testing.expect(!factsForTest().crash_recovery_record);
-    try std.testing.expect(!factsForTest().crash_record_persisted);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().crash_recovery_cycles);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().crash_record_persistence_cycles);
 }
 
 test "hardware proof records update rollback only from verified power cycle proof" {

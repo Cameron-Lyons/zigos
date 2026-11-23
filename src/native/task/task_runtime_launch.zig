@@ -15,7 +15,6 @@ pub const DEFAULT_USER_STACK_TOP: u64 = userspace_layout.default_stack_top;
 pub const DEFAULT_USER_STACK_SIZE_BYTES: u64 = userspace_layout.default_stack_size;
 pub const PRODUCTION_ADDRESS_SPACE_COUNT: usize = 8;
 pub const COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP = true;
-pub const ORDERED_EXECUTABLE_SEGMENTS = true;
 
 comptime {
     if (userspace_bootstrap_mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR != userspace_layout.shared_start) {
@@ -72,7 +71,6 @@ pub fn makeLaunchProvenance(RecordType: type, spec: anytype) RecordType {
     var record = zeroLaunchProvenance(RecordType);
     record.boundary = spec.boundary;
     record.image_id = spec.image_id;
-    record.component_abi_version = spec.component_abi_version;
     record.signed = spec.signed;
     record.bundle_id_len = @intCast(native_util.copyTextWithReserve(record.bundle_id[0..], spec.bundle_id, 1));
     record.source_identity_len = @intCast(native_util.copyTextWithReserve(record.source_identity[0..], spec.source_identity, 1));

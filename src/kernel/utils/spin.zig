@@ -1,9 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
-pub const USES_ACQUIRE_RELEASE = true;
-pub const CONTENDED_WAIT_USES_READS = true;
-
 pub const Lock = struct {
     state: u32 = 0,
 
@@ -42,7 +39,4 @@ test "spin lock provides exclusive acquire and release state" {
     lock.release();
     try std.testing.expect(lock.tryAcquire());
     lock.release();
-
-    try std.testing.expect(USES_ACQUIRE_RELEASE);
-    try std.testing.expect(CONTENDED_WAIT_USES_READS);
 }

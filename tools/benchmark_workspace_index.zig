@@ -1,5 +1,5 @@
 const std = @import("std");
-const index_module = @import("workspace_index");
+const index_module = @import("host_benchmarks").workspace_index;
 const index = index_module.workspace_index;
 const id_index = index_module.id_index;
 
@@ -137,10 +137,5 @@ fn iteration(comptime workload: Workload, state: *State, path_pool: *const [PATH
 }
 
 fn removeObject(comptime capacity: usize, slots: *[capacity]index.EntryObjectIndexSlot, entries: anytype, slot: usize, object_id: u64) void {
-    // Keep this tool runnable against the frozen parent API for paired timing.
-    if (comptime @typeInfo(@TypeOf(index.removeEntryObjectSlot)).@"fn".params.len == 5) {
-        index.removeEntryObjectSlot(capacity, slots, entries, slot, object_id);
-    } else {
-        index.removeEntryObjectSlot(capacity, slots, slot, object_id);
-    }
+    index.removeEntryObjectSlot(capacity, slots, entries, slot, object_id);
 }

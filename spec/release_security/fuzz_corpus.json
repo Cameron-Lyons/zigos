@@ -40,9 +40,9 @@
       "target_anchor": "src/native/sync/sync_state_store.zig",
       "scope": "Durable sync records, transport frame queues, principals, strings, semantic enums, and replay boundaries.",
       "seeds": [
-        "5a4753594e435204000901000000000000000000000000000000000000000000",
-        "5a4753594e4352ffff09",
-        "5a4753594e43520400ff",
+        "5a4753594e43520a0900000000000000",
+        "5a4753594e4352090001000200000000000000",
+        "5a4753594e4352ff",
         "00000000000000000000000000000000"
       ]
     },

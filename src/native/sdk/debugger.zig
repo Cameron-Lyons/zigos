@@ -1,12 +1,11 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const debug_contract = @import("../security/debug_contract.zig");
-const typed_component_abi = @import("../services/typed_component_abi.zig");
+const component_abi_schema = @import("../services/component_abi_schema.zig");
 const native_util = @import("../core/util.zig");
 
 pub const MAX_EVENTS: usize = 96;
 pub const MAX_LABEL_BYTES: usize = 96;
-pub const COMPACT_EVENT_METADATA = true;
 pub const EVENT_SIZE_CEILING_BYTES: usize = 240;
 pub const SESSION_SIZE_CEILING_BYTES: usize = 23_048;
 const EXPORT_TEXT_TEST_BUFFER_BYTES: usize = 1024;
@@ -28,14 +27,12 @@ pub const EventKind = enum(u8) {
     native_app_launched,
     native_app_suspended,
     native_app_resumed,
-    native_app_stopped,
     abi_message_checked,
     capability_trace,
     denial_explained,
     launch_provenance,
     service_call_provenance,
     crash_report,
-    breakpoint_hit,
 };
 
 pub const Event = struct {
@@ -73,7 +70,7 @@ pub const Event = struct {
     }
 };
 
-pub const Error = typed_component_abi.Error || error{
+pub const Error = component_abi_schema.Error || error{
     DebugEventLogFull,
     DebugLabelTooLong,
     DebugDetailTooLong,
@@ -131,15 +128,15 @@ pub const Session = struct {
     pub fn inspectMessage(
         self: *Session,
         tick: u64,
-        comptime interface: typed_component_abi.InterfaceKey,
-        operation_id: typed_component_abi.OperationId,
-        header: typed_component_abi.WireHeader,
+        comptime interface: component_abi_schema.InterfaceKey,
+        operation_id: component_abi_schema.OperationId,
+        header: component_abi_schema.WireHeader,
         actual_request_len: usize,
         actual_response_len: usize,
     ) Error!void {
-        const iface = typed_component_abi.Interface(interface);
-        typed_component_abi.validateMessage(
-            typed_component_abi.interfaceId(interface),
+        const iface = component_abi_schema.interfaceDecl(interface);
+        component_abi_schema.validateMessage(
+            component_abi_schema.interfaceId(interface),
             operation_id,
             header,
             actual_request_len,
@@ -151,10 +148,6 @@ pub const Session = struct {
         try self.record(.abi_message_checked, tick, iface.name, @tagName(operation_id), true);
     }
 
-    pub fn hitBreakpoint(self: *Session, tick: u64, label: []const u8) Error!void {
-        try self.record(.breakpoint_hit, tick, label, "developer-breakpoint", true);
-    }
-
     pub fn recordProvenance(self: *Session, tick: u64, provenance_record: debug_contract.ProvenanceRecord) Error!void {
         var detail_buffer: [MAX_LABEL_BYTES]u8 = undefined;
         const detail = std.fmt.bufPrint(
@@ -164,7 +157,7 @@ pub const Session = struct {
                 provenance_record.trace_id,
                 provenance_record.task_id,
                 @tagName(provenance_record.decision),
-                @tagName(provenance_record.denial.reason),
+                @tagName(provenance_record.denial_reason),
             },
         ) catch return error.DebugOutputTooLong;
         try self.record(
@@ -260,8 +253,8 @@ test "debugger keeps bounded event metadata compact" {
 
 test "debugger records ABI checks and exports a redaction-safe trace" {
     var session = Session.init();
-    const header = typed_component_abi.WireHeader{
-        .operation = @backingInt(typed_component_abi.OperationId.package_rollback),
+    const header = component_abi_schema.WireHeader{
+        .operation = @backingInt(component_abi_schema.OperationId.package_rollback),
         .correlation_id = 7,
         .subject_task_id = 9,
     };
@@ -271,10 +264,9 @@ test "debugger records ABI checks and exports a redaction-safe trace" {
         .package_install,
         .package_rollback,
         header,
-        @sizeOf(typed_component_abi.PackageRollbackRequest),
-        @sizeOf(typed_component_abi.PackageRollbackResponse),
+        @sizeOf(component_abi_schema.Request(.package_rollback)),
+        @sizeOf(component_abi_schema.Response(.package_rollback)),
     );
-    try session.hitBreakpoint(11, "after-rollback");
     const denied = debug_contract.explainDenied(.policy_denied, "open-camera", "camera", 9, 0, .device, 3);
     try session.recordDenial(12, denied);
     try session.recordProvenance(13, debug_contract.provenance(
@@ -293,7 +285,6 @@ test "debugger records ABI checks and exports a redaction-safe trace" {
     ));
     try session.recordProvenance(14, debug_contract.crashReportProvenance(9, 22, 14, 0xCA11, 1, 0xBEEF, true));
     try std.testing.expectEqual(@as(usize, 1), session.countKind(.abi_message_checked));
-    try std.testing.expectEqual(@as(usize, 1), session.countKind(.breakpoint_hit));
     try std.testing.expectEqual(@as(usize, 1), session.countKind(.denial_explained));
     try std.testing.expectEqual(@as(usize, 1), session.countKind(.service_call_provenance));
     try std.testing.expectEqual(@as(usize, 1), session.countKind(.crash_report));
@@ -301,7 +292,6 @@ test "debugger records ABI checks and exports a redaction-safe trace" {
     var output: [EXPORT_TEXT_TEST_BUFFER_BYTES]u8 = undefined;
     const text = try session.exportText(&output);
     try std.testing.expect(std.mem.indexOf(u8, text, "kind=abi_message_checked") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "after-rollback") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "kind=denial_explained") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "fingerprint=0x") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "kind=service_call_provenance") != null);

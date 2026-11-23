@@ -2,13 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const acpi = @import("acpi.zig");
 const checksum = @import("../utils/checksum.zig");
-const endian = @import("../utils/endian.zig");
 
 pub const DMAR_SIGNATURE = "DMAR";
 pub const DMAR_HEADER_LENGTH: usize = acpi.SDT_HEADER_LENGTH + 12;
 pub const MAX_REMAPPING_UNITS: usize = 16;
 pub const MIN_PRODUCTION_HOST_ADDRESS_WIDTH: u8 = 39;
-pub const COMPACT_SUMMARY_COUNT_METADATA = true;
 pub const SUMMARY_SIZE_CEILING_BYTES: usize = 408;
 
 const HOST_ADDRESS_WIDTH_OFFSET: usize = acpi.SDT_HEADER_LENGTH;
@@ -225,11 +223,15 @@ fn parseValidatedDmarInto(table: []const u8, requesters: ?[]const u16, out: *Sum
     var offset: usize = DMAR_HEADER_LENGTH;
     while (offset < table_length) {
         if (table_length - offset < REMAPPING_STRUCTURE_HEADER_BYTES) return error.InvalidLength;
-        const structure_type = endian.readU16Le(
+        const structure_type = std.mem.readInt(
+            u16,
             table[offset + REMAPPING_STRUCTURE_TYPE_OFFSET ..][0..2],
+            .little,
         );
-        const structure_length: usize = endian.readU16Le(
+        const structure_length: usize = std.mem.readInt(
+            u16,
             table[offset + REMAPPING_STRUCTURE_LENGTH_OFFSET ..][0..2],
+            .little,
         );
         if (structure_length < REMAPPING_STRUCTURE_HEADER_BYTES or structure_length > table_length - offset) {
             return error.InvalidLength;
@@ -290,13 +292,13 @@ fn validateScopedRequesters(table: []const u8, summary: *const Summary, requeste
         !summary.interrupt_remapping or summary.x2apic_opt_out or summary.dma_remapping_opt_out or
         summary.reserved_memory_with_non_pci_scope_count != 0) return error.RequesterNotCovered;
     if (summary.units()[0].include_pci_all) return;
-    const table_length = endian.readU32Le(table[4..8]);
+    const table_length = std.mem.readInt(u32, table[4..8], .little);
     for (requesters) |requester| {
         var matches: usize = 0;
         var offset: usize = DMAR_HEADER_LENGTH;
         while (offset < table_length) {
-            const length: usize = endian.readU16Le(table[offset + 2 ..][0..2]);
-            if (endian.readU16Le(table[offset..][0..2]) == DRHD_TYPE) {
+            const length: usize = std.mem.readInt(u16, table[offset + 2 ..][0..2], .little);
+            if (std.mem.readInt(u16, table[offset..][0..2], .little) == DRHD_TYPE) {
                 var scope = offset + DRHD_MIN_BYTES;
                 while (scope < offset + length) {
                     const scope_length = table[scope + 1];
@@ -322,7 +324,7 @@ fn parseRemappingUnit(structure: []const u8, host_address_width: u8) Error!Remap
     if ((size_exponent & 0xF0) != 0) return error.InvalidReserved;
     const register_shift: u6 = @intCast(@as(u16, size_exponent) + 12);
     const register_bytes = @as(u64, 1) << register_shift;
-    const register_base_address = endian.readU64Le(structure[8..16]);
+    const register_base_address = std.mem.readInt(u64, structure[8..16], .little);
     if (register_base_address == 0 or register_base_address % register_bytes != 0) {
         return error.InvalidRemappingUnit;
     }
@@ -339,7 +341,7 @@ fn parseRemappingUnit(structure: []const u8, host_address_width: u8) Error!Remap
     return .{
         .register_base_address = register_base_address,
         .register_page_count = @as(u32, 1) << @intCast(size_exponent),
-        .segment = endian.readU16Le(structure[6..8]),
+        .segment = std.mem.readInt(u16, structure[6..8], .little),
         .include_pci_all = include_pci_all,
         .device_scope_count = scope_summary.count,
     };
@@ -347,9 +349,9 @@ fn parseRemappingUnit(structure: []const u8, host_address_width: u8) Error!Remap
 
 fn validateReservedMemoryRegion(structure: []const u8, host_address_width: u8) Error!ReservedMemoryRegion {
     if (structure.len < RMRR_MIN_BYTES) return error.InvalidReservedMemoryRegion;
-    if (endian.readU16Le(structure[4..6]) != 0) return error.InvalidReserved;
-    const base = endian.readU64Le(structure[8..16]);
-    const limit = endian.readU64Le(structure[16..24]);
+    if (std.mem.readInt(u16, structure[4..6], .little) != 0) return error.InvalidReserved;
+    const base = std.mem.readInt(u64, structure[8..16], .little);
+    const limit = std.mem.readInt(u64, structure[16..24], .little);
     if (base % PAGE_SIZE != 0 or limit <= base) {
         return error.InvalidReservedMemoryRegion;
     }
@@ -360,7 +362,7 @@ fn validateReservedMemoryRegion(structure: []const u8, host_address_width: u8) E
     }
     const scopes = try validateDeviceScopes(structure[RMRR_MIN_BYTES..], true, .any);
     return .{
-        .segment = endian.readU16Le(structure[6..8]),
+        .segment = std.mem.readInt(u16, structure[6..8], .little),
         .only_pci_devices = scopes.only_pci_devices,
     };
 }
@@ -373,10 +375,10 @@ fn validateAtsCapability(structure: []const u8) Error!u16 {
     const scopes = structure[ATSR_MIN_BYTES..];
     if ((flags & ATSR_FLAG_ALL_PORTS) != 0) {
         if (scopes.len != 0) return error.InvalidAtsCapability;
-        return endian.readU16Le(structure[6..8]);
+        return std.mem.readInt(u16, structure[6..8], .little);
     }
     _ = try validateDeviceScopes(scopes, true, .pci_sub_hierarchy_only);
-    return endian.readU16Le(structure[6..8]);
+    return std.mem.readInt(u16, structure[6..8], .little);
 }
 
 fn validateDeviceScopes(bytes: []const u8, required: bool, policy: ScopePolicy) Error!DeviceScopeSummary {
@@ -455,30 +457,30 @@ const TEST_TABLE_BYTES: usize = 120;
 fn validDmar() [TEST_TABLE_BYTES]u8 {
     var table = @as([TEST_TABLE_BYTES]u8, @splat(0));
     @memcpy(table[0..4], DMAR_SIGNATURE);
-    endian.writeU32Le(table[4..8], table.len);
+    std.mem.writeInt(u32, table[4..8], table.len, .little);
     table[8] = 1;
     @memcpy(table[10..16], "ZIGOS ");
     @memcpy(table[16..24], "NUC11VTD");
     table[HOST_ADDRESS_WIDTH_OFFSET] = MIN_PRODUCTION_HOST_ADDRESS_WIDTH - 1;
     table[FLAGS_OFFSET] = FLAG_INTERRUPT_REMAPPING | FLAG_DMA_CONTROL_PLATFORM_OPT_IN;
 
-    endian.writeU16Le(table[48..50], DRHD_TYPE);
-    endian.writeU16Le(table[50..52], 24);
-    endian.writeU64Le(table[56..64], 0x0000_0000_FED9_0000);
+    std.mem.writeInt(u16, table[48..50], DRHD_TYPE, .little);
+    std.mem.writeInt(u16, table[50..52], 24, .little);
+    std.mem.writeInt(u64, table[56..64], 0x0000_0000_FED9_0000, .little);
     table[64] = DEVICE_SCOPE_TYPE_PCI_ENDPOINT;
     table[65] = 8;
     table[70] = 2;
     table[71] = 0;
 
-    endian.writeU16Le(table[72..74], DRHD_TYPE);
-    endian.writeU16Le(table[74..76], 16);
+    std.mem.writeInt(u16, table[72..74], DRHD_TYPE, .little);
+    std.mem.writeInt(u16, table[74..76], 16, .little);
     table[76] = DRHD_FLAG_INCLUDE_PCI_ALL;
-    endian.writeU64Le(table[80..88], 0x0000_0000_FED9_1000);
+    std.mem.writeInt(u64, table[80..88], 0x0000_0000_FED9_1000, .little);
 
-    endian.writeU16Le(table[88..90], RMRR_TYPE);
-    endian.writeU16Le(table[90..92], 32);
-    endian.writeU64Le(table[96..104], 0x0000_0000_7D00_0000);
-    endian.writeU64Le(table[104..112], 0x0000_0000_7D00_1FFF);
+    std.mem.writeInt(u16, table[88..90], RMRR_TYPE, .little);
+    std.mem.writeInt(u16, table[90..92], 32, .little);
+    std.mem.writeInt(u64, table[96..104], 0x0000_0000_7D00_0000, .little);
+    std.mem.writeInt(u64, table[104..112], 0x0000_0000_7D00_1FFF, .little);
     table[112] = DEVICE_SCOPE_TYPE_PCI_ENDPOINT;
     table[113] = 8;
     table[118] = 20;
@@ -489,7 +491,6 @@ fn validDmar() [TEST_TABLE_BYTES]u8 {
 }
 
 test "DMAR summary uses capacity-sized discovery counts" {
-    try std.testing.expect(COMPACT_SUMMARY_COUNT_METADATA);
     try std.testing.expectEqual(u8, @FieldType(Summary, "remapping_unit_count"));
     try std.testing.expectEqual(u32, @FieldType(Summary, "reserved_memory_region_count"));
     try std.testing.expectEqual(u32, @FieldType(Summary, "reserved_memory_with_non_pci_scope_count"));
@@ -516,7 +517,7 @@ test "DMAR caller-owned output is unchanged on early and late parse rejection" {
 
     // Both units have already passed validation when the RMRR's segment fails.
     var late_rejection = validDmar();
-    endian.writeU16Le(late_rejection[94..96], 1);
+    std.mem.writeInt(u16, late_rejection[94..96], 1, .little);
     checksum.finishSum8Prefix(&late_rejection, 9, late_rejection.len);
     try std.testing.expectError(error.InvalidReservedMemoryRegion, parseDmarInto(&late_rejection, &output));
     try std.testing.expectEqualSlices(u8, &before, std.mem.asBytes(&output));
@@ -541,7 +542,7 @@ test "DMAR requester admission is atomic and follows complete table validation" 
     const before = std.mem.asBytes(&output).*;
 
     var table = validDmar();
-    endian.writeU32Le(table[4..8], 72);
+    std.mem.writeInt(u32, table[4..8], 72, .little);
     checksum.finishSum8Prefix(&table, 9, 72);
     try std.testing.expectError(error.RequesterNotCovered, scopedEnforcementSummaryInto(&table, &.{0x0018}, &output));
     try std.testing.expectEqualSlices(u8, &before, std.mem.asBytes(&output));
@@ -562,7 +563,7 @@ test "DMAR requester admission is atomic and follows complete table validation" 
 
 test "DMAR explicit scopes cover exact requesters without asserting catch-all policy" {
     var table = validDmar();
-    endian.writeU32Le(table[4..8], 72);
+    std.mem.writeInt(u32, table[4..8], 72, .little);
     checksum.finishSum8Prefix(&table, 9, 72);
     const summary = try scopedEnforcementSummary(&table, &.{0x0010});
     try std.testing.expect(!summary.productionEnforcementReady());
@@ -584,8 +585,8 @@ test "DMAR explicit scopes cover exact requesters without asserting catch-all po
 test "DMAR explicit scopes reject duplicate endpoints and multiple remapping units" {
     var table = validDmar();
     try std.testing.expectError(error.RequesterNotCovered, scopedEnforcementSummary(&table, &.{0x0010}));
-    endian.writeU32Le(table[4..8], 80);
-    endian.writeU16Le(table[50..52], 32);
+    std.mem.writeInt(u32, table[4..8], 80, .little);
+    std.mem.writeInt(u16, table[50..52], 32, .little);
     @memcpy(table[72..80], table[64..72]);
     checksum.finishSum8Prefix(&table, 9, 80);
     try std.testing.expectError(error.RequesterNotCovered, scopedEnforcementSummary(&table, &.{0x0010}));
@@ -684,10 +685,10 @@ test "DMAR parser validates register sizing order and segment-zero coverage" {
     try std.testing.expectError(error.InvalidRemappingUnit, parseDmar(bad_alignment[0..]));
 
     var after_catch_all = validDmar();
-    endian.writeU32Le(after_catch_all[4..8], 104);
-    endian.writeU16Le(after_catch_all[88..90], DRHD_TYPE);
-    endian.writeU16Le(after_catch_all[90..92], DRHD_MIN_BYTES);
-    endian.writeU64Le(after_catch_all[96..104], 0x0000_0000_FED9_2000);
+    std.mem.writeInt(u32, after_catch_all[4..8], 104, .little);
+    std.mem.writeInt(u16, after_catch_all[88..90], DRHD_TYPE, .little);
+    std.mem.writeInt(u16, after_catch_all[90..92], DRHD_MIN_BYTES, .little);
+    std.mem.writeInt(u64, after_catch_all[96..104], 0x0000_0000_FED9_2000, .little);
     checksum.finishSum8Prefix(after_catch_all[0..], 9, 104);
     try std.testing.expectError(error.InvalidStructureOrder, parseDmar(after_catch_all[0..]));
 
@@ -699,7 +700,7 @@ test "DMAR parser validates register sizing order and segment-zero coverage" {
     try std.testing.expect(!summary.productionDiscoveryReady());
 
     var out_of_order = validDmar();
-    endian.writeU16Le(out_of_order[48..50], 7);
+    std.mem.writeInt(u16, out_of_order[48..50], 7, .little);
     checksum.finishSum8Prefix(out_of_order[0..], 9, out_of_order.len);
     try std.testing.expectError(error.InvalidStructureOrder, parseDmar(out_of_order[0..]));
 }
@@ -721,26 +722,26 @@ test "DMAR parser rejects malformed device scopes and reserved memory regions" {
     try std.testing.expectError(error.InvalidReserved, parseDmar(bad_scope_flags[0..]));
 
     var bad_reserved_region = validDmar();
-    endian.writeU64Le(bad_reserved_region[104..112], 0x0000_0000_7D00_1FFE);
+    std.mem.writeInt(u64, bad_reserved_region[104..112], 0x0000_0000_7D00_1FFE, .little);
     checksum.finishSum8Prefix(bad_reserved_region[0..], 9, bad_reserved_region.len);
     try std.testing.expectError(error.InvalidReservedMemoryRegion, parseDmar(bad_reserved_region[0..]));
 
     var unknown_segment = validDmar();
-    endian.writeU16Le(unknown_segment[94..96], 1);
+    std.mem.writeInt(u16, unknown_segment[94..96], 1, .little);
     checksum.finishSum8Prefix(unknown_segment[0..], 9, unknown_segment.len);
     try std.testing.expectError(error.InvalidReservedMemoryRegion, parseDmar(unknown_segment[0..]));
 }
 
 test "DMAR parser validates ATS capability scopes" {
     var all_ports = @as([ATSR_MIN_BYTES]u8, @splat(0));
-    endian.writeU16Le(all_ports[0..2], ATSR_TYPE);
-    endian.writeU16Le(all_ports[2..4], all_ports.len);
+    std.mem.writeInt(u16, all_ports[0..2], ATSR_TYPE, .little);
+    std.mem.writeInt(u16, all_ports[2..4], all_ports.len, .little);
     all_ports[4] = ATSR_FLAG_ALL_PORTS;
     try std.testing.expectEqual(@as(u16, 0), try validateAtsCapability(all_ports[0..]));
 
     var bridge = @as([ATSR_MIN_BYTES + DEVICE_SCOPE_MIN_BYTES]u8, @splat(0));
-    endian.writeU16Le(bridge[0..2], ATSR_TYPE);
-    endian.writeU16Le(bridge[2..4], bridge.len);
+    std.mem.writeInt(u16, bridge[0..2], ATSR_TYPE, .little);
+    std.mem.writeInt(u16, bridge[2..4], bridge.len, .little);
     bridge[8] = DEVICE_SCOPE_TYPE_PCI_SUB_HIERARCHY;
     bridge[9] = DEVICE_SCOPE_MIN_BYTES;
     bridge[14] = 1;

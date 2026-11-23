@@ -8,7 +8,6 @@ const IDENTIFIER_COUNT: usize = @as(usize, MAX_IDENTIFIER) + 1;
 const WORD_BITS: usize = @bitSizeOf(u32);
 const WORD_COUNT: usize = IDENTIFIER_COUNT / WORD_BITS;
 
-pub const SCANS_BITMAP_WORDS = true;
 pub const MAX_ALLOCATION_WORD_PROBES: usize = WORD_COUNT + 1;
 pub const ALLOCATOR_SIZE_CEILING_BYTES: usize = 516;
 
@@ -100,7 +99,7 @@ comptime {
     if (@sizeOf(Allocator) > ALLOCATOR_SIZE_CEILING_BYTES) {
         @compileError("PCID allocator exceeds its compact size ceiling");
     }
-    if (!SCANS_BITMAP_WORDS or MAX_ALLOCATION_WORD_PROBES != 129) {
+    if (MAX_ALLOCATION_WORD_PROBES != 129) {
         @compileError("PCID allocator scan bounds changed unexpectedly");
     }
 }

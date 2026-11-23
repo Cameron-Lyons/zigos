@@ -6,7 +6,6 @@ const driver_runtime_mod = @import("../../drivers/driver_runtime.zig");
 const driver_service = @import("../../drivers/driver_service.zig");
 const endpoint = @import("../../kernel_api/endpoint.zig");
 const ids = @import("../../core/ids.zig");
-const kernel_data_plane_boundary = @import("../../../kernel/boot/init/data_plane_boundary.zig");
 const native_service_registry = @import("../../services/service_registry.zig");
 const service_catalog = @import("../service_catalog.zig");
 const supervisor_mod = @import("../supervisor.zig");
@@ -29,34 +28,25 @@ pub fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
     driver_directory: *driver_service.Directory,
     driver_runtime: *const driver_runtime_mod.Runtime,
 ) !void {
-    const excluded_services = [_]struct {
-        class: service_catalog.ServiceClass,
-        data_plane: kernel_data_plane_boundary.DataPlaneKind,
-    }{
-        .{ .class = .network_stack, .data_plane = .network_stack },
-        .{ .class = .storage_object, .data_plane = .storage_object },
-        .{ .class = .compositor_ui_session, .data_plane = .windowing },
-        .{ .class = .package_install_update, .data_plane = .package_install },
-        .{ .class = .indexing_search, .data_plane = .indexing },
-        .{ .class = .sync_replication, .data_plane = .sync_replication },
+    const excluded_services = [_]service_catalog.ServiceClass{
+        .network_stack,
+        .storage_object,
+        .compositor_ui_session,
+        .package_install_update,
+        .indexing_search,
+        .sync_replication,
     };
 
-    for (excluded_services) |entry| {
+    for (excluded_services) |class| {
         const binding = try assertBootedUserspaceServiceBinding(
             kernel_port,
             runtime,
             capability_table,
             supervisor,
             service_directory,
-            entry.class,
+            class,
         );
-        try std.testing.expectError(error.KernelSubsystemDataPlaneDisabled, kernel_data_plane_boundary.rejectKernelSubsystemDataPlane(.{
-            .kind = entry.data_plane,
-            .service_id = binding.service_id,
-            .owner_task_id = binding.owner_task_id,
-            .endpoint_id = binding.endpoint_id,
-        }));
-        try expectRootKernelCallerDenied(kernel_port, binding.endpoint_capability_id, binding.owner_task_id, 170 + @backingInt(entry.class));
+        try expectRootKernelCallerDenied(kernel_port, binding.endpoint_capability_id, binding.owner_task_id, 170 + @backingInt(class));
     }
 
     const driver_expectations = [_]struct {
@@ -80,15 +70,7 @@ pub fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
         try std.testing.expect(driver_task.runsAsUserspaceProcess());
         try std.testing.expect(driver_task.hasLoadedExecutable());
         try std.testing.expect(driver_task.launch.signed);
-        try std.testing.expect(driver_service.requiresUserspaceDataPlane(expectation.device_class));
-        try std.testing.expect(!driver_service.permitsKernelDataPlane(expectation.device_class));
         try std.testing.expect(driver.dma_domain_id != 0);
-        try std.testing.expectEqual(driver_service.DmaProtection.iommu_enforced, driver.dma_protection);
-        try std.testing.expectError(error.KernelDeviceDataPlaneDisabled, kernel_data_plane_boundary.rejectKernelDeviceDataPlane(.{
-            .service_id = driver.service_id,
-            .device_id = driver.device_id,
-            .device_class = @backingInt(driver.device_class),
-        }));
 
         const activation = driver_runtime.findByClass(expectation.device_class) orelse return error.MissingBootedDriverBinding;
         try std.testing.expectEqual(driver.service_id, activation.service_id);
@@ -96,21 +78,7 @@ pub fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
         try std.testing.expect(activation.iommuEnforced());
         try std.testing.expect(!activation.kernelBootstrap());
         try std.testing.expect(activation.hasExclusiveClaim());
-        switch (expectation.device_class) {
-            .storage_controller => try std.testing.expect(
-                activation.mode == .published_data_plane or
-                    activation.mode == .userspace_brokered_data_plane,
-            ),
-            .network_adapter,
-            .usb_controller,
-            .graphics_adapter,
-            .audio_print_io,
-            .input_device,
-            .compositor_policy,
-            => {
-                try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, activation.mode);
-            },
-        }
+        try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, activation.mode);
         try std.testing.expect(activation.publisherSlice().len != 0);
     }
 }
@@ -134,7 +102,6 @@ fn assertBootedUserspaceServiceBinding(
     const service_record = supervisor.findByClass(class) orelse return error.MissingBootedServiceBinding;
     const connection = try service_directory.connect(contract.interface_id);
     try std.testing.expectEqual(service_record.id, connection.service_id);
-    try std.testing.expect(native_service_registry.AUTHENTICATED_BINDINGS_ONLY);
 
     const endpoint_descriptor = try kernel_port.kernel.endpoint_table.descriptor(ids.endpoint(connection.endpoint_id));
     const endpoint_flags: endpoint.EndpointFlags = @bitCast(endpoint_descriptor.flags);

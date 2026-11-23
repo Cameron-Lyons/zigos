@@ -22,8 +22,6 @@ pub const MAX_PRIVATE_SERVICES: usize = 4;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_TRANSPORT_FRAMES: usize = 64;
 pub const TRANSPORT_REPLAY_WINDOW: u64 = 32;
-pub const COMPACT_RECORD_METADATA = true;
-pub const COMPACT_REPLICATION_SUMMARY_METADATA = true;
 pub const SyncPathLength = workspace.WorkspacePathLength;
 pub const WORKSPACE_POLICY_SIZE_CEILING_BYTES: usize = 328;
 pub const OVERLAY_RECORD_SIZE_CEILING_BYTES: usize = 280;
@@ -36,7 +34,10 @@ pub const REPLICATION_SUMMARY_SIZE_CEILING_BYTES: usize = 18;
 pub const PERSISTENT_STATE_SIZE_CEILING_BYTES: usize = 55_640;
 pub const RESIDENT_STATE_SIZE_CEILING_BYTES: usize = 57_768;
 pub const state_workspace_label = "system-sync";
-pub const state_signer = signing.SignerIdentity{
+/// Placeholder signer for sync state records. Its seed is public and load does
+/// not verify the signature: sync state integrity rests on the measured boot
+/// chain and the device's storage volume, not on this signature.
+pub const unauthenticated_state_signer = signing.SignerIdentity{
     .label = "zigos-sync-state",
     .seed = signing.seedFromByte(0xA7),
 };
@@ -372,7 +373,6 @@ pub const Error = error{
     TransportReplayRejected,
     TooManyDocumentOperations,
     DocumentOperationLogFull,
-    UnsupportedStateVersion,
     WorkspacePolicyNotFound,
     WorkspacePolicyTableFull,
 } || network_policy.Error || device_graph.Error || workspace.Error || object_store.Error;
@@ -568,83 +568,43 @@ pub const ResidentState = struct {
     }
 
     pub fn userRootCount(self: *const ResidentState) usize {
-        var count: usize = 0;
-        for (self.persisted_state.graph.user_roots.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return inUseCount(&self.persisted_state.graph.user_roots.slots);
     }
 
     pub fn deviceCount(self: *const ResidentState) usize {
-        var count: usize = 0;
-        for (self.persisted_state.graph.devices.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return inUseCount(&self.persisted_state.graph.devices.slots);
     }
 
     pub fn networkPolicyCount(self: *const ResidentState) usize {
-        var count: usize = 0;
-        for (self.persisted_state.network_policies.policies.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return inUseCount(&self.persisted_state.network_policies.policies.slots);
     }
 
     pub fn workspacePolicyCount(self: *const ResidentState) usize {
-        var count: usize = 0;
-        for (self.persisted_state.workspace_policies.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return inUseCount(&self.persisted_state.workspace_policies.slots);
     }
 
     pub fn replicaCount(self: *const ResidentState) usize {
-        var count: usize = 0;
-        for (self.persisted_state.replica_entries.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return inUseCount(&self.persisted_state.replica_entries.slots);
     }
 
     pub fn conflictCount(self: *const ResidentState) usize {
-        var count: usize = 0;
-        for (self.persisted_state.conflicts.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return inUseCount(&self.persisted_state.conflicts.slots);
     }
 
     pub fn databaseContractCount(self: *const ResidentState) usize {
-        var count: usize = 0;
-        for (self.persisted_state.database_contracts.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return inUseCount(&self.persisted_state.database_contracts.slots);
     }
 
     pub fn overlayCount(self: *const ResidentState) usize {
-        var count: usize = 0;
-        for (self.persisted_state.overlays.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return inUseCount(&self.persisted_state.overlays.slots);
     }
 
     pub fn outboundTransportFrameCount(self: *const ResidentState) usize {
-        var count: usize = 0;
-        for (self.persisted_state.outbound_transport_frames.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return inUseCount(&self.persisted_state.outbound_transport_frames.slots);
     }
 
     pub fn inboundTransportFrameCount(self: *const ResidentState) usize {
-        var count: usize = 0;
-        for (self.persisted_state.inbound_transport_frames.slots) |slot| {
-            if (slot.in_use) count += 1;
-        }
-        return count;
+        return inUseCount(&self.persisted_state.inbound_transport_frames.slots);
     }
 
     pub fn nextPersistTick(self: *ResidentState) u64 {
@@ -664,6 +624,12 @@ pub const ResidentState = struct {
         }
     }
 };
+
+fn inUseCount(slots: anytype) usize {
+    var count: usize = 0;
+    for (slots) |*slot| count += @intFromBool(slot.in_use);
+    return count;
+}
 
 pub fn readOptionalU64(value: u64) ?u64 {
     return if (value == 0) null else value;

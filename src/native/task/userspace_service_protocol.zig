@@ -7,7 +7,6 @@ pub const MAX_OPERATIONS: usize = 4;
 pub const MAX_OPERATION_NAME_BYTES: usize = 32;
 pub const OperationCount = u8;
 pub const PLAN_SIZE_BYTES: usize = 120;
-pub const COMPACT_PLAN_METADATA = true;
 
 comptime {
     if (MAX_OPERATIONS > std.math.maxInt(OperationCount)) {
@@ -256,7 +255,6 @@ test "userspace service protocol round-trips every concrete service plan" {
 }
 
 test "userspace service plan metadata stays compact" {
-    try std.testing.expect(COMPACT_PLAN_METADATA);
     try std.testing.expectEqual(OperationCount, @FieldType(Plan, "operation_count"));
     try std.testing.expectEqual(@as(usize, 120), @sizeOf(Plan));
 }

@@ -5,8 +5,6 @@ const native_util = @import("../core/util.zig");
 const yesNo = native_util.yesNo;
 
 pub const MAX_LABEL_BYTES: usize = 48;
-pub const COMPACT_DENIAL_EXPLANATION_METADATA = true;
-pub const GROUPS_DENIAL_SUMMARY_TEXT_WRITES = true;
 pub const EXPLANATION_SIZE_CEILING_BYTES: usize = 24;
 const USER_HELP_BUFFER_BYTES: usize = 256;
 
@@ -256,8 +254,6 @@ inline fn appendTextParts(buffer: []u8, used: *usize, parts: anytype) RenderErro
 }
 
 test "permission denials explain blocking policy capability approval and retry hints" {
-    try std.testing.expect(COMPACT_DENIAL_EXPLANATION_METADATA);
-    try std.testing.expect(GROUPS_DENIAL_SUMMARY_TEXT_WRITES);
     try std.testing.expectEqual([*]const u8, @FieldType(Explanation, "policy_ptr"));
     try std.testing.expectEqual([*]const u8, @FieldType(Explanation, "missing_capability_ptr"));
     try std.testing.expectEqual(u8, @FieldType(Explanation, "policy_len"));

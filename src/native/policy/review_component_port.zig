@@ -12,7 +12,6 @@ pub const Error = error{
     SubjectTaskRequired,
     SubjectTaskMismatch,
     UnexpectedOperation,
-    UnsupportedAbiVersion,
     InvalidRequestFlags,
 } || permission_review_service.Error;
 

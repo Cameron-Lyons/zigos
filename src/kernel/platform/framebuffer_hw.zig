@@ -10,7 +10,6 @@ const scanout = @import("text_scanout.zig");
 var renderer: scanout.Renderer = undefined;
 var composed_frame: scanout.Frame = undefined;
 var initialized = false;
-var pixels_written: u64 = 0;
 
 pub const Mapping = struct {
     physical_base: usize,
@@ -38,15 +37,15 @@ pub fn mappingFor(info: framebuffer.Info) !Mapping {
 }
 
 // Boot CPU only, after paging initialization and before creating user address
-// spaces. The mapping is supervisor-only, non-executable and uncached. The
-// caller retains sole ownership; there is no raw-framebuffer userspace handle.
+// spaces. The mapping is supervisor-only, non-executable and write-combining.
+// The caller retains sole ownership; there is no raw-framebuffer userspace handle.
 pub fn init() !void {
     if (comptime builtin.os.tag != .freestanding) return error.Unavailable;
     if (initialized) return;
     const boot = handoff.capturedInfo() orelse return error.MissingFramebuffer;
     const info = try handoff.framebufferInfo(boot);
     const mapping = try mappingFor(info);
-    try paging.mapKernelDeviceRange(mmio.framebuffer.base, mapping.physical_base, mapping.page_bytes, true);
+    try paging.mapKernelWriteCombiningRange(mmio.framebuffer.base, mapping.physical_base, mapping.page_bytes);
     const pixels: [*]volatile u32 = @ptrFromInt(mmio.framebuffer.base + mapping.pixel_offset);
     renderer = try scanout.Renderer.init(info, pixels[0..mapping.pixel_count]);
     composed_frame = try scanout.Frame.init(renderer.columns, renderer.rows);
@@ -60,12 +59,9 @@ pub fn frame() ?*scanout.Frame {
 pub fn present() !scanout.PresentStats {
     if (!initialized) return error.Unavailable;
     const result = try renderer.present(&composed_frame);
-    pixels_written +|= result.pixels_written;
+    // Drain write-combining buffers before scanout or any verification read.
+    if (comptime builtin.os.tag == .freestanding) asm volatile ("sfence" ::: .{ .memory = true });
     return result;
-}
-
-pub fn totalPixelWrites() u64 {
-    return pixels_written;
 }
 
 pub fn verifyCell(column: usize, row: usize) bool {
@@ -94,8 +90,4 @@ pub fn verifyText(column: usize, row: usize, text: []const u8) bool {
         x += width;
     }
     return true;
-}
-
-pub fn displayInfo() ?framebuffer.Info {
-    return if (initialized) renderer.info else null;
 }

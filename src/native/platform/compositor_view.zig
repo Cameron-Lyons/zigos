@@ -148,14 +148,7 @@ fn renderAuthentication(frame: *scanout.Frame, authentication: *const @import("t
     frame.put(1, 2, if (recovering) "Recover Zigos" else "Unlock Zigos", .selected);
     frame.put(0, 4, if (recovering) "Enter your recovery key" else "Enter your device PIN", .body);
     const mask = &@as([@import("trusted_auth_entry.zig").MAX_ENTRY_BYTES]u8, @splat('*'));
-    const count = @min(authentication.characters, mask.len);
-    var offset: usize = 0;
-    var row: usize = 6;
-    while (offset < count and row + 2 < frame.rows) : (row += 1) {
-        const take = @min(count - offset, frame.columns);
-        frame.put(0, row, mask[offset..][0..take], .accent);
-        offset += take;
-    }
+    const row = putWrapped(frame, 6, mask[0..@min(authentication.characters, mask.len)], .accent, 2);
     const message = switch (authentication.status) {
         .hidden, .entering => "",
         .too_short => if (recovering) (if (authentication.recovery_characters == 128) "Enter all 128 recovery characters." else "Enter all 56 recovery characters.") else "Enter at least 6 digits.",
@@ -176,6 +169,19 @@ fn renderAuthentication(frame: *scanout.Frame, authentication: *const @import("t
         "Enter  Unlock  |  Esc  Clear  |  Ctrl+R  Recovery"
     else
         "Enter  Unlock  |  Esc  Clear PIN", .muted);
+}
+
+// Wraps one-column ASCII by bytes, keeping `bottom_margin` rows free at the
+// frame end. Returns the row after the last one written.
+fn putWrapped(frame: *scanout.Frame, first_row: usize, bytes: []const u8, style: scanout.Style, bottom_margin: usize) usize {
+    var row = first_row;
+    var offset: usize = 0;
+    while (offset < bytes.len and row + bottom_margin < frame.rows) : (row += 1) {
+        const take = @min(bytes.len - offset, frame.columns);
+        frame.put(0, row, bytes[offset..][0..take], style);
+        offset += take;
+    }
+    return row;
 }
 
 fn putDocumentLines(frame: *scanout.Frame, row: *usize, text: []const u8, style: scanout.Style) void {
@@ -240,15 +246,7 @@ fn renderCredentialReview(frame: *scanout.Frame, review: *const @import("trusted
     inline for (.{ "application", "relying_party", "origin" }, .{ "Application", "Account site", "Website" }) |field, label| {
         frame.put(0, row, label, .muted);
         row += 1;
-        const value = @field(review, field)[0..@field(review, field ++ "_len")];
-        var offset: usize = 0;
-        while (offset < value.len) {
-            const take = @min(value.len - offset, frame.columns);
-            frame.put(0, row, value[offset..][0..take], .accent);
-            row += 1;
-            offset += take;
-        }
-        row += 1;
+        row = putWrapped(frame, row, @field(review, field)[0..@field(review, field ++ "_len")], .accent, 0) + 1;
     }
     frame.put(0, row, " Cancel ", if (!review.allow_selected) .selected else .body);
     frame.put(12, row, " Allow once ", if (review.allow_selected) .selected else .body);
@@ -316,14 +314,7 @@ fn renderSetup(frame: *scanout.Frame, setup: *const @import("trusted_setup_entry
         .record_recovery => unreachable,
     }, .body);
     const mask = &@as([@import("../services/identity_recovery_record.zig").CODE_BYTES]u8, @splat('*'));
-    const count = @min(setup.characters, mask.len);
-    var offset: usize = 0;
-    var row: usize = 6;
-    while (offset < count and row + 2 < frame.rows) : (row += 1) {
-        const take = @min(count - offset, frame.columns);
-        frame.put(0, row, mask[offset..][0..take], .accent);
-        offset += take;
-    }
+    const row = putWrapped(frame, 6, mask[0..@min(setup.characters, mask.len)], .accent, 2);
     frame.put(0, @max(row + 1, 8), switch (setup.notice) {
         .none => "",
         .too_short => "Enter at least 6 digits.",
@@ -419,10 +410,6 @@ fn saveStatus(state: abi.DocumentSaveState, dirty: bool) struct { text: []const 
     };
 }
 
-fn drawText(frame: *scanout.Frame, start_row: usize, text: []const u8, cursor: usize, selection_anchor: ?usize) void {
-    drawTextAt(frame, start_row, text, .{ .offset = cursor }, selection_anchor);
-}
-
 fn drawTextAt(frame: *scanout.Frame, start_row: usize, text: []const u8, caret: abi.text_layout.Caret, selection_anchor: ?usize) void {
     const viewport = textViewport(frame.columns, frame.rows, start_row);
     if (viewport.rows == 0) return;
@@ -466,11 +453,7 @@ test "desktop view renders owned surface text and removes stale task content" {
     });
     var session = compositor.Session.init();
     _ = try session.openTaskView(task, "Notes");
-    var presentation = std.mem.zeroes(abi.SurfacePresentation);
-    presentation.surface_id = 31;
-    presentation.revision = 1;
-    presentation.buffer_object_id = 31;
-    presentation.buffer_bytes = 512;
+    const presentation = abi.SurfacePresentation{ .surface_id = 31, .revision = 1 };
     _ = try session.presentSurface(task, &presentation);
     const content = Content{ .surface_id = 31, .text = "First\nDraft", .cursor = 11, .flags = .{ .dirty = true } };
     var frame = try scanout.Frame.init(60, 20);
@@ -490,21 +473,21 @@ test "desktop view renders owned surface text and removes stale task content" {
 test "desktop text wraps scrolls to its cursor and clears old cells" {
     const std = @import("std");
     var frame = try scanout.Frame.init(20, 10);
-    drawText(&frame, 5, "abcdefghijklmnopqrstUV", 22, null);
+    drawTextAt(&frame, 5, "abcdefghijklmnopqrstUV", .{ .offset = 22 }, null);
     try expectText(&frame, 0, 5, "abcdefghijklmnopqrst");
     try expectText(&frame, 0, 6, "UV");
     try std.testing.expect(frame.cells[6 * 20 + 2].cursor);
     frame.clear();
-    drawText(&frame, 6, "abcdefghijklmnopqrstUV", 22, null);
+    drawTextAt(&frame, 6, "abcdefghijklmnopqrstUV", .{ .offset = 22 }, null);
     try expectText(&frame, 0, 6, "UV");
     try std.testing.expect(frame.cells[6 * 20 + 2].cursor);
     for (frame.cells[7 * 20 ..][0..20]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
     frame.clear();
-    drawText(&frame, 5, "one\ntwo\nthree\n", 14, null);
+    drawTextAt(&frame, 5, "one\ntwo\nthree\n", .{ .offset = 14 }, null);
     try expectText(&frame, 0, 5, "three");
     try std.testing.expect(frame.cells[6 * 20].cursor);
     frame.clear();
-    drawText(&frame, 5, "one\ntwo\nthree\n", 1, null);
+    drawTextAt(&frame, 5, "one\ntwo\nthree\n", .{ .offset = 1 }, null);
     try expectText(&frame, 0, 5, "one");
     try std.testing.expect(frame.cells[5 * 20 + 1].cursor);
     try std.testing.expect(!frame.cells[6 * 20].cursor);
@@ -540,7 +523,7 @@ test "desktop selection highlights both directions across newlines and clears on
     var frame = try scanout.Frame.init(20, 10);
     for ([_]struct { cursor: usize, anchor: usize }{ .{ .cursor = 2, .anchor = 5 }, .{ .cursor = 5, .anchor = 2 } }) |selection| {
         frame.clear();
-        drawText(&frame, 5, "abc\ndef", selection.cursor, selection.anchor);
+        drawTextAt(&frame, 5, "abc\ndef", .{ .offset = selection.cursor }, selection.anchor);
         try std.testing.expectEqual(scanout.Style.body, frame.cells[5 * 20 + 1].style);
         try std.testing.expectEqual(scanout.Style.selected, frame.cells[5 * 20 + 2].style);
         try std.testing.expectEqual(scanout.Style.selected, frame.cells[5 * 20 + 3].style);
@@ -548,10 +531,10 @@ test "desktop selection highlights both directions across newlines and clears on
         try std.testing.expectEqual(scanout.Style.body, frame.cells[6 * 20 + 1].style);
     }
     frame.clear();
-    drawText(&frame, 5, "abc\ndef", 5, 5);
+    drawTextAt(&frame, 5, "abc\ndef", .{ .offset = 5 }, 5);
     for (frame.cells[5 * 20 .. 7 * 20]) |cell| try std.testing.expectEqual(scanout.Style.body, cell.style);
     frame.clear();
-    drawText(&frame, 6, "abcdefghijklmnopqrstUV", 22, 18);
+    drawTextAt(&frame, 6, "abcdefghijklmnopqrstUV", .{ .offset = 22 }, 18);
     try expectText(&frame, 0, 6, "UV");
     try std.testing.expectEqual(scanout.Style.selected, frame.cells[6 * 20].style);
     try std.testing.expectEqual(scanout.Style.selected, frame.cells[6 * 20 + 1].style);
@@ -564,7 +547,7 @@ test "desktop row window keeps Unicode selection and cursor after repeated scrol
     const line = "界e\u{301}\tZ\r\n";
     const text = @as([line.len * 30]u8, @bitCast(@as([30][line.len]u8, @splat(line.*)))) ++ "tail";
     var frame = try scanout.Frame.init(20, 10);
-    drawText(&frame, 5, text, text.len, text.len - 4 - line.len + 3);
+    drawTextAt(&frame, 5, text, .{ .offset = text.len }, text.len - 4 - line.len + 3);
     const first = frame.cells[5 * frame.columns ..][0..frame.columns];
     try std.testing.expectEqual(@as(u21, '界'), first[0].character);
     try std.testing.expectEqual(.left, first[0].part);
@@ -581,7 +564,7 @@ test "desktop row window keeps Unicode selection and cursor after repeated scrol
     try std.testing.expectEqual(scanout.Style.body, frame.cells[6 * frame.columns + 4].style);
 
     frame.clear();
-    drawText(&frame, 5, text, 0, null);
+    drawTextAt(&frame, 5, text, .{ .offset = 0 }, null);
     try std.testing.expect(frame.cells[5 * frame.columns].cursor);
     for (frame.cells[5 * frame.columns .. 7 * frame.columns]) |cell| try std.testing.expectEqual(scanout.Style.body, cell.style);
     try std.testing.expect(!frame.cells[6 * frame.columns + 4].cursor);

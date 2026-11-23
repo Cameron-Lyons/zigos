@@ -1,43 +1,34 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const channel = @import("../storage/document_channel.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const object_signer = @import("../storage/sealed_object_signer.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding) @import("../../kernel/memory/memory.zig") else struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 pub const OpenRequest = channel.OpenRequest;
 pub const MAX_CHANNELS: usize = 4;
 pub const DISPATCH_BUDGET: usize = 2;
 const Channels = [MAX_CHANNELS]channel.Channel;
-const heap_backed = builtin.target.os.tag == .freestanding;
-const Backing = if (heap_backed) ?*Channels else Channels;
+
+fn initializeChannels(items: *Channels) void {
+    for (items) |*item| item.* = .{};
+}
 
 pub const Sessions = struct {
-    backing: Backing = if (heap_backed) null else @as([MAX_CHANNELS]channel.Channel, @splat(.{})),
+    backing: table_backing.Lazy(Channels, initializeChannels) = .{},
     cursor: u8 = 0,
 
     fn channels(self: *Sessions) ?*Channels {
-        if (comptime heap_backed) return self.backing;
-        return &self.backing;
+        return self.backing.get();
     }
 
     fn channelsConst(self: *const Sessions) ?*const Channels {
-        if (comptime heap_backed) return self.backing;
-        return &self.backing;
+        return self.backing.get();
     }
 
     fn ensureChannels(self: *Sessions) error{NoSpaceLeft}!*Channels {
-        if (self.channels()) |items| return items;
-        if (comptime heap_backed) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(Channels)) orelse return error.NoSpaceLeft;
-            const items: *Channels = @ptrCast(@alignCast(allocation));
-            for (items) |*item| item.* = .{};
-            self.backing = items;
-            return items;
-        }
-        return &self.backing;
+        return self.backing.ensure();
     }
 
     pub fn open(self: *Sessions, kernel: *component_port.KernelPort, storage: *storage_service.Service, request: OpenRequest, now_ticks: u64) !mailbox.DocumentBinding {
@@ -157,11 +148,7 @@ pub const Sessions = struct {
         try self.requireQuiescent();
         const items = self.channels() orelse return;
         for (items) |*item| item.close(now_ticks);
-        if (comptime heap_backed) {
-            @memset(std.mem.asBytes(items), 0);
-            kernel_memory.kfree(@ptrCast(items));
-            self.backing = null;
-        }
+        self.backing.release();
         self.cursor = 0;
     }
 };
@@ -174,5 +161,5 @@ fn matchesSigner(item: *const channel.Channel, signer: object_signer.Signer) boo
 }
 
 comptime {
-    if (heap_backed and @sizeOf(Sessions) > 16) @compileError("document session handle exceeds its resident size bound");
+    if (@sizeOf(Sessions) > 16) @compileError("document session handle exceeds its resident size bound");
 }

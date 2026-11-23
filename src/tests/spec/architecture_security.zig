@@ -4,7 +4,7 @@ const spec_support = @import("support.zig");
 const abi = @import("../../native/core/abi.zig");
 const capability = @import("../../native/kernel_api/capability.zig");
 const component_port = @import("../../native/kernel_api/component_port.zig");
-const contract = @import("../../native/session/contract.zig");
+const service_catalog = @import("../../native/session/service_catalog.zig");
 const device_graph = @import("../../native/sync/device_graph.zig");
 const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
@@ -13,18 +13,18 @@ const kernel_descriptors = @import("../../native/kernel_api/native_kernel_descri
 const generated_image_fixtures = @import("../../native/task/generated_image_fixtures.zig");
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
 const native_util = @import("../../native/core/util.zig");
+const operation_metadata = @import("../../native/kernel_api/operation_metadata.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
 const policy_object = @import("../../native/policy/policy_object.zig");
 const principal = @import("../../native/core/principal.zig");
 const service_registry = @import("../../native/services/service_registry.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
-const syscall_abi = @import("../../native/kernel_api/syscall_abi.zig");
 const syscall_surface = @import("../../native/kernel_api/syscall_surface.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const task_runtime_service = @import("../../native/task/task_runtime_service.zig");
-const typed_component_abi = @import("../../native/services/typed_component_abi.zig");
-const userspace_service_ipc = @import("../../native/services/userspace_service_ipc.zig");
+const component_abi_schema = @import("../../native/services/component_abi_schema.zig");
+const userspace_service_ipc = @import("../fixtures/userspace_service_ipc.zig");
 const userspace_loader = @import("../../native/task/userspace_loader.zig");
 const userspace_manifest_signing = @import("../../native/task/userspace_manifest_signing.zig");
 
@@ -40,7 +40,7 @@ pub fn designGoalsKeepInstallsDeclarativeAndAuthorityExplicit() !void {
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
 
     var policies = policy_object.Directory.init();
-    const install_policy = try policies.create(.{
+    _ = try policies.create(.{
         .scope = .organization,
         .subject_id = 41,
         .issuer = spec_support.policyAuthority(41),
@@ -79,12 +79,12 @@ pub fn designGoalsKeepInstallsDeclarativeAndAuthorityExplicit() !void {
         .bundle = bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, install_policy);
+    }, &policies, .{ .organization_id = 41 });
     try std.testing.expectError(package_service.Error.InstallSourceDenied, package_port.install(package_authority, .{
         .bundle = bundle,
         .source_identity = "repo:opaque-script",
         .data_schema_version = 1,
-    }, install_policy));
+    }, &policies, .{ .organization_id = 41 }));
 
     var compatibility_bundle = bundle;
     compatibility_bundle.bundle_id = "compat.writer.bridge";
@@ -94,7 +94,7 @@ pub fn designGoalsKeepInstallsDeclarativeAndAuthorityExplicit() !void {
         .bundle = compatibility_bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, install_policy));
+    }, &policies, .{ .organization_id = 41 }));
 }
 
 pub fn explicitGrantsRequireAuthority() !void {
@@ -110,6 +110,7 @@ pub fn explicitGrantsRequireAuthority() !void {
             .policy_service_id = 43,
             .service_registry_id = 44,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const bundle_requests = [_]manifest.PermissionRequest{
@@ -226,22 +227,22 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
         .endpoint_capability_id = 1,
     });
 
-    try std.testing.expectEqual(@as(usize, 7), contract.kernel_tcb.len);
-    try std.testing.expectEqualStrings("ipc_transport", contract.tcbName(.ipc_transport));
-    try std.testing.expectEqualStrings("iommu_dma_isolation_hooks", contract.tcbName(.iommu_dma_isolation_hooks));
+    try std.testing.expectEqual(@as(usize, 7), service_catalog.kernel_tcb.len);
+    try std.testing.expectEqualStrings("ipc_transport", service_catalog.tcbName(.ipc_transport));
+    try std.testing.expectEqualStrings("iommu_dma_isolation_hooks", service_catalog.tcbName(.iommu_dma_isolation_hooks));
 
-    const runtime_descriptor = contract.serviceDescriptor(.task_runtime).?;
-    const network = contract.serviceDescriptor(.network_stack).?;
-    const storage = contract.serviceDescriptor(.storage_object).?;
-    const compositor = contract.serviceDescriptor(.compositor_ui_session).?;
-    const session = contract.serviceDescriptor(.session_manager).?;
-    const registry_service = contract.serviceDescriptor(.service_registry).?;
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, runtime_descriptor.boundary);
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, session.boundary);
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, registry_service.boundary);
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, network.boundary);
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, storage.boundary);
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, compositor.boundary);
+    const runtime_descriptor = service_catalog.serviceDescriptor(.task_runtime).?;
+    const network = service_catalog.serviceDescriptor(.network_stack).?;
+    const storage = service_catalog.serviceDescriptor(.storage_object).?;
+    const compositor = service_catalog.serviceDescriptor(.compositor_ui_session).?;
+    const session = service_catalog.serviceDescriptor(.session_manager).?;
+    const registry_service = service_catalog.serviceDescriptor(.service_registry).?;
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, runtime_descriptor.boundary);
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, session.boundary);
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, registry_service.boundary);
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, network.boundary);
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, storage.boundary);
+    try std.testing.expectEqual(service_catalog.ServiceBoundary.userspace_service, compositor.boundary);
     try std.testing.expect(runtime_descriptor.restartable);
     try std.testing.expect(session.restartable);
     try std.testing.expect(registry_service.restartable);
@@ -249,29 +250,27 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(storage.restartable);
     try std.testing.expect(compositor.restartable);
     try std.testing.expect(runtime_descriptor.isolation.namespace_isolated);
-    try std.testing.expectEqual(contract.NetworkPrivilege.unrestricted_brokered, network.isolation.network);
-    try std.testing.expectEqual(contract.StoragePrivilege.object_store_authority, storage.isolation.storage);
-    try std.testing.expect(contract.allowsDriverClass(.network_stack, .network_adapter));
-    try std.testing.expect(contract.allowsDriverClass(.storage_object, .storage_controller));
-    try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .usb_controller));
-    try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .graphics_adapter));
-    try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .input_device));
-    try std.testing.expect(contract.allowsDriverClass(.compositor_ui_session, .compositor_policy));
-    try std.testing.expect(contract.allowsDriverClass(.media_print_helpers, .audio_print_io));
+    try std.testing.expectEqual(service_catalog.NetworkPrivilege.unrestricted_brokered, network.isolation.network);
+    try std.testing.expectEqual(service_catalog.StoragePrivilege.object_store_authority, storage.isolation.storage);
+    try std.testing.expect(service_catalog.allowsDriverClass(.network_stack, .network_adapter));
+    try std.testing.expect(service_catalog.allowsDriverClass(.storage_object, .storage_controller));
+    try std.testing.expect(service_catalog.allowsDriverClass(.compositor_ui_session, .usb_controller));
+    try std.testing.expect(service_catalog.allowsDriverClass(.compositor_ui_session, .graphics_adapter));
+    try std.testing.expect(service_catalog.allowsDriverClass(.compositor_ui_session, .input_device));
+    try std.testing.expect(service_catalog.allowsDriverClass(.compositor_ui_session, .compositor_policy));
+    try std.testing.expect(service_catalog.allowsDriverClass(.media_print_helpers, .audio_print_io));
 
     try std.testing.expect(abi.opcode(.task_create) >= 0x100);
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 23), abi.ABI_VERSION);
     try std.testing.expectEqual(@as(usize, 23), @typeInfo(abi.NativeOperation).@"enum".field_names.len);
     try std.testing.expectEqual(@as(u16, 0x116), abi.opcode(.surface_present));
     try std.testing.expect(std.enums.fromInt(abi.NativeOperation, 0x117) == null);
-    const storage_interface_id = typed_component_abi.interfaceIdForService(.storage_object);
+    const storage_interface_id = component_abi_schema.interfaceId(.object_workspace);
     try registry.register(55, 101, 201, storage_interface_id, service_registry.REQUIRED_BINDING_FLAGS);
     const connection = try registry.connect(storage_interface_id);
     try std.testing.expectEqual(@as(u64, 55), connection.service_id);
     try std.testing.expectEqual(@as(u64, 101), connection.endpoint_id);
-    try std.testing.expect(service_registry.AUTHENTICATED_BINDINGS_ONLY);
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(@TypeOf(connection)));
     try std.testing.expectError(service_registry.Error.InterfaceNotFound, registry.connect(.task_runtime));
 
@@ -698,13 +697,12 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         123,
         service_endpoint.endpoint.endpoint_id,
         service_endpoint.capability_id,
-        typed_component_abi.interfaceIdForService(.storage_object),
+        component_abi_schema.interfaceId(.object_workspace),
         kernel_descriptors.serviceBindingFlags(launched_record),
     );
 
-    const connection = try service_directory.connect(typed_component_abi.interfaceIdForService(.storage_object));
+    const connection = try service_directory.connect(component_abi_schema.interfaceId(.object_workspace));
     try std.testing.expectEqual(@as(u64, 123), connection.service_id);
-    try std.testing.expect(service_registry.AUTHENTICATED_BINDINGS_ONLY);
 }
 
 pub fn modeledKernelClaimsHaveHardEnforcementProofs() !void {
@@ -757,33 +755,28 @@ fn mmuStyleAddressSpaceValidationRejectsCrossSpaceRanges() !void {
 }
 
 fn componentAbiDeclarationsCoverEveryTypedOperation() !void {
-    try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".field_names.len, syscall_abi.operations.len);
+    try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".field_names.len, operation_metadata.operations.len);
 
     inline for (@typeInfo(abi.NativeOperation).@"enum".field_values) |field| {
         const operation: abi.NativeOperation = @fromBackingInt(@intCast(field));
-        const declaration = syscall_abi.declarationFor(operation);
+        const declaration = comptime operation_metadata.declarationFor(operation);
         try std.testing.expectEqual(operation, declaration.operation);
-        try std.testing.expect(declaration.requestSize() >= @sizeOf(abi.RequestHeader));
-        if (declaration.responseSize() != 0) {
-            try std.testing.expect(declaration.responseSize() >= @sizeOf(u8));
-        }
+        try std.testing.expect(@sizeOf(component_port.SyscallWireRequest(operation)) >= @sizeOf(abi.RequestHeader));
     }
 
-    try std.testing.expectEqual(syscall_abi.Domain.task, syscall_abi.declarationFor(.task_create).domain);
-    try std.testing.expectEqual(syscall_abi.Domain.endpoint, syscall_abi.declarationFor(.endpoint_send).domain);
-    try std.testing.expectEqual(syscall_abi.Domain.capability, syscall_abi.declarationFor(.capability_derive).domain);
-    try std.testing.expectEqual(syscall_abi.Domain.shared_memory, syscall_abi.declarationFor(.shared_memory_map).domain);
-    try std.testing.expectEqual(syscall_abi.Domain.device, syscall_abi.declarationFor(.device_describe).domain);
-    try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscall_abi.declarationFor(.task_create).request_copy);
-    try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscall_abi.declarationFor(.endpoint_send).request_copy);
-    try std.testing.expectEqual(capability.CapabilityRight.task_create, syscall_abi.declarationFor(.task_create).required_right);
-    try std.testing.expectEqual(capability.CapabilityRight.device_use, syscall_abi.declarationFor(.device_describe).required_right);
-    try std.testing.expect(switch (syscall_abi.declarationFor(.shared_memory_map).target_kind) {
+    try std.testing.expectEqual(operation_metadata.Domain.task, operation_metadata.declarationFor(.task_create).domain);
+    try std.testing.expectEqual(operation_metadata.Domain.endpoint, operation_metadata.declarationFor(.endpoint_send).domain);
+    try std.testing.expectEqual(operation_metadata.Domain.capability, operation_metadata.declarationFor(.capability_derive).domain);
+    try std.testing.expectEqual(operation_metadata.Domain.shared_memory, operation_metadata.declarationFor(.shared_memory_map).domain);
+    try std.testing.expectEqual(operation_metadata.Domain.device, operation_metadata.declarationFor(.device_describe).domain);
+    try std.testing.expectEqual(capability.CapabilityRight.task_create, operation_metadata.declarationFor(.task_create).required_right);
+    try std.testing.expectEqual(capability.CapabilityRight.device_use, operation_metadata.declarationFor(.device_describe).required_right);
+    try std.testing.expect(switch (operation_metadata.declarationFor(.shared_memory_map).target_kind) {
         .fixed => |kind| kind == .shared_memory,
         else => false,
     });
-    try std.testing.expect(syscall_abi.declarationFor(.endpoint_create).scope_rule.task_scope_matches_request_task);
-    try std.testing.expectEqual(@as(usize, 1), syscall_abi.declarationFor(.endpoint_create).auto_grants.len);
+    try std.testing.expect(operation_metadata.declarationFor(.endpoint_create).scope_rule.task_scope_matches_request_task);
+    try std.testing.expectEqual(@as(usize, 1), operation_metadata.declarationFor(.endpoint_create).auto_grants.len);
 }
 
 pub fn principalIdentityAndAdministrativeScopeStaySplit() !void {
@@ -853,8 +846,8 @@ pub fn principalIdentityAndAdministrativeScopeStaySplit() !void {
     try std.testing.expectEqual(policy_object.NetworkEgressMode.local_only, user_policy.network_egress_mode);
     try std.testing.expect(device_policy.allowsInstallSource("store:zigos"));
     try std.testing.expect(!device_policy.allowsInstallSource("repo:unsigned"));
-    try std.testing.expect(policies.syncDestinationAllowed(.workspace, 500, "relay.spec.zigos"));
-    try std.testing.expect(!policies.syncDestinationAllowed(.workspace, 500, "relay.other"));
+    try std.testing.expect(policies.syncDestinationDecision(.{ .workspace_id = 500 }, "relay.spec.zigos").allowed);
+    try std.testing.expect(!policies.syncDestinationDecision(.{ .workspace_id = 500 }, "relay.other").allowed);
     try std.testing.expect(org_policy.audit_export_required);
 
     const subjects = policy_object.SubjectSet{

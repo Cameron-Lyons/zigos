@@ -7,10 +7,6 @@ pub const FrameRun = struct {
     count: u32,
 };
 
-pub const AllocationCursor = struct {
-    next_frame: u32 = 0,
-};
-
 pub const Stats = struct {
     total: u32,
     reserved: u32,
@@ -28,15 +24,6 @@ pub const Error = error{
     ReservationTableFull,
     ReservationsSealed,
 };
-
-pub const MUTATES_RANGES_BY_BITMAP_WORD = true;
-pub const CONTIGUOUS_SEARCH_USES_BITMAP_WORDS = true;
-pub const SINGLE_FRAME_MUTATIONS_ARE_DIRECT = true;
-pub const SINGLE_FRAME_HINT_IS_PROBED_DIRECTLY = true;
-pub const SUPPORTS_BOUNDED_PHYSICAL_ALLOCATION = true;
-pub const SUPPORTS_INDEPENDENT_ALLOCATION_CURSORS = true;
-pub const USES_SINGLE_UNAVAILABLE_BITMAP = true;
-pub const RESERVATIONS_USE_NORMALIZED_RANGES = true;
 
 const MAX_HANDOFF_BYTES: usize = 1024 * 1024;
 const MIN_MEMORY_MAP_ENTRY_BYTES: usize = 24;
@@ -254,15 +241,6 @@ fn FixedWithReservationCapacity(
             return self.allocateBetween(count, 0, exclusive_end);
         }
 
-        pub fn allocateBelowWithCursor(
-            self: *Self,
-            count: u32,
-            exclusive_end: PhysicalAddress,
-            cursor: *AllocationCursor,
-        ) ?FrameRun {
-            return self.allocateBetweenWithCursor(count, 0, exclusive_end, cursor);
-        }
-
         pub fn allocateFrameBetween(
             self: *Self,
             inclusive_start: PhysicalAddress,
@@ -327,21 +305,6 @@ fn FixedWithReservationCapacity(
             };
         }
 
-        pub fn allocateBetweenWithCursor(
-            self: *Self,
-            count: u32,
-            inclusive_start: PhysicalAddress,
-            exclusive_end: PhysicalAddress,
-            cursor: *AllocationCursor,
-        ) ?FrameRun {
-            const shared_hint = self.search_frame_hint;
-            self.search_frame_hint = cursor.next_frame;
-            const run = self.allocateBetween(count, inclusive_start, exclusive_end);
-            cursor.next_frame = self.search_frame_hint;
-            self.search_frame_hint = shared_hint;
-            return run;
-        }
-
         pub fn allocateAlignedBetween(
             self: *Self,
             count: u32,
@@ -379,22 +342,6 @@ fn FixedWithReservationCapacity(
             self.cacheKnownUnreservedRange(start, start + count);
             self.search_frame_hint = if (start + count == frame_count) 0 else start + count;
             return .{ .base = @as(PhysicalAddress, start) * page_size, .count = count };
-        }
-
-        pub fn allocateAlignedBetweenWithCursor(
-            self: *Self,
-            count: u32,
-            alignment_frames: u32,
-            inclusive_start: PhysicalAddress,
-            exclusive_end: PhysicalAddress,
-            cursor: *AllocationCursor,
-        ) ?FrameRun {
-            const shared_hint = self.search_frame_hint;
-            self.search_frame_hint = cursor.next_frame;
-            const run = self.allocateAlignedBetween(count, alignment_frames, inclusive_start, exclusive_end);
-            cursor.next_frame = self.search_frame_hint;
-            self.search_frame_hint = shared_hint;
-            return run;
         }
 
         pub fn release(self: *Self, run: FrameRun) Error!void {
@@ -451,6 +398,29 @@ fn FixedWithReservationCapacity(
             const frame: u32 = @intCast(frame_address / page_size);
             return self.bitIsSet(&self.storage.unavailable_bitmap, frame) and
                 (self.rangeIsKnownUnreserved(frame, frame + 1) or !self.frameIsReserved(frame));
+        }
+
+        /// Every frame of the run is allocated: the word and reservation-range
+        /// checks a release performs, without per-frame probes.
+        pub fn isRunAllocated(self: *const Self, run: FrameRun) bool {
+            if (!self.reservations_sealed) return false;
+            const start = validateRun(run) catch return false;
+            self.validateReleasableRange(start, run.count) catch return false;
+            return true;
+        }
+
+        /// Every frame of the run is reserved, which also excludes allocation.
+        pub fn isRunReserved(self: *const Self, run: FrameRun) bool {
+            const start = validateRun(run) catch return false;
+            const end = start + run.count;
+            if (!self.reservations_sealed) return self.findFreeFrame(start, end) == null;
+            var index = self.firstRangeEndingAfter(start);
+            var cursor = start;
+            while (cursor < end) : (index += 1) {
+                if (index == self.reservation_range_count or self.storage.reservation_ranges[index].start > cursor) return false;
+                cursor = self.storage.reservation_ranges[index].end;
+            }
+            return true;
         }
 
         fn validateRun(run: FrameRun) Error!u32 {
@@ -930,8 +900,6 @@ test "reservation sealing fails closed when normalized ownership exceeds capacit
 
 test "64 GiB allocator state stays below three MiB" {
     const Allocator = Fixed(64 * 1024 * 1024 * 1024, 4096);
-    try std.testing.expect(USES_SINGLE_UNAVAILABLE_BITMAP);
-    try std.testing.expect(RESERVATIONS_USE_NORMALIZED_RANGES);
     try std.testing.expectEqual(MAX_BOOT_RESERVATION_RANGES, Allocator.max_reservation_ranges);
     try std.testing.expectEqual(@as(usize, 8), Allocator.reservation_range_bytes);
     try std.testing.expectEqual(@sizeOf(Allocator.Storage), Allocator.storage_bytes);
@@ -961,7 +929,7 @@ test "availability indexes respect partial words at every level" {
     }
 }
 
-test "sparse searches preserve physical bounds and independent cursor wraparound" {
+test "sparse searches preserve physical bounds and hint wraparound" {
     const frames = 262_144 + 131;
     const Allocator = Fixed(frames * 4096, 4096);
     var storage: Allocator.Storage = undefined;
@@ -970,15 +938,15 @@ test "sparse searches preserve physical bounds and independent cursor wraparound
     for ([_]u32{ 63, 4096, 262_144, frames - 1 }) |frame| {
         try allocator.makeAvailable(.{ .base = @as(PhysicalAddress, frame) * 4096, .count = 1 });
     }
-    var cursor = AllocationCursor{ .next_frame = frames - 1 };
-    try std.testing.expect(allocator.allocateBetweenWithCursor(1, 4097 * 4096, 262_144 * 4096, &cursor) == null);
-    try std.testing.expect(allocator.allocateBetweenWithCursor(1, 64 * 4096, 4096 * 4096, &cursor) == null);
-    cursor.next_frame = 262_143;
-    try std.testing.expectEqual(@as(PhysicalAddress, 262_144 * 4096), allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor).?.base);
-    try std.testing.expectEqual(@as(PhysicalAddress, 63 * 4096), allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor).?.base);
-    try std.testing.expectEqual(@as(PhysicalAddress, 4096 * 4096), allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor).?.base);
-    try std.testing.expect(allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor) == null);
-    try std.testing.expectEqual(@as(u32, 0), allocator.search_frame_hint);
+    allocator.search_frame_hint = frames - 1;
+    try std.testing.expect(allocator.allocateBetween(1, 4097 * 4096, 262_144 * 4096) == null);
+    try std.testing.expect(allocator.allocateBetween(1, 64 * 4096, 4096 * 4096) == null);
+    try std.testing.expectEqual(@as(u32, frames - 1), allocator.search_frame_hint);
+    allocator.search_frame_hint = 262_143;
+    try std.testing.expectEqual(@as(PhysicalAddress, 262_144 * 4096), allocator.allocateBelow(1, 262_145 * 4096).?.base);
+    try std.testing.expectEqual(@as(PhysicalAddress, 63 * 4096), allocator.allocateBelow(1, 262_145 * 4096).?.base);
+    try std.testing.expectEqual(@as(PhysicalAddress, 4096 * 4096), allocator.allocateBelow(1, 262_145 * 4096).?.base);
+    try std.testing.expect(allocator.allocateBelow(1, 262_145 * 4096) == null);
     try std.testing.expectEqual(@as(PhysicalAddress, (frames - 1) * 4096), allocator.allocate(1).?.base);
 }
 
@@ -1040,11 +1008,11 @@ test "indexed frame allocation matches a linear ownership model under churn" {
         const count = random.intRangeAtMost(u32, 1, @min(80, upper - lower));
         if (iteration % 3 != 0) {
             const hint = random.uintLessThan(u32, frames);
-            var cursor = AllocationCursor{ .next_frame = hint };
+            allocator.search_frame_hint = hint;
             const start = if (hint >= lower and hint < upper) hint else lower;
             const expected = Reference.find(&states, start, upper, count) orelse
                 Reference.find(&states, lower, upper, count);
-            const actual = allocator.allocateBetweenWithCursor(count, @as(PhysicalAddress, lower) * 4096, @as(PhysicalAddress, upper) * 4096, &cursor);
+            const actual = allocator.allocateBetween(count, @as(PhysicalAddress, lower) * 4096, @as(PhysicalAddress, upper) * 4096);
             if (expected) |frame| {
                 try std.testing.expectEqual(FrameRun{ .base = @as(PhysicalAddress, frame) * 4096, .count = count }, actual.?);
                 @memset(states[frame..][0..count], .allocated);
@@ -1164,7 +1132,6 @@ test "single-frame mutations use native bitmap words and preserve accounting" {
     try allocator.release(run);
     try std.testing.expectEqual(@as(u32, 0), allocator.stats().allocated);
     try std.testing.expectError(error.NotAllocated, allocator.release(run));
-    try std.testing.expect(SINGLE_FRAME_MUTATIONS_ARE_DIRECT);
     try std.testing.expectEqual(@as(u32, 64), Allocator.bits_per_bitmap_word);
 }
 
@@ -1180,7 +1147,6 @@ test "single-frame allocation probes a released search hint directly" {
     try allocator.releaseFrame(first);
 
     try std.testing.expectEqual(first, allocator.allocateFrameBetween(lower_bound, 96 * page_size).?);
-    try std.testing.expect(SINGLE_FRAME_HINT_IS_PROBED_DIRECTLY);
 }
 
 test "physical frame addresses remain exact above 4 GiB" {
@@ -1244,36 +1210,6 @@ test "range allocation honors both physical boundaries" {
     try std.testing.expectEqual(@as(PhysicalAddress, 10 * page_size), second_high.base);
     try std.testing.expect(allocator.allocateBetween(1, 8 * page_size, 12 * page_size) == null);
     try std.testing.expectEqual(@as(PhysicalAddress, 0), allocator.allocateBelow(1, 8 * page_size).?.base);
-}
-
-test "bounded allocation cursors retain independent range progress" {
-    const page_size: u32 = 4096;
-    const Allocator = Fixed(16 * page_size, page_size);
-    var storage: Allocator.Storage = undefined;
-    var allocator = Allocator.init(&storage);
-    var low_cursor = AllocationCursor{};
-    var high_cursor = AllocationCursor{ .next_frame = 8 };
-
-    const first_high = allocator.allocateBetweenWithCursor(
-        1,
-        8 * page_size,
-        16 * page_size,
-        &high_cursor,
-    ).?;
-    const first_low = allocator.allocateBelowWithCursor(1, 8 * page_size, &low_cursor).?;
-    const second_high = allocator.allocateBetweenWithCursor(
-        1,
-        8 * page_size,
-        16 * page_size,
-        &high_cursor,
-    ).?;
-
-    try std.testing.expectEqual(@as(PhysicalAddress, 8 * page_size), first_high.base);
-    try std.testing.expectEqual(@as(PhysicalAddress, 0), first_low.base);
-    try std.testing.expectEqual(@as(PhysicalAddress, 9 * page_size), second_high.base);
-    try std.testing.expectEqual(@as(u32, 1), low_cursor.next_frame);
-    try std.testing.expectEqual(@as(u32, 10), high_cursor.next_frame);
-    try std.testing.expect(SUPPORTS_INDEPENDENT_ALLOCATION_CURSORS);
 }
 
 test "single-frame allocation wraps from a non-word-aligned hint" {
@@ -1367,17 +1303,15 @@ test "aligned contiguous allocation skips fragmented candidates and a nonaligned
     try std.testing.expectEqual(run, allocator.allocateAlignedBetween(512, 512, 0, 4096 * page_size).?);
 }
 
-test "aligned contiguous allocation wraps independent cursors and preserves physical limits" {
+test "aligned contiguous allocation wraps its hint and preserves physical limits" {
     const page_size: u32 = 4096;
     const Allocator = Fixed(64 * page_size, page_size);
     var storage: Allocator.Storage = undefined;
     var allocator = Allocator.init(&storage);
-    allocator.search_frame_hint = 48;
-    var cursor = AllocationCursor{ .next_frame = 27 };
-    const run = allocator.allocateAlignedBetweenWithCursor(8, 8, 3 * page_size + 1, 35 * page_size - 1, &cursor).?;
+    allocator.search_frame_hint = 27;
+    const run = allocator.allocateAlignedBetween(8, 8, 3 * page_size + 1, 35 * page_size - 1).?;
     try std.testing.expectEqual(@as(u64, 8 * page_size), run.base);
-    try std.testing.expectEqual(@as(u32, 16), cursor.next_frame);
-    try std.testing.expectEqual(@as(u32, 48), allocator.search_frame_hint);
+    try std.testing.expectEqual(@as(u32, 16), allocator.search_frame_hint);
 
     const before = allocator.stats();
     const hint = allocator.search_frame_hint;
@@ -1529,13 +1463,12 @@ test "wrapped bounded allocations match exhaustive first-fit results" {
                                 Reference.find(unavailable, lower, upper, count, alignment);
                             var storage: Allocator.Storage = undefined;
                             var allocator = baseline.cloneInto(&storage);
-                            var cursor = AllocationCursor{ .next_frame = hint };
-                            const actual = allocator.allocateAlignedBetweenWithCursor(
+                            allocator.search_frame_hint = hint;
+                            const actual = allocator.allocateAlignedBetween(
                                 count,
                                 alignment,
                                 @as(PhysicalAddress, lower) * page_size,
                                 @as(PhysicalAddress, upper) * page_size,
-                                &cursor,
                             );
                             try std.testing.expectEqual(expected, if (actual) |run|
                                 @as(?u32, @intCast(run.base / page_size))
@@ -1543,7 +1476,10 @@ test "wrapped bounded allocations match exhaustive first-fit results" {
                                 null);
                             try std.testing.expectEqual(if (expected != null) count else @as(u32, 0), allocator.stats().allocated);
                             try std.testing.expectEqual(baseline.stats().reserved, allocator.stats().reserved);
-                            try std.testing.expectEqual(baseline.search_frame_hint, allocator.search_frame_hint);
+                            if (expected) |frame| {
+                                const next = frame + count;
+                                try std.testing.expectEqual(if (next == frame_total) 0 else next, allocator.search_frame_hint);
+                            } else try std.testing.expectEqual(hint, allocator.search_frame_hint);
                         }
                     }
                 }
@@ -1552,19 +1488,19 @@ test "wrapped bounded allocations match exhaustive first-fit results" {
     }
 }
 
-test "wrapped allocations retain runs crossing the cursor and bitmap boundary" {
+test "wrapped allocations retain runs crossing the hint and bitmap boundary" {
     const page_size: u32 = 4096;
     const Allocator = Fixed(128 * page_size, page_size);
     var storage: Allocator.Storage = undefined;
     var allocator = Allocator.init(&storage);
     try allocator.reserve(.{ .base = 0, .count = 128 });
     try allocator.makeAvailable(.{ .base = 62 * page_size, .count = 6 });
-    var cursor = AllocationCursor{ .next_frame = 65 };
-    const aligned = allocator.allocateAlignedBetweenWithCursor(4, 64, 0, 128 * page_size, &cursor).?;
+    allocator.search_frame_hint = 65;
+    const aligned = allocator.allocateAlignedBetween(4, 64, 0, 128 * page_size).?;
     try std.testing.expectEqual(FrameRun{ .base = 64 * page_size, .count = 4 }, aligned);
     try allocator.release(aligned);
-    cursor.next_frame = 64;
-    const run = allocator.allocateBetweenWithCursor(6, 0, 128 * page_size, &cursor).?;
+    allocator.search_frame_hint = 64;
+    const run = allocator.allocateBetween(6, 0, 128 * page_size).?;
     try std.testing.expectEqual(FrameRun{ .base = 62 * page_size, .count = 6 }, run);
 }
 
@@ -1580,7 +1516,6 @@ test "fragmented full-space contiguous search is bounded by bitmap words" {
     }
 
     try std.testing.expect(allocator.findRun(0, Allocator.total_frames, 2) == null);
-    try std.testing.expect(CONTIGUOUS_SEARCH_USES_BITMAP_WORDS);
     try std.testing.expectEqual(@as(usize, 512), Allocator.max_contiguous_search_word_probes);
 }
 
@@ -1712,6 +1647,32 @@ test "fail-closed availability opens only declared firmware runs" {
         .base = 16 * 4096,
         .count = 1,
     }));
-    try std.testing.expect(MUTATES_RANGES_BY_BITMAP_WORD);
     try std.testing.expectEqual(@as(usize, 2), Allocator.max_range_word_probes);
+}
+
+test "run ownership queries match per-frame reservation and allocation state" {
+    const Allocator = Fixed(256 * 4096, 4096);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    try allocator.reserve(.{ .base = 8 * 4096, .count = 8 });
+    try allocator.reserve(.{ .base = 16 * 4096, .count = 4 });
+    try std.testing.expect(allocator.isRunReserved(.{ .base = 8 * 4096, .count = 12 }));
+    try std.testing.expect(!allocator.isRunAllocated(.{ .base = 0, .count = 1 }));
+    try allocator.sealReservations();
+    try std.testing.expect(allocator.isRunReserved(.{ .base = 8 * 4096, .count = 12 }));
+    try std.testing.expect(allocator.isRunReserved(.{ .base = 19 * 4096, .count = 1 }));
+    try std.testing.expect(!allocator.isRunReserved(.{ .base = 7 * 4096, .count = 2 }));
+    try std.testing.expect(!allocator.isRunReserved(.{ .base = 19 * 4096, .count = 2 }));
+    const run = allocator.allocateBetween(70, 64 * 4096, 256 * 4096).?;
+    try std.testing.expect(allocator.isRunAllocated(run));
+    try std.testing.expect(!allocator.isRunReserved(run));
+    try std.testing.expect(!allocator.isRunAllocated(.{ .base = run.base, .count = run.count + 1 }));
+    try std.testing.expect(!allocator.isRunAllocated(.{ .base = 8 * 4096, .count = 1 }));
+    try allocator.releaseFrame(run.base + 65 * 4096);
+    try std.testing.expect(!allocator.isRunAllocated(run));
+    try std.testing.expect(allocator.isRunAllocated(.{ .base = run.base, .count = 65 }));
+    for ([_]FrameRun{ .{ .base = 1, .count = 1 }, .{ .base = 0, .count = 0 }, .{ .base = 255 * 4096, .count = 2 } }) |invalid| {
+        try std.testing.expect(!allocator.isRunAllocated(invalid));
+        try std.testing.expect(!allocator.isRunReserved(invalid));
+    }
 }

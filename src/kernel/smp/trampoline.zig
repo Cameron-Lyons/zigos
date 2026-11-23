@@ -14,7 +14,7 @@ extern var smp_trampoline_entry: u64;
 extern var smp_trampoline_stack: u64;
 extern var smp_trampoline_cpu: u64;
 
-pub const PHYSICAL_LIMIT: u32 = 1024 * 1024;
+pub const PHYSICAL_LIMIT: u32 = paging.SIPI_PHYSICAL_LIMIT;
 pub const STACK_USABLE_BYTES: usize = 16 * 1024;
 const PAGE_BYTES: usize = 4096;
 

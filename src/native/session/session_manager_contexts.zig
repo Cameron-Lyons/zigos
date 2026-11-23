@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
@@ -17,41 +16,17 @@ const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const table_backing = @import("../core/table_backing.zig");
 
-pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = true;
-pub const HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING = true;
-pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = true;
-pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = true;
-pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = true;
-pub const HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING = true;
-pub const ENDPOINT_TABLE_HANDLE_SIZE_CEILING_BYTES: usize = 8;
-pub const REVIEW_UX_CONTROLLER_HANDLE_SIZE_CEILING_BYTES: usize = 8;
-const heap_backed_capability_table = builtin.target.os.tag == .freestanding;
-const heap_backed_endpoint_table = builtin.target.os.tag == .freestanding;
-const heap_backed_userspace_catalog = builtin.target.os.tag == .freestanding;
-const heap_backed_userspace_scheduler = builtin.target.os.tag == .freestanding;
-const heap_backed_task_runtime = builtin.target.os.tag == .freestanding;
-const heap_backed_review_ux_controller = builtin.target.os.tag == .freestanding;
-const CapabilityTableBacking = if (heap_backed_capability_table) ?*capability.CapabilityTable else capability.CapabilityTable;
-const EndpointTableBacking = if (heap_backed_endpoint_table) ?*endpoint_mod.Table else endpoint_mod.Table;
-const UserspaceCatalogBacking = if (heap_backed_userspace_catalog) ?*userspace_loader.Catalog else userspace_loader.Catalog;
-const UserspaceSchedulerBacking = if (heap_backed_userspace_scheduler) ?*userspace_scheduler.Scheduler else userspace_scheduler.Scheduler;
-const TaskRuntimeBacking = if (heap_backed_task_runtime) ?*task_runtime.Runtime else task_runtime.Runtime;
-const ReviewUxControllerBacking = if (heap_backed_review_ux_controller) ?*native_ux.Controller else native_ux.Controller;
-
 pub const KernelContext = struct {
-    capability_table: CapabilityTableBacking = if (heap_backed_capability_table) null else capability.CapabilityTable.init(),
-    endpoint_table: EndpointTableBacking = if (heap_backed_endpoint_table) null else endpoint_mod.Table.init(),
+    capability_table: table_backing.Lazy(capability.CapabilityTable, capability.CapabilityTable.initializeAllocated) = .{},
+    endpoint_table: table_backing.Lazy(endpoint_mod.Table, null) = .{},
     shared_memory_table: shared_memory_mod.Table = shared_memory_mod.Table.init(),
     kernel_instance: native_kernel.Kernel = undefined,
     kernel_port_instance: component_port.KernelPort = undefined,
     kernel_port_ready: bool = false,
 
     comptime {
-        if ((heap_backed_capability_table or heap_backed_endpoint_table) and @sizeOf(@This()) > 12 * 1024) {
+        if (@sizeOf(@This()) > 12 * 1024) {
             @compileError("heap-backed kernel contexts exceed their compact resident layout");
-        }
-        if (heap_backed_endpoint_table and @sizeOf(EndpointTableBacking) > ENDPOINT_TABLE_HANDLE_SIZE_CEILING_BYTES) {
-            @compileError("heap-backed endpoint table exceeds its handle size ceiling");
         }
     }
 
@@ -68,59 +43,28 @@ pub const KernelContext = struct {
     }
 
     pub fn capabilityTable(self: *KernelContext) ?*capability.CapabilityTable {
-        if (comptime heap_backed_capability_table) return self.capability_table;
-        return &self.capability_table;
+        return self.capability_table.get();
     }
 
     pub fn ensureCapabilityTable(self: *KernelContext) error{NoSpaceLeft}!*capability.CapabilityTable {
-        if (self.capabilityTable()) |table| return table;
-        if (comptime heap_backed_capability_table) {
-            const table = table_backing.alloc(capability.CapabilityTable) orelse return error.NoSpaceLeft;
-            table.initializeAllocated();
-            self.capability_table = table;
-            return table;
-        }
-        return &self.capability_table;
+        return self.capability_table.ensure();
     }
 
     pub fn releaseCapabilityTable(self: *KernelContext) void {
-        if (comptime heap_backed_capability_table) {
-            if (self.capability_table) |table| {
-                table_backing.free(capability.CapabilityTable, table);
-                self.capability_table = null;
-            }
-        } else {
-            self.capability_table = capability.CapabilityTable.init();
-        }
+        self.capability_table.release();
     }
 
     pub fn endpointTable(self: *KernelContext) ?*endpoint_mod.Table {
-        if (comptime heap_backed_endpoint_table) return self.endpoint_table;
-        return &self.endpoint_table;
+        return self.endpoint_table.get();
     }
 
     pub fn ensureEndpointTable(self: *KernelContext) error{NoSpaceLeft}!*endpoint_mod.Table {
-        if (self.endpointTable()) |table| return table;
-        if (comptime heap_backed_endpoint_table) {
-            const table = table_backing.alloc(endpoint_mod.Table) orelse return error.NoSpaceLeft;
-            table.initializeAllocated();
-            self.endpoint_table = table;
-            return table;
-        }
-        return &self.endpoint_table;
+        return self.endpoint_table.ensure();
     }
 
     pub fn releaseEndpointTable(self: *KernelContext) void {
-        if (comptime heap_backed_endpoint_table) {
-            if (self.endpoint_table) |table| {
-                table.deinit();
-                table_backing.free(endpoint_mod.Table, table);
-                self.endpoint_table = null;
-            }
-        } else {
-            self.endpoint_table.deinit();
-            self.endpoint_table = endpoint_mod.Table.init();
-        }
+        if (self.endpoint_table.get()) |table| table.deinit();
+        self.endpoint_table.release();
     }
 
     pub fn port(self: *KernelContext) ?*component_port.KernelPort {
@@ -150,23 +94,17 @@ pub const KernelContext = struct {
     }
 };
 
-pub const kernel_context_layout = .{
-    .freestanding_endpoint_table_size_ceiling_bytes = endpoint_mod.FREESTANDING_TABLE_SIZE_CEILING_BYTES,
-    .freestanding_endpoint_table_handle_size_bytes = @sizeOf(?*endpoint_mod.Table),
-    .heap_backs_endpoint_table_on_freestanding = HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING,
-};
-
 pub const RuntimeContext = struct {
-    runtime: TaskRuntimeBacking = if (heap_backed_task_runtime) null else task_runtime.Runtime.init(),
+    runtime: table_backing.Lazy(task_runtime.Runtime, task_runtime.Runtime.initializeAllocated) = .{},
     runtime_checkpoint_store: task_runtime_service_mod.CheckpointStore = .{},
     runtime_service: task_runtime_service_mod.Service = undefined,
     userspace_executor: userspace_executor.Executor = .{},
-    userspace_scheduler: UserspaceSchedulerBacking = if (heap_backed_userspace_scheduler) null else undefined,
-    userspace_catalog: UserspaceCatalogBacking = if (heap_backed_userspace_catalog) null else userspace_loader.Catalog.init(),
+    userspace_scheduler: table_backing.Lazy(userspace_scheduler.Scheduler, null) = .{},
+    userspace_catalog: table_backing.Lazy(userspace_loader.Catalog, null) = .{},
     constructed: bool = false,
 
     comptime {
-        if ((heap_backed_userspace_catalog or heap_backed_userspace_scheduler or heap_backed_task_runtime) and @sizeOf(@This()) > 1024) {
+        if (@sizeOf(@This()) > 1024) {
             @compileError("heap-backed runtime contexts exceed their compact resident layout");
         }
     }
@@ -177,17 +115,12 @@ pub const RuntimeContext = struct {
 
     pub fn ensureConstructed(self: *RuntimeContext) error{NoSpaceLeft}!void {
         if (self.constructed) return;
-        const runtime = try self.ensureTaskRuntime();
-        if (comptime heap_backed_userspace_scheduler) {
-            const scheduler = table_backing.alloc(userspace_scheduler.Scheduler) orelse {
-                self.releaseTaskRuntime();
-                return error.NoSpaceLeft;
-            };
-            scheduler.initializeAllocated(&self.userspace_executor);
-            self.userspace_scheduler = scheduler;
-        } else {
-            self.userspace_scheduler = userspace_scheduler.Scheduler.init(&self.userspace_executor);
-        }
+        const runtime = try self.runtime.ensure();
+        const scheduler = self.userspace_scheduler.ensure() catch |err| {
+            self.releaseTaskRuntime();
+            return err;
+        };
+        scheduler.initializeAllocated(&self.userspace_executor);
         self.runtime_service.initWithStoreInPlace(
             runtime,
             &self.runtime_checkpoint_store,
@@ -196,87 +129,43 @@ pub const RuntimeContext = struct {
     }
 
     pub fn taskRuntime(self: *RuntimeContext) ?*task_runtime.Runtime {
-        if (comptime heap_backed_task_runtime) return self.runtime;
-        return &self.runtime;
+        return self.runtime.get();
     }
 
     pub fn taskRuntimeConst(self: *const RuntimeContext) ?*const task_runtime.Runtime {
-        if (comptime heap_backed_task_runtime) return self.runtime;
-        return &self.runtime;
-    }
-
-    fn ensureTaskRuntime(self: *RuntimeContext) error{NoSpaceLeft}!*task_runtime.Runtime {
-        if (self.taskRuntime()) |runtime| return runtime;
-        if (comptime heap_backed_task_runtime) {
-            const runtime = table_backing.alloc(task_runtime.Runtime) orelse return error.NoSpaceLeft;
-            runtime.initializeAllocated();
-            self.runtime = runtime;
-            return runtime;
-        }
-        return &self.runtime;
+        return self.runtime.get();
     }
 
     pub fn releaseTaskRuntime(self: *RuntimeContext) void {
-        if (comptime heap_backed_task_runtime) {
-            if (self.runtime) |runtime| {
-                runtime.reset();
-                table_backing.free(task_runtime.Runtime, runtime);
-                self.runtime = null;
-            }
-        } else {
-            self.runtime.reset();
-        }
+        if (self.runtime.get()) |runtime| runtime.reset();
+        self.runtime.release();
     }
 
     pub fn userspaceScheduler(self: *RuntimeContext) ?*userspace_scheduler.Scheduler {
-        if (comptime heap_backed_userspace_scheduler) return self.userspace_scheduler;
-        return &self.userspace_scheduler;
+        return self.userspace_scheduler.get();
     }
 
     pub fn userspaceSchedulerConst(self: *const RuntimeContext) ?*const userspace_scheduler.Scheduler {
-        if (comptime heap_backed_userspace_scheduler) return self.userspace_scheduler;
-        return &self.userspace_scheduler;
+        return self.userspace_scheduler.get();
     }
 
     pub fn releaseUserspaceScheduler(self: *RuntimeContext) void {
         if (!self.constructed) return;
-        if (comptime heap_backed_userspace_scheduler) {
-            if (self.userspace_scheduler) |scheduler| {
-                scheduler.deinit();
-                table_backing.free(userspace_scheduler.Scheduler, scheduler);
-                self.userspace_scheduler = null;
-            }
-        } else {
-            self.userspace_scheduler.deinit();
-        }
+        if (self.userspace_scheduler.get()) |scheduler| scheduler.deinit();
+        self.userspace_scheduler.release();
         self.constructed = false;
     }
 
     pub fn userspaceCatalog(self: *RuntimeContext) ?*userspace_loader.Catalog {
-        if (comptime heap_backed_userspace_catalog) return self.userspace_catalog;
-        return &self.userspace_catalog;
+        return self.userspace_catalog.get();
     }
 
     pub fn ensureUserspaceCatalog(self: *RuntimeContext) error{NoSpaceLeft}!*userspace_loader.Catalog {
-        if (self.userspaceCatalog()) |catalog| return catalog;
-        if (comptime heap_backed_userspace_catalog) {
-            const catalog = table_backing.alloc(userspace_loader.Catalog) orelse return error.NoSpaceLeft;
-            catalog.initializeAllocated();
-            self.userspace_catalog = catalog;
-            return catalog;
-        }
-        return &self.userspace_catalog;
+        return self.userspace_catalog.ensure();
     }
 
     pub fn releaseUserspaceCatalog(self: *RuntimeContext) void {
-        if (comptime heap_backed_userspace_catalog) {
-            if (self.userspace_catalog) |catalog| {
-                table_backing.free(userspace_loader.Catalog, catalog);
-                self.userspace_catalog = null;
-            }
-        } else {
-            self.userspace_catalog = userspace_loader.Catalog.init();
-        }
+        self.userspace_catalog.release();
     }
 
     pub fn resetScheduler(self: *RuntimeContext) void {
@@ -303,63 +192,26 @@ pub const RuntimeContext = struct {
         const scheduler = self.userspaceScheduler() orelse return;
         _ = scheduler.executeTask(task_id, 0);
     }
-
-    pub fn runScheduler(self: *RuntimeContext, now_ticks: u64) bool {
-        const scheduler = self.userspaceScheduler() orelse return false;
-        return scheduler.runNext(now_ticks);
-    }
-
-    pub fn schedulerHasReadyTasks(self: *const RuntimeContext) bool {
-        const scheduler = self.userspaceSchedulerConst() orelse return false;
-        return scheduler.hasReadyTasks();
-    }
 };
 
 pub const RecoveryContext = struct {
     review_compositor_session: compositor_session.Session = compositor_session.Session.init(),
-    review_ux_controller: ReviewUxControllerBacking = if (heap_backed_review_ux_controller) null else native_ux.Controller.init(),
+    review_ux_controller: table_backing.Lazy(native_ux.Controller, native_ux.Controller.initializeAllocated) = .{},
     diagnostic_ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
-
-    comptime {
-        if (heap_backed_review_ux_controller and @sizeOf(ReviewUxControllerBacking) > REVIEW_UX_CONTROLLER_HANDLE_SIZE_CEILING_BYTES) {
-            @compileError("heap-backed review UX controller exceeds its handle size ceiling");
-        }
-    }
 
     pub fn init() RecoveryContext {
         return .{};
     }
 
     pub fn reviewUxController(self: *RecoveryContext) ?*native_ux.Controller {
-        if (comptime heap_backed_review_ux_controller) return self.review_ux_controller;
-        return &self.review_ux_controller;
+        return self.review_ux_controller.get();
     }
 
     pub fn ensureReviewUxController(self: *RecoveryContext) error{NoSpaceLeft}!*native_ux.Controller {
-        if (self.reviewUxController()) |controller| return controller;
-        if (comptime heap_backed_review_ux_controller) {
-            const controller = table_backing.alloc(native_ux.Controller) orelse return error.NoSpaceLeft;
-            controller.initializeAllocated();
-            self.review_ux_controller = controller;
-            return controller;
-        }
-        return &self.review_ux_controller;
+        return self.review_ux_controller.ensure();
     }
 
     pub fn releaseReviewUxController(self: *RecoveryContext) void {
-        if (comptime heap_backed_review_ux_controller) {
-            if (self.review_ux_controller) |controller| {
-                table_backing.free(native_ux.Controller, controller);
-                self.review_ux_controller = null;
-            }
-        } else {
-            self.review_ux_controller = native_ux.Controller.init();
-        }
+        self.review_ux_controller.release();
     }
-};
-
-pub const recovery_context_layout = .{
-    .heap_backs_review_ux_controller_on_freestanding = HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING,
-    .review_ux_controller_size_bytes = native_ux.CONTROLLER_SIZE_CEILING_BYTES,
-    .freestanding_review_ux_controller_handle_size_bytes = if (HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING) @sizeOf(?*native_ux.Controller) else native_ux.CONTROLLER_SIZE_CEILING_BYTES,
 };

@@ -15,8 +15,6 @@ pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
 pub const MAX_DOCUMENT_OPERATIONS: usize = 16;
 pub const MAX_DOCUMENT_OPERATION_TEXT_BYTES: usize = 64;
 pub const MAX_DOCUMENT_VECTOR_CLOCKS: usize = 8;
-pub const COMPACT_DOCUMENT_LOG_METADATA = true;
-pub const COMPACT_DOCUMENT_OPERATION_OFFSETS = true;
 pub const DocumentOffset = u32;
 pub const DOCUMENT_OPERATION_SIZE_CEILING_BYTES: usize = 104;
 pub const DOCUMENT_OPERATION_LOG_SIZE_CEILING_BYTES: usize = 2_296;
@@ -234,14 +232,6 @@ pub const MergeResult = struct {
     merged_document_len: usize = 0,
 };
 
-pub const MergeableDocumentAdapter = struct {
-    mergeFn: *const fn (request: MergeRequest) Error!MergeResult,
-
-    pub fn merge(self: *const MergeableDocumentAdapter, request: MergeRequest) Error!MergeResult {
-        return self.mergeFn(request);
-    }
-};
-
 pub fn applyMergeableDocumentOperations(
     base_document: []const u8,
     local_operations: []const DocumentOperation,
@@ -294,14 +284,6 @@ pub const ChunkReplicationResult = struct {
     replicated_chunks: usize,
 };
 
-pub const ChunkMediaAdapter = struct {
-    replicateFn: *const fn (request: ChunkReplicationRequest) Error!ChunkReplicationResult,
-
-    pub fn replicate(self: *const ChunkMediaAdapter, request: ChunkReplicationRequest) Error!ChunkReplicationResult {
-        return self.replicateFn(request);
-    }
-};
-
 pub const SecretTransferRequest = struct {
     store: *const storage_service.Service,
     workspace_id: u64,
@@ -316,14 +298,6 @@ pub const SecretTransferResult = struct {
     encrypted_payload: bool,
 };
 
-pub const SecretTransferAdapter = struct {
-    transferFn: *const fn (request: SecretTransferRequest) Error!SecretTransferResult,
-
-    pub fn transfer(self: *const SecretTransferAdapter, request: SecretTransferRequest) Error!SecretTransferResult {
-        return self.transferFn(request);
-    }
-};
-
 pub const DatabaseSyncRequest = struct {
     contract: *const state_support.DatabaseContract,
     workspace_id: u64,
@@ -334,14 +308,6 @@ pub const DatabaseSyncRequest = struct {
 pub const DatabaseSyncResult = struct {
     replicated: bool,
     transactional_contract: bool,
-};
-
-pub const DatabaseSyncAdapter = struct {
-    replicateFn: *const fn (request: DatabaseSyncRequest) Error!DatabaseSyncResult,
-
-    pub fn replicate(self: *const DatabaseSyncAdapter, request: DatabaseSyncRequest) Error!DatabaseSyncResult {
-        return self.replicateFn(request);
-    }
 };
 
 pub const TransportFrame = state_support.TransportFrame;
@@ -437,32 +403,6 @@ pub const TransportQueue = struct {
         return self.next_frame_id - 1;
     }
 
-    pub fn copyForSince(
-        self: *const TransportQueue,
-        workspace_id: u64,
-        target_device: principal.PrincipalId,
-        min_frame_id: u64,
-        out: []TransportFrame,
-    ) usize {
-        var copied: usize = 0;
-        var slot_index = self.target_index.head(transportFrameTargetKey(workspace_id, target_device));
-        while (slot_index != indexed_arena.no_index) {
-            if (slot_index >= MAX_TRANSPORT_FRAMES) native_util.impossibleByInvariant("transport target index points outside frame slots");
-            const slot = &self.frames.slots[slot_index];
-            if (!slot.in_use) native_util.impossibleByInvariant("transport target index points at a free frame");
-            if (slot.frame.workspace_id == workspace_id and
-                slot.frame.target_device.eql(target_device) and
-                slot.frame.id > min_frame_id)
-            {
-                if (copied >= out.len) return copied;
-                out[copied] = slot.frame;
-                copied += 1;
-            }
-            slot_index = self.target_index.next(slot_index);
-        }
-        return copied;
-    }
-
     pub fn latestForPath(
         self: *const TransportQueue,
         workspace_id: u64,
@@ -514,108 +454,79 @@ fn transportFramePathKey(workspace_id: u64, target_device: principal.PrincipalId
     return indexed_arena.nonZeroKey(hash);
 }
 
-pub const DefaultMergeableDocumentAdapter = struct {
-    pub fn adapter() MergeableDocumentAdapter {
-        return .{ .mergeFn = merge };
+pub fn mergeDocument(request: MergeRequest) Error!MergeResult {
+    if (request.entry.object_type != .document and request.entry.object_type != .collection and request.entry.object_type != .blob) {
+        return error.TypeMismatch;
     }
-
-    fn merge(request: MergeRequest) Error!MergeResult {
-        if (request.entry.object_type != .document and request.entry.object_type != .collection and request.entry.object_type != .blob) {
-            return error.TypeMismatch;
-        }
-        const local_version = request.store.version(request.entry.version_id) orelse return error.VersionNotFound;
-        if (local_version.object_type != request.entry.object_type) return error.TypeMismatch;
-        if (request.local_operations.len != 0 or request.remote_operations.len != 0) {
-            if (request.entry.object_type != .document) return error.TypeMismatch;
-            const merge_buffer = request.merge_buffer orelse return error.DocumentBufferTooSmall;
-            const merged_document = try applyMergeableDocumentOperations(
-                request.base_document,
-                request.local_operations,
-                request.remote_operations,
-                merge_buffer,
-            );
-            return .{ .merged = true, .conflict = false, .merged_document_len = merged_document.len };
-        }
-        if (request.remote_version_id == 0 or request.remote_version_id == request.entry.version_id.raw()) {
-            return .{ .merged = true, .conflict = false };
-        }
-        if (local_version.previousVersionId().raw() == request.remote_version_id) {
-            return .{ .merged = true, .conflict = false };
-        }
-        return .{ .merged = true, .conflict = true };
+    const local_version = request.store.version(request.entry.version_id) orelse return error.VersionNotFound;
+    if (local_version.object_type != request.entry.object_type) return error.TypeMismatch;
+    if (request.local_operations.len != 0 or request.remote_operations.len != 0) {
+        if (request.entry.object_type != .document) return error.TypeMismatch;
+        const merge_buffer = request.merge_buffer orelse return error.DocumentBufferTooSmall;
+        const merged_document = try applyMergeableDocumentOperations(
+            request.base_document,
+            request.local_operations,
+            request.remote_operations,
+            merge_buffer,
+        );
+        return .{ .merged = true, .conflict = false, .merged_document_len = merged_document.len };
     }
-};
-
-pub const DefaultChunkMediaAdapter = struct {
-    pub fn adapter() ChunkMediaAdapter {
-        return .{ .replicateFn = replicate };
+    if (request.remote_version_id == 0 or request.remote_version_id == request.entry.version_id.raw()) {
+        return .{ .merged = true, .conflict = false };
     }
-
-    fn replicate(request: ChunkReplicationRequest) Error!ChunkReplicationResult {
-        const version = request.store.version(request.entry.version_id) orelse return error.VersionNotFound;
-        if (version.object_type != request.entry.object_type) return error.TypeMismatch;
-        var cursor = try request.store.versionChunkCursor(version);
-        var chunk_count: usize = 0;
-        while (try cursor.next()) |_| {
-            chunk_count += 1;
-        }
-        const blob = request.store.versionBlob(version) orelse return error.BlobNotFound;
-        return .{
-            .snapshot_replicated = true,
-            .replicated_chunks = @max(@max(blob.chunkCount(), chunk_count), chunkCountForPayload(blob.payloadLen())),
-        };
+    if (local_version.previousVersionId().raw() == request.remote_version_id) {
+        return .{ .merged = true, .conflict = false };
     }
-};
+    return .{ .merged = true, .conflict = true };
+}
 
-pub const DefaultSecretTransferAdapter = struct {
-    pub fn adapter() SecretTransferAdapter {
-        return .{ .transferFn = transfer };
+pub fn replicateChunks(request: ChunkReplicationRequest) Error!ChunkReplicationResult {
+    const version = request.store.version(request.entry.version_id) orelse return error.VersionNotFound;
+    if (version.object_type != request.entry.object_type) return error.TypeMismatch;
+    var cursor = try request.store.versionChunkCursor(version);
+    var chunk_count: usize = 0;
+    while (try cursor.next()) |_| {
+        chunk_count += 1;
     }
+    const blob = request.store.versionBlob(version) orelse return error.BlobNotFound;
+    return .{
+        .snapshot_replicated = true,
+        .replicated_chunks = @max(@max(blob.chunkCount(), chunk_count), chunkCountForPayload(blob.payloadLen())),
+    };
+}
 
-    fn transfer(request: SecretTransferRequest) Error!SecretTransferResult {
-        _ = request.workspace_id;
-        _ = request.from_device;
-        _ = request.to_device;
-        if (!request.personal_e2ee) return error.TransportDenied;
-        const object_record = request.store.object(request.object_id) orelse return error.ObjectNotFound;
-        if (object_record.object_type != .secret) return error.TypeMismatch;
-        const version = request.store.latestVersion(request.object_id) orelse return error.VersionNotFound;
-        if (!(try versionStartsWith(request.store, version, "enc:"))) return error.SecretPayloadNotEncrypted;
-        return .{
-            .transferred = true,
-            .encrypted_payload = true,
-        };
-    }
-};
+pub fn transferSecret(request: SecretTransferRequest) Error!SecretTransferResult {
+    _ = request.workspace_id;
+    _ = request.from_device;
+    _ = request.to_device;
+    if (!request.personal_e2ee) return error.TransportDenied;
+    const object_record = request.store.object(request.object_id) orelse return error.ObjectNotFound;
+    if (object_record.object_type != .secret) return error.TypeMismatch;
+    const version = request.store.latestVersion(request.object_id) orelse return error.VersionNotFound;
+    if (!(try versionStartsWith(request.store, version, "enc:"))) return error.SecretPayloadNotEncrypted;
+    return .{
+        .transferred = true,
+        .encrypted_payload = true,
+    };
+}
 
-pub const DefaultDatabaseSyncAdapter = struct {
-    pub fn adapter() DatabaseSyncAdapter {
-        return .{ .replicateFn = replicate };
-    }
-
-    fn replicate(request: DatabaseSyncRequest) Error!DatabaseSyncResult {
-        _ = request.from_device;
-        _ = request.to_device;
-        if (request.contract.workspace_id != request.workspace_id) return error.InvalidContractSignature;
-        var message_buffer: [DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES]u8 = undefined;
-        const message = state_support.databaseContractMessage(
-            &message_buffer,
-            request.contract.workspace_id,
-            request.contract.bundleIdSlice(),
-            request.contract.labelSlice(),
-        ) catch return error.InvalidContractSignature;
-        if (!signing.verify(request.contract.signature, message)) return error.InvalidContractSignature;
-        return .{
-            .replicated = true,
-            .transactional_contract = true,
-        };
-    }
-};
-
-pub const default_mergeable_document_adapter = DefaultMergeableDocumentAdapter.adapter();
-pub const default_chunk_media_adapter = DefaultChunkMediaAdapter.adapter();
-pub const default_secret_transfer_adapter = DefaultSecretTransferAdapter.adapter();
-pub const default_database_sync_adapter = DefaultDatabaseSyncAdapter.adapter();
+pub fn replicateDatabaseContract(request: DatabaseSyncRequest) Error!DatabaseSyncResult {
+    _ = request.from_device;
+    _ = request.to_device;
+    if (request.contract.workspace_id != request.workspace_id) return error.InvalidContractSignature;
+    var message_buffer: [DATABASE_CONTRACT_MESSAGE_BUFFER_BYTES]u8 = undefined;
+    const message = state_support.databaseContractMessage(
+        &message_buffer,
+        request.contract.workspace_id,
+        request.contract.bundleIdSlice(),
+        request.contract.labelSlice(),
+    ) catch return error.InvalidContractSignature;
+    if (!signing.verify(request.contract.signature, message)) return error.InvalidContractSignature;
+    return .{
+        .replicated = true,
+        .transactional_contract = true,
+    };
+}
 
 const VERSION_PREFIX_BUFFER_BYTES: usize = 16;
 const SMALL_DOCUMENT_MERGE_BUFFER_BYTES: usize = 8;
@@ -719,8 +630,7 @@ test "mergeable document adapter applies deterministic CRDT operations and rejec
         try DocumentOperation.insert(5, " and tablet", tablet, 1),
     };
     var merge_buffer: [DOCUMENT_MERGE_TEST_BUFFER_BYTES]u8 = undefined;
-    const adapter_value = DefaultMergeableDocumentAdapter.adapter();
-    const result = try adapter_value.merge(.{
+    const result = try mergeDocument(.{
         .store = &storage,
         .entry = try workspace.Entry.init("documents/notes.md", document.object_id, document.version_id, .document),
         .base_document = "hello",
@@ -800,7 +710,6 @@ test "compact document log metadata preserves exact capacities" {
 
     try std.testing.expectEqual(@as(u8, MAX_DOCUMENT_OPERATIONS), log.operation_count);
     try std.testing.expectEqual(@as(u8, MAX_DOCUMENT_VECTOR_CLOCKS), log.clock_count);
-    try std.testing.expect(COMPACT_DOCUMENT_OPERATION_OFFSETS);
     try std.testing.expectEqual(DocumentOffset, @FieldType(DocumentOperation, "position"));
     try std.testing.expectEqual(DocumentOffset, @FieldType(DocumentOperation, "delete_len"));
     try std.testing.expectEqual(@as(usize, DOCUMENT_OPERATION_SIZE_CEILING_BYTES), @sizeOf(DocumentOperation));
@@ -830,8 +739,7 @@ test "default chunk media adapter reports concrete payload chunks" {
         .payload = media_payload,
         .metadata = try object_store.signMetadata(signer, "clip", "video/raw", .media_asset, media_payload, 1),
     });
-    const adapter_value = DefaultChunkMediaAdapter.adapter();
-    const result = try adapter_value.replicate(.{
+    const result = try replicateChunks(.{
         .store = &storage,
         .entry = try workspace.Entry.init("assets/clip.raw", media.object_id, media.version_id, .media_asset),
     });
@@ -856,8 +764,7 @@ test "secret transfer adapter refuses plaintext secret payloads" {
         .metadata = try object_store.signMetadata(signer, "plain-secret", "application/zigos-secret", .secret, "plain:secret", 1),
     });
 
-    const adapter_value = DefaultSecretTransferAdapter.adapter();
-    try std.testing.expectError(error.SecretPayloadNotEncrypted, adapter_value.transfer(.{
+    try std.testing.expectError(error.SecretPayloadNotEncrypted, transferSecret(.{
         .store = &storage,
         .workspace_id = 99,
         .object_id = plaintext_secret.object_id.raw(),
@@ -871,7 +778,7 @@ test "secret transfer adapter refuses plaintext secret payloads" {
         .payload = "enc:secret",
         .metadata = try object_store.signMetadata(signer, "encrypted-secret", "application/zigos-secret", .secret, "enc:secret", 2),
     });
-    const transferred = try adapter_value.transfer(.{
+    const transferred = try transferSecret(.{
         .store = &storage,
         .workspace_id = 99,
         .object_id = encrypted_secret.object_id.raw(),

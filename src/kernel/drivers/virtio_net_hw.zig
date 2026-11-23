@@ -1,5 +1,6 @@
 const std = @import("std");
 const pci = @import("pci.zig");
+const device_isolation = @import("device_isolation.zig");
 const transport = @import("virtio_pci.zig");
 const virtqueue = @import("virtio_queue.zig");
 const ethernet = @import("intel_i225_frame.zig");
@@ -9,7 +10,6 @@ const vtd = @import("../platform/intel_vtd.zig");
 const clock = @import("../timer/tsc_clock.zig");
 const timer = @import("../timer/timer.zig");
 const x2apic = @import("../interrupts/x2apic.zig");
-const smp = @import("../smp.zig");
 const console = @import("../utils/console.zig");
 
 const PAGE: u32 = 4096;
@@ -23,13 +23,13 @@ const STATUS_DRIVER_OK: u8 = 4;
 const STATUS_FEATURES_OK: u8 = 8;
 const STATUS_FAILED: u8 = 128;
 const READY_STATUS = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK;
-pub const INTERRUPT_VECTOR: u8 = 65; // One selected network device owns this vector.
+const INTERRUPT_VECTOR = @import("network_hw.zig").INTERRUPT_VECTOR;
 
 const Queue = struct {
     state: virtqueue.Queue,
     ring: usize,
     buffers: usize,
-    buffer_physical: u32,
+    buffer_physical: u64,
     notification: usize,
 
     fn memory(self: *const Queue) *volatile virtqueue.Ring {
@@ -39,7 +39,7 @@ const Queue = struct {
         return @as([*]u8, @ptrFromInt(self.buffers + @as(usize, id) * virtqueue.BUFFER_BYTES))[0..virtqueue.BUFFER_BYTES];
     }
     fn submit(self: *Queue, id: u16, length: u32) !void {
-        try self.state.submit(self.memory(), id, self.buffer_physical + @as(u32, id) * virtqueue.BUFFER_BYTES, length);
+        try self.state.submit(self.memory(), id, self.buffer_physical + @as(u64, id) * virtqueue.BUFFER_BYTES, length);
     }
     fn notify(self: *const Queue, index: u16) void {
         if (virtqueue.Queue.shouldNotify(self.memory())) reg(u16, self.notification).* = index;
@@ -51,7 +51,6 @@ const Controller = struct {
     common: usize,
     isr: usize,
     msix: usize,
-    msix_control: u16,
     mac: [6]u8,
     rx: Queue,
     tx: Queue,
@@ -63,6 +62,8 @@ var controller: Controller = undefined;
 var prepared: bool = false;
 var active: bool = false;
 var interrupt_pending: bool = false;
+// Set when the ISR masks MSI-X entry 0, so only a masked vector is reopened.
+var vector_masked: bool = false;
 var interrupt_count: u32 = 0;
 var empty_interrupts: u8 = 0;
 
@@ -80,7 +81,7 @@ pub fn prepare(device: pci.PCIDevice) !void {
     if (pci.busMasteringEnabled(device)) return error.BusMasteringNotRevoked;
     const bars = try pci.probeMemoryBars(device);
     var config: [256]u8 = undefined;
-    for (0..64) |index| std.mem.writeInt(u32, config[index * 4 ..][0..4], pci.readConfigDword(device.bus, device.device, device.function, @intCast(index * 4)), .little);
+    for (0..64) |index| std.mem.writeInt(u32, config[index * 4 ..][0..4], pci.readConfig(device.bus, device.device, device.function, @intCast(index * 4)), .little);
     const layout = try transport.parse(&config, &bars);
     pci.enableMemoryDecoding(device);
     const common = try mapRegion(layout.common.physical(&bars), 56, 0);
@@ -116,8 +117,9 @@ pub fn prepare(device: pci.PCIDevice) !void {
         }
     }
     if (!coherent or !ethernet.validUnicastMac(mac)) return error.InvalidMac;
-    const dma = paging.allocIdentityDmaFrames(DMA_PAGES) orelse return error.DmaAllocationFailed;
-    errdefer paging.releaseIdentityDmaFrames(dma, DMA_PAGES) catch {};
+    const dma_run = paging.allocGeneralFrames(DMA_PAGES) orelse return error.DmaAllocationFailed;
+    errdefer paging.releaseGeneralFrames(dma_run) catch {};
+    const dma = dma_run.base;
     const alias = paging.directMapAddress(dma) orelse return error.DmaAllocationFailed;
     @memset(@as([*]u8, @ptrFromInt(alias))[0 .. DMA_PAGES * PAGE], 0);
     var pending = Controller{
@@ -125,7 +127,6 @@ pub fn prepare(device: pci.PCIDevice) !void {
         .common = common,
         .isr = try mapRegion(layout.isr.physical(&bars), 1, 2),
         .msix = try mapRegion(layout.msix_table.physical(&bars), 16, 3),
-        .msix_control = @as(u16, layout.msix_capability) + 2,
         .mac = mac,
         .rx = undefined,
         .tx = undefined,
@@ -144,7 +145,7 @@ pub fn prepare(device: pci.PCIDevice) !void {
     console.print("ZIGOS:VIRTIO_NET:PREPARED\n");
 }
 
-fn setupQueue(common: usize, index: u16, physical: u32, alias: usize, buffer_physical: u32, buffers: usize, layout: transport.Layout, bars: *const [6]transport.Bar, slot: usize) !Queue {
+fn setupQueue(common: usize, index: u16, physical: u64, alias: usize, buffer_physical: u64, buffers: usize, layout: transport.Layout, bars: *const [6]transport.Bar, slot: usize) !Queue {
     reg(u16, common + 22).* = index;
     if (reg(u16, common + 24).* < virtqueue.CAPACITY or reg(u16, common + 28).* != 0) return error.InvalidQueue;
     reg(u16, common + 24).* = virtqueue.CAPACITY;
@@ -171,24 +172,20 @@ pub fn attached() bool {
     return @atomicLoad(bool, &active, .acquire);
 }
 
+/// The caller (network_hw.activate) has already run IOMMU enforcement.
 pub fn activate() !void {
     if (attached()) return;
-    if (!prepared or !vtd.requesterProtected(controller.device) or !vtd.faultMonitoringEnabled() or !vtd.interruptIsolationEnabled()) return error.DmaIsolationUnavailable;
-    const message = try vtd.routeInterrupt(controller.device, INTERRUPT_VECTOR, smp.irqDestinationId());
+    if (!prepared) return error.DmaIsolationUnavailable;
+    device_isolation.requireIsolated(controller.device) catch return error.DmaIsolationUnavailable;
     const device = controller.device;
-    const control = pci.readConfigWord(device.bus, device.device, device.function, controller.msix_control);
-    pci.writeConfigWord(device.bus, device.device, device.function, controller.msix_control, control | 0xC000);
-    if (pci.readConfigWord(device.bus, device.device, device.function, controller.msix_control) & 0xC000 != 0xC000) return error.MsixUnavailable;
-    reg(u32, controller.msix + 12).* = 1;
-    reg(u32, controller.msix).* = @truncate(message.address);
-    reg(u32, controller.msix + 4).* = @truncate(message.address >> 32);
-    reg(u32, controller.msix + 8).* = message.data;
-    if (reg(u32, controller.msix).* != @as(u32, @truncate(message.address)) or
-        reg(u32, controller.msix + 4).* != @as(u32, @truncate(message.address >> 32)) or
-        reg(u32, controller.msix + 8).* != message.data or
-        reg(u32, controller.msix + 12).* & 1 == 0) return error.MsixUnavailable;
-    reg(u16, controller.common + 16).* = 0xFFFF; // No config-change interrupts.
+    const entry: pci.MsixEntry = @ptrFromInt(controller.msix);
+    // Entry 0 stays masked by the function mask until the queues are live.
+    device_isolation.routeInterrupt(device, INTERRUPT_VECTOR, .{ .msix_masked = entry }) catch |err| return switch (err) {
+        error.InterruptRouteInstallFailed => error.InterruptRouteInstallFailed,
+        else => error.MsixUnavailable,
+    };
     errdefer contain("Activation");
+    reg(u16, controller.common + 16).* = 0xFFFF; // No config-change interrupts.
     for (0..2) |index| {
         reg(u16, controller.common + 22).* = @intCast(index);
         reg(u16, controller.common + 26).* = 0;
@@ -197,13 +194,11 @@ pub fn activate() !void {
         if (reg(u16, controller.common + 28).* != 1) return error.QueueEnableFailed;
     }
     pci.enableMemoryBusMastering(device) catch return error.BusMasterEnableFailed;
+    @atomicStore(bool, &vector_masked, false, .release);
     @atomicStore(bool, &active, true, .release);
     reg(u8, controller.common + 20).* = READY_STATUS | STATUS_DRIVER_OK;
     if (reg(u8, controller.common + 20).* != READY_STATUS | STATUS_DRIVER_OK) return error.DeviceNotReady;
-    pci.writeConfigWord(device.bus, device.device, device.function, controller.msix_control, (control | 0x8000) & ~@as(u16, 0x4000));
-    reg(u32, controller.msix + 12).* = 0;
-    if (pci.readConfigWord(device.bus, device.device, device.function, controller.msix_control) & 0xC000 != 0x8000 or
-        reg(u32, controller.msix + 12).* & 1 != 0) return error.MsixUnavailable;
+    pci.unmaskSingleMsix(device, entry) catch return error.MsixUnavailable;
     controller.rx.notify(0);
     console.print("ZIGOS:VIRTIO_NET:DMA_AND_MSIX_READY\n");
 }
@@ -211,6 +206,7 @@ pub fn activate() !void {
 pub fn handleInterrupt() void {
     if (attached()) {
         reg(u32, controller.msix + 12).* = 1;
+        @atomicStore(bool, &vector_masked, true, .release);
         _ = @atomicRmw(u32, &interrupt_count, .Add, 1, .monotonic);
         @atomicStore(bool, &interrupt_pending, true, .release);
     }
@@ -221,6 +217,7 @@ fn contain(reason: []const u8) void {
     @atomicStore(bool, &active, false, .release);
     reg(u32, controller.msix + 12).* = 1;
     pci.disableBusMastering(controller.device);
+    device_isolation.revokeInterrupt(controller.device);
     reg(u8, controller.common + 20).* |= STATUS_FAILED;
     // DMA allocations remain pinned after publication to VT-d.
     console.print("ZIGOS:VIRTIO_NET:FAILURE_CONTAINED ");
@@ -287,7 +284,7 @@ fn serviceAt(comptime Backend: type, now: u64) bool {
 }
 
 fn rearm() void {
-    if (!attached()) return;
+    if (!attached() or !@atomicRmw(bool, &vector_masked, .Xchg, false, .acq_rel)) return;
     reg(u32, controller.msix + 12).* = 0;
     virtqueue.publish();
     if (controller.rx.state.completionReady(controller.rx.memory()) or controller.tx.state.completionReady(controller.tx.memory())) {
@@ -309,24 +306,37 @@ pub fn sendPayload(destination: [6]u8, payload: []const u8) bool {
     return true;
 }
 
-pub const ReceiveResult = @import("intel_i225_hw.zig").ReceiveResult;
-
-pub fn pollReceive(output: []u8) ReceiveResult {
-    if (!service()) return .{ .status = .failed };
+/// Services the device once, then drains at most one ring of receive
+/// completions into `sink` (see `network_hw.receive`), reposting each buffer
+/// and notifying the device once for the batch.
+pub fn pollReceiveBatch(sink: anytype) void {
+    if (!service()) return sink.fail();
     defer rearm();
-    const completion = (controller.rx.state.complete(controller.rx.memory()) catch |err| {
-        contain(@errorName(err));
-        return .{ .status = .failed };
-    }) orelse return .{ .status = .empty };
-    defer {
-        controller.rx.submit(completion.id, virtqueue.BUFFER_BYTES) catch |err| contain(@errorName(err));
-        if (attached()) controller.rx.notify(0);
+    var reposted = false;
+    defer if (reposted and attached()) controller.rx.notify(0);
+    for (0..virtqueue.CAPACITY) |_| {
+        const completion = (controller.rx.state.complete(controller.rx.memory()) catch |err| {
+            contain(@errorName(err));
+            return sink.fail();
+        }) orelse return;
+        const length = receivedPayload(completion, sink.buffer());
+        controller.rx.submit(completion.id, virtqueue.BUFFER_BYTES) catch |err| {
+            contain(@errorName(err));
+            return sink.fail();
+        };
+        reposted = true;
+        if (!sink.accept(if (length) |payload_len| .{ .status = .frame, .length = payload_len } else .{ .status = .dropped })) return;
     }
-    const frame = virtqueue.receivedFrame(controller.rx.buffer(completion.id)[0..completion.length]) catch return .{ .status = .dropped };
-    const view = ethernet.parseEthernetFrame(frame, controller.mac) catch return .{ .status = .dropped };
-    if (view.payload.len > output.len) return .{ .status = .dropped };
+}
+
+/// Copies a completed buffer's Ethernet payload into `output`, or returns
+/// null when the frame must be dropped.
+fn receivedPayload(completion: virtqueue.Completion, output: []u8) ?u16 {
+    const frame = virtqueue.receivedFrame(controller.rx.buffer(completion.id)[0..completion.length]) catch return null;
+    const view = ethernet.parseEthernetFrame(frame, controller.mac) catch return null;
+    if (view.payload.len > output.len) return null;
     @memcpy(output[0..view.payload.len], view.payload);
-    return .{ .status = .frame, .length = view.payload.len };
+    return @intCast(view.payload.len);
 }
 
 pub fn workPending() bool {
@@ -402,7 +412,6 @@ test "VirtIO idle transmit watchdog drains completions and contains stalls or ma
         .common = 0,
         .isr = 0,
         .msix = 0,
-        .msix_control = 0,
         .mac = @splat(0),
         .rx = .{ .state = .{ .device_writable = true }, .ring = @intFromPtr(&rx_ring), .buffers = 0, .buffer_physical = 0, .notification = 0 },
         .tx = .{ .state = .{ .device_writable = false }, .ring = @intFromPtr(&tx_ring), .buffers = 0, .buffer_physical = 0x1000, .notification = 0 },

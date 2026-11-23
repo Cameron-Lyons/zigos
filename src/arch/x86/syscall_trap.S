@@ -17,8 +17,9 @@ syscall3_asm:
 .globl syscall_yield_asm
 .type syscall_yield_asm, @function
 syscall_yield_asm:
-    # The public C ABI carries two u32 values; upper register bits are not
-    # arguments. Raw SYSCALL callers remain subject to kernel validation.
+    # The public C ABI carries a u32 counter and a u32 disposition, whose
+    # upper register bits are not arguments, plus the u64 UI revision in rdx.
+    # Raw SYSCALL callers remain subject to kernel validation.
     movl %edi, %edi
     movl %esi, %esi
     xor %eax, %eax

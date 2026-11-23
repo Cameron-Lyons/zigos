@@ -10,8 +10,7 @@ const mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const documents = @import("document_sessions.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const workspace = @import("../storage/workspace.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding) @import("../../kernel/memory/memory.zig") else struct {};
-const heap_backed = builtin.target.os.tag == .freestanding;
+const table_backing = @import("../core/table_backing.zig");
 
 pub const Request = struct {
     authority: storage_service.AuthorityContext,
@@ -59,18 +58,16 @@ const State = struct {
 // One workspace picker per session, allocated only when used. Only authorized
 // display names leave the session; object identities, grants and signers stay here.
 pub const Launcher = struct {
-    backing: if (heap_backed) ?*State else ?State = null,
+    backing: table_backing.Lazy(State, null) = .{},
     owner_task_id: u64 = 0,
     token: u64 = 0,
 
     fn state(self: *Launcher) ?*State {
-        if (comptime heap_backed) return self.backing;
-        return if (self.backing) |*value| value else null;
+        return self.backing.get();
     }
 
     fn stateConst(self: *const Launcher) ?*const State {
-        if (comptime heap_backed) return self.backing;
-        return if (self.backing) |*value| value else null;
+        return self.backing.get();
     }
 
     pub fn offer(self: *Launcher, manager: anytype, request: Request, now_ticks: u64) !u64 {
@@ -141,15 +138,9 @@ pub const Launcher = struct {
             .peer_endpoint_id = server.endpoint.endpoint_id,
         }, now_ticks);
         const binding = mailbox.LauncherBinding{ .endpoint_capability_id = client.capability_id, .service_endpoint_id = server.endpoint.endpoint_id };
-        if (comptime heap_backed) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(State)) orelse return error.NoSpaceLeft;
-            self.backing = @ptrCast(@alignCast(allocation));
-        }
-        errdefer if (comptime heap_backed) {
-            kernel_memory.kfree(@ptrCast(self.backing.?));
-            self.backing = null;
-        };
-        if (comptime heap_backed) {
+        const s = try self.backing.ensure();
+        errdefer self.backing.release();
+        if (comptime builtin.target.os.tag == .freestanding) {
             if (!manager.runtime_context.userspace_executor.bindLauncherChannel(manager.userspaceCatalogPtr(), runtime, capabilities, client_task.id, binding, now_ticks)) return error.LauncherBindingUnavailable;
         }
         const initial = State{
@@ -161,8 +152,8 @@ pub const Launcher = struct {
             .server_capability_id = server.capability_id,
             .binding = binding,
         };
-        if (comptime heap_backed) self.backing.?.* = initial else self.backing = initial;
-        return self.state().?;
+        s.* = initial;
+        return s;
     }
 
     pub fn service(self: *Launcher, manager: anytype, now_ticks: u64) bool {
@@ -279,9 +270,7 @@ pub const Launcher = struct {
             error.EndpointNotFound => {},
             else => unreachable,
         };
-        @memset(std.mem.asBytes(s), 0);
-        if (comptime heap_backed) kernel_memory.kfree(@ptrCast(s));
-        self.backing = null;
+        self.backing.release();
         // Keep the token cursor across channel loss within this session.
     }
 };
@@ -388,7 +377,7 @@ fn pendingTaskRetired(s: *const State) bool {
 
 comptime {
     if (protocol.MAX_LABEL_BYTES != workspace.MAX_ENTRY_PATH_BYTES) @compileError("picker must represent full workspace paths");
-    if (heap_backed and @sizeOf(Launcher) > 24) @compileError("launcher handle exceeds resident size bound");
+    if (@sizeOf(Launcher) > 24) @compileError("launcher handle exceeds resident size bound");
     if (@sizeOf(State) > 2048) @compileError("launcher exceeds bounded storage");
 }
 

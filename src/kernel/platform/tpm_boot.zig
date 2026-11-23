@@ -8,8 +8,8 @@ const log = @import("../../boot/tcg_event_log.zig");
 
 pub fn verify() !bool {
     const info = handoff.capturedInfo() orelse return error.MissingBootInfo;
-    const captured = info.boot_tpm orelse return false;
-    const image = info.boot_image orelse return error.MissingBootImage;
+    const captured = info.tpmLog() orelse return false;
+    const image = info.image;
     // The allocator retains the loader's complete page-aligned copy before
     // CRB init. Access that physical extent only through its supervisor alias.
     const bytes = try mappedLogBytes(captured.log_address, captured.log_bytes);

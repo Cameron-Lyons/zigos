@@ -403,9 +403,9 @@ pub const ProductionJourneyService = struct {
 
     fn installApp(self: *ProductionJourneyService, tick: u64) !void {
         if (self.installed and !self.removed) return error.AppAlreadyInstalled;
-        const policy = try self.requireActivePolicy();
+        _ = try self.requireActivePolicy();
         const request = try self.installRequestForBundle(self.config.install_bundle);
-        const installed_result = try self.packages.install(self.package_authority, request, policy);
+        const installed_result = try self.packages.install(self.package_authority, request, self.policies, self.installSubjects());
         if (!installed_result.installed_new) return error.AppAlreadyInstalled;
         _ = try self.ux.installApp(self.config.user, self.config.bundle_id);
         self.installed = true;
@@ -647,9 +647,9 @@ pub const ProductionJourneyService = struct {
 
     fn updateApp(self: *ProductionJourneyService, tick: u64) !void {
         if (!self.installed or self.removed) return error.AppNotInstalled;
-        const policy = try self.requireActivePolicy();
+        _ = try self.requireActivePolicy();
         const request = try self.installRequestForBundle(self.config.update_bundle);
-        const updated_result = try self.packages.install(self.package_authority, request, policy);
+        const updated_result = try self.packages.install(self.package_authority, request, self.policies, self.installSubjects());
         if (!updated_result.updated_existing or !updated_result.rollback_available) return error.AppNotInstalled;
         _ = try self.ux.updateApp(self.task_id, self.config.user, self.config.bundle_id);
         self.updated = true;
@@ -743,6 +743,14 @@ pub const ProductionJourneyService = struct {
         const active = self.policies.activeForScope(.organization, self.config.organization_id) orelse return error.PolicyRequired;
         if (active.id != self.policy_id or !self.policies.verify(active.id)) return error.PolicyDenied;
         return active;
+    }
+
+    fn installSubjects(self: *const ProductionJourneyService) policy_object.SubjectSet {
+        return .{
+            .user_id = self.config.user.serial,
+            .workspace_id = self.config.workspace_id,
+            .organization_id = self.config.organization_id,
+        };
     }
 
     fn installSourceIdentity(self: *const ProductionJourneyService) []const u8 {
@@ -889,6 +897,8 @@ fn statusForProductionJourneyError(err: anyerror) ProductionJourneyStatus {
         error.CheckpointDeferred,
         error.CheckpointPending,
         error.CorruptImage,
+        error.DeviceReadFailed,
+        error.DeviceWriteFailed,
         error.DurabilityBarrierFailed,
         error.ImageTooSmall,
         error.NoSpaceLeft,

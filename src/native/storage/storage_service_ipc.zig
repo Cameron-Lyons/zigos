@@ -517,7 +517,6 @@ const UserspaceStorageHarness = struct {
                 .launch = .{
                     .boundary = .userspace_process,
                     .image_id = STORAGE_IMAGE_ID,
-                    .component_abi_version = abi.ABI_VERSION,
                     .signed = true,
                     .bundle_id = storage_bundle_id,
                 },
@@ -542,7 +541,6 @@ const UserspaceStorageHarness = struct {
                 .launch = .{
                     .boundary = .userspace_process,
                     .image_id = CLIENT_IMAGE_ID,
-                    .component_abi_version = abi.ABI_VERSION,
                     .signed = true,
                     .bundle_id = "app.storage-client",
                 },

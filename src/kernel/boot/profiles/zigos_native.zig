@@ -9,7 +9,6 @@ const xhci_driver_task = @import("../../../native/drivers/xhci_driver_task.zig")
 const event_wake = @import("../../event_wake.zig");
 const smp = @import("../../smp.zig");
 const framebuffer_hw = @import("../../platform/framebuffer_hw.zig");
-const desktop_display = @import("../../../native/platform/desktop_display.zig");
 
 var recorded_input_report_count: u64 = 0;
 var reported_scheduler_idle = false;
@@ -30,14 +29,7 @@ pub fn run() noreturn {
         timer.synchronize();
         const now_ticks = timer.getTicks();
         const pending = event_wake.take();
-        if (pending.scheduler) {
-            // Only the BSP drains copied requests. Keep mapping admission,
-            // fixed input copy and invocation within one serialized interval.
-            const restore_interrupts = x86.interruptsEnabled();
-            x86.cli();
-            _ = session_manager.servicePendingSyscalls(now_ticks);
-            if (restore_interrupts) x86.sti();
-        }
+        if (pending.scheduler) _ = session_manager.servicePendingSyscalls(now_ticks);
         // Expiry revokes input/identity authority before a userspace task can
         // consume another event, including wakes without keyboard activity.
         session_manager.system().serviceAuthenticationClock(now_ticks);
@@ -50,7 +42,6 @@ pub fn run() noreturn {
         if (pending.xhci or pending.timer) {
             harvestInputProof();
             _ = session_manager.servicePendingInputWork(now_ticks);
-            _ = desktop_display.present(session_manager.system().compositorSessionPtr());
         }
 
         x86.cli();
@@ -86,8 +77,7 @@ inline fn wakeBoundXhciTask(driver: anytype, manager: anytype, pending: event_wa
 
 fn harvestInputProof() void {
     const input_report_count = xhci_driver_task.keyboardReportCount();
-    if (input_report_count == recorded_input_report_count) return;
-    const proof = xhci_driver_task.inputProof() orelse return;
+    if (input_report_count == 0 or input_report_count == recorded_input_report_count) return;
     if (xhci_driver_task.controllerDeviceId()) |device_id| {
         device_inventory.registerDetected(
             .input_device,
@@ -96,7 +86,7 @@ fn harvestInputProof() void {
             false,
         );
     }
-    hardware_proof.recordInputProof(proof);
+    hardware_proof.recordKeyboardInput(input_report_count);
     recorded_input_report_count = input_report_count;
 }
 
@@ -153,7 +143,7 @@ const WakeTest = if (@import("builtin").is_test) struct {
             .component_class = .service_component,
             .budget = .{ .cpu_time_ticks = 2_000, .memory_bytes = 4_096, .endpoint_slots = 2, .shared_memory_bytes = 0 },
             .local_only = true,
-            .launch = .{ .boundary = .userspace_process, .image_id = 1, .component_abi_version = 1, .signed = true, .bundle_id = "svc.compositor-ui-session" },
+            .launch = .{ .boundary = .userspace_process, .image_id = 1, .signed = true, .bundle_id = "svc.compositor-ui-session" },
             .userspace_image = &image,
         });
         self.task_id = task.id;

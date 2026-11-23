@@ -1,5 +1,4 @@
 const builtin = @import("builtin");
-const native_util = @import("../core/util.zig");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const common = if (builtin.target.os.tag == .freestanding)
@@ -8,7 +7,6 @@ else
     struct {
         pub fn printBootMarker(_: []const u8) void {}
     };
-const contract = @import("contract.zig");
 const principal = @import("../core/principal.zig");
 const capability = @import("../kernel_api/capability.zig");
 const service_catalog = @import("service_catalog.zig");
@@ -41,27 +39,41 @@ pub const Principals = struct {
     task_runtime_service: principal.PrincipalId,
 };
 
-pub const CoreServices = struct {
-    runtime_service_record: *supervisor_mod.ServiceRecord,
-    service_registry: *supervisor_mod.ServiceRecord,
-    policy_service: *supervisor_mod.ServiceRecord,
-    session: *supervisor_mod.ServiceRecord,
-    review_service_record: *supervisor_mod.ServiceRecord,
-    network_service: *supervisor_mod.ServiceRecord,
-    compositor_service: *supervisor_mod.ServiceRecord,
-    storage_service: *supervisor_mod.ServiceRecord,
-    package_service: *supervisor_mod.ServiceRecord,
-    indexing_service: *supervisor_mod.ServiceRecord,
-    personal_context_service: *supervisor_mod.ServiceRecord,
-    sync_service: *supervisor_mod.ServiceRecord,
-    media_service: *supervisor_mod.ServiceRecord,
-    attention_broker_service: *supervisor_mod.ServiceRecord,
-    task_lifecycle_service: *supervisor_mod.ServiceRecord,
-    pasteboard_service: *supervisor_mod.ServiceRecord,
-    object_resilience_service: *supervisor_mod.ServiceRecord,
-    sensitive_capture_service: *supervisor_mod.ServiceRecord,
-    secret_vault_service: *supervisor_mod.ServiceRecord,
+pub const CoreServices = std.EnumArray(service_catalog.ServiceClass, *supervisor_mod.ServiceRecord);
+
+/// Supervisor service ids follow this order, so it also fixes the measured policy digest.
+const registration_order = [_]service_catalog.ServiceClass{
+    .task_runtime,
+    .service_registry,
+    .policy_mediation,
+    .session_manager,
+    .permission_review_ui,
+    .network_stack,
+    .compositor_ui_session,
+    .storage_object,
+    .package_install_update,
+    .indexing_search,
+    .personal_context,
+    .sync_replication,
+    .media_print_helpers,
+    .attention_broker,
+    .task_lifecycle,
+    .secure_pasteboard,
+    .object_resilience,
+    .sensitive_capture,
+    .secret_vault,
 };
+
+comptime {
+    if (registration_order.len != service_catalog.SERVICE_CLASS_COUNT) {
+        @compileError("every service class registers exactly one core service record");
+    }
+    for (registration_order, 0..) |class, index| {
+        for (registration_order[0..index]) |earlier| {
+            if (earlier == class) @compileError("duplicate core service registration");
+        }
+    }
+}
 
 pub const Error = userspace_boot_registry.Error || supervisor_mod.Error;
 
@@ -109,40 +121,21 @@ pub fn registerCoreServices(
     runtime_service: *task_runtime_service.Service,
     ids: Principals,
 ) supervisor_mod.Error!CoreServices {
-    const services = CoreServices{
-        .runtime_service_record = try supervisor.register(.task_runtime, ids.task_runtime_service),
-        .service_registry = try supervisor.register(.service_registry, ids.policy_authority),
-        .policy_service = try supervisor.register(.policy_mediation, ids.policy_authority),
-        .session = try supervisor.register(.session_manager, ids.session_service),
-        .review_service_record = try supervisor.register(.permission_review_ui, ids.review_service),
-        .network_service = try supervisor.register(.network_stack, ids.network_service),
-        .compositor_service = try supervisor.register(.compositor_ui_session, ids.compositor_service),
-        .storage_service = try supervisor.register(.storage_object, ids.storage_service),
-        .package_service = try supervisor.register(.package_install_update, ids.package_service),
-        .indexing_service = try supervisor.register(.indexing_search, ids.indexing_service),
-        .personal_context_service = try supervisor.register(.personal_context, ids.personal_context_service),
-        .sync_service = try supervisor.register(.sync_replication, ids.sync_service),
-        .media_service = try supervisor.register(.media_print_helpers, ids.media_service),
-        .attention_broker_service = try supervisor.register(.attention_broker, ids.attention_broker_service),
-        .task_lifecycle_service = try supervisor.register(.task_lifecycle, ids.task_lifecycle_service),
-        .pasteboard_service = try supervisor.register(.secure_pasteboard, ids.pasteboard_service),
-        .object_resilience_service = try supervisor.register(.object_resilience, ids.object_resilience_service),
-        .sensitive_capture_service = try supervisor.register(.sensitive_capture, ids.sensitive_capture_service),
-        .secret_vault_service = try supervisor.register(.secret_vault, ids.secret_vault_service),
-    };
+    var services: CoreServices = undefined;
+    for (registration_order) |class| {
+        services.set(class, try supervisor.register(class, ownerForServiceClass(ids, class)));
+    }
 
-    runtime_service.bind(services.runtime_service_record.id, ids.task_runtime_service);
+    runtime_service.bind(services.get(.task_runtime).id, ids.task_runtime_service);
 
     for (service_catalog.catalog) |entry| {
-        const service = serviceRecordForClass(services, entry.class) orelse
-            native_util.impossibleByInvariant("the service catalog registers a record for every class");
-        _ = supervisor.markHealthy(service.id);
+        _ = supervisor.markHealthy(services.get(entry.class).id);
     }
 
     common.printBootMarker(boot_markers.supervisor_ready);
-    if (contract.serviceDescriptor(.policy_mediation).?.boundary == .userspace_service and
-        contract.serviceDescriptor(.network_stack).?.boundary == .userspace_service and
-        contract.serviceDescriptor(.storage_object).?.boundary == .userspace_service)
+    if (service_catalog.serviceDescriptor(.policy_mediation).?.boundary == .userspace_service and
+        service_catalog.serviceDescriptor(.network_stack).?.boundary == .userspace_service and
+        service_catalog.serviceDescriptor(.storage_object).?.boundary == .userspace_service)
     {
         common.printBootMarker(boot_markers.service_contract_map_ready);
     }
@@ -150,65 +143,26 @@ pub fn registerCoreServices(
     return services;
 }
 
-pub fn ownerForServiceClass(ids: Principals, class: contract.ServiceClass) ?principal.PrincipalId {
-    const owner_key = service_catalog.bootstrapOwnerKeyForClass(class) orelse return null;
-    return principalForOwnerKey(ids, owner_key);
-}
-
-pub fn serviceRecordForClass(services: CoreServices, class: contract.ServiceClass) ?*supervisor_mod.ServiceRecord {
-    const record_key = service_catalog.bootstrapServiceRecordKeyForClass(class) orelse return null;
-    return serviceRecordForKey(services, record_key);
-}
-
-pub fn serviceIdForClass(services: CoreServices, class: contract.ServiceClass) ?u64 {
-    const service = serviceRecordForClass(services, class) orelse return null;
-    return service.id;
-}
-
-fn principalForOwnerKey(ids: Principals, owner_key: service_catalog.BootstrapOwnerKey) principal.PrincipalId {
-    return switch (owner_key) {
-        .policy_authority => ids.policy_authority,
-        .session_service => ids.session_service,
-        .network_service => ids.network_service,
-        .compositor_service => ids.compositor_service,
-        .storage_service => ids.storage_service,
-        .review_service => ids.review_service,
-        .package_service => ids.package_service,
-        .indexing_service => ids.indexing_service,
-        .personal_context_service => ids.personal_context_service,
-        .sync_service => ids.sync_service,
-        .media_service => ids.media_service,
-        .attention_broker_service => ids.attention_broker_service,
-        .task_lifecycle_service => ids.task_lifecycle_service,
-        .pasteboard_service => ids.pasteboard_service,
-        .object_resilience_service => ids.object_resilience_service,
-        .sensitive_capture_service => ids.sensitive_capture_service,
-        .secret_vault_service => ids.secret_vault_service,
-        .task_runtime_service => ids.task_runtime_service,
-    };
-}
-
-fn serviceRecordForKey(services: CoreServices, record_key: service_catalog.BootstrapServiceRecordKey) *supervisor_mod.ServiceRecord {
-    return switch (record_key) {
-        .runtime_service_record => services.runtime_service_record,
-        .service_registry => services.service_registry,
-        .policy_service => services.policy_service,
-        .session => services.session,
-        .review_service_record => services.review_service_record,
-        .network_service => services.network_service,
-        .compositor_service => services.compositor_service,
-        .storage_service => services.storage_service,
-        .package_service => services.package_service,
-        .indexing_service => services.indexing_service,
-        .personal_context_service => services.personal_context_service,
-        .sync_service => services.sync_service,
-        .media_service => services.media_service,
-        .attention_broker_service => services.attention_broker_service,
-        .task_lifecycle_service => services.task_lifecycle_service,
-        .pasteboard_service => services.pasteboard_service,
-        .object_resilience_service => services.object_resilience_service,
-        .sensitive_capture_service => services.sensitive_capture_service,
-        .secret_vault_service => services.secret_vault_service,
+pub fn ownerForServiceClass(ids: Principals, class: service_catalog.ServiceClass) principal.PrincipalId {
+    return switch (class) {
+        .task_runtime => ids.task_runtime_service,
+        .session_manager => ids.session_service,
+        .policy_mediation, .service_registry => ids.policy_authority,
+        .attention_broker => ids.attention_broker_service,
+        .task_lifecycle => ids.task_lifecycle_service,
+        .permission_review_ui => ids.review_service,
+        .network_stack => ids.network_service,
+        .storage_object => ids.storage_service,
+        .package_install_update => ids.package_service,
+        .compositor_ui_session => ids.compositor_service,
+        .indexing_search => ids.indexing_service,
+        .personal_context => ids.personal_context_service,
+        .sync_replication => ids.sync_service,
+        .media_print_helpers => ids.media_service,
+        .secure_pasteboard => ids.pasteboard_service,
+        .object_resilience => ids.object_resilience_service,
+        .sensitive_capture => ids.sensitive_capture_service,
+        .secret_vault => ids.secret_vault_service,
     };
 }
 
@@ -219,11 +173,11 @@ test "bootstrap service ownership and service records resolve from service catal
     const ids = principals();
     const services = try registerCoreServices(&supervisor, &runtime_service, ids);
 
-    try std.testing.expectEqual(ids.storage_service, ownerForServiceClass(ids, .storage_object).?);
-    try std.testing.expectEqual(services.storage_service.id, serviceIdForClass(services, .storage_object).?);
-    for (service_catalog.catalog) |entry| {
-        const owner = ownerForServiceClass(ids, entry.class) orelse return error.TestUnexpectedResult;
-        const service = serviceRecordForClass(services, entry.class) orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqual(owner, service.owner);
+    try std.testing.expectEqual(ids.storage_service, ownerForServiceClass(ids, .storage_object));
+    for (registration_order, 1..) |class, expected_id| {
+        const service = services.get(class);
+        try std.testing.expectEqual(@as(u64, expected_id), service.id);
+        try std.testing.expectEqual(ownerForServiceClass(ids, class), service.owner);
+        try std.testing.expectEqual(service, supervisor.findByClass(class).?);
     }
 }

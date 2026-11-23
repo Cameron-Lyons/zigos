@@ -25,7 +25,6 @@ const x86 = if (builtin.target.os.tag == .freestanding) @import("../../arch/x86.
 pub const MAX_TASKS = model.MAX_TASKS;
 pub const MAX_TASK_CAPABILITIES = model.MAX_TASK_CAPABILITIES;
 pub const TASK_CAPABILITY_SCAN_BOUND = model.TASK_CAPABILITY_SCAN_BOUND;
-pub const TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION = model.TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION;
 pub const MAX_TASK_COMPONENTS = model.MAX_TASK_COMPONENTS;
 pub const MAX_AUDIT_EVENTS = model.MAX_AUDIT_EVENTS;
 pub const MAX_TASK_PROVENANCE_EVENTS = model.MAX_TASK_PROVENANCE_EVENTS;
@@ -34,32 +33,15 @@ pub const MAX_TASK_SOURCE_IDENTITY_BYTES = model.MAX_TASK_SOURCE_IDENTITY_BYTES;
 pub const MAX_COMPONENT_LABEL_BYTES = model.MAX_COMPONENT_LABEL_BYTES;
 pub const MAX_COMPONENT_ENTRY_BYTES = model.MAX_COMPONENT_ENTRY_BYTES;
 pub const MAX_EXECUTABLE_SEGMENTS = model.MAX_EXECUTABLE_SEGMENTS;
-pub const ORDERED_EXECUTABLE_SEGMENTS = model.ORDERED_EXECUTABLE_SEGMENTS;
 pub const MAX_IMAGE_HASH_BYTES = model.MAX_IMAGE_HASH_BYTES;
 pub const DEFAULT_USER_STACK_TOP = model.DEFAULT_USER_STACK_TOP;
 pub const DEFAULT_USER_STACK_SIZE_BYTES = model.DEFAULT_USER_STACK_SIZE_BYTES;
 pub const DEFAULT_SYNTHETIC_ENTRY_POINT = model.DEFAULT_SYNTHETIC_ENTRY_POINT;
 pub const DEFAULT_SYNTHETIC_IMAGE_BYTES = model.DEFAULT_SYNTHETIC_IMAGE_BYTES;
 pub const TaskStateCount = u8;
-pub const COMPACT_LIFECYCLE_METADATA = true;
-pub const SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING = true;
-pub const IN_PLACE_RUNTIME_STATE_INITIALIZATION = true;
-pub const TERMINATION_TASK_INDEX_RELOOKUPS: u8 = 0;
-pub const TERMINATION_TASK_SLOT_LOOKUPS: u8 = 1;
-pub const RESOLVED_TERMINATION_SLOT_RELOOKUPS: u8 = 0;
-pub const RESOLVED_TERMINATION_HANDLE_DERIVATIONS: u8 = 0;
-pub const RESOLVED_TASK_HANDLE_INDEX_LOOKUPS: u8 = 0;
-pub const RESOLVED_TASK_HANDLE_SLOT_LOOKUPS: u8 = 0;
-pub const RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS: u8 = 0;
-pub const RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS: u8 = 0;
 // Sixteen lease-bound syscall mailboxes add exactly 64 bytes per isolated
 // CPU slot. Keep this explicit layout allowance rather than a loose budget.
-pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 608_680;
-pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 72_752;
-pub const RUNTIME_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
-    FREESTANDING_RUNTIME_SIZE_CEILING_BYTES
-else
-    HOST_RUNTIME_SIZE_CEILING_BYTES;
+pub const RUNTIME_SIZE_CEILING_BYTES: usize = 72_752;
 pub const TaskState = model.TaskState;
 pub const ComponentClass = model.ComponentClass;
 pub const ProcessClass = model.ProcessClass;
@@ -84,7 +66,6 @@ pub const ResourceBudget = model.ResourceBudget;
 pub const AuditEventKind = model.AuditEventKind;
 pub const AuditEvent = model.AuditEvent;
 pub const ProvenanceRecord = model.ProvenanceRecord;
-pub const TaskProvenanceRecord = model.TaskProvenanceRecord;
 pub const LaunchProvenanceSpec = model.LaunchProvenanceSpec;
 pub const LaunchProvenanceRecord = model.LaunchProvenanceRecord;
 pub const TaskCreateRequest = model.TaskCreateRequest;
@@ -278,7 +259,6 @@ const AddressSpaceSlot = model.AddressSpaceSlot;
 const allocateHost = model.allocateHost;
 const reassignHost = model.reassignHost;
 const saturatingSub = model.saturatingSub;
-const zeroTaskCold = model.zeroTaskCold;
 const resetTaskCold = model.resetTaskCold;
 const copyTaskCheckpointCold = model.copyTaskCheckpointCold;
 const bindTaskColdStates = model.bindTaskColdStates;
@@ -293,26 +273,11 @@ const TEST_MINIMAL_SHARED_MEMORY_BYTES: usize = 512;
 const TASK_STATE_COUNT: usize = @typeInfo(TaskState).@"enum".field_names.len;
 const TASK_LABEL_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 const TaskInitialComponentLabelIndex = indexed_arena.MultimapIndex(MAX_TASKS, MAX_TASKS, TASK_LABEL_INDEX_CAPACITY);
-const heap_backed_task_cold = builtin.target.os.tag == .freestanding;
-pub const HEAP_BACKED_ADDRESS_SPACE_ARENA_ON_FREESTANDING = true;
-pub const BULK_TASK_COLD_MEMORY_OPS = true;
-const heap_backed_address_spaces = builtin.target.os.tag == .freestanding and HEAP_BACKED_ADDRESS_SPACE_ARENA_ON_FREESTANDING;
 const TaskColdRecords = [MAX_TASKS]TaskColdRecord;
-const TaskColdBacking = if (heap_backed_task_cold) ?*TaskColdRecords else TaskColdRecords;
-const AddressSpaceBacking = if (heap_backed_address_spaces) ?*model.AddressSpaceArena else model.AddressSpaceArena;
 const findAddressSpaceSlot = model.findAddressSpaceSlot;
 const defaultInitialComponent = model.defaultInitialComponent;
 const makeLaunchProvenance = model.makeLaunchProvenance;
 const zeroExecutionComponent = model.zeroExecutionComponent;
-
-fn initializeTaskMultimapIndex(index: anytype) void {
-    const Index = @TypeOf(index.*);
-    const CompactIndex = @FieldType(Index, "free_bucket_head");
-    const compact_no_index: CompactIndex = @intCast(@max(index.links.len, index.buckets.len));
-    @memset(std.mem.asBytes(index), 0);
-    for (&index.links) |*link| link.bucket = compact_no_index;
-    index.free_bucket_head = compact_no_index;
-}
 
 pub const Runtime = struct {
     pub const AddressSpaceArenaType = model.AddressSpaceArena;
@@ -335,15 +300,15 @@ pub const Runtime = struct {
     execution_borrows: [cpu_identity.MAX_CPUS]?TaskBorrow = @splat(null),
     execution_retirement_ticks: [cpu_identity.MAX_CPUS]u64 = @splat(0),
     lifecycle_transition_active: bool = false,
-    task_cold: TaskColdBacking = if (heap_backed_task_cold) null else @as([MAX_TASKS]TaskColdRecord, @splat(zeroTaskCold())),
-    address_spaces: AddressSpaceBacking = if (heap_backed_address_spaces) null else model.AddressSpaceArena.init(),
+    task_cold: table_backing.Lazy(TaskColdRecords, null) = .{},
+    address_spaces: table_backing.Lazy(model.AddressSpaceArena, null) = .{},
     address_space_retirement_sink: ?AddressSpaceRetirementSink = null,
     task_retirement_sink: ?TaskRetirementSink = null,
     execution_stop_sink: ?ExecutionStopSink = null,
 
     comptime {
         if (@sizeOf(@This()) > RUNTIME_SIZE_CEILING_BYTES) {
-            @compileError("task runtime exceeded its target-specific compact size ceiling");
+            @compileError("task runtime exceeded its compact size ceiling");
         }
     }
 
@@ -359,16 +324,7 @@ pub const Runtime = struct {
         self.next_namespace_id = 1;
         self.next_component_id = 1;
         self.execution.next_epoch = 1;
-        self.tasks.free_head = indexed_arena.reusableNoIndex(MAX_TASKS);
-        initializeTaskMultimapIndex(&self.task_owner_index);
-        initializeTaskMultimapIndex(&self.task_initial_component_label_index);
         self.task_lifecycle_generation = 1;
-        if (comptime !heap_backed_task_cold) {
-            for (&self.task_cold) |*cold| resetTaskCold(cold);
-        }
-        if (comptime !heap_backed_address_spaces) {
-            self.address_spaces.initializeAllocated();
-        }
     }
 
     pub fn initSnapshot() Snapshot {
@@ -424,77 +380,35 @@ pub const Runtime = struct {
     }
 
     fn taskColdRecords(self: *Runtime) ?*TaskColdRecords {
-        if (comptime heap_backed_task_cold) return self.task_cold;
-        return &self.task_cold;
+        return self.task_cold.get();
     }
 
     fn taskColdRecordsConst(self: *const Runtime) ?*const TaskColdRecords {
-        if (comptime heap_backed_task_cold) return self.task_cold;
-        return &self.task_cold;
+        return self.task_cold.get();
     }
 
     fn ensureTaskColdRecords(self: *Runtime) error{NoSpaceLeft}!*TaskColdRecords {
-        if (self.taskColdRecords()) |records| return records;
-        if (comptime heap_backed_task_cold) {
-            const records = table_backing.alloc(TaskColdRecords) orelse return error.NoSpaceLeft;
-            self.task_cold = records;
-            return records;
-        }
-        return &self.task_cold;
-    }
-
-    fn clearTaskColdRecords(self: *Runtime, count: usize) void {
-        self.clearTaskColdRecordRange(0, count);
-    }
-
-    fn clearTaskColdRecordRange(self: *Runtime, first: usize, end: usize) void {
-        const records = self.taskColdRecords() orelse return;
-        const bounded_first = @min(first, records.len);
-        const bounded_end = @min(@max(first, end), records.len);
-        for (records[bounded_first..bounded_end]) |*cold| resetTaskCold(cold);
+        return self.task_cold.ensure();
     }
 
     fn releaseTaskColdRecords(self: *Runtime) void {
-        if (comptime heap_backed_task_cold) {
-            if (self.task_cold) |records| {
-                table_backing.free(TaskColdRecords, records);
-                self.task_cold = null;
-            }
-        } else {
-            self.clearTaskColdRecords(MAX_TASKS);
-        }
+        self.task_cold.release();
     }
 
     fn addressSpaceArena(self: *Runtime) ?*model.AddressSpaceArena {
-        if (comptime heap_backed_address_spaces) return self.address_spaces;
-        return &self.address_spaces;
+        return self.address_spaces.get();
     }
 
     fn addressSpaceArenaConst(self: *const Runtime) ?*const model.AddressSpaceArena {
-        if (comptime heap_backed_address_spaces) return self.address_spaces;
-        return &self.address_spaces;
+        return self.address_spaces.get();
     }
 
     fn ensureAddressSpaceArena(self: *Runtime) error{NoSpaceLeft}!*model.AddressSpaceArena {
-        if (self.addressSpaceArena()) |arena| return arena;
-        if (comptime heap_backed_address_spaces) {
-            const arena = table_backing.alloc(model.AddressSpaceArena) orelse return error.NoSpaceLeft;
-            arena.free_head = indexed_arena.reusableNoIndex(MAX_TASKS);
-            self.address_spaces = arena;
-            return arena;
-        }
-        return &self.address_spaces;
+        return self.address_spaces.ensure();
     }
 
     fn releaseAddressSpaceArena(self: *Runtime) void {
-        if (comptime heap_backed_address_spaces) {
-            if (self.address_spaces) |arena| {
-                table_backing.free(model.AddressSpaceArena, arena);
-                self.address_spaces = null;
-            }
-        } else {
-            self.address_spaces.reset();
-        }
+        self.address_spaces.release();
     }
 
     pub fn reset(self: *Runtime) void {
@@ -601,16 +515,26 @@ pub const Runtime = struct {
         const retirements = self.captureAddressSpaceRetirements(.snapshot_restore);
         self.retireUnretainedTasks(retained);
         if (self.hasTaskBorrows()) native_util.impossibleByInvariant("restore callbacks return every scoped task borrow");
+        const previous_address_space_claimed_count = if (self.addressSpaceArenaConst()) |address_spaces| address_spaces.claimedCount() else 0;
         self.resetForSnapshotRestore();
-        if (state.task_count == 0 and heap_backed_task_cold) {
+        // Kept payloads that the restore does not reclaim are unreachable.
+        // Scrub them now: a later reset only reaches the reclaimed prefix.
+        for (0..previous_task_claimed_count) |index| {
+            if (!occupied.isSet(index)) self.tasks.slotAt(index).* = .{};
+        }
+        if (state.task_count == 0) {
             self.releaseTaskColdRecords();
         } else if (self.taskColdRecords()) |records| {
             for (0..previous_task_claimed_count) |index| {
                 if (!occupied.isSet(index)) resetTaskCold(&records[index]);
             }
         }
-        if (state.address_space_count == 0 and heap_backed_address_spaces) {
+        if (state.address_space_count == 0) {
             self.releaseAddressSpaceArena();
+        } else if (self.addressSpaceArena()) |address_spaces| {
+            if (previous_address_space_claimed_count > state.address_space_count) {
+                @memset(address_spaces.slots[state.address_space_count..previous_address_space_claimed_count], .{});
+            }
         }
         self.next_task_id = mergeIssuanceCursor(self.next_task_id, state.next_task_id);
         self.next_process_id = mergeIssuanceCursor(self.next_process_id, state.next_process_id);
@@ -774,7 +698,7 @@ pub const Runtime = struct {
             .cold_state = &task_cold[slot_index],
         };
         task_cold[slot_index].execution_components[0] = initial_component;
-        appendProvenanceToTask(&slot.task, debug_contract.launchProvenance(
+        if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(&slot.task, debug_contract.launchProvenance(
             task_id,
             0,
             request.launch.image_id,
@@ -1321,7 +1245,7 @@ pub const Runtime = struct {
         task.process_class = host.process_class;
         task.namespace_class = host.namespace_class;
         task.process_generation += 1;
-        appendProvenanceToTask(task, debug_contract.launchProvenance(
+        if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(task, debug_contract.launchProvenance(
             task_id,
             tick,
             task.launch.image_id,
@@ -1384,7 +1308,7 @@ pub const Runtime = struct {
 
     pub fn recordProvenance(self: *Runtime, task_id: u64, event: ProvenanceRecord) Error!void {
         const task = self.find(task_id) orelse return error.TaskNotFound;
-        appendProvenanceToTask(task, event);
+        if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(task, event);
     }
 
     pub fn recordCrashReportForResolved(
@@ -1398,7 +1322,7 @@ pub const Runtime = struct {
         redacted: bool,
     ) void {
         if (builtin.mode == .debug) _ = self.taskHandleForResolved(task);
-        appendProvenanceToTask(task, debug_contract.crashReportProvenance(
+        if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(task, debug_contract.crashReportProvenance(
             task.id,
             service_id,
             tick,
@@ -1407,15 +1331,6 @@ pub const Runtime = struct {
             reason_fingerprint,
             redacted,
         ));
-    }
-
-    pub fn canReserveBackgroundWork(
-        self: *const Runtime,
-        task_id: u64,
-        budget: manifest.BackgroundResourceBudget,
-    ) bool {
-        const task = self.findConst(task_id) orelse return false;
-        return planBackgroundCapacity(task, budget) != null;
     }
 
     pub fn reserveBackgroundWork(
@@ -1579,7 +1494,7 @@ pub fn grantCapabilityToTask(task: *TaskRecord, capability_id: u64) Error!void {
     cold.dense_of_stable[stable] = dense;
     task.capability_count += 1;
     advanceTaskCapabilityGeneration(task);
-    appendProvenanceToTask(task, debug_contract.capabilityGrantProvenance(task.id, capability_id, 0));
+    if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(task, debug_contract.capabilityGrantProvenance(task.id, capability_id, 0));
 }
 
 pub fn revokeCapabilityFromTask(task: *TaskRecord, capability_id: u64) bool {
@@ -1599,7 +1514,7 @@ pub fn revokeCapabilityFromTask(task: *TaskRecord, capability_id: u64) bool {
     cold.stable_slot_of_dense[task.capability_count] = model.CSPACE_SLOT_EMPTY;
     if (revoked_stable != model.CSPACE_SLOT_EMPTY) cold.dense_of_stable[revoked_stable] = model.CSPACE_SLOT_EMPTY;
     advanceTaskCapabilityGeneration(task);
-    appendProvenanceToTask(task, debug_contract.capabilityRevokeProvenance(task.id, capability_id, 0));
+    if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(task, debug_contract.capabilityRevokeProvenance(task.id, capability_id, 0));
     return true;
 }
 
@@ -1650,15 +1565,16 @@ fn preferTaskLookupMatch(candidate: *const TaskRecord, current: *const TaskRecor
 }
 
 fn appendProvenanceToTask(task: *TaskRecord, event: ProvenanceRecord) void {
+    if (comptime !model.RETAINS_TASK_PROVENANCE) return;
     const cold = taskCold(task);
     if (task.provenance_count < MAX_TASK_PROVENANCE_EVENTS) {
         const slot_index = (task.provenance_start + task.provenance_count) % MAX_TASK_PROVENANCE_EVENTS;
-        cold.provenance_trail[slot_index] = TaskProvenanceRecord.from(event);
+        cold.provenance_trail[slot_index] = event;
         task.provenance_count += 1;
         return;
     }
 
-    cold.provenance_trail[task.provenance_start] = TaskProvenanceRecord.from(event);
+    cold.provenance_trail[task.provenance_start] = event;
     task.provenance_start = @intCast((task.provenance_start + 1) % MAX_TASK_PROVENANCE_EVENTS);
 }
 
@@ -1690,14 +1606,8 @@ test "allocated runtime initialization preserves empty indexes and id sequences"
 
     try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
     try std.testing.expectEqual(@as(u64, 1), runtime.taskLifecycleGeneration());
-    if (comptime !heap_backed_task_cold) {
-        try std.testing.expectEqual(@as(u64, 1), runtime.task_cold[0].capability_generation);
-        try std.testing.expectEqual(@as(u64, 1), runtime.task_cold[MAX_TASKS - 1].capability_generation);
-        try std.testing.expectEqual(@as(u64, 0), runtime.task_cold[MAX_TASKS - 1].capability_ids[MAX_TASK_CAPABILITIES - 1]);
-    }
-    if (comptime !heap_backed_address_spaces) {
-        try std.testing.expectEqual(@as(usize, 0), runtime.address_spaces.claimedCount());
-    }
+    try std.testing.expect(runtime.task_cold.get() == null);
+    try std.testing.expect(runtime.address_spaces.get() == null);
 
     const task = try createTaskIdTestTask(&runtime, 42);
     const execution_ticket = try runtime.reserveExecution(task, 0);
@@ -1815,13 +1725,13 @@ test "background work reservations plan and commit against a resolved task" {
     try std.testing.expect(planBackgroundWork(task, over_budget, .none, .audit_only, 43) == null);
 }
 
-test "task runtime crosses the first task slab page with indexed handles" {
+test "task runtime resolves indexed handles across many tasks" {
     var runtime = Runtime.init();
     var last_task_id: u64 = 0;
     var last_owner = principal.PrincipalId{ .kind = .app, .serial = 0 };
 
     var index: usize = 0;
-    while (index < model.TASK_PAGE_SIZE + 5) : (index += 1) {
+    while (index < 37) : (index += 1) {
         const owner = principal.PrincipalId{ .kind = .app, .serial = @intCast(index + 1) };
         const task = try runtime.createTask(.{
             .owner = owner,
@@ -1837,7 +1747,7 @@ test "task runtime crosses the first task slab page with indexed handles" {
         last_owner = owner;
     }
 
-    try std.testing.expectEqual(@as(usize, model.TASK_PAGE_SIZE + 5), runtime.taskCount());
+    try std.testing.expectEqual(@as(usize, 37), runtime.taskCount());
     try std.testing.expect(runtime.find(last_task_id) != null);
     try std.testing.expectEqual(last_task_id, runtime.findByOwner(last_owner).?.id);
     const last_task = runtime.find(last_task_id).?;
@@ -1875,6 +1785,28 @@ test "task handles reject stale task records across restore and reuse" {
     try std.testing.expect(runtime.findByHandle(restored_handle, replacement.id) == null);
     try std.testing.expectEqual(replacement.id, runtime.findByHandle(replacement_handle, replacement.id).?.id);
     try std.testing.expect(runtime.taskHandleForResolved(replacement).eql(replacement_handle));
+}
+
+test "snapshot restore scrubs kept task and address-space payloads it does not reclaim" {
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    const kept = try createTaskIdTestTask(&runtime, 811);
+    const kept_id = kept.id;
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    _ = try createTaskIdTestTask(&runtime, 812);
+    _ = try createTaskIdTestTask(&runtime, 813);
+    try std.testing.expectEqual(@as(usize, 3), runtime.tasks.claimedCount());
+    try std.testing.expectEqual(@as(usize, 3), runtime.addressSpaceArenaConst().?.claimedCount());
+
+    try runtime.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqual(@as(usize, 1), runtime.taskCount());
+    try std.testing.expectEqual(kept_id, runtime.find(kept_id).?.id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.tasks.claimedCount());
+    for (runtime.tasks.slots[1..3]) |*slot| try std.testing.expectEqualDeep(model.TaskSlot{}, slot.*);
+    const address_spaces = runtime.addressSpaceArenaConst().?;
+    try std.testing.expectEqual(@as(usize, 1), address_spaces.claimedCount());
+    for (address_spaces.slots[1..3]) |*slot| try std.testing.expectEqualDeep(model.AddressSpaceSlot{}, slot.*);
 }
 
 test "task handle exhaustion rejects restore before retirement and survives runtime reset" {
@@ -1952,10 +1884,11 @@ test "task runtime host ids are monotonic and exhaust without wrapping" {
 
 test "task runtime host ids do not advance when address space installation fails" {
     var runtime = Runtime.init();
-    for (0..runtime.address_spaces.slots.len) |index| {
+    const address_spaces = try runtime.ensureAddressSpaceArena();
+    for (0..address_spaces.slots.len) |index| {
         const address_space_id: u64 = @intCast(index + 1_000);
-        const slot_index = runtime.address_spaces.reserveIndex(address_space_id) orelse unreachable;
-        const slot = &runtime.address_spaces.slots[slot_index];
+        const slot_index = address_spaces.reserveIndex(address_space_id) orelse unreachable;
+        const slot = &address_spaces.slots[slot_index];
         slot.address_space = model.zeroAddressSpace();
         slot.address_space.id = address_space_id;
     }
@@ -1995,10 +1928,11 @@ test "task runtime component ids are monotonic and exhaust without wrapping" {
 
 test "task runtime component ids do not advance when host allocation fails" {
     var runtime = Runtime.init();
-    for (0..runtime.address_spaces.slots.len) |index| {
+    const address_spaces = try runtime.ensureAddressSpaceArena();
+    for (0..address_spaces.slots.len) |index| {
         const address_space_id: u64 = @intCast(index + 2_000);
-        const slot_index = runtime.address_spaces.reserveIndex(address_space_id) orelse unreachable;
-        const slot = &runtime.address_spaces.slots[slot_index];
+        const slot_index = address_spaces.reserveIndex(address_space_id) orelse unreachable;
+        const slot = &address_spaces.slots[slot_index];
         slot.address_space = model.zeroAddressSpace();
         slot.address_space.id = address_space_id;
     }
@@ -2122,7 +2056,6 @@ test "task runtime records redacted crash report provenance" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 51,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.crash-provenance",
         },
@@ -2432,7 +2365,6 @@ test "userspace launch provenance is recorded for explicit image launches" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 44,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.notes",
             .source_identity = "store:zigos/public",
@@ -2489,7 +2421,6 @@ test "userspace tasks materialize executable mappings in their address spaces" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 45,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.storage-object",
         },
@@ -2618,7 +2549,7 @@ test "tasks are isolated in separate process address space and namespace hosts a
 
     const original_process_id = service_task.process_id;
     const original_address_space_id = service_task.address_space_id;
-    const original_address_space_count = runtime.address_spaces.countInUse();
+    const original_address_space_count = runtime.address_spaces.get().?.countInUse();
     try std.testing.expect(runtime.processSeparated(service_task.id, app_task.id));
     try std.testing.expectEqual(ProcessClass.service_sandbox, service_task.process_class);
     try std.testing.expectEqual(ProcessClass.app_sandbox, app_task.process_class);
@@ -2626,9 +2557,9 @@ test "tasks are isolated in separate process address space and namespace hosts a
     try std.testing.expect(try runtime.rehostTask(service_task.id, 55));
     try std.testing.expect(service_task.process_id != original_process_id);
     try std.testing.expect(service_task.address_space_id != original_address_space_id);
-    try std.testing.expect(runtime.address_spaces.get(original_address_space_id) == null);
-    try std.testing.expect(runtime.address_spaces.get(service_task.address_space_id) != null);
-    try std.testing.expectEqual(original_address_space_count, runtime.address_spaces.countInUse());
+    try std.testing.expect(runtime.address_spaces.get().?.get(original_address_space_id) == null);
+    try std.testing.expect(runtime.address_spaces.get().?.get(service_task.address_space_id) != null);
+    try std.testing.expectEqual(original_address_space_count, runtime.address_spaces.get().?.countInUse());
     try std.testing.expectEqual(@as(u32, 2), service_task.process_generation);
     try std.testing.expectEqual(AuditEventKind.service_restarted, service_task.latestAuditEvent().?.kind);
 }
@@ -2653,7 +2584,6 @@ test "rehosting a restored userspace task clones authoritative mapped state" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 46,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.sync-service",
         },
@@ -2832,7 +2762,7 @@ test "sparse checkpoints preserve cross-page slot order and retire only live add
     defer std.testing.allocator.destroy(snapshot);
     snapshot.* = Runtime.initSnapshot();
 
-    const task_count = model.TASK_PAGE_SIZE + 4;
+    const task_count = 36;
     var task_ids: [task_count]u64 = undefined;
     for (&task_ids, 0..) |*task_id, index| {
         const task = try createTaskIdTestTask(runtime, 8_200 + index);
@@ -2868,7 +2798,7 @@ test "sparse checkpoints preserve cross-page slot order and retire only live add
     try std.testing.expect(runtime.findByHandle(stale_task_handle, removed_task_id) == null);
     try std.testing.expectEqual(TaskState.active, replacement.state);
     try std.testing.expectEqual(task_count, runtime.tasks.claimedCount());
-    try std.testing.expectEqual(task_count, runtime.address_spaces.claimedCount());
+    try std.testing.expectEqual(task_count, runtime.address_spaces.get().?.claimedCount());
 
     runtime.writeSnapshot(snapshot);
     try std.testing.expectEqual(@as(usize, 3), snapshot.task_count);
@@ -3167,7 +3097,7 @@ test "task reclamation keeps recent history and clears every reused index and co
     try std.testing.expect(std.mem.allEqual(u64, &taskCold(replacement).capability_ids, 0));
     try std.testing.expect(std.mem.allEqual(u8, &taskCold(replacement).dense_of_stable, model.CSPACE_SLOT_EMPTY));
     try std.testing.expect(std.meta.eql(AuditEvent{ .kind = .created }, taskCold(replacement).audit_trail[0]));
-    try std.testing.expect(std.meta.eql(TaskProvenanceRecord{}, taskCold(replacement).provenance_trail[1]));
+    try std.testing.expect(std.meta.eql(ProvenanceRecord{}, taskCold(replacement).provenance_trail[1]));
     runtime.debugAssertIndexIntegrity();
     try std.testing.expect(runtime.terminateResolvedTask(replacement, 1001));
     for (0..MAX_TASKS * 3) |index| {
@@ -3727,11 +3657,11 @@ test "execution transport collection retains every owner until independent compl
         }
 
         fn rejected(runtime: *Runtime, ticket: ExecutionTicket, expected: anyerror) !void {
-            const before = try std.testing.allocator.dupe(u8, std.mem.asBytes(runtime));
+            const before = try table_backing.deepBytes(std.testing.allocator, runtime);
             defer std.testing.allocator.free(before);
             const channels_before = dispatch_transport.global;
             try std.testing.expectError(expected, runtime.collectExecution(ticket));
-            try std.testing.expectEqualSlices(u8, before, std.mem.asBytes(runtime));
+            try table_backing.expectDeepBytes(before, runtime);
             try std.testing.expectEqualSlices(u8, std.mem.asBytes(&channels_before), std.mem.asBytes(&dispatch_transport.global));
         }
     };
@@ -3843,13 +3773,13 @@ test "execution transport collection aborts failed receipt admission and preserv
 
     try dispatch_transport.global.withdraw(key);
     try runtime.cancelUnstartedExecution(ticket);
-    const runtime_before = try std.testing.allocator.dupe(u8, std.mem.asBytes(runtime));
+    const runtime_before = try table_backing.deepBytes(std.testing.allocator, runtime);
     defer std.testing.allocator.free(runtime_before);
     const completed_before = dispatch_transport.global;
     // Prepared cancellation still needs its canonical receipt consumed. Failed
     // Coordinator admission must restore the exact completed channel kind.
     try std.testing.expectError(error.WrongPhase, runtime.collectExecution(ticket));
-    try std.testing.expectEqualSlices(u8, runtime_before, std.mem.asBytes(runtime));
+    try table_backing.expectDeepBytes(runtime_before, runtime);
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&completed_before), std.mem.asBytes(&dispatch_transport.global));
     var completion: dispatch_transport.Completion = .owner_returned;
     try dispatch_transport.global.completionInto(key, &completion);
@@ -3880,7 +3810,7 @@ test "execution transport retained shells preserve snapshot resources indexes an
             self.stop_notifications += 1;
         }
         fn rejected(self: *@This(), runtime: *Runtime, snapshot: *const Snapshot) !void {
-            const before = try std.testing.allocator.dupe(u8, std.mem.asBytes(runtime));
+            const before = try table_backing.deepBytes(std.testing.allocator, runtime);
             defer std.testing.allocator.free(before);
             const channels_before = dispatch_transport.global;
             const observer_before = self.*;
@@ -3889,7 +3819,7 @@ test "execution transport retained shells preserve snapshot resources indexes an
             try std.testing.expect(!runtime.unbindTaskRetirementSink(.{ .context = self, .retire = retire }));
             try std.testing.expect(!runtime.unbindAddressSpaceRetirementSink(AddressSpaceRetirementSink.init(@This(), self)));
             try std.testing.expect(!runtime.unbindExecutionStopSink(.{ .context = self, .notify = stop }));
-            try std.testing.expectEqualSlices(u8, before, std.mem.asBytes(runtime));
+            try table_backing.expectDeepBytes(before, runtime);
             try std.testing.expectEqualSlices(u8, std.mem.asBytes(&channels_before), std.mem.asBytes(&dispatch_transport.global));
             try std.testing.expectEqualDeep(observer_before, self.*);
         }

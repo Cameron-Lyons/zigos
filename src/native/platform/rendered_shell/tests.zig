@@ -1,5 +1,4 @@
 const std = @import("std");
-const abi = @import("../../core/abi.zig");
 const boot_markers = @import("../../../kernel/boot/markers.zig");
 const capability = @import("../../kernel_api/capability.zig");
 const compositor_session = @import("../compositor_session.zig");
@@ -23,40 +22,21 @@ const task_runtime_service = @import("../../task/task_runtime_service.zig");
 const units = @import("../../core/units.zig");
 const booted_system = @import("booted_system.zig");
 const humane_shell = @import("humane_shell.zig");
-const humane_shell_wire = @import("humane_shell_wire.zig");
-const journey_surface = @import("journey_surface.zig");
-const model = @import("model.zig");
 const production_journey = @import("production_journey.zig");
-const shell_mod = @import("shell.zig");
-const task_shell_service = @import("task_shell_service.zig");
-const task_shell_wire = @import("task_shell_wire.zig");
 
 const FULL_RENDER_BUFFER_BYTES: usize = units.kibibytes(8);
 const EXPORT_BUFFER_BYTES: usize = units.kibibytes(4);
 const RENDER_BUFFER_BYTES: usize = units.kibibytes(2);
-const COMPACT_RENDER_BUFFER_BYTES: usize = 768;
 const SMALL_EXPORT_BUFFER_BYTES: usize = units.kibibytes(1);
-const WIRE_BUFFER_BYTES: usize = 128;
 
-const Config = model.Config;
-const Control = model.Control;
 const HumaneShell = humane_shell.HumaneShell;
 const HumaneShellCheckpointStore = humane_shell.HumaneShellCheckpointStore;
 const HumaneShellControl = humane_shell.HumaneShellControl;
 const HumaneShellStatus = humane_shell.HumaneShellStatus;
 const BootedSystem = booted_system.BootedSystem;
 const ShellInput = booted_system.ShellInput;
-const JourneySurface = journey_surface.JourneySurface;
 const ProductionJourneyService = production_journey.ProductionJourneyService;
 const ProductionJourneyStatus = production_journey.ProductionJourneyStatus;
-const Shell = shell_mod.Shell;
-const TaskShellCheckpointStore = task_shell_service.TaskShellCheckpointStore;
-const TaskShellOperation = task_shell_wire.TaskShellOperation;
-const TaskShellResponse = task_shell_wire.TaskShellResponse;
-const TaskShellService = task_shell_service.TaskShellService;
-const TaskShellStatus = task_shell_wire.TaskShellStatus;
-const decodeTaskShellResponse = task_shell_wire.decodeResponse;
-const encodeTaskShellRequest = task_shell_wire.encodeRequest;
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
     if (std.mem.indexOf(u8, haystack, needle) == null) return error.ExpectedSubstringMissing;
@@ -69,11 +49,13 @@ fn expectNotContains(haystack: []const u8, needle: []const u8) !void {
 const DocumentDisk = struct {
     var image: []u8 = &.{};
     var fail_flush: bool = false;
+    var fail_writes: bool = false;
 
     fn init() !void {
         image = try std.testing.allocator.alloc(u8, storage_volume.image_bytes);
         @memset(image, 0);
         fail_flush = false;
+        fail_writes = false;
         if (!storage_volume.attachBackend(.{ .sector_count = storage_volume.required_device_sectors, .read = read, .write = write, .flush = flush })) @panic("storage lifecycle transition was refused");
     }
 
@@ -91,6 +73,7 @@ const DocumentDisk = struct {
     }
 
     fn write(lba: u64, bytes: [*]const u8, len: usize) callconv(.c) bool {
+        if (fail_writes) return false;
         const offset: usize = @intCast(lba * storage_volume.sector_size);
         if (offset > image.len or len > image.len - offset) return false;
         @memcpy(image[offset..][0..len], bytes[0..len]);
@@ -131,8 +114,7 @@ fn seedShellWorkspace(storage: *storage_service.Service, owner: principal.Princi
 }
 
 fn signReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
-    return signing.signWithDefaultRegistry(
-        .ed25519,
+    return signing.sign(
         identity,
         &package_service.digestBundle(bundle),
     );
@@ -165,254 +147,6 @@ fn mintRenderedShellServiceAuthority(
         },
         .audit = .{},
     });
-}
-
-fn shellConfig(user: principal.PrincipalId, workspace_id: u64, document_path: []const u8) Config {
-    return .{
-        .user = user,
-        .app_owner = user,
-        .reviewer_task_id = 71,
-        .workspace_id = workspace_id,
-        .workspace_label = "Rendered Shell Workspace",
-        .document_path = document_path,
-        .task_label = "trip-planner",
-        .task_entry = "app.trip.ui",
-        .task_title = "Plan Trip",
-        .bundle_id = "app.trip",
-        .display_name = "Trip Planner",
-        .ui_surface_id = 88,
-        .image_id = 92_001,
-    };
-}
-
-fn dispatchTaskShellForTest(
-    service: *TaskShellService,
-    operation: TaskShellOperation,
-    control: Control,
-    tick: u64,
-) !TaskShellResponse {
-    var request_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
-    var response_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
-    const payload = try encodeTaskShellRequest(&request_buffer, .{
-        .operation = operation,
-        .control = control,
-        .tick = tick,
-    });
-    return decodeTaskShellResponse(try service.dispatchPayload(payload, &response_buffer));
-}
-
-test "rendered demo journey drives install sync permission update recovery and removal controls" {
-    var storage_checkpoint_store = storage_service.CheckpointStore{};
-    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
-    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
-
-    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 94 };
-    const package_owner = principal.PrincipalId{ .kind = .service, .serial = 95 };
-    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 96 };
-    const user = principal.PrincipalId{ .kind = .user, .serial = 94 };
-    const primary_device = principal.PrincipalId{ .kind = .device, .serial = 941 };
-    const paired_device = principal.PrincipalId{ .kind = .device, .serial = 942 };
-    const document_path = "documents/plan.md";
-    const bundle_signer = signing.SignerIdentity{
-        .label = "rendered-journey-bundle",
-        .seed = signing.seedFromByte(0x9c),
-    };
-    const user_signer = signing.SignerIdentity{
-        .label = "rendered-journey-user",
-        .seed = signing.seedFromByte(0x9d),
-    };
-    const primary_signer = signing.SignerIdentity{
-        .label = "rendered-journey-primary",
-        .seed = signing.seedFromByte(0x9e),
-    };
-    const paired_signer = signing.SignerIdentity{
-        .label = "rendered-journey-paired",
-        .seed = signing.seedFromByte(0x9f),
-    };
-
-    const provided_interfaces = [_]manifest.InterfaceDecl{
-        .{ .name = "zigos.workspace.document" },
-    };
-    const consumed_interfaces = [_]manifest.InterfaceDecl{
-        .{ .name = "zigos.object.workspace" },
-    };
-    const components = [_]manifest.ExecutionComponentDecl{
-        .{ .id = "trip-ui", .entry = "app.trip.ui" },
-    };
-    const v1_assets = [_]manifest.AssetDecl{
-        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
-    };
-    const v2_assets = [_]manifest.AssetDecl{
-        .{ .path = "assets/icon.svg", .content_type = "image/svg+xml" },
-        .{ .path = "assets/theme.css", .content_type = "text/css" },
-    };
-    const permissions = [_]manifest.PermissionRequest{
-        .{
-            .kind = .object_access,
-            .resource = "documents/plan.md",
-            .rights = .{ .object = .{ .object_read = true, .object_write = true } },
-            .local_only = true,
-            .max_lease_ticks = 240,
-        },
-    };
-    var v1 = manifest.BundleManifest{
-        .bundle_id = "app.trip",
-        .display_name = "Trip Planner",
-        .publisher = "Example Software",
-        .provided_interfaces = &provided_interfaces,
-        .consumed_interfaces = &consumed_interfaces,
-        .components = &components,
-        .assets = &v1_assets,
-        .requested_permissions = &permissions,
-    };
-    v1.signature = try signReleaseBundle(bundle_signer, v1);
-    var v2 = manifest.BundleManifest{
-        .bundle_id = "app.trip",
-        .display_name = "Trip Planner",
-        .publisher = "Example Software",
-        .version_major = 1,
-        .version_minor = 1,
-        .provided_interfaces = &provided_interfaces,
-        .consumed_interfaces = &consumed_interfaces,
-        .components = &components,
-        .assets = &v2_assets,
-        .requested_permissions = &permissions,
-    };
-    v2.signature = try signReleaseBundle(bundle_signer, v2);
-
-    var package_capabilities = capability.CapabilityTable.init();
-    var packages_service = package_service.Service.init();
-    packages_service.bind(9_500, package_owner);
-    var package_port = package_service.PackagePort.init(&packages_service, &package_capabilities);
-    const package_capability = try mintRenderedShellServiceAuthority(&package_capabilities, packages_service.service_id, package_owner, 9_501);
-    const package_authority = package_service.AuthorityContext{
-        .task_id = 9_501,
-        .principal = package_owner,
-        .capability_id = package_capability.id,
-        .now_ticks = 10,
-    };
-    _ = try package_port.trustPolicyAuthorityRoot(package_authority, .{ .kind = .policy_authority, .serial = 1 }, signing.publicKeyFromByte(0x5A));
-    _ = try package_port.trustPublisher(
-        package_authority,
-        .{ .kind = .app, .serial = 9_502 },
-        .{ .kind = .policy_authority, .serial = 1 },
-        "Example Software",
-        try signing.publicKey(bundle_signer),
-    );
-
-    var storage = storage_service.Service.initWithStore(940, 941, storage_owner, &storage_checkpoint_store);
-    const workspace_id = try seedShellWorkspace(&storage, user, document_path);
-
-    var sync = sync_service.Service.init(9_510, 9_511, sync_owner);
-    var sync_capabilities = capability.CapabilityTable.init();
-    const sync_capability = try mintRenderedShellServiceAuthority(&sync_capabilities, sync.service_id, sync_owner, sync.task_id);
-    var sync_port = sync_service.SyncPort.init(&sync, &sync_capabilities);
-    const sync_authority = sync_service.AuthorityContext{
-        .task_id = sync.task_id,
-        .principal = sync_owner,
-        .capability_id = sync_capability.id,
-        .now_ticks = 12,
-    };
-    _ = try sync_port.ensureUserRoot(sync_authority, user, "owner", user_signer);
-    _ = try sync_port.enrollTrustedDevice(sync_authority, user, primary_device, "laptop", user_signer, primary_signer, 12);
-    _ = try sync_port.enrollTrustedDevice(sync_authority, user, paired_device, "tablet", user_signer, paired_signer, 13);
-    const local_policy = try sync_port.createNetworkPolicy(sync_authority, .{
-        .owner = sync_owner,
-        .workspace_id = workspace_id,
-        .label = "trip-local",
-        .mode = .local_network,
-    });
-    _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
-        .workspace_id = workspace_id,
-        .owner = user,
-        .offline_first = true,
-        .personal_e2ee = true,
-        .selective_prefixes = &.{"documents/"},
-        .device_to_device_policy_id = local_policy.id,
-    });
-    try sync_port.setReplicaVersion(sync_authority, workspace_id, paired_device, document_path, 92_001, 99_001);
-
-    var runtime = task_runtime.Runtime.init();
-    var ux = native_ux.Controller.init();
-    var compositor = compositor_session.Session.init();
-    var ledger = event_ledger.Ledger.init();
-    var journey = JourneySurface.init(
-        &runtime,
-        &ux,
-        &compositor,
-        &storage,
-        &package_port,
-        package_authority,
-        &sync_port,
-        sync_authority,
-        &ledger,
-        .{
-            .user = user,
-            .app_owner = user,
-            .reviewer_task_id = 77,
-            .workspace_id = workspace_id,
-            .workspace_label = "Trip Workspace",
-            .document_path = document_path,
-            .task_label = "trip-planner",
-            .task_entry = "app.trip.ui",
-            .task_title = "Plan Trip",
-            .bundle_id = "app.trip",
-            .display_name = "Trip Planner",
-            .source_identity = "store:zigos",
-            .install_bundle = v1,
-            .update_bundle = v2,
-            .ui_surface_id = 94,
-            .image_id = 94_001,
-            .sync_from_device = primary_device,
-            .sync_to_device = paired_device,
-        },
-    );
-
-    var render_buffer: [RENDER_BUFFER_BYTES]u8 = undefined;
-    const initial = try journey.render(&render_buffer);
-    try expectContains(initial, "control=install-app state=ready");
-    try expectContains(initial, "control=remove-app state=ready");
-
-    try journey.click(.install_app, 20);
-    try journey.click(.start_task, 21);
-    try journey.click(.open_workspace, 22);
-    try journey.click(.open_document, 23);
-    try journey.click(.open_app_panel, 24);
-    try journey.click(.review_permission, 25);
-    try journey.click(.sync_workspace, 26);
-    try journey.click(.update_app, 27);
-    try journey.click(.rollback_update, 28);
-    try journey.click(.containment_denial, 29);
-    try journey.click(.recover_system, 30);
-    try journey.click(.remove_app, 31);
-
-    try std.testing.expect(packages_service.find("app.trip") == null);
-    try std.testing.expectError(error.AppNotInstalled, journey.click(.start_task, 32));
-    try std.testing.expectEqual(@as(usize, 13), ledger.countMatching(.{ .kind = .task_flow }));
-    try std.testing.expectEqual(@as(usize, 4), compositor.window_count);
-    try std.testing.expectEqual(compositor_session.ViewType.app_panel, compositor.windowAtOrder(2).?.view_type);
-    try std.testing.expectEqual(compositor_session.ViewType.sync_conflict_review, compositor.windowAtOrder(3).?.view_type);
-
-    const rendered = try journey.render(&render_buffer);
-    try expectContains(rendered, "control=remove-app state=done");
-    try expectContains(rendered, "package installed=yes updated=yes rolled_back=yes removed=yes");
-    try expectContains(rendered, "task_flow_events=13");
-
-    var export_buffer: [EXPORT_BUFFER_BYTES]u8 = undefined;
-    const exported = try ledger.exportText(&export_buffer, .{});
-    try expectContains(exported, "flow_kind=install_app");
-    try expectContains(exported, "flow_kind=start_task");
-    try expectContains(exported, "flow_kind=open_workspace");
-    try expectContains(exported, "flow_kind=open_document");
-    try expectContains(exported, "flow_kind=open_app_panel");
-    try expectContains(exported, "flow_kind=review_permission_request");
-    try expectContains(exported, "flow_kind=sync_workspace");
-    try expectContains(exported, "flow_kind=sync_conflict_review");
-    try expectContains(exported, "flow_kind=update_app");
-    try expectContains(exported, "flow_kind=rollback_app_update");
-    try expectContains(exported, "flow_kind=containment_denial");
-    try expectContains(exported, "flow_kind=recover_system");
-    try expectContains(exported, "flow_kind=remove_app");
 }
 
 test "production journey service rejects premature controls then routes lifecycle policy device trust and recovery through service ports" {
@@ -678,6 +412,11 @@ test "production journey service rejects premature controls then routes lifecycl
     try std.testing.expectEqual(before_edit.version_id.raw(), journey.document_version_id);
     try expectNotContains(try journey.renderMarkerContract(&marker_buffer), boot_markers.notes_daily_driver_edit_saved_ok);
     DocumentDisk.fail_flush = false;
+    DocumentDisk.fail_writes = true;
+    try std.testing.expectEqual(ProductionJourneyStatus.storage_unavailable, journey.dispatch(.{ .control = .edit_document, .tick = 26 }).status);
+    try std.testing.expect(!journey.document_edited);
+    try std.testing.expectEqual(before_edit.version_id.raw(), journey.document_version_id);
+    DocumentDisk.fail_writes = false;
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .edit_document, .tick = 26 }).status);
     const edited_markers = try journey.renderMarkerContract(&marker_buffer);
     try expectContains(edited_markers, boot_markers.notes_daily_driver_edit_saved_ok);
@@ -832,154 +571,6 @@ test "production journey service rejects premature controls then routes lifecycl
     try expectContains(exported, "flow_kind=recover_system");
 }
 
-test "rendered task shell drives task workspace document panel and focus controls" {
-    var storage_checkpoint_store = storage_service.CheckpointStore{};
-    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
-    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
-
-    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 92 };
-    const user = principal.PrincipalId{ .kind = .user, .serial = 92 };
-    const document_path = "documents/plan.md";
-
-    var runtime = task_runtime.Runtime.init();
-    var storage = storage_service.Service.initWithStore(920, 921, storage_owner, &storage_checkpoint_store);
-    const workspace_id = try seedShellWorkspace(&storage, user, document_path);
-    var ux = native_ux.Controller.init();
-    var compositor = compositor_session.Session.init();
-    var ledger = event_ledger.Ledger.init();
-    var shell = Shell.init(&runtime, &ux, &compositor, &storage, &ledger, shellConfig(user, workspace_id, document_path));
-
-    var render_buffer: [COMPACT_RENDER_BUFFER_BYTES]u8 = undefined;
-    const initial = try shell.render(&render_buffer);
-    try expectContains(initial, "control=start-task");
-    try expectContains(initial, "task=0");
-
-    try shell.click(.start_task, 20);
-    try shell.click(.open_workspace, 21);
-    try shell.click(.open_document, 22);
-    try shell.click(.open_app_panel, 23);
-    try shell.click(.focus_full_screen, 24);
-
-    const task = runtime.find(shell.taskId()) orelse return error.TaskMissing;
-    try std.testing.expect(task.runsAsUserspaceProcess());
-    try std.testing.expectEqual(@as(?u64, 88), task.ui_surface_id);
-    try std.testing.expectEqual(@as(usize, 4), compositor.window_count);
-    try std.testing.expectEqual(@as(usize, 1), compositor.item_count);
-    try std.testing.expectEqual(compositor_session.ViewType.workspace_view, compositor.windowAtOrder(0).?.view_type);
-    try std.testing.expectEqual(compositor_session.ViewType.document_view, compositor.windowAtOrder(1).?.view_type);
-    try std.testing.expectEqual(compositor_session.ViewType.app_panel, compositor.windowAtOrder(2).?.view_type);
-    try std.testing.expectEqual(compositor_session.ViewType.full_screen_task_view, compositor.windowAtOrder(3).?.view_type);
-    try std.testing.expectEqual(compositor.windowAtOrder(3).?.id, compositor.active_window_id);
-
-    try std.testing.expectEqual(@as(usize, 5), ledger.countMatching(.{ .kind = .task_flow }));
-    try std.testing.expectEqual(@as(usize, 4), ledger.countMatching(.{ .kind = .task_flow, .task_id = task.id }));
-    try std.testing.expectEqual(@as(usize, 3), ledger.countMatching(.{ .kind = .task_flow, .workspace_id = workspace_id }));
-
-    var export_buffer: [SMALL_EXPORT_BUFFER_BYTES]u8 = undefined;
-    const exported = try ledger.exportText(&export_buffer, .{});
-    try expectContains(exported, "flow_kind=start_task");
-    try expectContains(exported, "flow_kind=open_workspace");
-    try expectContains(exported, "flow_kind=open_document");
-    try expectContains(exported, "flow_kind=open_app_panel");
-    try expectContains(exported, "flow_kind=focus_task");
-
-    const rendered = try shell.render(&render_buffer);
-    try expectContains(rendered, "active_type=full_screen_task_view");
-    try expectContains(rendered, "active_title=Plan Trip");
-    try expectContains(rendered, "task_flow_events=5");
-}
-
-test "task shell service routes controls through compositor service and recovers persistent task state" {
-    var storage_checkpoint_store = storage_service.CheckpointStore{};
-    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
-    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
-
-    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 95 };
-    const user = principal.PrincipalId{ .kind = .user, .serial = 95 };
-    const document_path = "documents/plan.md";
-
-    var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
-    var runtime = task_runtime.Runtime.init();
-    var runtime_service = task_runtime_service.Service.initWithStore(&runtime, &runtime_checkpoint_store);
-    runtime_service.bind(9_600, .{ .kind = .service, .serial = 9_600 });
-
-    var storage = storage_service.Service.initWithStore(950, 951, storage_owner, &storage_checkpoint_store);
-    const workspace_id = try seedShellWorkspace(&storage, user, document_path);
-    var ux = native_ux.Controller.init();
-    var compositor = compositor_session.Session.init();
-    var compositor_checkpoint_store = compositor_session.CheckpointStore{};
-    var compositor_service = compositor_session.Service.initWithCheckpoint(9_601, 9_602, &runtime, &compositor, &compositor_checkpoint_store);
-    var ledger = event_ledger.Ledger.init();
-    var shell_checkpoint_store = TaskShellCheckpointStore{};
-    const config = shellConfig(user, workspace_id, document_path);
-    var shell_service = TaskShellService.init(
-        &runtime_service,
-        &ux,
-        &compositor_service,
-        &storage,
-        &ledger,
-        config,
-        &shell_checkpoint_store,
-    );
-
-    const start = try dispatchTaskShellForTest(&shell_service, .click, .start_task, 40);
-    try std.testing.expectEqual(TaskShellStatus.ok, start.status);
-    const workspace_response = try dispatchTaskShellForTest(&shell_service, .click, .open_workspace, 41);
-    try std.testing.expectEqual(TaskShellStatus.ok, workspace_response.status);
-    const document_response = try dispatchTaskShellForTest(&shell_service, .click, .open_document, 42);
-    try std.testing.expectEqual(TaskShellStatus.ok, document_response.status);
-    const panel_response = try dispatchTaskShellForTest(&shell_service, .click, .open_app_panel, 43);
-    try std.testing.expectEqual(TaskShellStatus.ok, panel_response.status);
-    const focus_response = try dispatchTaskShellForTest(&shell_service, .click, .focus_full_screen, 44);
-    try std.testing.expectEqual(TaskShellStatus.ok, focus_response.status);
-
-    const task_id = focus_response.task_id;
-    try std.testing.expect(task_id != 0);
-    try std.testing.expect(runtime_checkpoint_store.has_checkpoint);
-    try std.testing.expect(compositor_checkpoint_store.valid);
-    try std.testing.expect(shell_checkpoint_store.valid);
-    try std.testing.expectEqual(@as(u16, 4), focus_response.visible_window_count);
-    try std.testing.expectEqual(@as(u16, 5), focus_response.task_flow_events);
-    try std.testing.expectEqual(@as(usize, 4), compositor.window_count);
-    try std.testing.expectEqual(compositor_session.ViewType.full_screen_task_view, compositor.windowAtOrder(3).?.view_type);
-    try std.testing.expectEqual(compositor.windowAtOrder(3).?.id, compositor.active_window_id);
-
-    var restarted_runtime = task_runtime.Runtime.init();
-    var restarted_runtime_service = task_runtime_service.Service.initWithStore(&restarted_runtime, &runtime_checkpoint_store);
-    restarted_runtime_service.bind(9_600, .{ .kind = .service, .serial = 9_600 });
-    var restarted_compositor = compositor_session.Session.init();
-    var restarted_compositor_service = compositor_session.Service.initWithCheckpoint(
-        9_601,
-        9_602,
-        &restarted_runtime,
-        &restarted_compositor,
-        &compositor_checkpoint_store,
-    );
-    var restarted_shell_service = TaskShellService.init(
-        &restarted_runtime_service,
-        &ux,
-        &restarted_compositor_service,
-        &storage,
-        &ledger,
-        config,
-        &shell_checkpoint_store,
-    );
-    const recovered = try dispatchTaskShellForTest(&restarted_shell_service, .recover_state, .start_task, 50);
-    try std.testing.expectEqual(TaskShellStatus.ok, recovered.status);
-    try std.testing.expect(recovered.recovered);
-    try std.testing.expectEqual(task_id, recovered.task_id);
-    try std.testing.expect(restarted_runtime.find(task_id) != null);
-    try std.testing.expectEqual(@as(usize, 4), restarted_compositor.window_count);
-    try std.testing.expectEqual(restarted_compositor.windowAtOrder(3).?.id, restarted_compositor.active_window_id);
-
-    var render_buffer: [COMPACT_RENDER_BUFFER_BYTES]u8 = undefined;
-    const rendered = try restarted_shell_service.render(&render_buffer);
-    try expectContains(rendered, "control=focus-full-screen state=done");
-    try expectContains(rendered, "active_type=full_screen_task_view");
-    try expectContains(rendered, "active_title=Task: Plan Trip");
-    try expectContains(rendered, "task_flow_events=5");
-}
-
 test "humane shell composes task-first review pairing snapshots diagnostics notifications keyboard and recovery" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
@@ -1093,15 +684,7 @@ test "humane shell composes task-first review pairing snapshots diagnostics noti
     try std.testing.expectEqual(HumaneShellStatus.invalid_order, blocked_workspace.status);
     try std.testing.expectEqual(@as(u64, 0), blocked_workspace.task_id);
 
-    var request_buffer: [WIRE_BUFFER_BYTES]u8 = undefined;
-    var response_buffer: [WIRE_BUFFER_BYTES]u8 = undefined;
-    try std.testing.expectError(error.MalformedRequest, humane_shell_wire.decodeRequest("bad"));
-    try std.testing.expectError(error.RequestTooLarge, humane_shell_wire.encodeRequest(request_buffer[0..4], .{}));
-    const next_payload = try humane_shell_wire.encodeRequest(&request_buffer, .{ .operation = .keyboard, .keyboard = .next, .tick = 20 });
-    const decoded_next_request = try humane_shell_wire.decodeRequest(next_payload);
-    try std.testing.expectEqual(humane_shell.HumaneShellOperation.keyboard, decoded_next_request.operation);
-    try std.testing.expectEqual(humane_shell.KeyboardIntent.next, decoded_next_request.keyboard);
-    const next_focus = try humane_shell_wire.decodeResponse(try humane_shell_wire.dispatchPayload(&shell, next_payload, &response_buffer));
+    const next_focus = shell.dispatch(.{ .operation = .keyboard, .keyboard = .next, .tick = 20 });
     try std.testing.expectEqual(HumaneShellStatus.ok, next_focus.status);
     try std.testing.expectEqual(HumaneShellControl.open_workspace, next_focus.focused_control);
     const previous_focus = shell.dispatch(.{ .operation = .keyboard, .keyboard = .previous, .tick = 21 });
@@ -1131,11 +714,9 @@ test "humane shell composes task-first review pairing snapshots diagnostics noti
     try shell.click(.create_snapshot, 29);
     try shell.click(.rollback_snapshot, 30);
     try shell.click(.run_diagnostics, 31);
-    const notify_payload = try humane_shell_wire.encodeRequest(&request_buffer, .{ .control = .post_notification, .tick = 32 });
-    const notify_response = try humane_shell_wire.decodeResponse(try humane_shell_wire.dispatchPayload(&shell, notify_payload, &response_buffer));
+    const notify_response = shell.dispatch(.{ .control = .post_notification, .tick = 32 });
     try std.testing.expectEqual(HumaneShellStatus.ok, notify_response.status);
     try std.testing.expectEqual(@as(u16, 4), notify_response.notification_events);
-    try std.testing.expectError(error.ResponseTooLarge, humane_shell_wire.encodeResponse(response_buffer[0..4], notify_response));
 
     try std.testing.expect(sync.isTrustedDevice(paired_device));
     try std.testing.expect(shell.state.snapshot_id != 0);
@@ -1530,8 +1111,15 @@ test "booted rendered system runs input loop compositor prompts task switching r
     try std.testing.expect(system.hardware_text_dirty);
     try std.testing.expectEqual(text_before, shell.documentTextSlice().len);
     try std.testing.expect(!shell.state.document_edited);
-    const pending_count = storage.versionCount();
     DocumentDisk.fail_flush = false;
+    DocumentDisk.fail_writes = true;
+    const failed_write = system.dispatchKeyboardEvent(.{ .kind = .commit_text }, 25);
+    try std.testing.expect(!failed_write.accepted);
+    try std.testing.expectEqual(HumaneShellStatus.storage_unavailable, failed_write.status);
+    try std.testing.expect(system.hardware_text_dirty);
+    try std.testing.expectEqual(text_before, shell.documentTextSlice().len);
+    const pending_count = storage.versionCount();
+    DocumentDisk.fail_writes = false;
     const committed = system.dispatchKeyboardEvent(.{ .kind = .commit_text }, 25);
     try std.testing.expect(committed.accepted);
     try std.testing.expectEqual(pending_count, storage.versionCount());
@@ -1601,7 +1189,7 @@ test "booted notes docs loop edits shares syncs reviews rollback recovery and re
         .bundle = notes_bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &.{}, .{});
     try std.testing.expect(packages_service.find("app.notes") != null);
 
     var storage = storage_service.Service.initWithStore(11_110, 11_111, storage_owner, &storage_checkpoint_store);
@@ -1785,86 +1373,4 @@ test "booted notes docs loop edits shares syncs reviews rollback recovery and re
     try expectContains(exported, "flow_kind=sync_workspace");
     try expectContains(exported, "flow_kind=sync_conflict_review");
     try expectContains(exported, "flow_kind=remove_app");
-}
-
-test "rendered task shell rejects out-of-order or missing workspace interactions" {
-    var storage_checkpoint_store = storage_service.CheckpointStore{};
-    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
-    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
-
-    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 93 };
-    const user = principal.PrincipalId{ .kind = .user, .serial = 93 };
-
-    var runtime = task_runtime.Runtime.init();
-    var storage = storage_service.Service.initWithStore(930, 931, storage_owner, &storage_checkpoint_store);
-    const workspace_record = try storage.createWorkspace(.{
-        .owner = user,
-        .label = "empty-rendered-shell",
-    });
-    var ux = native_ux.Controller.init();
-    var compositor = compositor_session.Session.init();
-    var ledger = event_ledger.Ledger.init();
-    var shell = Shell.init(&runtime, &ux, &compositor, &storage, &ledger, shellConfig(user, workspace_record.id.raw(), "documents/missing.md"));
-
-    try std.testing.expectError(error.TaskRequired, shell.click(.open_workspace, 30));
-    try std.testing.expectError(error.TaskRequired, shell.click(.focus_full_screen, 31));
-
-    try shell.click(.start_task, 32);
-    try std.testing.expectError(error.WorkspaceRequired, shell.click(.open_document, 33));
-    try std.testing.expectError(error.EntryNotFound, shell.click(.open_workspace, 34));
-    try std.testing.expectError(error.WorkspaceRequired, shell.click(.open_app_panel, 35));
-
-    try std.testing.expectEqual(@as(usize, 0), compositor.window_count);
-    try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .kind = .task_flow }));
-}
-
-test "task shell service rejects out-of-order controls before creating compositor state" {
-    var storage_checkpoint_store = storage_service.CheckpointStore{};
-    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
-    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
-
-    const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 96 };
-    const user = principal.PrincipalId{ .kind = .user, .serial = 96 };
-
-    var runtime_checkpoint_store = task_runtime_service.CheckpointStore{};
-    var runtime = task_runtime.Runtime.init();
-    var runtime_service = task_runtime_service.Service.initWithStore(&runtime, &runtime_checkpoint_store);
-    runtime_service.bind(9_700, .{ .kind = .service, .serial = 9_700 });
-
-    var storage = storage_service.Service.initWithStore(960, 961, storage_owner, &storage_checkpoint_store);
-    const workspace_record = try storage.createWorkspace(.{
-        .owner = user,
-        .label = "empty-service-shell",
-    });
-    var ux = native_ux.Controller.init();
-    var compositor = compositor_session.Session.init();
-    var compositor_checkpoint_store = compositor_session.CheckpointStore{};
-    var compositor_service = compositor_session.Service.initWithCheckpoint(9_701, 9_702, &runtime, &compositor, &compositor_checkpoint_store);
-    var ledger = event_ledger.Ledger.init();
-    var shell_checkpoint_store = TaskShellCheckpointStore{};
-    var shell_service = TaskShellService.init(
-        &runtime_service,
-        &ux,
-        &compositor_service,
-        &storage,
-        &ledger,
-        shellConfig(user, workspace_record.id.raw(), "documents/missing.md"),
-        &shell_checkpoint_store,
-    );
-
-    const missing_task = try dispatchTaskShellForTest(&shell_service, .click, .open_workspace, 60);
-    try std.testing.expectEqual(TaskShellStatus.invalid_order, missing_task.status);
-    try std.testing.expect(!shell_checkpoint_store.valid);
-
-    const start = try dispatchTaskShellForTest(&shell_service, .click, .start_task, 61);
-    try std.testing.expectEqual(TaskShellStatus.ok, start.status);
-    const document_before_workspace = try dispatchTaskShellForTest(&shell_service, .click, .open_document, 62);
-    try std.testing.expectEqual(TaskShellStatus.invalid_order, document_before_workspace.status);
-    const missing_workspace_entry = try dispatchTaskShellForTest(&shell_service, .click, .open_workspace, 63);
-    try std.testing.expectEqual(TaskShellStatus.not_found, missing_workspace_entry.status);
-    const panel_before_document = try dispatchTaskShellForTest(&shell_service, .click, .open_app_panel, 64);
-    try std.testing.expectEqual(TaskShellStatus.invalid_order, panel_before_document.status);
-
-    try std.testing.expectEqual(@as(usize, 0), compositor.window_count);
-    try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .kind = .task_flow }));
 }

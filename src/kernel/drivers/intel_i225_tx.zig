@@ -67,7 +67,7 @@ comptime {
     if (@alignOf(Descriptor) != @alignOf(u64)) @compileError("I225 TX descriptor alignment changed");
 }
 
-pub fn submissionDescriptor(buffer_address: u32, frame_len: usize) error{InvalidFrameLength}!Descriptor {
+pub fn submissionDescriptor(buffer_address: u64, frame_len: usize) error{InvalidFrameLength}!Descriptor {
     if (frame_len == 0 or frame_len > BUFFER_BYTES) return error.InvalidFrameLength;
     return .{
         .buffer_addr = buffer_address,

@@ -30,7 +30,7 @@ const storage_scenarios = @import("../demo/storage_scenarios.zig");
 const sync_scenarios = @import("../demo/sync_scenarios.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
 const transient_sync_service = @import("../sync/transient_service.zig");
-const xhci = @import("../../kernel/drivers/xhci.zig");
+const modeled_xhci = @import("proofs/modeled_xhci.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
@@ -45,7 +45,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     bootstrap_packages.seed(
         manager.packageServicePtr(),
         manager.capabilityTablePtr(),
-        graph.state.services.package_service.id,
+        graph.state.services.get(.package_install_update).id,
         graph.state.ids.package_service,
         graph.state.session_task.id,
         graph.state.ids.session_service,
@@ -57,11 +57,12 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         manager.capabilityTablePtr(),
         manager.runtimeServicePtr().runtimePtr(),
         .{
-            .network_service_id = graph.state.services.network_service.id,
-            .compositor_service_id = graph.state.services.compositor_service.id,
-            .policy_service_id = graph.state.services.policy_service.id,
-            .service_registry_id = graph.state.services.service_registry.id,
+            .network_service_id = graph.state.services.get(.network_stack).id,
+            .compositor_service_id = graph.state.services.get(.compositor_ui_session).id,
+            .policy_service_id = graph.state.services.get(.policy_mediation).id,
+            .service_registry_id = graph.state.services.get(.service_registry).id,
         },
+        .{ .directory = &@import("../policy/policy_object.zig").unattached },
     );
     mediator.attachLedger(manager.updateLedgerPtr());
 
@@ -84,15 +85,15 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     var expected_physical_review_reports: usize = 0;
     for (physical_review_commands) |command| {
         modeled_review_input.enqueueTextCommand(
-            xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
-            xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+            modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+            modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
             command,
         ) catch |err| native_util.bootProofFailure("booted evidence", err);
         expected_physical_review_reports += command.len + 1;
     }
 
     var review_service = permission_review_service.Service.init(
-        graph.state.services.review_service_record.id,
+        graph.state.services.get(.permission_review_ui).id,
         graph.state.review_service_task.id,
         manager.runtimePtr(),
         &[_][]const u8{},
@@ -100,8 +101,9 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     review_service.compositor = manager.compositorSessionPtr();
     review_service.ux = manager.reviewUxControllerPtr() catch |err| native_util.bootProofFailure("booted evidence", err);
     review_service.bindModeledInput(modeled_review_input);
+    review_service.bindFocusedInput(manager.inputRouterPtr());
     var compositor_service = compositor_session.Service.initWithCheckpoint(
-        graph.state.services.compositor_service.id,
+        graph.state.services.get(.compositor_ui_session).id,
         graph.service_bindings.bindingFor(.compositor_ui_session).task_id,
         manager.runtimePtr(),
         manager.compositorSessionPtr(),
@@ -155,17 +157,17 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         .policy_authority = graph.state.ids.policy_authority,
         .session_service = graph.state.ids.session_service,
         .session_user = graph.state.ids.session_user,
-        .storage_service_id = graph.state.services.storage_service.id,
+        .storage_service_id = graph.state.services.get(.storage_object).id,
         .storage_task_id = graph.service_bindings.bindingFor(.storage_object).task_id,
         .storage_service_principal = graph.state.ids.storage_service,
-        .sync_service_id = graph.state.services.sync_service.id,
+        .sync_service_id = graph.state.services.get(.sync_replication).id,
         .sync_task_id = graph.service_bindings.bindingFor(.sync_replication).task_id,
         .sync_service_principal = graph.state.ids.sync_service,
         .sync_resident_state = manager.syncResidentStatePtr() catch |err| native_util.bootProofFailure("booted sync state", err),
-        .policy_service_id = graph.state.services.policy_service.id,
-        .network_service_id = graph.state.services.network_service.id,
-        .compositor_service_id = graph.state.services.compositor_service.id,
-        .package_service_id = graph.state.services.package_service.id,
+        .policy_service_id = graph.state.services.get(.policy_mediation).id,
+        .network_service_id = graph.state.services.get(.network_stack).id,
+        .compositor_service_id = graph.state.services.get(.compositor_ui_session).id,
+        .package_service_id = graph.state.services.get(.package_install_update).id,
         .package_service_principal = graph.state.ids.package_service,
         .update_ledger = manager.updateLedgerPtr(),
         .notes_task_id = notes_review.task_id,
@@ -613,8 +615,7 @@ fn signedNotesDailyBundle(version_minor: u16) !manifest.BundleManifest {
     bundle.version_minor = version_minor;
     bundle.assets = if (version_minor == 0) &notes_daily_v1_manifest_assets else &notes_daily_v2_manifest_assets;
     bundle.supply_chain = notesDailySupplyChain(version_minor);
-    bundle.signature = try signing.signWithDefaultRegistry(
-        .ed25519,
+    bundle.signature = try signing.sign(
         notes_daily_bundle_signer,
         &package_service.digestBundle(bundle),
     );

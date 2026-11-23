@@ -8,12 +8,6 @@ const signing = @import("../core/signing.zig");
 pub const MAX_RELEASES_PER_CHANNEL: usize = 8;
 pub const MAX_ASSET_DIGEST_BYTES: usize = 96;
 pub const MAX_TRUSTED_PUBLISHERS_PER_CHANNEL: usize = 8;
-pub const BOUNDED_RELEASE_SCAN = true;
-pub const BOUNDED_TRUSTED_PUBLISHER_SCAN = true;
-pub const DENSE_RELEASE_TABLE = true;
-pub const DENSE_TRUSTED_PUBLISHER_TABLE = true;
-pub const DIRECT_RELEASE_IDENTITY_COMPARISON = true;
-pub const IN_PLACE_CHANNEL_INITIALIZATION = true;
 pub const RELEASE_SCAN_BOUND: usize = MAX_RELEASES_PER_CHANNEL;
 pub const TRUSTED_PUBLISHER_SCAN_BOUND: usize = MAX_TRUSTED_PUBLISHERS_PER_CHANNEL;
 pub const CHANNEL_SIZE_CEILING_BYTES: usize = 5_816;
@@ -285,7 +279,7 @@ pub const Channel = struct {
 
     fn validateRelease(self: *const Channel, release: Release) Error!void {
         if (!release.bundle.signature.isComplete()) return error.StoreReleaseUnsigned;
-        if (!signing.verifyWithDefaultRegistry(release.bundle.signature, &package_service.digestBundle(release.bundle))) {
+        if (!signing.verify(release.bundle.signature, &package_service.digestBundle(release.bundle))) {
             return error.StoreReleaseSignatureInvalid;
         }
         if (!self.releaseSignedByTrustedPublisher(release.bundle)) return error.StoreReleasePublisherUntrusted;
@@ -498,8 +492,7 @@ fn versionNewerThan(release: Release, current_major: u16, current_minor: u16) bo
 }
 
 fn signStoreTestBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
-    return signing.signWithDefaultRegistry(
-        .ed25519,
+    return signing.sign(
         identity,
         &package_service.digestBundle(bundle),
     );

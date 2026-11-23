@@ -1,5 +1,5 @@
 const std = @import("std");
-const module = @import("object_chunks");
+const module = @import("host_benchmarks").object_chunks;
 const objects = module.objects;
 const FRAME_BYTES = module.MAX_TRANSFER_CHUNK;
 const ITERATIONS = 1_000;

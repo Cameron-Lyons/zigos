@@ -1,13 +1,11 @@
 const std = @import("std");
 const tpm2_crb_test = @import("../../kernel/platform/tpm2_crb_test.zig");
 
-const accelerator_driver_task = @import("../../native/drivers/accelerator_driver_task.zig");
 const bootstrap_driver_port = @import("../../native/drivers/bootstrap_driver_port.zig");
 const dataplane_handoff = @import("../../native/drivers/dataplane_handoff.zig");
 const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_runtime = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
-const first_target_telemetry = @import("../../kernel/drivers/first_target_telemetry.zig");
 const intel_i225_tx = @import("../../kernel/drivers/intel_i225_tx.zig");
 const interrupt_context = @import("../../kernel/interrupts/context.zig");
 const nvme_completion = @import("../../kernel/drivers/nvme_completion.zig");
@@ -16,26 +14,23 @@ const nvme_timing = @import("../../kernel/drivers/nvme_timing.zig");
 const network_driver_task = @import("../../native/drivers/network_driver_task.zig");
 const storage_driver_task = @import("../../native/drivers/storage_driver_task.zig");
 const xhci_driver_task = @import("../../native/drivers/xhci_driver_task.zig");
-const display_driver_task = @import("../../native/drivers/display_driver_task.zig");
 
 test "driver host tests import native driver modules" {
     // Reach the hardware module's pure tests without instantiating MMIO/VT-d
     // entry points in a hosted Debug executable.
     _ = @import("../../kernel/drivers/xhci_hw.zig").keyboardContinuityEpoch;
     _ = @import("../../kernel/boot/profiles/zigos_native.zig").INTERRUPT_DRIVEN_IDLE;
-    _ = @import("../../kernel/drivers/intel_i225_hw.zig").transmitCount;
+    _ = @import("../../kernel/drivers/intel_i225_hw.zig").MAX_PAYLOAD_BYTES;
     _ = @import("../../kernel/drivers/virtio_net_hw.zig").interruptCount;
-    _ = @import("../../kernel/interrupts/syscall64.zig").FRED_ONLY_TRAPS;
+    _ = @import("../../kernel/interrupts/syscall64.zig");
     std.testing.refAllDecls(tpm2_crb_test);
     std.testing.refAllDecls(@import("fred_gpr_capture_test.zig"));
     std.testing.refAllDecls(@import("xstate_roundtrip_test.zig"));
-    std.testing.refAllDecls(accelerator_driver_task);
     std.testing.refAllDecls(bootstrap_driver_port);
     std.testing.refAllDecls(dataplane_handoff);
     std.testing.refAllDecls(device_inventory);
     std.testing.refAllDecls(driver_runtime);
     std.testing.refAllDecls(driver_service);
-    std.testing.refAllDecls(first_target_telemetry);
     std.testing.refAllDecls(intel_i225_tx);
     std.testing.refAllDecls(@import("../../kernel/drivers/virtio_queue.zig"));
     std.testing.refAllDecls(@import("../../kernel/drivers/virtio_pci.zig"));
@@ -46,7 +41,6 @@ test "driver host tests import native driver modules" {
     std.testing.refAllDecls(network_driver_task);
     std.testing.refAllDecls(storage_driver_task);
     std.testing.refAllDecls(xhci_driver_task);
-    std.testing.refAllDecls(display_driver_task);
 }
 
 test "interrupt context tracks nested entry" {

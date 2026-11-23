@@ -2,31 +2,16 @@ const std = @import("std");
 const binary_cursor = @import("binary_cursor");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const driver_service = @import("../drivers/driver_service.zig");
-const hex = @import("../core/hex.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
-const policy_manifest = @import("../policy/manifest.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("../session/supervisor.zig");
-const units = @import("../core/units.zig");
 const embedded_file = @import("../task/embedded_file.zig");
-const elf_image_inspector = @import("../task/elf_image_inspector.zig");
-const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_registry = @import("../task/userspace_registry.zig");
 const copyText = native_util.copyText;
-
-pub const production_artifact_manifest_signer = signing.SignerIdentity{
-    .label = "zigos-artifact-manifest",
-    .seed = signing.seedFromByte(0xB7),
-};
-
-pub const build_artifact_manifest_signer = signing.SignerIdentity{
-    .label = "zigos-build-artifact-manifest",
-    .seed = signing.seedFromByte(0xC7),
-};
 
 pub const MAX_RECORDS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
@@ -34,12 +19,10 @@ pub const MEASUREMENT_KIND_COUNT: usize = 5;
 pub const MAX_MANIFEST_ENTRIES: usize = MAX_RECORDS;
 pub const MAX_BUILD_ARTIFACTS: usize = 32;
 pub const state_workspace_label = "system-measured-boot";
-pub const COMPACT_MEASUREMENT_METADATA = true;
-pub const IN_PLACE_GENERATED_BUILD_ARTIFACT_MANIFEST = true;
 pub const MEASUREMENT_RECORD_SIZE_CEILING_BYTES: usize = 82;
 pub const BUILD_ARTIFACT_ENTRY_SIZE_CEILING_BYTES: usize = 82;
 pub const ARTIFACT_MANIFEST_SIZE_CEILING_BYTES: usize = 1_328;
-pub const BUILD_ARTIFACT_MANIFEST_SIZE_CEILING_BYTES: usize = 2_760;
+pub const BUILD_ARTIFACT_MANIFEST_SIZE_CEILING_BYTES: usize = 2_640;
 pub const BOOT_RECORD_SIZE_CEILING_BYTES: usize = 1_360;
 pub const MEASUREMENT_SNAPSHOT_SIZE_CEILING_BYTES: usize = 1_360;
 pub const RECORDER_SIZE_CEILING_BYTES: usize = 1_328;
@@ -56,8 +39,6 @@ comptime {
 const state_entry_path = "state/latest";
 const state_magic = "ZMB1";
 const state_version: u16 = 1;
-const ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES: usize = units.kibibytes(2);
-const BUILD_ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES: usize = units.kibibytes(4);
 const BOOT_SUMMARY_PAYLOAD_BUFFER_BYTES: usize = 128;
 const BUILD_ARTIFACT_LABEL_BUFFER_BYTES: usize = 32;
 const CursorWriter = binary_cursor.Writer(Error, error.StateTooLarge);
@@ -151,25 +132,6 @@ pub const ArtifactManifest = struct {
         self.entry_count += 1;
     }
 
-    pub fn addCriticalServiceImage(
-        self: *ArtifactManifest,
-        service: *const supervisor_mod.ServiceRecord,
-        image: *const userspace_loader.ImageRecord,
-    ) Error!void {
-        var payload: CriticalServiceMeasurementPayload = undefined;
-        const bytes = criticalServiceMeasurementPayload(&payload, service, image);
-        return self.add(.critical_service, image.bundleIdSlice(), bytes);
-    }
-
-    pub fn addDriverSet(
-        self: *ArtifactManifest,
-        label: []const u8,
-        directory: *const driver_service.Directory,
-    ) Error!void {
-        const digest = driverSetDigest(directory);
-        return self.add(.driver_set, label, &digest);
-    }
-
     pub fn countKind(self: *const ArtifactManifest, kind: MeasurementKind) usize {
         var count: usize = 0;
         for (self.entries[0..self.entry_count]) |entry| {
@@ -185,29 +147,19 @@ pub const ArtifactManifest = struct {
     }
 };
 
-pub const SignedArtifactManifest = struct {
-    manifest: ArtifactManifest,
-    signature: policy_manifest.Signature,
-
-    pub fn verify(self: *const SignedArtifactManifest, expected_signer: signing.SignerIdentity) bool {
-        var payload_buffer: [ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
-        const payload = encodeArtifactManifest(self.manifest, &payload_buffer) catch return false;
-        return signing.verifyTrusted(self.signature, payload, expected_signer) and requiredArtifactShape(&self.manifest);
-    }
-};
-
+/// Build-time digests of the boot inputs. The generated manifest is compiled
+/// into the measured, firmware-authenticated kernel image, so its integrity is
+/// the kernel image's; boot compares the live artifacts against these digests.
 pub const BuildArtifactManifest = struct {
     generation: u64,
     entry_count: u8,
     entries: [MAX_BUILD_ARTIFACTS]BuildArtifactEntry,
-    signature: policy_manifest.Signature,
 
     pub fn init(generation: u64) BuildArtifactManifest {
         return .{
             .generation = generation,
             .entry_count = 0,
             .entries = @as([MAX_BUILD_ARTIFACTS]BuildArtifactEntry, @splat(zeroBuildArtifactEntry())),
-            .signature = .{},
         };
     }
 
@@ -215,7 +167,6 @@ pub const BuildArtifactManifest = struct {
         self.generation = generation;
         self.entry_count = 0;
         for (&self.entries) |*entry| entry.* = zeroBuildArtifactEntry();
-        self.signature = .{};
     }
 
     pub fn addDigest(self: *BuildArtifactManifest, kind: BuildArtifactKind, label: []const u8, digest: crypto_hash.Digest) Error!void {
@@ -239,11 +190,10 @@ pub const BuildArtifactManifest = struct {
         return null;
     }
 
-    pub fn verify(self: *const BuildArtifactManifest) bool {
-        var payload_buffer: [BUILD_ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
-        const payload = encodeBuildArtifactManifest(self.generation, self.entries[0..self.entry_count], &payload_buffer) catch return false;
-        return signing.verifyTrusted(self.signature, payload, build_artifact_manifest_signer) and
-            requiredBuildArtifactShape(self);
+    pub fn hasRequiredShape(self: *const BuildArtifactManifest) bool {
+        return self.countKind(.bootloader_source) == 1 and
+            self.countKind(.boot_descriptor) == 1 and
+            self.countKind(.userspace_image) >= userspace_registry.production_build_image_specs.len;
     }
 
     comptime {
@@ -299,8 +249,8 @@ pub const BootRecord = struct {
     }
 };
 
-// Snapshot consistency and fixture-manifest signatures establish integrity
-// only. Origin authentication must be supplied separately by the boot path.
+// Snapshot consistency establishes integrity only. Origin authentication must
+// be supplied separately by the boot path.
 pub const MeasurementSnapshot = struct {
     generation: u64,
     record_count: u8,
@@ -383,7 +333,6 @@ pub const Error = error{
     ManifestTooLarge,
     InvalidBuildArtifactKind,
     ManifestMismatch,
-    UntrustedArtifactManifest,
     UntrustedRootProvenance,
 };
 
@@ -457,6 +406,8 @@ pub const Recorder = struct {
     }
 };
 
+/// Hashes one artifact measurement once and records the same digest in the
+/// boot record and in the expected artifact manifest.
 pub fn addMeasuredArtifact(
     recorder: *Recorder,
     artifact_manifest: *ArtifactManifest,
@@ -464,45 +415,30 @@ pub fn addMeasuredArtifact(
     label: []const u8,
     payload: []const u8,
 ) Error!void {
-    try recorder.add(kind, label, payload);
-    try artifact_manifest.add(kind, label, payload);
+    const digest = hashMeasurement(kind, label, payload);
+    try recorder.addDigest(kind, label, digest);
+    try artifact_manifest.addDigest(kind, label, digest);
 }
 
-pub fn signArtifactManifest(
-    artifact_manifest: ArtifactManifest,
-    identity: signing.SignerIdentity,
-) anyerror!SignedArtifactManifest {
-    var payload_buffer: [ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
-    const payload = try encodeArtifactManifest(artifact_manifest, &payload_buffer);
-    return .{
-        .manifest = artifact_manifest,
-        .signature = try signing.signWithDefaultRegistry(.ed25519, identity, payload),
-    };
+pub fn addMeasuredCriticalServiceImage(
+    recorder: *Recorder,
+    artifact_manifest: *ArtifactManifest,
+    service: *const supervisor_mod.ServiceRecord,
+    image: *const userspace_loader.ImageRecord,
+) Error!void {
+    var payload: CriticalServiceMeasurementPayload = undefined;
+    const bytes = criticalServiceMeasurementPayload(&payload, service, image);
+    return addMeasuredArtifact(recorder, artifact_manifest, .critical_service, image.bundleIdSlice(), bytes);
 }
 
-pub fn signArtifactManifestWithProvider(
-    artifact_manifest: ArtifactManifest,
-    identity: signing.SignerIdentity,
-    provider: signing.SignatureProvider,
-) anyerror!SignedArtifactManifest {
-    if (!provider.releaseEligible()) return error.ReleaseProviderNotEligible;
-    var payload_buffer: [ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
-    const payload = try encodeArtifactManifest(artifact_manifest, &payload_buffer);
-    return .{
-        .manifest = artifact_manifest,
-        .signature = try provider.sign(identity, payload),
-    };
-}
-
-pub fn verifySignedArtifactManifest(
-    signed_manifest: *const SignedArtifactManifest,
-    expected_signer: signing.SignerIdentity,
-) bool {
-    return signed_manifest.verify(expected_signer);
-}
-
-pub fn verifyBuildArtifactManifest(manifest: *const BuildArtifactManifest) bool {
-    return manifest.verify();
+pub fn addMeasuredDriverSet(
+    recorder: *Recorder,
+    artifact_manifest: *ArtifactManifest,
+    label: []const u8,
+    directory: *const driver_service.Directory,
+) Error!void {
+    const digest = driverSetDigest(directory);
+    return addMeasuredArtifact(recorder, artifact_manifest, .driver_set, label, &digest);
 }
 
 pub fn buildArtifactDigestMatches(
@@ -513,69 +449,6 @@ pub fn buildArtifactDigestMatches(
 ) bool {
     const entry = manifest.find(kind, label) orelse return false;
     return std.mem.eql(u8, &entry.digest, digest);
-}
-
-pub fn generatedUserspaceArchiveMatchesManifest(manifest: *const BuildArtifactManifest) bool {
-    if (!@import("builtin").is_test) return false;
-    const generated_archive = @import("userspace_archive");
-
-    if (manifest.countKind(.userspace_image) != generated_archive.artifacts.len) return false;
-    for (generated_archive.artifacts, 0..) |artifact, artifact_index| {
-        const spec = userspace_boot_registry.specAt(artifact_index) orelse return false;
-        if (!generatedArtifactMatchesManifest(manifest, spec, artifact)) return false;
-    }
-
-    return true;
-}
-
-fn generatedArtifactMatchesManifest(manifest: *const BuildArtifactManifest, spec: anytype, artifact: anytype) bool {
-    userspace_boot_registry.validateGeneratedArtifact(artifact) catch return false;
-    const file = embedded_file.File.fromChunkedArtifact(artifact);
-    if (!file.isPresent()) return false;
-    if (artifact.file_size_bytes != file.byte_len) return false;
-
-    const digest = file.sha256() orelse return false;
-    if (!std.mem.eql(u8, &digest, &artifact.file_sha256)) return false;
-    if (!buildArtifactDigestMatches(manifest, .userspace_image, spec.bundleId(), &digest)) return false;
-
-    const inspection = elf_image_inspector.inspectFile(file) catch return false;
-    if (artifact.entry_point != inspection.entry_point) return false;
-    if (artifact.bootstrap_mailbox_address != inspection.bootstrap_mailbox_address) return false;
-    if (artifact.segment_count != inspection.executable_image.segment_count) return false;
-    return true;
-}
-
-pub fn generatedProductionArtifactManifestMatchesUserspaceArchive() !void {
-    if (!@import("builtin").is_test) return;
-    const generated_manifest = @import("production_artifact_manifest");
-    const generated_archive = @import("userspace_archive");
-
-    var manifest: BuildArtifactManifest = undefined;
-    @memset(std.mem.asBytes(&manifest), 0xa5);
-    try buildArtifactManifestFromGeneratedInto(&manifest, generated_manifest);
-    try std.testing.expect(verifyBuildArtifactManifest(&manifest));
-    try std.testing.expectEqual(generated_archive.artifacts.len, manifest.countKind(.userspace_image));
-    try std.testing.expect(generatedUserspaceArchiveMatchesManifest(&manifest));
-
-    var stale_digest = manifest;
-    const stale_index = firstBuildArtifactIndex(&stale_digest, .userspace_image) orelse return error.ManifestMismatch;
-    stale_digest.entries[stale_index].digest[0] ^= 0x33;
-    try signBuildArtifactManifestForTest(&stale_digest);
-    try std.testing.expect(verifyBuildArtifactManifest(&stale_digest));
-    try std.testing.expect(!generatedUserspaceArchiveMatchesManifest(&stale_digest));
-
-    var missing_entry = manifest;
-    try removeBuildArtifactEntry(&missing_entry, stale_index);
-    try signBuildArtifactManifestForTest(&missing_entry);
-    try std.testing.expect(!generatedUserspaceArchiveMatchesManifest(&missing_entry));
-
-    var stale_metadata = generated_archive.artifacts[0];
-    stale_metadata.entry_point +%= 0x1000;
-    const first_spec = userspace_boot_registry.specAt(0) orelse return error.ManifestMismatch;
-    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, first_spec, stale_metadata));
-
-    const wrong_spec = userspace_boot_registry.specAt(1) orelse return error.ManifestMismatch;
-    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, wrong_spec, generated_archive.artifacts[0]));
 }
 
 pub fn buildArtifactEntry(kind: BuildArtifactKind, label: []const u8, digest: crypto_hash.Digest) Error!BuildArtifactEntry {
@@ -592,37 +465,6 @@ pub fn buildArtifactManifestFromGeneratedInto(manifest: *BuildArtifactManifest, 
         const kind = std.enums.fromInt(BuildArtifactKind, entry.kind) orelse return error.InvalidBuildArtifactKind;
         try manifest.addDigest(kind, entry.label, entry.digest);
     }
-    var signature = policy_manifest.Signature{
-        .format = policy_manifest.parseSignatureFormat(generated.signature_format),
-        .signer = generated.signature_signer,
-        .public_key_len = generated.signature_public_key.len,
-        .value_len = generated.signature_value.len,
-    };
-    @memcpy(signature.public_key[0..generated.signature_public_key.len], generated.signature_public_key[0..]);
-    @memcpy(signature.value[0..generated.signature_value.len], generated.signature_value[0..]);
-    manifest.signature = signature;
-}
-
-fn signBuildArtifactManifestForTest(manifest: *BuildArtifactManifest) !void {
-    var payload_buffer: [BUILD_ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
-    const payload = try encodeBuildArtifactManifest(manifest.generation, manifest.entries[0..manifest.entry_count], &payload_buffer);
-    manifest.signature = try signing.signWithDefaultRegistry(.ed25519, build_artifact_manifest_signer, payload);
-}
-
-pub fn encodeBuildArtifactManifest(generation: u64, entries: []const BuildArtifactEntry, buffer: []u8) Error![]const u8 {
-    var offset: usize = 0;
-    offset = appendManifestFormat(buffer, offset, "ZBAM1|g={d}|n={d}", .{
-        generation,
-        entries.len,
-    }) catch return error.ManifestTooLarge;
-    for (entries) |entry| {
-        offset = appendManifestFormat(buffer, offset, "|{s}:{s}:", .{
-            @tagName(entry.kind),
-            entry.labelSlice(),
-        }) catch return error.ManifestTooLarge;
-        offset = appendHexDigest(buffer, offset, &entry.digest) catch return error.ManifestTooLarge;
-    }
-    return buffer[0..offset];
 }
 
 pub fn bootRecordMatchesManifest(boot: *const BootRecord, artifact_manifest: *const ArtifactManifest) bool {
@@ -663,13 +505,9 @@ pub fn verifyBootRecordAgainstManifest(
 
 pub fn verifyMeasurementSnapshot(
     handoff: *const MeasurementSnapshot,
-    signed_manifest: *const SignedArtifactManifest,
-    expected_signer: signing.SignerIdentity,
+    artifact_manifest: *const ArtifactManifest,
     provenance: RootProvenance,
 ) Error!BootRecord {
-    if (!verifySignedArtifactManifest(signed_manifest, expected_signer)) {
-        return error.UntrustedArtifactManifest;
-    }
     if (handoff.record_count > MAX_RECORDS) return error.ManifestMismatch;
     var boot = BootRecord{
         .generation = handoff.generation,
@@ -677,7 +515,7 @@ pub fn verifyMeasurementSnapshot(
         .records = handoff.records,
         .root_digest = handoff.root_digest,
     };
-    try verifyBootRecordAgainstManifest(&boot, &signed_manifest.manifest, provenance);
+    try verifyBootRecordAgainstManifest(&boot, artifact_manifest, provenance);
     return boot;
 }
 
@@ -793,24 +631,7 @@ fn hashMeasurement(kind: MeasurementKind, label: []const u8, payload: []const u8
     return crypto_hash.finalize(&hasher);
 }
 
-fn firstBuildArtifactIndex(manifest: *const BuildArtifactManifest, kind: BuildArtifactKind) ?usize {
-    for (manifest.entries[0..manifest.entry_count], 0..) |entry, index| {
-        if (entry.kind == kind) return index;
-    }
-    return null;
-}
-
-fn removeBuildArtifactEntry(manifest: *BuildArtifactManifest, index: usize) Error!void {
-    if (index >= manifest.entry_count) return error.ManifestMismatch;
-    var cursor = index;
-    while (cursor + 1 < manifest.entry_count) : (cursor += 1) {
-        manifest.entries[cursor] = manifest.entries[cursor + 1];
-    }
-    manifest.entry_count -= 1;
-    manifest.entries[manifest.entry_count] = zeroBuildArtifactEntry();
-}
-
-const CRITICAL_SERVICE_MEASUREMENT_PAYLOAD_BYTES: usize = 64;
+const CRITICAL_SERVICE_MEASUREMENT_PAYLOAD_BYTES: usize = 62;
 const CriticalServiceMeasurementPayload = [CRITICAL_SERVICE_MEASUREMENT_PAYLOAD_BYTES]u8;
 
 fn criticalServiceMeasurementPayload(
@@ -824,17 +645,15 @@ fn criticalServiceMeasurementPayload(
     std.mem.writeInt(u64, payload[48..56], @intCast(image.byte_len), .little);
     std.mem.writeInt(u16, payload[56..58], @backingInt(service.class), .little);
     std.mem.writeInt(u32, payload[58..62], image.contract_flags, .little);
-    std.mem.writeInt(u16, payload[62..64], image.component_abi_version, .little);
     return payload[0..];
 }
 
 fn driverSetDigest(directory: *const driver_service.Directory) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     var driver_count: usize = 0;
-    for (directory.slots.slots) |slot| {
-        if (!slot.in_use) continue;
+    for (&directory.slots) |*slot| {
+        const driver = if (slot.*) |*current| current else continue;
         driver_count += 1;
-        const driver = &slot.driver;
         crypto_hash.updateInt(&hasher, "service-id", driver.service_id);
         crypto_hash.updateInt(&hasher, "owner-task-id", driver.owner_task_id);
         crypto_hash.updateInt(&hasher, "device-id", driver.device_id);
@@ -843,7 +662,6 @@ fn driverSetDigest(directory: *const driver_service.Directory) crypto_hash.Diges
         crypto_hash.updateInt(&hasher, "restart-generation", driver.restart_generation);
         crypto_hash.updateEnum(&hasher, "bootstrap-transport", driver.bootstrap_transport);
         crypto_hash.updateInt(&hasher, "dma-domain-id", driver.dma_domain_id);
-        crypto_hash.updateEnum(&hasher, "dma-protection", driver.dma_protection);
         crypto_hash.updateBytes(&hasher, "signer-fingerprint", &driver.signer_fingerprint);
         const dma_range_count = driver.dmaRangeCount();
         crypto_hash.updateInt(&hasher, "dma-range-count", dma_range_count);
@@ -895,38 +713,6 @@ fn requiredArtifactShape(artifact_manifest: *const ArtifactManifest) bool {
         artifact_manifest.countKind(.critical_service) >= 4 and
         artifact_manifest.countKind(.policy) == 1 and
         artifact_manifest.countKind(.driver_set) == 1;
-}
-
-fn requiredBuildArtifactShape(manifest: *const BuildArtifactManifest) bool {
-    return manifest.countKind(.bootloader_source) == 1 and
-        manifest.countKind(.boot_descriptor) == 1 and
-        manifest.countKind(.userspace_image) >= userspace_registry.production_build_image_specs.len;
-}
-
-fn encodeArtifactManifest(artifact_manifest: ArtifactManifest, buffer: []u8) Error![]const u8 {
-    var offset: usize = 0;
-    offset = appendManifestFormat(buffer, offset, "ZAM1|g={d}|n={d}", .{
-        artifact_manifest.generation,
-        artifact_manifest.entry_count,
-    }) catch return error.ManifestTooLarge;
-    for (artifact_manifest.entries[0..artifact_manifest.entry_count]) |entry| {
-        offset = appendManifestFormat(buffer, offset, "|{s}:{s}:", .{
-            @tagName(entry.kind),
-            entry.labelSlice(),
-        }) catch return error.ManifestTooLarge;
-        offset = appendHexDigest(buffer, offset, &entry.digest) catch return error.ManifestTooLarge;
-    }
-    return buffer[0..offset];
-}
-
-fn appendManifestFormat(buffer: []u8, offset: usize, comptime fmt: []const u8, args: anytype) error{NoSpaceLeft}!usize {
-    const text = std.fmt.bufPrint(buffer[offset..], fmt, args) catch return error.NoSpaceLeft;
-    return offset + text.len;
-}
-
-fn appendHexDigest(buffer: []u8, offset: usize, digest: *const crypto_hash.Digest) error{NoSpaceLeft}!usize {
-    const encoded = hex.encodeLower(digest.*[0..], buffer[offset..]) catch return error.NoSpaceLeft;
-    return offset + encoded.len;
 }
 
 fn encodeSummary(summary: BootSummary, buffer: []u8) Error![]const u8 {
@@ -1062,7 +848,6 @@ test "critical service measurements bind launched userspace image artifacts" {
 
 test "driver set measurements bind signed driver records and restart generation" {
     const capability = @import("../kernel_api/capability.zig");
-    const manifest = @import("../policy/manifest.zig");
 
     var capabilities = capability.CapabilityTable.init();
     var directory = driver_service.Directory.init();
@@ -1082,16 +867,7 @@ test "driver set measurements bind signed driver records and restart generation"
             .renewable = true,
         },
     });
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "svc.net.driver",
-        .display_name = "Network Driver",
-        .publisher = "zigos.dev",
-        .signature = .{
-            .format = .ed25519,
-            .signer = "zigos-driver-key",
-        },
-    };
-    const driver = try directory.register(.{
+    const driver = try directory.registerSigned(.{
         .service_id = 44,
         .owner_task_id = 7,
         .device_id = 100,
@@ -1100,7 +876,7 @@ test "driver set measurements bind signed driver records and restart generation"
         .capability_table = &capabilities,
         .requester = authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-driver-key",
     });
 
     var first_recorder = Recorder.init();
@@ -1173,7 +949,7 @@ test "measured boot journal persists and compares latest boot summary across res
     try std.testing.expect(!second_restart.latestMatches(&first_boot));
 }
 
-test "signed artifact manifests bind required boot artifact classes before activation" {
+test "artifact manifests bind required boot artifact classes before activation" {
     var artifact_manifest = ArtifactManifest.init(7);
     try artifact_manifest.add(.kernel, "kernel-zigos-native", "kernel-bytes-v1");
     try artifact_manifest.add(.base_image, "stable-a", "base-image-v1");
@@ -1182,30 +958,9 @@ test "signed artifact manifests bind required boot artifact classes before activ
     try artifact_manifest.add(.critical_service, "zigos.system.compositor", "compositor-service-elf");
     try artifact_manifest.add(.critical_service, "zigos.system.network", "network-service-elf");
     try artifact_manifest.add(.policy, "production-policy-set", "policy-v1");
+    try std.testing.expect(!requiredArtifactShape(&artifact_manifest));
     try artifact_manifest.add(.driver_set, "production-driver-set", "drivers-v1");
-
-    const signed_manifest = try signArtifactManifest(artifact_manifest, production_artifact_manifest_signer);
-    try std.testing.expect(verifySignedArtifactManifest(
-        &signed_manifest,
-        production_artifact_manifest_signer,
-    ));
-
-    var tampered = signed_manifest;
-    tampered.manifest.entries[0].digest[0] ^= 0xFF;
-    try std.testing.expect(!verifySignedArtifactManifest(
-        &tampered,
-        production_artifact_manifest_signer,
-    ));
-
-    const wrong_signer = signing.SignerIdentity{
-        .label = "untrusted-artifact-manifest",
-        .seed = signing.seedFromByte(0xB8),
-    };
-    const wrong_authority = try signArtifactManifest(artifact_manifest, wrong_signer);
-    try std.testing.expect(!verifySignedArtifactManifest(
-        &wrong_authority,
-        production_artifact_manifest_signer,
-    ));
+    try std.testing.expect(requiredArtifactShape(&artifact_manifest));
 
     var boot = BootRecord{
         .generation = artifact_manifest.generation,
@@ -1219,72 +974,14 @@ test "signed artifact manifests bind required boot artifact classes before activ
     try std.testing.expect(!bootRecordMatchesManifest(&boot, &artifact_manifest));
 }
 
-test "artifact manifests can be signed through release provider boundaries" {
-    const SigningBackend = struct {
-        seed: signing.Seed,
-
-        fn sign(context: *anyopaque, key: signing.ReleaseRootKeyHandle, message: []const u8) ![signing.SIGNATURE_BYTES]u8 {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            const key_pair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(self.seed);
-            try std.testing.expectEqualSlices(u8, &key.public_key, &key_pair.public_key.toBytes());
-            return (try key_pair.sign(message, null)).toBytes();
-        }
-    };
-
-    var artifact_manifest = ArtifactManifest.init(8);
-    try artifact_manifest.add(.kernel, "kernel-zigos-native", "kernel-bytes-v2");
-    try artifact_manifest.add(.base_image, "stable-a", "base-image-v2");
-    try artifact_manifest.add(.critical_service, "zigos.system.policy", "policy-service-elf");
-    try artifact_manifest.add(.critical_service, "zigos.system.storage", "storage-service-elf");
-    try artifact_manifest.add(.critical_service, "zigos.system.compositor", "compositor-service-elf");
-    try artifact_manifest.add(.critical_service, "zigos.system.network", "network-service-elf");
-    try artifact_manifest.add(.policy, "production-policy-set", "policy-v2");
-    try artifact_manifest.add(.driver_set, "production-driver-set", "drivers-v2");
-
-    const root_identity = production_artifact_manifest_signer;
-    var backend = SigningBackend{ .seed = root_identity.seed };
-    var provider_impl = try signing.ExternalReleaseProvider.init(
-        .{
-            .name = "release-kms-artifact-manifest",
-            .profile = .ed25519,
-            .role = .production,
-            .provider_boundary = .cloud_kms,
-            .custody = .cloud_kms,
-            .hardware_backed = true,
-            .rotation_supported = true,
-            .revocation_supported = true,
-            .customer_verifiable = true,
-            .verifier_protocol = .dsse_in_toto_slsa,
-        },
-        .{
-            .key_id = "kms://zigos/release/artifact-manifest/1",
-            .label = root_identity.label,
-            .public_key = try signing.publicKey(root_identity),
-            .generation = 1,
-            .provider_boundary = .cloud_kms,
-            .custody = .cloud_kms,
-        },
-        &backend,
-        SigningBackend.sign,
-    );
-    const provider = provider_impl.provider();
-    const signed_manifest = try signArtifactManifestWithProvider(artifact_manifest, root_identity, provider);
-    try std.testing.expect(verifySignedArtifactManifest(&signed_manifest, root_identity));
-
-    var software_provider_impl = signing.SoftwareEd25519Provider{};
-    try std.testing.expectError(
-        error.ReleaseProviderNotEligible,
-        signArtifactManifestWithProvider(artifact_manifest, root_identity, software_provider_impl.provider()),
-    );
-}
-
-test "build-generated artifact manifests reject tampered bootloader source measurement and authority" {
+test "build-generated artifact manifests reject tampered bootloader source measurement" {
     var manifest = BuildArtifactManifest.init(1);
     const bootloader_source_digest = crypto_hash.digestFromByte(0x10);
     const bootloader_measurement_digest = crypto_hash.digestFromByte(0x11);
     const unexpected_bootloader_digest = crypto_hash.digestFromByte(0x12);
 
     try manifest.addDigest(.bootloader_source, "src/boot/efi_stub.zig", bootloader_source_digest);
+    try std.testing.expect(!manifest.hasRequiredShape());
     try manifest.addDigest(.boot_descriptor, "efi:zigos_native", bootloader_measurement_digest);
     inline for (0..10) |index| {
         const digest = crypto_hash.digestFromByte(@intCast(0x20 + index));
@@ -1293,11 +990,7 @@ test "build-generated artifact manifests reject tampered bootloader source measu
         try manifest.addDigest(.userspace_image, label, digest);
     }
 
-    var payload_buffer: [BUILD_ARTIFACT_MANIFEST_PAYLOAD_BUFFER_BYTES]u8 = undefined;
-    const payload = try encodeBuildArtifactManifest(manifest.generation, manifest.entries[0..manifest.entry_count], &payload_buffer);
-    manifest.signature = try signing.signWithDefaultRegistry(.ed25519, build_artifact_manifest_signer, payload);
-
-    try std.testing.expect(verifyBuildArtifactManifest(&manifest));
+    try std.testing.expect(manifest.hasRequiredShape());
     try std.testing.expect(manifest.find(.boot_descriptor, "efi:zigos_native") != null);
     try std.testing.expect(buildArtifactDigestMatches(
         &manifest,
@@ -1323,27 +1016,21 @@ test "build-generated artifact manifests reject tampered bootloader source measu
         "efi:zigos_native",
         &unexpected_bootloader_digest,
     ));
+    try std.testing.expect(!buildArtifactDigestMatches(
+        &manifest,
+        .userspace_image,
+        "src/boot/efi_stub.zig",
+        &bootloader_source_digest,
+    ));
 
-    for (0..manifest.entry_count) |entry_index| {
+    for (manifest.entries[0..manifest.entry_count], 0..) |entry, entry_index| {
         var tampered = manifest;
         tampered.entries[entry_index].digest[0] ^= 0xFF;
-        try std.testing.expect(!verifyBuildArtifactManifest(&tampered));
+        try std.testing.expect(!buildArtifactDigestMatches(&tampered, entry.kind, entry.labelSlice(), &entry.digest));
     }
-
-    var wrong_authority = manifest;
-    const wrong_signer = signing.SignerIdentity{
-        .label = "untrusted-build-artifact-manifest",
-        .seed = signing.seedFromByte(0xC8),
-    };
-    wrong_authority.signature = try signing.signWithDefaultRegistry(.ed25519, wrong_signer, payload);
-    try std.testing.expect(!verifyBuildArtifactManifest(&wrong_authority));
 }
 
-test "build-generated production artifact manifest matches embedded userspace archive" {
-    try generatedProductionArtifactManifestMatchesUserspaceArchive();
-}
-
-test "measurement snapshot rejects unsigned manifests and tampered startup artifacts" {
+test "measurement snapshot rejects tampered manifests and startup artifacts" {
     var artifact_manifest = ArtifactManifest.init(33);
     var recorder = Recorder.init();
     recorder.begin(33);
@@ -1357,35 +1044,26 @@ test "measurement snapshot rejects unsigned manifests and tampered startup artif
     try addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "production-policy-set", "strict");
     try addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "production-driver-set", "drivers=v7");
 
-    const signed_manifest = try signArtifactManifest(artifact_manifest, production_artifact_manifest_signer);
     const boot = recorder.finalize();
     const handoff = try MeasurementSnapshot.fromBootRecord(&boot);
-    const verified = try verifyMeasurementSnapshot(
-        &handoff,
-        &signed_manifest,
-        production_artifact_manifest_signer,
-        .firmware_authenticated,
-    );
-    const unverified = try verifyMeasurementSnapshot(&handoff, &signed_manifest, production_artifact_manifest_signer, .unverified_boot);
+    const verified = try verifyMeasurementSnapshot(&handoff, &artifact_manifest, .firmware_authenticated);
+    const unverified = try verifyMeasurementSnapshot(&handoff, &artifact_manifest, .unverified_boot);
     try std.testing.expect(unverified.hasVerifiedRoot());
     try std.testing.expect(!unverified.isRemoteAttestable());
     try std.testing.expectEqual(RootProvenance.unverified_boot, unverified.root_provenance);
     try std.testing.expect(verified.hasVerifiedRoot());
     try std.testing.expect(verified.isRemoteAttestable());
     try std.testing.expectEqual(RootProvenance.firmware_authenticated, verified.root_provenance);
-
-    var unsigned_manifest = signed_manifest;
-    unsigned_manifest.manifest.entries[0].digest[0] ^= 0x40;
     try std.testing.expectError(
-        error.UntrustedArtifactManifest,
-        verifyMeasurementSnapshot(&handoff, &unsigned_manifest, production_artifact_manifest_signer, .firmware_authenticated),
+        error.UntrustedRootProvenance,
+        verifyMeasurementSnapshot(&handoff, &artifact_manifest, .synthetic_host),
     );
 
     var wrong_root = handoff;
     wrong_root.root_digest[31] ^= 0x20;
     try std.testing.expectError(
         error.ManifestMismatch,
-        verifyMeasurementSnapshot(&wrong_root, &signed_manifest, production_artifact_manifest_signer, .firmware_authenticated),
+        verifyMeasurementSnapshot(&wrong_root, &artifact_manifest, .firmware_authenticated),
     );
 
     for (0..artifact_manifest.entry_count) |entry_index| {
@@ -1393,15 +1071,14 @@ test "measurement snapshot rejects unsigned manifests and tampered startup artif
         tampered_handoff.records[entry_index].digest[0] ^= 0x11;
         try std.testing.expectError(
             error.ManifestMismatch,
-            verifyMeasurementSnapshot(&tampered_handoff, &signed_manifest, production_artifact_manifest_signer, .firmware_authenticated),
+            verifyMeasurementSnapshot(&tampered_handoff, &artifact_manifest, .firmware_authenticated),
         );
 
         var tampered_manifest = artifact_manifest;
         tampered_manifest.entries[entry_index].digest[0] ^= 0x22;
-        const trusted_tampered_manifest = try signArtifactManifest(tampered_manifest, production_artifact_manifest_signer);
         try std.testing.expectError(
             error.ManifestMismatch,
-            verifyMeasurementSnapshot(&handoff, &trusted_tampered_manifest, production_artifact_manifest_signer, .firmware_authenticated),
+            verifyMeasurementSnapshot(&handoff, &tampered_manifest, .firmware_authenticated),
         );
     }
 }

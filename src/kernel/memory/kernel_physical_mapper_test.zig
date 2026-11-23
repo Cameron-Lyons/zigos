@@ -102,7 +102,11 @@ const Model = struct {
                 continue;
             }).value;
             if (self.physical(self.expect_virtual + offset) != self.expect_physical + offset or
-                leaf_value & (pt.CACHE_DISABLE | pt.WRITE_THROUGH) != (if (self.expect_kind == .device) cache.UNCACHEABLE_SELECTOR else 0)) self.valid_order = false;
+                leaf_value & (pt.CACHE_DISABLE | pt.WRITE_THROUGH | pt.LARGE_PAGE) != cache.selector(switch (self.expect_kind) {
+                    .device => .uncacheable,
+                    .write_combining => .write_combining,
+                    .firmware => .write_back,
+                })) self.valid_order = false;
         }
         self.ends += 1;
         self.held = false;
@@ -214,4 +218,21 @@ test "hostile geometry direct leaf ownership and PAT selectors fail before reser
     }
     try std.testing.expectEqual(@as(u32, 2), model.used);
     try std.testing.expectEqual(@as(u32, 0), model.begins);
+}
+
+test "write-combining transaction retires WB aliases and publishes only the PA4 selector" {
+    var model = Model.init();
+    model.expect_kind = .write_combining;
+    try mapper.map(&model, VA, GIB - PAGE, 2 * PAGE, .write_combining, true);
+    try std.testing.expect(model.valid_order);
+    try std.testing.expectEqual(@as(u32, 1), model.cache_flushes);
+    try std.testing.expect(model.leaf(layout.physical_memory.base + GIB - PAGE) == null);
+    const leaf = model.leaf(VA).?;
+    try std.testing.expectEqual(@as(u6, 12), leaf.shift);
+    try std.testing.expectEqual(cache.WRITE_COMBINING_SELECTOR, leaf.value & (pt.CACHE_DISABLE | pt.WRITE_THROUGH | pt.LARGE_PAGE));
+    // A destination keeps one memory type: device and WC never replace each other.
+    try std.testing.expectError(error.MappingCollision, mapper.map(&model, VA, GIB - PAGE, 2 * PAGE, .device, true));
+    model.expect_kind = .write_combining;
+    try mapper.map(&model, VA, GIB - PAGE, 2 * PAGE, .write_combining, true);
+    try std.testing.expectEqual(@as(u32, 1), model.cache_flushes);
 }

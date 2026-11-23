@@ -15,81 +15,33 @@ pub const NativeSmokeMode = enum {
     tampered_policy,
     tampered_driver_set,
     rollback_slot_failure,
-
-    fn arg(self: NativeSmokeMode) ?[]const u8 {
-        return switch (self) {
-            .full => null,
-            else => @tagName(self),
-        };
-    }
-
-    fn fileStem(self: NativeSmokeMode) []const u8 {
-        return switch (self) {
-            .production => "production",
-            .full => "full",
-            .driver_restart => "driver-restart",
-            .tampered_artifact_manifest => "tampered-artifact-manifest",
-            .tampered_bootloader_measurement => "tampered-bootloader-measurement",
-            .tampered_kernel => "tampered-kernel",
-            .tampered_userspace_image => "tampered-userspace-image",
-            .tampered_policy => "tampered-policy",
-            .tampered_driver_set => "tampered-driver-set",
-            .rollback_slot_failure => "rollback-slot-failure",
-        };
-    }
 };
 
-pub const NativeStoreImage = struct {
-    command: *std.Build.Step.Run,
-    step: *std.Build.Step,
-};
-
-pub const NativeRunSteps = struct {
-    command: *std.Build.Step.Run,
-    run: *std.Build.Step,
-    run_zigos_native: *std.Build.Step,
-};
-
-pub fn addNativeStoreImageStep(b: *std.Build) NativeStoreImage {
+pub fn addNativeStoreImageStep(b: *std.Build) *std.Build.Step.Run {
     const command = tools_build.addRun(b, "build-native-store");
     command.addArgs(&.{
         shared.native_store_image_path,
         shared.native_store_size_mib,
         "preserve",
     });
-
-    const step = b.step("native-store-image", "Build or preserve the dedicated native storage image");
-    step.dependOn(&command.step);
-    return .{
-        .command = command,
-        .step = step,
-    };
+    b.step("native-store-image", "Build or preserve the dedicated native storage image").dependOn(&command.step);
+    return command;
 }
 
-pub fn addNativeRunSteps(
+pub fn addNativeRunCommand(
     b: *std.Build,
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
-    native_store: NativeStoreImage,
-) NativeRunSteps {
-    const command = addKernelBootCommand(b, kernel, "qemu-harness", &.{"native-store"}, &.{
+    native_store: *std.Build.Step.Run,
+) *std.Build.Step.Run {
+    const command = addKernelBootCommand(b, kernel, kernel.qemu_boot_iso_path, "qemu-harness", &.{"native-store"}, &.{
         shared.native_store_image_path,
         "stdio",
     });
-    command.step.dependOn(&native_store.command.step);
+    command.step.dependOn(&native_store.step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
-
-    const run_step = b.step("run", "Run the native-only Zigos kernel in QEMU");
-    run_step.dependOn(&command.step);
-
-    const run_zigos_native_step = b.step("run-zigos-native", "Run the Zigos native bootstrap kernel in QEMU");
-    run_zigos_native_step.dependOn(&command.step);
-
-    return .{
-        .command = command,
-        .run = run_step,
-        .run_zigos_native = run_zigos_native_step,
-    };
+    b.step("run", "Run the native-only Zigos kernel in QEMU").dependOn(&command.step);
+    return command;
 }
 
 pub fn addNativeSmokeCommand(
@@ -100,15 +52,41 @@ pub fn addNativeSmokeCommand(
     store_path: []const u8,
     mode: NativeSmokeMode,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, "run-zigos-native-smoke", &.{}, &.{
+    return addNativeSmokeBoot(b, kernel, kernel.qemu_boot_iso_path, userspace_images, log_path, store_path, mode);
+}
+
+fn addNativeSmokeBoot(
+    b: *std.Build,
+    kernel: shared.KernelArtifact,
+    boot_iso: std.Build.LazyPath,
+    userspace_images: userspace_build.ArtifactSet,
+    log_path: []const u8,
+    store_path: []const u8,
+    mode: NativeSmokeMode,
+) *std.Build.Step.Run {
+    const command = addKernelBootCommand(b, kernel, boot_iso, "run-zigos-native-smoke", &.{}, &.{
         log_path,
         store_path,
     });
-    command.addArg(mode.arg() orelse "full");
-    command.addDirectoryArg(b.graph.path(.install_bin, ""));
-    command.addArg(kernel.bootloader_source_path);
+    command.addArg(@tagName(mode));
+    command.addArg(shared.bootloader_source_path);
+    const expected_userspace_count = userspace_build.production_artifact_count +
+        if (mode == .production) 0 else userspace_build.verification_only_artifact_count;
+    command.addArg(b.fmt("{d}", .{expected_userspace_count}));
+    for (userspace_images.production_compile_steps) |image| command.addFileArg(image.getEmittedBin());
+    if (kernel.kernel_role == .verification) {
+        for (userspace_images.verification_only_compile_steps) |image| command.addFileArg(image.getEmittedBin());
+    }
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
+}
+
+/// Boots the verification kernel from an authenticated image whose command line
+/// selects one injected boot fault. Production kernels compile no fault paths.
+fn addSmokeFaultIso(b: *std.Build, kernel: shared.KernelArtifact, fault: []const u8) std.Build.LazyPath {
+    std.debug.assert(kernel.kernel_role == .verification);
+    const name = b.fmt("smoke-fault-{s}", .{fault});
+    return kernel_build.addBootImage(b, name, kernel.output_file, kernel_build.addQemuCommandLine(b, b.fmt("smoke_fault_{s}", .{fault}))).iso;
 }
 
 pub fn addTpm2QemuCommand(
@@ -116,7 +94,7 @@ pub fn addTpm2QemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, "run-tpm2-qemu", &.{}, &.{});
+    const command = addKernelBootCommand(b, kernel, kernel.qemu_boot_iso_path, "run-tpm2-qemu", &.{}, &.{});
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
@@ -126,36 +104,22 @@ pub fn addTpm2SealingQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, "run-tpm2-qemu", &.{}, &.{"sealing"});
+    const command = addKernelBootCommand(b, kernel, kernel.qemu_boot_iso_path, "run-tpm2-qemu", &.{}, &.{"sealing"});
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
 
-pub fn addTpm2OwnershipQemuCommand(
-    b: *std.Build,
-    kernel: shared.KernelArtifact,
-    userspace_images: userspace_build.ArtifactSet,
-) *std.Build.Step.Run {
-    return addTpm2ProfileQemuCommand(b, kernel, userspace_images, "ownership", "src/boot/cmdline-tpm-ownership.txt");
+pub fn addTpm2OwnershipQemuCommand(b: *std.Build, kernel: shared.KernelArtifact, userspace_images: userspace_build.ArtifactSet) *std.Build.Step.Run {
+    return addTpm2ProfileQemuCommand(b, kernel, userspace_images, "ownership");
 }
 
 pub fn addTpm2QuoteQemuCommand(b: *std.Build, kernel: shared.KernelArtifact, userspace_images: userspace_build.ArtifactSet) *std.Build.Step.Run {
-    return addTpm2ProfileQemuCommand(b, kernel, userspace_images, "quote", "src/boot/cmdline-tpm-quote.txt");
+    return addTpm2ProfileQemuCommand(b, kernel, userspace_images, "quote");
 }
 
-fn addTpm2ProfileQemuCommand(b: *std.Build, kernel: shared.KernelArtifact, userspace_images: userspace_build.ArtifactSet, comptime mode: []const u8, cmdline: []const u8) *std.Build.Step.Run {
-    const image = kernel_build.addEfiImage(b, .small, kernel.boot_payload, b.path(cmdline));
-    const iso = tools_build.addRun(b, "build-efi-iso");
-    iso.addFileArg(image.getEmittedBin());
-    const iso_path = iso.addOutputFileArg("tpm-" ++ mode ++ ".iso");
-    _ = iso.addOutputDirectoryArg("tpm-" ++ mode ++ "-staging");
-    shared.addEfiIsoEpochArg(b, iso);
-    const command = tools_build.addRun(b, "run-tpm2-qemu");
-    command.addArg("--boot-iso");
-    command.addFileArg(iso_path);
-    command.addFileArg(kernel.output_path);
-    command.addArg(mode);
-    command.step.dependOn(kernel.install_step);
+fn addTpm2ProfileQemuCommand(b: *std.Build, kernel: shared.KernelArtifact, userspace_images: userspace_build.ArtifactSet, comptime mode: []const u8) *std.Build.Step.Run {
+    const image = kernel_build.addBootImage(b, "tpm-" ++ mode, kernel.output_file, kernel_build.addQemuCommandLine(b, "tpm_" ++ mode ++ "_proof"));
+    const command = addKernelBootCommand(b, kernel, image.iso, "run-tpm2-qemu", &.{}, &.{mode});
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
@@ -167,10 +131,12 @@ pub fn addNativeFaultSmokeCommand(
     mode: NativeSmokeMode,
 ) *std.Build.Step.Run {
     std.debug.assert(mode != .production and mode != .full and mode != .driver_restart);
-    const file_stem = mode.fileStem();
-    return addNativeSmokeCommand(
+    const file_stem = b.allocator.dupe(u8, @tagName(mode)) catch @panic("OOM");
+    std.mem.replaceScalar(u8, file_stem, '_', '-');
+    return addNativeSmokeBoot(
         b,
         kernel,
+        addSmokeFaultIso(b, kernel, @tagName(mode)),
         userspace_images,
         b.fmt("build/zigos-native-{s}.log", .{file_stem}),
         b.fmt("build/native-store-{s}.img", .{file_stem}),
@@ -183,7 +149,7 @@ pub fn addRecoveryQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, "run-kernel-recovery", &.{}, &.{
+    const command = addKernelBootCommand(b, kernel, kernel.qemu_boot_iso_path, "run-kernel-recovery", &.{}, &.{
         "build/kernel-recovery.log",
     });
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
@@ -195,7 +161,7 @@ pub fn addStorageDurabilityQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, "run-storage-durability-qemu", &.{}, &.{
+    const command = addKernelBootCommand(b, kernel, addSmokeFaultIso(b, kernel, "storage_durability"), "run-storage-durability-qemu", &.{}, &.{
         "build/storage-durability-qemu.log",
         "build/native-store-storage-durability.img",
     });
@@ -209,13 +175,12 @@ pub fn addSyncTwoNodeQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, "run-sync-two-node-qemu", &.{}, &.{
+    const command = addKernelBootCommand(b, kernel, kernel.qemu_boot_iso_path, "run-sync-two-node-qemu", &.{}, &.{
         "build/sync-two-node-qemu.log",
         "build/native-store-sync-node-a.img",
         "build/native-store-sync-node-b.img",
     });
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
-    command.step.dependOn(&tools_build.addRelayTests(b).step);
     return command;
 }
 
@@ -224,7 +189,7 @@ pub fn addBenchmarkCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, "capture-kernel-benchmark", &.{}, &.{
+    const command = addKernelBootCommand(b, kernel, kernel.qemu_boot_iso_path, "capture-kernel-benchmark", &.{}, &.{
         "build/kernel-benchmark.log",
         "build/kernel-benchmark-summary.md",
     });
@@ -235,13 +200,14 @@ pub fn addBenchmarkCommand(
 fn addKernelBootCommand(
     b: *std.Build,
     kernel: shared.KernelArtifact,
+    boot_iso: std.Build.LazyPath,
     command_name: []const u8,
     prefix_args: []const []const u8,
     args: []const []const u8,
 ) *std.Build.Step.Run {
     const command = tools_build.addRun(b, command_name);
     command.addArg("--boot-iso");
-    command.addFileArg(kernel.qemu_boot_iso_path);
+    command.addFileArg(boot_iso);
     command.addArgs(prefix_args);
     command.addFileArg(kernel.output_path);
     command.addArgs(args);

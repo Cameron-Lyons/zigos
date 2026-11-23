@@ -39,12 +39,13 @@ zigos_enter_userspace:
     # only after the actual xstate controls and TS-clear invariant are verified.
     testb $(CPU_ENTRY_READY), %gs:CPU_NATIVE_ENTRY_MODES
     jz .Lunprepared_cpu
+    # This is a C-ABI call: no vector or x87 register is live across it, and
+    # the callee-saved MXCSR and x87 controls keep their defaults. The resume
+    # path restores those from the constant init image, so no kernel image is
+    # saved here. The resume path reloads RSP, so the synthetic FRED return
+    # frame keeps the 64-byte alignment of a delivered FRED frame.
     movq %rsp, %gs:CPU_RESUME_RSP
-    subq $XSTATE_STACK_BYTES, %rsp
     andq $-64, %rsp
-    movq %rsp, %r13
-    movq %r13, %gs:CPU_KERNEL_XSTATE
-    XSAVE_FULL_STATE %r13, 1
     movq %gs:CPU_USERSPACE_XSTATE, %r13
     XRSTOR_STATE %r13, 0, 1
     movq %r14, %rdi
@@ -94,9 +95,9 @@ zigos_enter_userspace:
 .global zigos_resume_from_userspace_interrupt
 .type zigos_resume_from_userspace_interrupt, @function
 zigos_resume_from_userspace_interrupt:
-    # The handler ran with kernel state, but restore the continuation's exact
-    # state before leaving the assembly boundary.
-    movq %gs:CPU_KERNEL_XSTATE, %r13
+    # The handler ran with kernel state. Return to the C-ABI caller with the
+    # default controls and PKRU 0 of the constant init image.
+    leaq zigos_initial_kernel_xstate(%rip), %r13
     XRSTOR_FULL_STATE %r13, 1
     movq %gs:CPU_RESUME_RSP, %rsp
     jmp *%gs:CPU_RESUME_RIP

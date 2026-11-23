@@ -6,9 +6,7 @@ const native_util = @import("util.zig");
 const signing = @import("signing.zig");
 
 pub const MAX_PRINCIPAL_KEYS = 32;
-pub const MAX_PRINCIPAL_LABEL_BYTES = 48;
 pub const MAX_PUBLISHER_BYTES = 64;
-pub const COMPACT_KEY_RECORD_METADATA = true;
 pub const PRINCIPAL_KEY_RECORD_SIZE_CEILING_BYTES: usize = 136;
 pub const KEYRING_SIZE_CEILING_BYTES: usize = 7_864;
 
@@ -43,26 +41,6 @@ pub const PrincipalId = struct {
         bytes[0] = @backingInt(self.kind);
         std.mem.writeInt(u64, bytes[serial_offset..][0..@sizeOf(u64)], self.serial, .little);
         return bytes;
-    }
-};
-
-pub const PrincipalRecord = struct {
-    id: PrincipalId,
-    label_len: usize,
-    label: [MAX_PRINCIPAL_LABEL_BYTES]u8,
-
-    pub fn init(id: PrincipalId, label: []const u8) PrincipalRecord {
-        var record = PrincipalRecord{
-            .id = id,
-            .label_len = @min(label.len, MAX_PRINCIPAL_LABEL_BYTES - 1),
-            .label = @as([MAX_PRINCIPAL_LABEL_BYTES]u8, @splat(0)),
-        };
-        @memcpy(record.label[0..record.label_len], label[0..record.label_len]);
-        return record;
-    }
-
-    pub fn labelSlice(self: *const PrincipalRecord) []const u8 {
-        return self.label[0..self.label_len];
     }
 };
 
@@ -117,6 +95,7 @@ fn publisherIndexKey(publisher: []const u8) u64 {
 }
 
 pub const KeyringError = error{
+    KeyringConflict,
     KeyringFull,
     PublisherTooLong,
     EmptyPublisher,
@@ -127,15 +106,6 @@ const PRINCIPAL_KEY_INDEX_CAPACITY = MAX_PRINCIPAL_KEYS * 2;
 const PrincipalKeyArena = indexed_arena.IndexedArenaWithKey(u64, PrincipalKeySlot, MAX_PRINCIPAL_KEYS, PRINCIPAL_KEY_INDEX_CAPACITY, principalKeySlotKey);
 const PrincipalKeyPrincipalIndex = indexed_arena.MultimapIndex(MAX_PRINCIPAL_KEYS, MAX_PRINCIPAL_KEYS, PRINCIPAL_KEY_INDEX_CAPACITY);
 const PrincipalKeyPublisherIndex = indexed_arena.MultimapIndex(MAX_PRINCIPAL_KEYS, MAX_PRINCIPAL_KEYS, PRINCIPAL_KEY_INDEX_CAPACITY);
-
-fn initializeKeyringIndex(index: anytype) void {
-    const Index = @TypeOf(index.*);
-    const CompactIndex = @FieldType(Index, "free_bucket_head");
-    const compact_no_index: CompactIndex = @intCast(@max(index.links.len, index.buckets.len));
-    @memset(std.mem.asBytes(index), 0);
-    for (&index.links) |*link| link.bucket = compact_no_index;
-    index.free_bucket_head = compact_no_index;
-}
 
 pub const Keyring = struct {
     slots: PrincipalKeyArena = PrincipalKeyArena.init(),
@@ -148,9 +118,6 @@ pub const Keyring = struct {
 
     pub fn initializeAllocated(self: *Keyring) void {
         @memset(std.mem.asBytes(self), 0);
-        self.slots.free_head = indexed_arena.reusableNoIndex(MAX_PRINCIPAL_KEYS);
-        initializeKeyringIndex(&self.principal_index);
-        initializeKeyringIndex(&self.publisher_index);
     }
 
     pub fn bindPolicyAuthorityRoot(
@@ -200,22 +167,6 @@ pub const Keyring = struct {
         if (!found) return error.PrincipalKeyNotFound;
     }
 
-    pub fn isPolicyAuthorityRoot(self: *const Keyring, principal_id: PrincipalId) bool {
-        var slot_index = self.principal_index.head(principalIndexKey(principal_id));
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.principal_index.next(slot_index)) {
-            if (slot_index >= self.slots.slots.len) native_util.impossibleByInvariant("principal key principal index points outside key slots");
-            const slot = &self.slots.slots[slot_index];
-            if (!slot.in_use) native_util.impossibleByInvariant("principal key principal index points at a free key slot");
-            if (slot.record.policy_authority_root and
-                !slot.record.revoked and
-                slot.record.principal_id.eql(principal_id))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
     pub fn isPolicyAuthorityRootKey(
         self: *const Keyring,
         principal_id: PrincipalId,
@@ -258,6 +209,8 @@ pub const Keyring = struct {
         return false;
     }
 
+    // The slot key hashes the principal and public key. A hit for a
+    // different principal or key is a hash collision, never a rebinding.
     fn put(self: *Keyring, record: PrincipalKeyRecord) KeyringError!*PrincipalKeyRecord {
         const record_key = principalPublicKeyIndexKey(record.principal_id, record.public_key);
         if (self.slots.slotIndexOf(record_key)) |slot_index| {
@@ -265,7 +218,7 @@ pub const Keyring = struct {
             if (!slot.record.principal_id.eql(record.principal_id) or
                 !std.mem.eql(u8, slot.record.public_key[0..], record.public_key[0..]))
             {
-                native_util.impossibleByInvariant("principal key primary index points at the wrong key");
+                return error.KeyringConflict;
             }
             self.removePublisherSlot(slot_index, &slot.record);
             slot.record = record;
@@ -308,32 +261,10 @@ pub const Keyring = struct {
     }
 };
 
-pub fn kindName(kind: PrincipalKind) []const u8 {
-    return switch (kind) {
-        .user => "UserPrincipal",
-        .team => "TeamPrincipal",
-        .device => "DevicePrincipal",
-        .app => "AppPrincipal",
-        .service => "ServicePrincipal",
-        .policy_authority => "PolicyAuthorityPrincipal",
-    };
-}
-
 test "principal keyring uses compact bounded publisher metadata" {
-    try std.testing.expect(COMPACT_KEY_RECORD_METADATA);
     try std.testing.expectEqual(u8, @FieldType(PrincipalKeyRecord, "publisher_len"));
     try std.testing.expectEqual(@as(usize, PRINCIPAL_KEY_RECORD_SIZE_CEILING_BYTES), @sizeOf(PrincipalKeyRecord));
     try std.testing.expectEqual(@as(usize, KEYRING_SIZE_CEILING_BYTES), @sizeOf(Keyring));
-}
-
-test "principal records preserve identity and labels" {
-    const id = PrincipalId{ .kind = .service, .serial = 7 };
-    const record = PrincipalRecord.init(id, "session-manager");
-
-    try std.testing.expect(record.id.eql(id));
-    try std.testing.expectEqualStrings("session-manager", record.labelSlice());
-    try std.testing.expectEqualStrings("ServicePrincipal", kindName(record.id.kind));
-    try std.testing.expectEqualStrings("TeamPrincipal", kindName(.team));
 }
 
 test "principal keyring binds publishers to trusted keys and supports revocation" {
@@ -346,7 +277,6 @@ test "principal keyring binds publishers to trusted keys and supports revocation
 
     _ = try keyring.bindPolicyAuthorityRoot(root, root_key);
     _ = try keyring.bindPublisher(publisher, root, "Example Software", publisher_key);
-    try std.testing.expect(keyring.isPolicyAuthorityRoot(root));
     try std.testing.expect(keyring.isPolicyAuthorityRootKey(root, root_key));
     try std.testing.expect(!keyring.isPolicyAuthorityRootKey(root, publisher_key));
 

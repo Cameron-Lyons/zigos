@@ -99,8 +99,9 @@ pub const PresentStats = struct {
 };
 
 // The caller owns an exclusive mapped 32-bit framebuffer and serializes present.
-// No framebuffer reads, allocation, timer polling, or full-frame shadow copies
-// are needed. The first frame clears visible pixels; later frames damage cells.
+// present() performs no framebuffer reads, allocation, timer polling or
+// full-frame pixel shadow; matchesCell verification reads device pixels. The
+// first frame clears visible pixels; later frames damage cells.
 pub const Renderer = struct {
     info: framebuffer.Info,
     pixels: []volatile u32,

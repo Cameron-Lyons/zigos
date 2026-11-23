@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const xhci = @import("../../kernel/drivers/xhci.zig");
 const abi = @import("../core/abi.zig");
@@ -9,7 +8,7 @@ const compositor_session = @import("compositor_session.zig");
 const trusted_identity = @import("trusted_identity_entry.zig");
 const trusted_auth = @import("trusted_auth_entry.zig");
 const task_runtime = @import("../task/task_runtime.zig");
-const root = @import("root");
+const table_backing = @import("../core/table_backing.zig");
 const timer = @import("../../kernel/timer/timer.zig");
 
 pub const MAX_KEYBOARDS: usize = 4;
@@ -19,8 +18,6 @@ pub const MAX_EVENTS_PER_INBOX: usize = 16;
 pub const DEFAULT_REPORT_BUDGET: usize = 16;
 pub const REPEAT_DELAY_TICKS: u64 = 400 / timer.MILLISECONDS_PER_TICK;
 pub const REPEAT_INTERVAL_TICKS: u64 = 40 / timer.MILLISECONDS_PER_TICK;
-pub const HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING = true;
-pub const EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 
 const NO_EVENT_INDEX: u8 = std.math.maxInt(u8);
 const NO_INBOX_INDEX: u8 = std.math.maxInt(u8);
@@ -95,12 +92,6 @@ const EventSlot = struct {
 };
 
 const EventSlotArray = [MAX_QUEUED_EVENTS]EventSlot;
-const heap_backed_event_slots = builtin.target.os.tag == .freestanding and HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING;
-const EventSlotBacking = if (heap_backed_event_slots) ?*EventSlotArray else EventSlotArray;
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
-else
-    struct {};
 
 const Inbox = struct {
     in_use: bool = false,
@@ -140,7 +131,7 @@ pub const Router = struct {
     active_inbox_tail: u8 = NO_INBOX_INDEX,
     wake_head: u8 = NO_INBOX_INDEX,
     wake_tail: u8 = NO_INBOX_INDEX,
-    event_slots: EventSlotBacking = if (heap_backed_event_slots) null else @as([MAX_QUEUED_EVENTS]EventSlot, @splat(.{})),
+    event_slots: table_backing.Lazy(EventSlotArray, null) = .{},
     free_event_head: u8 = NO_EVENT_INDEX,
     event_pool_initialized: bool = false,
     queued_event_count: u8 = 0,
@@ -163,44 +154,27 @@ pub const Router = struct {
 
     comptime {
         if (@sizeOf(?Repeat) > 64) @compileError("keyboard repeat exceeds its bounded single-key state");
-        if (heap_backed_event_slots and @sizeOf(EventSlotBacking) > EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES) {
-            @compileError("heap-backed input event slots exceed their handle size ceiling");
-        }
     }
 
     fn eventSlots(self: *Router) ?*EventSlotArray {
-        if (comptime heap_backed_event_slots) return self.event_slots;
-        return &self.event_slots;
+        return self.event_slots.get();
     }
 
     fn ensureEventSlots(self: *Router) ?*EventSlotArray {
         if (self.eventSlots()) |slots| return slots;
-        if (comptime heap_backed_event_slots) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(EventSlotArray)) orelse return null;
-            const slots: *EventSlotArray = @ptrCast(@alignCast(allocation));
-            initializeEventSlots(slots);
-            self.free_event_head = 0;
-            self.queued_event_count = 0;
-            self.event_pool_initialized = true;
-            self.event_slots = slots;
-            return slots;
-        }
-        return &self.event_slots;
+        const slots = self.event_slots.ensure() catch return null;
+        initializeEventSlots(slots);
+        self.free_event_head = 0;
+        self.queued_event_count = 0;
+        self.event_pool_initialized = true;
+        return slots;
     }
 
     pub fn deinit(self: *Router) void {
         self.clearTrustedEntry();
         self.routing_epoch +|= 1;
         self.dropAllInboxes();
-        if (comptime heap_backed_event_slots) {
-            if (self.event_slots) |slots| {
-                @memset(std.mem.asBytes(slots), 0);
-                kernel_memory.kfree(@ptrCast(slots));
-                self.event_slots = null;
-            }
-        } else {
-            self.event_slots = @as([MAX_QUEUED_EVENTS]EventSlot, @splat(.{}));
-        }
+        self.event_slots.release();
         self.free_event_head = NO_EVENT_INDEX;
         self.event_pool_initialized = false;
         self.queued_event_count = 0;
@@ -236,18 +210,18 @@ pub const Router = struct {
             (self.compositor.? != compositor or self.compositor_task_id != compositor_task_id))
         {
             if (self.trusted_entry) |entry| entry.inputInterrupted(entry.lastTicks());
-            self.compositor.?.trusted_view = null;
+            self.compositor.?.setTrustedView(null);
             self.routing_epoch +|= 1;
             self.dropAllInboxes();
         }
         self.compositor = compositor;
         self.compositor_task_id = compositor_task_id;
-        compositor.trusted_view = if (self.trusted_entry != null) &self.trusted_view else null;
+        compositor.setTrustedView(if (self.trusted_entry != null) &self.trusted_view else null);
     }
 
     pub fn clearCompositor(self: *Router) void {
         if (self.trusted_entry) |entry| entry.inputInterrupted(entry.lastTicks());
-        if (self.compositor) |compositor| compositor.trusted_view = null;
+        if (self.compositor) |compositor| compositor.setTrustedView(null);
         self.routing_epoch +|= 1;
         self.compositor = null;
         self.compositor_task_id = 0;
@@ -261,7 +235,7 @@ pub const Router = struct {
         self.trusted_entry = entry;
         self.trusted_view = entry.view();
         entry.lock(now_ticks);
-        if (self.compositor) |compositor| compositor.trusted_view = &self.trusted_view;
+        if (self.compositor) |compositor| compositor.setTrustedView(&self.trusted_view);
         self.synchronizeTrustedInput();
     }
 
@@ -270,7 +244,7 @@ pub const Router = struct {
     pub fn clearTrustedEntry(self: *Router) void {
         if (self.trusted_entry) |entry| {
             entry.quiesce();
-            if (self.compositor) |compositor| compositor.trusted_view = null;
+            if (self.compositor) |compositor| compositor.setTrustedView(null);
             self.trusted_entry = null;
             self.trusted_view = .none;
             self.trusted_revision = 0;
@@ -838,12 +812,6 @@ pub const Router = struct {
     }
 };
 
-pub const event_slot_layout = .{
-    .heap_backs_slots_on_freestanding = HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING,
-    .slot_backing_size_bytes = @sizeOf(EventSlotArray),
-    .freestanding_handle_size_bytes = if (HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING) @sizeOf(?*EventSlotArray) else @sizeOf(EventSlotArray),
-};
-
 fn initializeEventSlots(event_slots: *EventSlotArray) void {
     for (event_slots, 0..) |*slot, index| {
         std.crypto.secureZero(u8, std.mem.asBytes(&slot.event));
@@ -879,36 +847,11 @@ fn inboxTaskId(inbox: *const Inbox) u64 {
     return inbox.task_id;
 }
 
+// Every delivered kind names its wire byte; a kind without one fails to compile.
 fn inputByte(kind: input_driver_task.EventKind) u8 {
     return switch (kind) {
-        .text => abi.InputByte.text,
-        .backspace => abi.InputByte.backspace,
-        .commit_text => abi.InputByte.commit_text,
-        .focus_next => abi.InputByte.focus_next,
-        .focus_previous => abi.InputByte.focus_previous,
-        .activate => abi.InputByte.activate,
-        .task_switch_next => abi.InputByte.task_switch_next,
-        .task_switch_previous => abi.InputByte.task_switch_previous,
-        .show_recovery => abi.InputByte.show_recovery,
-        .dismiss_recovery => abi.InputByte.dismiss_recovery,
-        .cursor_left => abi.InputByte.cursor_left,
-        .cursor_right => abi.InputByte.cursor_right,
-        .cursor_up => abi.InputByte.cursor_up,
-        .cursor_down => abi.InputByte.cursor_down,
-        .line_start => abi.InputByte.line_start,
-        .line_end => abi.InputByte.line_end,
-        .document_start => abi.InputByte.document_start,
-        .document_end => abi.InputByte.document_end,
-        .delete_forward => abi.InputByte.delete_forward,
-        .select_all => abi.InputByte.select_all,
-        .undo => abi.InputByte.undo,
-        .redo => abi.InputByte.redo,
-        .copy => abi.InputByte.copy,
-        .cut => abi.InputByte.cut,
-        .paste => abi.InputByte.paste,
-        .page_up => abi.InputByte.page_up,
-        .page_down => abi.InputByte.page_down,
         .new_document, .open_document => 0,
+        inline else => |tag| @field(abi.InputByte, @tagName(tag)),
     };
 }
 

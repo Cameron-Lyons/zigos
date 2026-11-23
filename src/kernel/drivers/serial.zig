@@ -6,6 +6,7 @@ const tsc_clock = @import("../timer/tsc_clock.zig");
 const SERIAL_DATA = COM1_BASE + 0;
 const SERIAL_INTERRUPT_ENABLE = COM1_BASE + 1;
 const SERIAL_FIFO_CONTROL = COM1_BASE + 2;
+const SERIAL_INTERRUPT_IDENTIFICATION = COM1_BASE + 2;
 const SERIAL_LINE_CONTROL = COM1_BASE + 3;
 const SERIAL_MODEM_CONTROL = COM1_BASE + 4;
 const SERIAL_LINE_STATUS = COM1_BASE + 5;
@@ -16,6 +17,9 @@ const LINE_CONTROL_8N1 = 0x03;
 const INTERRUPTS_DISABLED = 0x00;
 const BAUD_DIVISOR_38400_LOW = 0x03;
 const FIFO_ENABLE_CLEAR_14_BYTE = 0xC7;
+const INTERRUPT_IDENTIFICATION_FIFO_MASK = 0xC0;
+// A 16550A transmit FIFO accepts 16 bytes once THRE reports it empty.
+const FIFO_TRANSMIT_BURST: u8 = 16;
 const MODEM_CONTROL_LOOPBACK = 0x1E;
 const MODEM_CONTROL_READY = 0x0F;
 const MODEM_CONTROL_IRQS_ENABLED = 0x0B;
@@ -24,6 +28,10 @@ const SERIAL_WAIT_TIMEOUT_MILLISECONDS: u64 = 100;
 const EARLY_SERIAL_WAIT_LIMIT: u32 = 10_000;
 
 var serial_initialized: bool = false;
+var transmit_burst: u8 = 1;
+// Bytes the transmitter accepts before THRE must be checked again. Console
+// output is unlocked, so the decrement saturates when writers race.
+var transmit_credit: u8 = 0;
 
 pub fn init() void {
     io.outb(SERIAL_INTERRUPT_ENABLE, INTERRUPTS_DISABLED);
@@ -36,6 +44,9 @@ pub fn init() void {
     io.outb(SERIAL_LINE_CONTROL, LINE_CONTROL_8N1);
 
     io.outb(SERIAL_FIFO_CONTROL, FIFO_ENABLE_CLEAR_14_BYTE);
+    const fifo_enabled = (io.inb(SERIAL_INTERRUPT_IDENTIFICATION) & INTERRUPT_IDENTIFICATION_FIFO_MASK) ==
+        INTERRUPT_IDENTIFICATION_FIFO_MASK;
+    transmit_burst = if (fifo_enabled) FIFO_TRANSMIT_BURST else 1;
 
     io.outb(SERIAL_MODEM_CONTROL, MODEM_CONTROL_IRQS_ENABLED);
 
@@ -60,6 +71,7 @@ fn isDataReady() bool {
 }
 
 fn waitForTransmitEmpty() bool {
+    if (isTransmitEmpty()) return true;
     if (!tsc_clock.initialized()) {
         var attempts: u32 = EARLY_SERIAL_WAIT_LIMIT;
         while (!isTransmitEmpty() and attempts > 0) : (attempts -= 1) {
@@ -81,16 +93,12 @@ pub fn putChar(c: u8) void {
         return;
     }
 
-    if (!waitForTransmitEmpty()) return;
-    io.outb(SERIAL_DATA, c);
-}
-
-pub fn flush() void {
-    if (!serial_initialized) {
-        return;
+    if (transmit_credit == 0) {
+        if (!waitForTransmitEmpty()) return;
+        transmit_credit = transmit_burst;
     }
-
-    _ = waitForTransmitEmpty();
+    io.outb(SERIAL_DATA, c);
+    transmit_credit -|= 1;
 }
 
 pub fn hasChar() bool {
@@ -112,8 +120,4 @@ pub fn print(str: []const u8) void {
     for (str) |c| {
         putChar(c);
     }
-}
-
-pub fn isInitialized() bool {
-    return serial_initialized;
 }

@@ -1,7 +1,6 @@
 const capability = @import("../kernel_api/capability.zig");
-const native_util = @import("../core/util.zig");
 const component_abi_schema = @import("../services/component_abi_schema.zig");
-const contract = @import("contract.zig");
+const service_catalog = @import("service_catalog.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
@@ -13,7 +12,6 @@ const policy_mediation = @import("../policy/policy_mediation.zig");
 const package_service = @import("../services/package_service.zig");
 const principal = @import("../core/principal.zig");
 const session_bootstrap = @import("session_bootstrap.zig");
-const service_contract = @import("service_contracts.zig");
 const supervisor_mod = @import("supervisor.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -44,31 +42,25 @@ pub const NotesReviewState = struct {
 };
 
 pub const ServiceBindings = struct {
-    bindings: [service_contract.ordered_service_contracts.len]service_bootstrap.ServiceBinding,
+    bindings: [service_catalog.ordered_service_contracts.len]service_bootstrap.ServiceBinding,
 
     pub fn init() ServiceBindings {
         return .{
-            .bindings = @as([service_contract.ordered_service_contracts.len]service_bootstrap.ServiceBinding, @splat(.{ .task_id = 0, .endpoint_id = 0 })),
+            .bindings = @as([service_catalog.ordered_service_contracts.len]service_bootstrap.ServiceBinding, @splat(.{ .task_id = 0, .endpoint_id = 0 })),
         };
     }
 
-    pub fn bindingFor(self: *const ServiceBindings, class: contract.ServiceClass) service_bootstrap.ServiceBinding {
-        return self.bindings[service_contract.orderedIndex(class).?];
+    pub fn bindingFor(self: *const ServiceBindings, class: service_catalog.ServiceClass) service_bootstrap.ServiceBinding {
+        return self.bindings[service_catalog.orderedServiceIndex(class).?];
     }
 };
 
-pub fn serviceOwner(state: *const BootstrapState, class: contract.ServiceClass) principal.PrincipalId {
-    return session_bootstrap.ownerForServiceClass(state.ids, class) orelse
-        native_util.impossibleByInvariant("every service class has a bootstrap owner");
+pub fn serviceOwner(state: *const BootstrapState, class: service_catalog.ServiceClass) principal.PrincipalId {
+    return session_bootstrap.ownerForServiceClass(state.ids, class);
 }
 
-pub fn serviceRecord(state: *const BootstrapState, class: contract.ServiceClass) *supervisor_mod.ServiceRecord {
-    return session_bootstrap.serviceRecordForClass(state.services, class) orelse
-        native_util.impossibleByInvariant("every service class has a bootstrap service record");
-}
-
-pub fn serviceId(state: *const BootstrapState, class: contract.ServiceClass) u64 {
-    return serviceRecord(state, class).id;
+pub fn serviceId(state: *const BootstrapState, class: service_catalog.ServiceClass) u64 {
+    return state.services.get(class).id;
 }
 
 pub const Environment = struct {
@@ -84,12 +76,3 @@ pub const Environment = struct {
     diagnostic_ledger: *event_ledger.Ledger,
     background_dispatcher: ?*background_dispatch.Controller,
 };
-
-pub fn hasGrantForKind(grants: []const policy_mediation.UserGrant, kind: manifest.PermissionKind) bool {
-    for (grants) |grant| {
-        if (grant.kind == kind and grant.allow) {
-            return true;
-        }
-    }
-    return false;
-}

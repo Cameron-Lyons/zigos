@@ -8,9 +8,6 @@ pub const EntrySlotIndex = u8;
 pub const EntryIndexSlot = EntrySlotIndex;
 pub const EntryObjectIndexSlot = EntrySlotIndex;
 pub const no_entry_slot: EntrySlotIndex = std.math.maxInt(EntrySlotIndex);
-pub const UPDATES_PATH_INDEX_INCREMENTALLY = true;
-pub const UPDATES_OBJECT_INDEX_INCREMENTALLY = true;
-pub const REMOVES_INDEX_ENTRIES_WITHOUT_TOMBSTONES = true;
 
 pub fn emptyEntryIndexTable(comptime capacity: usize) [capacity]EntryIndexSlot {
     return @as([capacity]EntryIndexSlot, @splat(no_entry_slot));

@@ -4,7 +4,7 @@ const paging = @import("../../memory/paging64.zig");
 const memory = @import("../../memory/memory.zig");
 const userspace_executor = @import("../../../native/task/userspace_executor.zig");
 
-pub fn init(lass_supported: bool) error{UnsupportedKernelAddressPartition}!void {
+pub fn init(rdpid: bool, lass_supported: bool, fred: bool) error{UnsupportedKernelAddressPartition}!void {
     const stack_watermark = @import("../../utils/stack_watermark.zig");
     stack_watermark.paint();
 
@@ -20,7 +20,7 @@ pub fn init(lass_supported: bool) error{UnsupportedKernelAddressPartition}!void 
 
     console.print("Initializing native syscall entry...\n");
     const syscall64 = @import("../../interrupts/syscall64.zig");
-    syscall64.init();
+    syscall64.init(rdpid, fred);
     console.print("Native syscall entry initialized!\n");
 
     console.print("Initializing interrupts...\n");
@@ -30,7 +30,7 @@ pub fn init(lass_supported: bool) error{UnsupportedKernelAddressPartition}!void 
     if (lass_supported) {
         const x86 = @import("../../../arch/x86.zig");
         try x86.enableLass();
-        if (!x86.lassEnabled()) unreachable;
+        if (!x86.lassEnabled()) x86.haltFatal();
     }
 
     console.print("Initializing paging...\n");

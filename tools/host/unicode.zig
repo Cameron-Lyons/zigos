@@ -160,6 +160,9 @@ fn parseGlyphs(glyphs: *Glyphs, data: []const u8) !void {
     }
 }
 
+// Runs of consecutive code points sharing one width: a u32 run count, every
+// run's first code point, then {u16 count, u16 width, u32 row offset} per run,
+// then rows as one byte for 8-pixel and a u16 for 16-pixel glyphs.
 fn encodeGlyphs(allocator: std.mem.Allocator, glyphs: *const Glyphs) ![]u8 {
     const code_points = try allocator.alloc(u32, glyphs.count());
     defer allocator.free(code_points);
@@ -167,9 +170,42 @@ fn encodeGlyphs(allocator: std.mem.Allocator, glyphs: *const Glyphs) ![]u8 {
     var index: usize = 0;
     while (iterator.next()) |code_point| : (index += 1) code_points[index] = code_point.*;
     std.mem.sort(u32, code_points, {}, std.sort.asc(u32));
-    const output = try allocator.alloc(u8, code_points.len * 36);
-    for (code_points, 0..) |code_point, record_index| @memcpy(output[record_index * 36 ..][0..36], &glyphs.get(code_point).?);
-    return output;
+
+    const Run = struct { first: u32, count: u16, width: u16, offset: u32 };
+    var runs: std.ArrayList(Run) = .empty;
+    defer runs.deinit(allocator);
+    var rows_bytes: u32 = 0;
+    for (code_points) |code_point| {
+        const width: u16 = if (isWide(glyphs.get(code_point).?)) 16 else 8;
+        const extends = if (runs.items.len == 0) false else blk: {
+            const last = runs.items[runs.items.len - 1];
+            break :blk last.first + last.count == code_point and last.width == width and last.count < std.math.maxInt(u16);
+        };
+        if (extends) runs.items[runs.items.len - 1].count += 1 else try runs.append(allocator, .{ .first = code_point, .count = 1, .width = width, .offset = rows_bytes });
+        rows_bytes += width * 2;
+    }
+
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try output.writer.writeInt(u32, @intCast(runs.items.len), .little);
+    for (runs.items) |glyph_run| try output.writer.writeInt(u32, glyph_run.first, .little);
+    for (runs.items) |glyph_run| {
+        try output.writer.writeInt(u16, glyph_run.count, .little);
+        try output.writer.writeInt(u16, glyph_run.width, .little);
+        try output.writer.writeInt(u32, glyph_run.offset, .little);
+    }
+    for (code_points) |code_point| {
+        const record = glyphs.get(code_point).?;
+        for (0..16) |row| {
+            const bits = std.mem.readInt(u16, record[4 + row * 2 ..][0..2], .little);
+            if (isWide(record)) try output.writer.writeInt(u16, bits, .little) else try output.writer.writeByte(@intCast(bits));
+        }
+    }
+    return output.toOwnedSlice();
+}
+
+fn isWide(record: [36]u8) bool {
+    return std.mem.readInt(u32, record[0..4], .little) & (1 << 21) != 0;
 }
 
 test "Unicode sources combine property bits and inclusive little-endian ranges" {
@@ -205,12 +241,13 @@ test "font records sort code points, exclude controls, preserve rows and replace
     try parseGlyphs(&glyphs, "0021:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n");
     const font = try encodeGlyphs(std.testing.allocator, &glyphs);
     defer std.testing.allocator.free(font);
-    try std.testing.expectEqual(@as(usize, 108), font.len);
-    try std.testing.expectEqualSlices(u8, &.{ 0x20, 0, 0, 0 }, font[0..4]);
-    for (0..16) |row| try std.testing.expectEqualSlices(u8, &.{ @intCast(row + 1), 0 }, font[4 + row * 2 ..][0..2]);
-    try std.testing.expectEqualSlices(u8, &.{ 0x21, 0, 0, 0 }, font[36..40]);
-    for (0..16) |row| try std.testing.expectEqualSlices(u8, &.{ 0xff, 0 }, font[40 + row * 2 ..][0..2]);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 0x20, 0, 0x23, 1, 0x67, 0x45, 0xab, 0x89, 0xef, 0xcd }, font[72..84]);
+    // Two runs: narrow U+0020..U+0021 at row offset 0, wide U+0100 at 32.
+    try std.testing.expectEqual(@as(usize, 92), font.len);
+    try std.testing.expectEqualSlices(u8, &.{ 2, 0, 0, 0, 0x20, 0, 0, 0, 0, 1, 0, 0 }, font[0..12]);
+    try std.testing.expectEqualSlices(u8, &.{ 2, 0, 8, 0, 0, 0, 0, 0, 1, 0, 16, 0, 32, 0, 0, 0 }, font[12..28]);
+    for (0..16) |row| try std.testing.expectEqual(@as(u8, @intCast(row + 1)), font[28 + row]);
+    for (0..16) |row| try std.testing.expectEqual(@as(u8, 0xff), font[44 + row]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x23, 1, 0x67, 0x45, 0xab, 0x89, 0xef, 0xcd }, font[60..68]);
     try std.testing.expectError(error.UnexpectedGlyphWidth, parseGlyphs(&glyphs, "0020:0000"));
 }
 

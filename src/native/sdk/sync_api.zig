@@ -25,7 +25,6 @@ pub const DEFAULT_OWNER = principal.PrincipalId{ .kind = .service, .serial = 64_
 pub const DEFAULT_USER = principal.PrincipalId{ .kind = .user, .serial = 64_103 };
 pub const DEFAULT_LOCAL_DEVICE = principal.PrincipalId{ .kind = .device, .serial = 64_104 };
 pub const DEFAULT_PEER_DEVICE = principal.PrincipalId{ .kind = .device, .serial = 64_105 };
-pub const COMPACT_PREFIX_METADATA = true;
 pub const LOCAL_FIRST_WORKSPACE_SIZE_CEILING_BYTES: usize = 208;
 
 comptime {
@@ -169,14 +168,6 @@ pub const DevNode = struct {
         return sync_port.registerDatabaseContract(self.authority(), workspace_id, bundle_id, label, identity);
     }
 
-    pub fn evaluateLocalNetwork(self: *DevNode, workspace_id: u64) !bool {
-        try self.bootstrap();
-        const policy = self.service.findWorkspacePolicy(workspace_id) orelse return error.WorkspacePolicyNotFound;
-        var sync_port = self.port();
-        const decision = try sync_port.evaluateNetworkPolicy(self.authority(), policy.device_to_device_policy_id.?, .local_network);
-        return decision.allowed;
-    }
-
     pub fn openPrivateServiceSession(
         self: *DevNode,
         workspace_id: u64,
@@ -274,7 +265,6 @@ test "sync SDK configures local-first policy and records replica state" {
     const policy = try node.configureLocalFirstWorkspace(workspace_id, &.{"documents/"});
     try std.testing.expect(policy.offline_first);
     try std.testing.expect(policy.personal_e2ee);
-    try std.testing.expect(try node.evaluateLocalNetwork(workspace_id));
 
     try node.recordReplicaVersion(workspace_id, "documents/notes.md", objectId(11), versionId(12));
     try std.testing.expectEqual(@as(?u64, 12), node.replicaVersion(workspace_id, "documents/notes.md"));

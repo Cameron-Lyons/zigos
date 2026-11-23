@@ -1,13 +1,13 @@
 const std = @import("std");
 const console = @import("../utils/console.zig");
-const endian = @import("../utils/endian.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const x2apic = @import("../interrupts/x2apic.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
 const tsc_clock = @import("../timer/tsc_clock.zig");
 const pci = @import("pci.zig");
-const smp = @import("../smp.zig");
+const device_isolation = @import("device_isolation.zig");
+const dma_enforcement = @import("dma_enforcement.zig");
 const xhci = @import("xhci.zig");
 
 const PAGE_BYTES = mmio_windows.PAGE_BYTES;
@@ -16,20 +16,19 @@ const PORT_RESET_TIMEOUT_MILLISECONDS: u64 = 1_000;
 const COMMAND_TIMEOUT_MILLISECONDS: u64 = 1_000;
 const CONTROL_TRANSFER_TIMEOUT_MILLISECONDS: u64 = 1_000;
 const RETIREMENT_TIMEOUT_MILLISECONDS: u64 = 6 * COMMAND_TIMEOUT_MILLISECONDS;
-const OS_OWNED_BYTE_OFFSET: usize = 3;
+const OS_OWNED_BYTE_OFFSET: u32 = 3;
 const PORT_RESET_COMPLETION_CHANGE_MASK: u7 = (1 << 2) | (1 << 4);
 
 pub const INTERRUPT_VECTOR: u8 = 67;
 pub const PORT_RUNTIME_STATE_SIZE_CEILING_BYTES: usize = 104;
 pub const CONTROLLER_RUNTIME_STATE_MAX_FRAME_COUNT: usize = 7;
-pub const COLOCATED_BOOT_KEYBOARD_REPORT_STATE = true;
-pub const COLOCATED_SUPPORTED_PROTOCOL_STATE = true;
-pub const INTERRUPT_STATE_USES_PROTOCOL_ORDERING = true;
-pub const CONTROLLER_RUNTIME_STATE_USES_GENERAL_MEMORY = true;
 
 comptime {
-    if (xhci.CAPABILITY_REGISTERS_BYTES > mmio_windows.xhci.bytes) {
-        @compileError("xHCI capability snapshot exceeds its reserved MMIO window");
+    if (xhci.CAPABILITY_REGISTERS_BYTES > PAGE_BYTES) {
+        @compileError("xHCI capability snapshot exceeds the first mapped register page");
+    }
+    if (mmio_windows.xhci.bytes < @as(usize, xhci.MAX_EXTENDED_CAPABILITY_OFFSET) + PAGE_BYTES) {
+        @compileError("xHCI register window must cover the last extended capability body");
     }
     if (xhci.XHCI_PAGE_BYTES != PAGE_BYTES) {
         @compileError("xHCI DMA and kernel page sizes must match");
@@ -40,7 +39,6 @@ pub const Error = xhci.Error || error{
     NotXhciController,
     BarUnmappable,
     BarMisaligned,
-    BarRangeOverflow,
     BarRangeOutsideAperture,
     MmioMappingFailed,
     InvariantClockUnavailable,
@@ -58,7 +56,7 @@ pub const Error = xhci.Error || error{
 };
 
 const ControllerDmaMemory = struct {
-    physical_base: u32 = 0,
+    physical_base: u64 = 0,
     alias_base: usize = 0,
     byte_len: usize = 0,
 
@@ -84,41 +82,20 @@ const ControllerDmaMemory = struct {
 };
 
 var active_capabilities: ?xhci.CapabilityRegisters = null;
-var active_protocols: ?*const xhci.SupportedProtocols = null;
+var active_protocols: ?*const xhci.caps.SupportedProtocols = null;
 var active_legacy_ownership: ?xhci.LegacyOwnership = null;
 var active_controller_reset = false;
 var active_enabled_slots: u8 = 0;
 var active_device: pci.PCIDevice = undefined;
-var active_dma_plan: ?xhci.ControllerDmaPlan = null;
+var active_dma_plan: ?xhci.dma_plan.ControllerDmaPlan = null;
 var active_dma_memory = ControllerDmaMemory{};
-var active_dma_frame_count: u32 = 0;
 var active_dma_windows: [xhci.MAX_CONTROLLER_DMA_REGIONS]intel_vtd.DmaWindow = undefined;
 var active_dma_window_count: usize = 0;
-var active_bar_address: usize = 0;
-var active_bar_bytes: u64 = 0;
+var mmio = RegisterMmio{ .base = mmio_windows.xhci.base, .bytes = 0 };
 var active = false;
-var event_consumer = xhci.EventRingConsumer{};
-var command_producer = xhci.TrbRingProducer{};
-var control_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
-var interrupt_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
-var slot_to_port = @as([xhci.MAX_DEVICE_SLOTS + 1]u8, @splat(0));
+var runtime: Runtime = .{};
 var active_keyboard_reports: ?*xhci.BootKeyboardReportPublisher = null;
-var outstanding_interrupt_reports: usize = 0;
 var pending_interrupts: u32 = 0;
-var interrupt_count: u64 = 0;
-var event_count: u64 = 0;
-var port_status_change_count: u64 = 0;
-var command_completion_count: u64 = 0;
-var transfer_completion_count: u64 = 0;
-var descriptor_prefix_count: u64 = 0;
-var device_descriptor_count: u64 = 0;
-var configuration_descriptor_header_count: u64 = 0;
-var configuration_descriptor_count: u64 = 0;
-var set_configuration_count: u64 = 0;
-var set_boot_protocol_count: u64 = 0;
-var configure_endpoint_count: u64 = 0;
-var interrupt_report_submission_count: u64 = 0;
-var keyboard_report_count: u64 = 0;
 // Never reset with controller counters: a reclaimed USB slot is a new input
 // lifetime even when the replacement reports the same device identity.
 var keyboard_continuity_epoch: u64 = 1;
@@ -134,7 +111,6 @@ fn publishControllerActive(value: bool) void {
 
 fn resetInterruptAccounting() void {
     @atomicStore(u32, &pending_interrupts, 0, .monotonic);
-    @atomicStore(u64, &interrupt_count, 0, .monotonic);
 }
 
 const PortAction = enum(u8) {
@@ -166,10 +142,10 @@ const PortRuntimeState = struct {
     enabled: bool = false,
     addressed: bool = false,
     descriptor_prefix_valid: bool = false,
-    device_descriptor: ?xhci.UsbDeviceDescriptor = null,
-    configuration_descriptor_header: ?xhci.UsbConfigurationDescriptor = null,
-    configuration_descriptor: ?xhci.UsbConfigurationDescriptor = null,
-    boot_keyboard: ?xhci.UsbBootKeyboardConfiguration = null,
+    device_descriptor: ?xhci.descriptors.UsbDeviceDescriptor = null,
+    configuration_descriptor_header: ?xhci.descriptors.UsbConfigurationDescriptor = null,
+    configuration_descriptor: ?xhci.descriptors.UsbConfigurationDescriptor = null,
+    boot_keyboard: ?xhci.descriptors.UsbBootKeyboardConfiguration = null,
     configuration_set: bool = false,
     boot_protocol_set: bool = false,
     endpoint_configured: bool = false,
@@ -186,7 +162,7 @@ const ControllerRuntimeStateAllocation = struct {
     frames: paging.FrameRun,
     states: []PortRuntimeState,
     keyboard_reports: *xhci.BootKeyboardReportPublisher,
-    protocols: *const xhci.SupportedProtocols,
+    protocols: *xhci.caps.SupportedProtocols,
 };
 
 comptime {
@@ -203,9 +179,9 @@ comptime {
     const protocols_offset = std.mem.alignForward(
         usize,
         publisher_offset + @sizeOf(xhci.BootKeyboardReportPublisher),
-        @alignOf(xhci.SupportedProtocols),
+        @alignOf(xhci.caps.SupportedProtocols),
     );
-    const maximum_runtime_bytes = protocols_offset + @sizeOf(xhci.SupportedProtocols);
+    const maximum_runtime_bytes = protocols_offset + @sizeOf(xhci.caps.SupportedProtocols);
     const maximum_frame_count = (maximum_runtime_bytes + PAGE_BYTES - 1) / PAGE_BYTES;
     if (maximum_frame_count > CONTROLLER_RUNTIME_STATE_MAX_FRAME_COUNT) {
         @compileError("xHCI controller runtime state exceeds its bounded frame ceiling");
@@ -213,7 +189,7 @@ comptime {
 }
 
 const OutstandingCommand = struct {
-    kind: xhci.CommandKind,
+    kind: xhci.trb.CommandKind,
     trb_address: u64,
     port_id: u8,
     slot_id: u8,
@@ -240,12 +216,24 @@ const OutstandingTransfer = struct {
     deadline: tsc_clock.Deadline,
 };
 
+/// Ring, slot and transfer bookkeeping for one controller lifetime. Probe and
+/// activate start each lifetime from `.{}`.
+const Runtime = struct {
+    event_consumer: xhci.trb.EventRingConsumer = .{},
+    command_producer: xhci.trb.TrbRingProducer = .{},
+    control_producers: [xhci.MAX_DEVICE_SLOTS + 1]xhci.trb.TrbRingProducer = @splat(.{}),
+    interrupt_producers: [xhci.MAX_DEVICE_SLOTS + 1]xhci.trb.TrbRingProducer = @splat(.{}),
+    slot_to_port: [xhci.MAX_DEVICE_SLOTS + 1]u8 = @splat(0),
+    outstanding_interrupt_reports: usize = 0,
+    outstanding_command: ?OutstandingCommand = null,
+    outstanding_transfer: ?OutstandingTransfer = null,
+    next_port_scan: u16 = 1,
+    keyboard_report_count: u64 = 0,
+};
+
 var empty_port_runtime_states: [0]PortRuntimeState = .{};
 var ports: []PortRuntimeState = empty_port_runtime_states[0..];
 var active_controller_runtime_state_frames: ?paging.FrameRun = null;
-var outstanding_command: ?OutstandingCommand = null;
-var outstanding_transfer: ?OutstandingTransfer = null;
-var next_port_scan: u16 = 1;
 
 fn keyboardReportPublisherOffsetFor(max_ports: u8) usize {
     const state_count = @as(usize, max_ports) + 1;
@@ -259,7 +247,7 @@ fn keyboardReportPublisherOffsetFor(max_ports: u8) usize {
 
 fn controllerRuntimeStateFrameCountFor(max_ports: u8) u32 {
     const runtime_bytes = supportedProtocolsOffsetFor(max_ports) +
-        @sizeOf(xhci.SupportedProtocols);
+        @sizeOf(xhci.caps.SupportedProtocols);
     return @intCast((runtime_bytes + PAGE_BYTES - 1) / PAGE_BYTES);
 }
 
@@ -268,14 +256,11 @@ fn supportedProtocolsOffsetFor(max_ports: u8) usize {
         usize,
         keyboardReportPublisherOffsetFor(max_ports) +
             @sizeOf(xhci.BootKeyboardReportPublisher),
-        @alignOf(xhci.SupportedProtocols),
+        @alignOf(xhci.caps.SupportedProtocols),
     );
 }
 
-fn allocateControllerRuntimeState(
-    max_ports: u8,
-    protocols: *const xhci.SupportedProtocols,
-) Error!ControllerRuntimeStateAllocation {
+fn allocateControllerRuntimeState(max_ports: u8) Error!ControllerRuntimeStateAllocation {
     const state_count = @as(usize, max_ports) + 1;
     const publisher_offset = keyboardReportPublisherOffsetFor(max_ports);
     const protocols_offset = supportedProtocolsOffsetFor(max_ports);
@@ -294,9 +279,8 @@ fn allocateControllerRuntimeState(
     const keyboard_reports: *xhci.BootKeyboardReportPublisher =
         @ptrFromInt(@as(usize, base) + publisher_offset);
     keyboard_reports.* = .{};
-    const protocol_state: *xhci.SupportedProtocols =
+    const protocol_state: *xhci.caps.SupportedProtocols =
         @ptrFromInt(@as(usize, base) + protocols_offset);
-    protocol_state.* = protocols.*;
     return .{
         .frames = frames,
         .states = states,
@@ -316,95 +300,69 @@ inline fn keyboardReports() *xhci.BootKeyboardReportPublisher {
 
 pub fn probe(device_info: pci.PCIDevice) Error!void {
     if (active_dma_plan != null) return error.AlreadyPrepared;
-    if (pci.busMasteringEnabled(device_info)) return error.BusMasteringNotRevoked;
     active_capabilities = null;
     active_protocols = null;
     active_legacy_ownership = null;
     active_controller_reset = false;
     active_enabled_slots = 0;
     active_dma_memory = .{};
-    active_bar_address = 0;
-    active_bar_bytes = 0;
+    mmio = .{ .base = mmio_windows.xhci.base, .bytes = 0 };
     publishControllerActive(false);
-    event_consumer = .{};
-    command_producer = .{};
-    control_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
-    interrupt_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
-    slot_to_port = @as([xhci.MAX_DEVICE_SLOTS + 1]u8, @splat(0));
+    runtime = .{};
     active_keyboard_reports = null;
-    outstanding_interrupt_reports = 0;
     ports = empty_port_runtime_states[0..];
     active_controller_runtime_state_frames = null;
-    outstanding_command = null;
-    outstanding_transfer = null;
-    next_port_scan = 1;
     resetInterruptAccounting();
-    event_count = 0;
-    port_status_change_count = 0;
-    command_completion_count = 0;
-    transfer_completion_count = 0;
-    descriptor_prefix_count = 0;
-    device_descriptor_count = 0;
-    configuration_descriptor_header_count = 0;
-    configuration_descriptor_count = 0;
-    set_configuration_count = 0;
-    set_boot_protocol_count = 0;
-    configure_endpoint_count = 0;
-    interrupt_report_submission_count = 0;
-    keyboard_report_count = 0;
     const bar = try validateBar(device_info);
-    const aperture = (pci.probeMemoryBars(device_info) catch return error.BarUnmappable)[0];
-    if (aperture.address != bar.address or aperture.length < PAGE_BYTES) return error.BarUnmappable;
-    paging.mapKernelDeviceRange(
-        mmio_windows.xhci.base,
-        bar.address,
-        PAGE_BYTES,
-        false,
-    ) catch return error.MmioMappingFailed;
+    const aperture = pci.admitMemoryBar0(device_info, PAGE_BYTES) catch |err| return switch (err) {
+        error.BusMasteringNotRevoked => error.BusMasteringNotRevoked,
+        else => error.BarUnmappable,
+    };
+    // Map the register aperture once for the controller lifetime. Fresh
+    // absent-to-present leaves need no shootdown, and no access remaps.
+    const mapped_bytes: u32 = @intCast(@min(aperture.length, mmio_windows.xhci.bytes));
+    paging.mapKernelDeviceRange(mmio_windows.xhci.base, bar.address, mapped_bytes, true) catch
+        return error.MmioMappingFailed;
+    mmio.bytes = mapped_bytes;
     const snapshot = readCapabilitySnapshot(mmio_windows.xhci.base);
     var capabilities: xhci.CapabilityRegisters = undefined;
-    try xhci.parseCapabilityRegistersInto(&capabilities, &snapshot);
-    try validateExtendedCapabilityRange(bar.address, capabilities.extended_capability_offset);
-    try validateControllerRegisterRanges(bar.address, capabilities);
-    try validateControllerAperture(aperture.length, capabilities);
+    try xhci.caps.parseCapabilityRegistersInto(&capabilities, &snapshot);
+    try validateControllerAperture(mapped_bytes, capabilities);
     if (!tsc_clock.initialized()) return error.InvariantClockUnavailable;
-    var reader = ExtendedCapabilityReader{ .bar_address = bar.address, .bar_bytes = aperture.length };
-    var protocols: xhci.SupportedProtocols = undefined;
-    xhci.parseSupportedProtocolsInto(
-        &protocols,
-        capabilities,
-        capabilities.extended_capability_offset,
-        &reader,
-    ) catch |err| return reader.mapping_error orelse err;
-    if (reader.mapping_error) |err| return err;
-    const legacy = xhci.findLegacySupport(capabilities.extended_capability_offset, &reader) catch |err| return reader.mapping_error orelse err;
-    if (reader.mapping_error) |err| return err;
-    const legacy_ownership = if (legacy) |support| ownership: {
-        break :ownership xhci.claimLegacyOwnership(
-            support,
-            &reader,
-            tsc_clock.afterMilliseconds(OWNERSHIP_TIMEOUT_MILLISECONDS),
-        ) catch |err| return reader.mapping_error orelse err;
-    } else xhci.LegacyOwnership.not_present;
-    if (reader.mapping_error) |err| return err;
-    xhci.resetOwnedController(capabilities.capability_length, &reader, InvariantClock{}) catch |err| return reader.mapping_error orelse err;
-    if (reader.mapping_error) |err| return err;
-    const enabled_slots = xhci.configureDeviceSlots(capabilities, &reader) catch |err| return reader.mapping_error orelse err;
-    if (reader.mapping_error) |err| return err;
 
-    const controller_runtime_state = try allocateControllerRuntimeState(
-        capabilities.max_ports,
-        &protocols,
-    );
+    const controller_runtime_state = try allocateControllerRuntimeState(capabilities.max_ports);
     var retain_controller_runtime_state = false;
     errdefer if (!retain_controller_runtime_state) paging.releaseGeneralFrames(
         controller_runtime_state.frames,
     ) catch {};
-    const dma_frame_count = try xhci.controllerDmaFrameCount(capabilities, enabled_slots);
-    const dma_base = paging.allocIdentityDmaFrames(dma_frame_count) orelse return error.DmaAllocationFailed;
+    // Firmware controls the extended capability chain. A walk that leaves
+    // the mapped aperture fails probe closed instead of reading zeros.
+    xhci.caps.parseSupportedProtocolsInto(
+        controller_runtime_state.protocols,
+        capabilities,
+        capabilities.extended_capability_offset,
+        &mmio,
+    ) catch |err| return apertureError(err);
+    const legacy = xhci.caps.findLegacySupport(capabilities.extended_capability_offset, &mmio) catch |err|
+        return apertureError(err);
+    const legacy_ownership = if (legacy) |support|
+        xhci.caps.claimLegacyOwnership(
+            support,
+            &mmio,
+            tsc_clock.afterMilliseconds(OWNERSHIP_TIMEOUT_MILLISECONDS),
+        ) catch |err| return apertureError(err)
+    else
+        xhci.LegacyOwnership.not_present;
+    if (mmio.out_of_bounds) return error.BarRangeOutsideAperture;
+    try xhci.controller.resetOwnedController(capabilities.capability_length, &mmio, InvariantClock{});
+    const enabled_slots = try xhci.controller.configureDeviceSlots(capabilities, &mmio);
+
+    const dma_frame_count = try xhci.dma_plan.controllerDmaFrameCount(capabilities, enabled_slots);
+    const dma_run = paging.allocGeneralFrames(dma_frame_count) orelse return error.DmaAllocationFailed;
     var retain_dma_frames = false;
-    errdefer if (!retain_dma_frames) paging.releaseIdentityDmaFrames(dma_base, dma_frame_count) catch {};
-    const dma_plan = try xhci.planControllerDma(capabilities, enabled_slots, dma_base);
+    errdefer if (!retain_dma_frames) paging.releaseGeneralFrames(dma_run) catch {};
+    const dma_base = dma_run.base;
+    const dma_plan = try xhci.dma_plan.planControllerDma(capabilities, enabled_slots, dma_base);
     if (try dma_plan.frameCount() > dma_frame_count) return error.DmaIsolationPlanInvalid;
     const dma_bytes = std.math.cast(usize, dma_plan.total_bytes) orelse
         return error.DmaIsolationPlanInvalid;
@@ -413,19 +371,16 @@ pub fn probe(device_info: pci.PCIDevice) Error!void {
         .alias_base = paging.directMapAddress(dma_base) orelse return error.DmaAllocationFailed,
         .byte_len = dma_bytes,
     };
-    try xhci.initializeControllerDma(dma_plan, dma_memory.bytes());
+    try xhci.dma_plan.initializeControllerDma(dma_plan, dma_memory.bytes());
     publishDmaStructures();
-    xhci.programControllerDmaRegisters(capabilities, dma_plan, &reader) catch |err| return reader.mapping_error orelse err;
-    if (reader.mapping_error) |err| return err;
+    try xhci.controller.programControllerDmaRegisters(capabilities, dma_plan, &mmio);
+    if (mmio.out_of_bounds) return error.BarRangeOutsideAperture;
     const dma_window_count = try buildDmaWindows(dma_plan, &active_dma_windows);
 
     active_device = device_info;
     active_dma_plan = dma_plan;
     active_dma_memory = dma_memory;
-    active_dma_frame_count = dma_frame_count;
     active_dma_window_count = dma_window_count;
-    active_bar_address = bar.address;
-    active_bar_bytes = aperture.length;
     active_capabilities = capabilities;
     active_protocols = controller_runtime_state.protocols;
     active_legacy_ownership = legacy_ownership;
@@ -436,6 +391,10 @@ pub fn probe(device_info: pci.PCIDevice) Error!void {
     active_controller_runtime_state_frames = controller_runtime_state.frames;
     retain_controller_runtime_state = true;
     retain_dma_frames = true;
+}
+
+fn apertureError(err: Error) Error {
+    return if (mmio.out_of_bounds) error.BarRangeOutsideAperture else err;
 }
 
 pub fn validated() bool {
@@ -452,39 +411,6 @@ pub fn validated() bool {
         active_dma_plan != null and
         active_dma_memory.byte_len != 0 and
         active_dma_window_count != 0;
-}
-
-pub fn probedCapabilities() ?xhci.CapabilityRegisters {
-    return active_capabilities;
-}
-
-pub fn publishedBar() ?struct { physical_base: u64, length: u64 } {
-    if (active_bar_address == 0) return null;
-    return .{ .physical_base = active_bar_address, .length = PAGE_BYTES };
-}
-
-pub fn probedLegacyOwnership() ?xhci.LegacyOwnership {
-    return active_legacy_ownership;
-}
-
-pub fn controllerReset() bool {
-    return active_controller_reset;
-}
-
-pub fn enabledDeviceSlots() u8 {
-    return active_enabled_slots;
-}
-
-pub fn dmaPlan() ?xhci.ControllerDmaPlan {
-    return active_dma_plan;
-}
-
-pub fn dmaFrameCount() u32 {
-    return active_dma_frame_count;
-}
-
-pub fn dmaBaseAddress() u32 {
-    return active_dma_memory.physical_base;
 }
 
 pub fn isolationDomain() ?intel_vtd.DmaDomain {
@@ -506,64 +432,28 @@ pub fn controllerDeviceId() ?u64 {
 
 pub fn activate() Error!void {
     if (controllerActive()) return;
-    if (!validated() or !intel_vtd.requesterProtected(active_device)) {
-        return error.DmaIsolationBypassed;
-    }
-    if (!intel_vtd.faultMonitoringEnabled()) return error.DmaFaultMonitoringUnavailable;
-    if (!intel_vtd.interruptIsolationEnabled()) return error.InterruptIsolationUnavailable;
+    if (!validated()) return error.DmaIsolationBypassed;
+    dma_enforcement.ensureEnforced() catch return error.DmaIsolationBypassed;
+    try device_isolation.requireIsolated(active_device);
 
     const capabilities = active_capabilities.?;
-    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address, .bar_bytes = active_bar_bytes };
-    const remapped = intel_vtd.routeInterrupt(
-        active_device,
-        INTERRUPT_VECTOR,
-        smp.irqDestinationId(),
-    ) catch return error.InterruptRouteInstallFailed;
-    pci.enableSingleMsi(active_device, .{
-        .address = remapped.address,
-        .data = remapped.data,
-    }) catch return error.MsiEnableFailed;
-    var msi_enabled = true;
+    try device_isolation.routeInterrupt(active_device, INTERRUPT_VECTOR, .msi);
     var bus_master_enabled = false;
     errdefer {
         publishControllerActive(false);
-        xhci.quiesceOwnedController(capabilities, &reader);
-        if (msi_enabled) pci.disableMsi(active_device) catch {};
+        xhci.controller.quiesceOwnedController(capabilities, &mmio);
         if (bus_master_enabled) pci.disableBusMastering(active_device);
+        device_isolation.revokeInterrupt(active_device);
     }
 
     bus_master_enabled = true;
     pci.enableMemoryBusMastering(active_device) catch return error.BusMasterEnableFailed;
 
-    event_consumer = .{};
-    command_producer = .{};
-    control_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
-    interrupt_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
-    slot_to_port = @as([xhci.MAX_DEVICE_SLOTS + 1]u8, @splat(0));
-    outstanding_interrupt_reports = 0;
+    runtime = .{};
     resetControllerRuntimeState();
-    outstanding_command = null;
-    outstanding_transfer = null;
-    next_port_scan = 1;
     resetInterruptAccounting();
-    event_count = 0;
-    port_status_change_count = 0;
-    command_completion_count = 0;
-    transfer_completion_count = 0;
-    descriptor_prefix_count = 0;
-    device_descriptor_count = 0;
-    configuration_descriptor_header_count = 0;
-    configuration_descriptor_count = 0;
-    set_configuration_count = 0;
-    set_boot_protocol_count = 0;
-    configure_endpoint_count = 0;
-    interrupt_report_submission_count = 0;
-    keyboard_report_count = 0;
     publishControllerActive(true);
-    xhci.startOwnedController(capabilities, &reader, InvariantClock{}) catch |err| return reader.mapping_error orelse err;
-    if (reader.mapping_error) |err| return err;
-    msi_enabled = false;
-    bus_master_enabled = false;
+    try xhci.controller.startOwnedController(capabilities, &mmio, InvariantClock{});
 }
 
 pub fn attached() bool {
@@ -573,7 +463,6 @@ pub fn attached() bool {
 pub fn handleInterrupt() void {
     if (controllerActive()) {
         _ = @atomicRmw(u32, &pending_interrupts, .Add, 1, .monotonic);
-        _ = @atomicRmw(u64, &interrupt_count, .Add, 1, .monotonic);
     }
     x2apic.acknowledge();
 }
@@ -586,7 +475,7 @@ pub fn eventWorkPending() bool {
 
 pub fn lifecyclePending() bool {
     if (!controllerActive()) return false;
-    if (outstanding_command != null or outstanding_transfer != null) return true;
+    if (runtime.outstanding_command != null or runtime.outstanding_transfer != null) return true;
     const capabilities = active_capabilities orelse return false;
     var port_id: u16 = 1;
     while (port_id <= capabilities.max_ports) : (port_id += 1) {
@@ -608,13 +497,8 @@ pub fn servicePendingEvents() usize {
     if (interrupt_wakes == 0 and !event_ready and !lifecyclePending()) return 0;
     if (pollDmaFault()) return 0;
     if (lifecycleTimedOut()) return 0;
-    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address, .bar_bytes = active_bar_bytes };
     if (interrupt_wakes == 0 and !event_ready) {
-        submitNextPortAction(&reader) catch {
-            containFailure("ZIGOS:XHCI:HW:COMMAND_SUBMIT_CONTAINED\n");
-            return 0;
-        };
-        if (reader.mapping_error != null) containFailure("ZIGOS:XHCI:HW:MMIO_MAPPING_CONTAINED\n");
+        submitNextPortAction(&mmio) catch containFailure("ZIGOS:XHCI:HW:COMMAND_SUBMIT_CONTAINED\n");
         return 0;
     }
 
@@ -622,15 +506,14 @@ pub fn servicePendingEvents() usize {
     var processed: usize = 0;
     while (processed < plan.ring_plan.event_ring_trbs) : (processed += 1) {
         const words = readCurrentEvent() orelse break;
-        const event = event_consumer.consume(
+        const event = runtime.event_consumer.consume(
             words,
             plan.ring_plan.event_ring_trbs,
         ) catch {
             containFailure("ZIGOS:XHCI:HW:EVENT_RING_STATE_CONTAINED\n");
             return processed;
         } orelse break;
-        event_count +%= 1;
-        handleEvent(event, &reader) catch {
+        handleEvent(event, &mmio) catch {
             containFailure(switch (event.kind) {
                 .port_status_change => "ZIGOS:XHCI:HW:PORT_EVENT_CONTAINED\n",
                 .command_completion => "ZIGOS:XHCI:HW:COMMAND_EVENT_CONTAINED\n",
@@ -639,122 +522,51 @@ pub fn servicePendingEvents() usize {
             });
             return processed + 1;
         };
-        if (reader.mapping_error != null) {
-            containFailure("ZIGOS:XHCI:HW:MMIO_MAPPING_CONTAINED\n");
-            return processed + 1;
-        }
     }
 
-    const dequeue_address = event_consumer.dequeueAddress(
+    const dequeue_address = runtime.event_consumer.dequeueAddress(
         plan.ring_plan.event_ring_address,
         plan.ring_plan.event_ring_trbs,
     ) catch {
         containFailure("ZIGOS:XHCI:HW:EVENT_RING_STATE_CONTAINED\n");
         return processed;
     };
-    xhci.acknowledgePrimaryEventRing(
+    xhci.controller.acknowledgePrimaryEventRing(
         active_capabilities.?,
         dequeue_address,
-        &reader,
+        &mmio,
     ) catch {
         containFailure("ZIGOS:XHCI:HW:ERDP_REJECTED_CONTAINED\n");
         return processed;
     };
-    if (!xhci.controllerRunningHealthy(active_capabilities.?, &reader)) {
+    if (!xhci.controller.controllerRunningHealthy(active_capabilities.?, &mmio)) {
         containFailure("ZIGOS:XHCI:HW:RUN_STATE_CONTAINED\n");
         return processed;
     }
-    submitNextPortAction(&reader) catch {
-        containFailure("ZIGOS:XHCI:HW:COMMAND_SUBMIT_CONTAINED\n");
-        return processed;
-    };
-    if (reader.mapping_error != null) containFailure("ZIGOS:XHCI:HW:MMIO_MAPPING_CONTAINED\n");
+    submitNextPortAction(&mmio) catch containFailure("ZIGOS:XHCI:HW:COMMAND_SUBMIT_CONTAINED\n");
     return processed;
 }
 
-fn handleEvent(event: xhci.Event, reader: anytype) Error!void {
+fn handleEvent(event: xhci.trb.Event, reader: anytype) Error!void {
     switch (event.kind) {
-        .port_status_change => {
-            try handlePortStatusChange(event, reader);
-            port_status_change_count +%= 1;
-        },
-        .command_completion => {
-            try handleCommandCompletion(event, reader);
-            command_completion_count +%= 1;
-        },
-        .transfer => {
-            if (event.endpoint_id == xhci.ENDPOINT_ZERO_DCI) {
-                try handleControlTransferCompletion(event, reader);
-            } else {
-                try handleInterruptTransferCompletion(event, reader);
-            }
-            transfer_completion_count +%= 1;
-        },
+        .port_status_change => try handlePortStatusChange(event, reader),
+        .command_completion => try handleCommandCompletion(event, reader),
+        .transfer => if (event.endpoint_id == xhci.ENDPOINT_ZERO_DCI)
+            try handleControlTransferCompletion(event, reader)
+        else
+            try handleInterruptTransferCompletion(event, reader),
         .host_controller, .vendor_defined, .unknown => return error.EventRingStateInvalid,
         .bandwidth_request, .doorbell, .device_notification, .mfindex_wrap => {},
     }
 }
 
-pub fn processedEventCount() u64 {
-    return event_count;
-}
-
-pub fn portStatusChangeEventCount() u64 {
-    return port_status_change_count;
-}
-
-pub fn commandCompletionEventCount() u64 {
-    return command_completion_count;
-}
-
-pub fn transferCompletionEventCount() u64 {
-    return transfer_completion_count;
-}
-
-pub fn deviceDescriptorPrefixCount() u64 {
-    return descriptor_prefix_count;
-}
-
-pub fn deviceDescriptorCount() u64 {
-    return device_descriptor_count;
-}
-
-pub fn configurationDescriptorHeaderCount() u64 {
-    return configuration_descriptor_header_count;
-}
-
-pub fn configurationDescriptorCount() u64 {
-    return configuration_descriptor_count;
-}
-
-pub fn setConfigurationCount() u64 {
-    return set_configuration_count;
-}
-
-pub fn setBootProtocolCount() u64 {
-    return set_boot_protocol_count;
-}
-
-pub fn configureEndpointCount() u64 {
-    return configure_endpoint_count;
-}
-
-pub fn interruptReportSubmissionCount() u64 {
-    return interrupt_report_submission_count;
-}
-
 pub fn keyboardReportCount() u64 {
-    return keyboard_report_count;
+    return runtime.keyboard_report_count;
 }
 
 pub fn keyboardContinuityEpoch() ?u64 {
     if (!controllerActive() or keyboard_continuity_epoch == std.math.maxInt(u64)) return null;
     return keyboard_continuity_epoch;
-}
-
-pub fn keyboardReportAfter(observed_sequence: u64) ?xhci.HardwareBootKeyboardReport {
-    if (!controllerActive()) return null;
-    return keyboardReports().latestAfter(observed_sequence);
 }
 
 pub fn pollKeyboardReport() ?xhci.HardwareBootKeyboardReport {
@@ -764,113 +576,23 @@ pub fn pollKeyboardReport() ?xhci.HardwareBootKeyboardReport {
     return report;
 }
 
+/// The latest hardware event-ring keyboard report, bound to the port whose
+/// configured slot and endpoint delivered it.
 pub fn inputProof() ?xhci.InputProof {
     if (!controllerActive()) return null;
     const report = keyboardReports().latestAfter(0) orelse return null;
     const state = &ports[report.port_id];
-    _ = state.device_descriptor orelse return null;
     const keyboard = state.boot_keyboard orelse return null;
     if (state.retiring or !state.endpoint_configured or state.slot_id != report.slot_id or
         keyboard.endpoint_id != report.endpoint_id)
     {
         return null;
     }
-    const capabilities = active_capabilities orelse return null;
-    const plan = active_dma_plan orelse return null;
-    const delivered_events = std.math.cast(usize, keyboard_report_count) orelse return null;
-    const delivered_events_u32 = saturatingU32(keyboard_report_count);
-    const control_doorbells = descriptor_prefix_count +| device_descriptor_count +|
-        configuration_descriptor_header_count +| configuration_descriptor_count +|
-        set_configuration_count +| set_boot_protocol_count;
-    const input_report_dma_bytes = std.math.mul(
-        u64,
-        keyboard_report_count,
-        xhci.HID_BOOT_KEYBOARD_REPORT_BYTES,
-    ) catch std.math.maxInt(u64);
     return .{
-        .keyboard = .{
-            .device_id = pci.stableDeviceId(active_device),
-            .port_id = report.port_id,
-            .slot_id = report.slot_id,
-            .interface_number = keyboard.interface_number,
-            .endpoint_id = keyboard.endpoint_id,
-            .max_packet_size = keyboard.max_packet_size,
-            .interval = keyboard.interval,
-        },
-        .event_count = delivered_events,
-        .mmio = .{
-            .doorbell_offset = capabilities.doorbell_offset,
-            .runtime_register_offset = capabilities.runtime_register_offset,
-            .command_ring_address = plan.ring_plan.command_ring_address,
-            .event_ring_address = plan.ring_plan.event_ring_address,
-            .device_context_base_address = plan.arena.device_contexts_address,
-            .input_context_address = plan.arena.input_context_address,
-            .transfer_ring_address = plan.arena.interruptTransferRingAddress(report.slot_id) catch return null,
-            .event_ring_segment_table_address = plan.event_ring_segment_table_address,
-            .context_size = capabilities.context_size,
-            .device_context_bytes = std.math.cast(u32, plan.arena.device_contexts_bytes) orelse
-                return null,
-            .input_context_bytes = plan.arena.input_context_bytes,
-            .transfer_ring_trbs = plan.arena.interrupt_transfer_ring_trbs,
-            .event_ring_segment_table_entries = plan.event_ring_segment_table_entries,
-            .command_doorbells = saturatingU32(command_completion_count),
-            .transfer_doorbells = saturatingU32(control_doorbells +| interrupt_report_submission_count),
-            .device_context_writes = 2,
-            .endpoint_context_writes = saturatingU32(configure_endpoint_count),
-            .event_ring_segment_table_writes = plan.event_ring_segment_table_entries,
-            .event_ring_dequeue_count = saturatingU32(event_count),
-            .interrupt_events = delivered_events_u32,
-            .interrupter_id = INTERRUPT_VECTOR,
-            .enabled_device_slots = active_enabled_slots,
-            .max_ports = capabilities.max_ports,
-            .hardware_input = .{
-                .source = .hardware_event_ring,
-                .controller_event_trbs = delivered_events_u32,
-                .event_ring_dma_writes = delivered_events_u32,
-                .device_context_reads_by_controller = 1,
-                .endpoint_context_reads_by_controller = 1,
-                .interrupt_assertions = saturatingU32(@atomicLoad(u64, &interrupt_count, .monotonic)),
-                .port_status_change_events = saturatingU32(port_status_change_count),
-                .input_report_dma_bytes = input_report_dma_bytes,
-            },
-        },
+        .port_id = report.port_id,
+        .slot_id = report.slot_id,
+        .event_count = std.math.cast(usize, runtime.keyboard_report_count) orelse return null,
     };
-}
-
-fn saturatingU32(value: u64) u32 {
-    return @intCast(@min(value, std.math.maxInt(u32)));
-}
-
-pub fn deviceDescriptorForPort(port_id: u8) ?xhci.UsbDeviceDescriptor {
-    if (!controllerActive()) return null;
-    const capabilities = active_capabilities orelse return null;
-    if (port_id == 0 or port_id > capabilities.max_ports) return null;
-    return if (ports[port_id].retiring) null else ports[port_id].device_descriptor;
-}
-
-pub fn configurationDescriptorForPort(port_id: u8) ?xhci.UsbConfigurationDescriptor {
-    if (!controllerActive()) return null;
-    const capabilities = active_capabilities orelse return null;
-    if (port_id == 0 or port_id > capabilities.max_ports) return null;
-    return if (ports[port_id].retiring) null else ports[port_id].configuration_descriptor;
-}
-
-pub fn bootKeyboardConfigurationForPort(port_id: u8) ?xhci.UsbBootKeyboardConfiguration {
-    if (!controllerActive()) return null;
-    const capabilities = active_capabilities orelse return null;
-    if (port_id == 0 or port_id > capabilities.max_ports) return null;
-    return if (ports[port_id].retiring) null else ports[port_id].boot_keyboard;
-}
-
-pub fn portConfigured(port_id: u8) bool {
-    if (!controllerActive()) return false;
-    const capabilities = active_capabilities orelse return false;
-    if (port_id == 0 or port_id > capabilities.max_ports) return false;
-    return !ports[port_id].retiring and ports[port_id].endpoint_configured;
-}
-
-pub fn handledInterruptCount() u64 {
-    return @atomicLoad(u64, &interrupt_count, .monotonic);
 }
 
 fn clearPortDescriptorState(state: *PortRuntimeState) void {
@@ -892,7 +614,7 @@ fn clearPortDescriptorState(state: *PortRuntimeState) void {
 
 fn scheduleUnarmedInterruptReports() void {
     const capabilities = active_capabilities orelse return;
-    var reserved = outstanding_interrupt_reports;
+    var reserved = runtime.outstanding_interrupt_reports;
     var existing_port_id: u16 = 1;
     while (existing_port_id <= capabilities.max_ports) : (existing_port_id += 1) {
         if (ports[existing_port_id].action == .post_interrupt_report) reserved += 1;
@@ -923,19 +645,16 @@ fn beginPortRetirement(port_id: u8, state: *PortRuntimeState) void {
     state.action = .retire_slot;
 }
 
-fn handlePortStatusChange(event: xhci.Event, reader: anytype) Error!void {
+fn handlePortStatusChange(event: xhci.trb.Event, reader: anytype) Error!void {
     const capabilities = active_capabilities orelse return error.InvalidPortStatus;
     const protocols = active_protocols orelse return error.MissingSupportedProtocols;
     if (!event.succeeded() or event.port_id == 0 or event.port_id > capabilities.max_ports) {
         return error.InvalidPortStatus;
     }
     const protocol = protocols.forPort(event.port_id) orelse return error.MissingPortProtocol;
-    const register_offset = try xhci.portRegisterOffset(capabilities, event.port_id);
+    const register_offset = try xhci.controller.portRegisterOffset(capabilities, event.port_id);
     const raw_status = reader.readReg32(register_offset);
-    if (comptime @hasField(@TypeOf(reader.*), "mapping_error")) {
-        if (reader.mapping_error) |err| return err;
-    }
-    const status = xhci.decodePortStatus(raw_status);
+    const status = xhci.controller.decodePortStatus(raw_status);
     if (status.over_current) return error.InvalidPortStatus;
     // A previously acknowledged change can have another queued notification.
     if (status.change_bits == 0) return;
@@ -949,7 +668,7 @@ fn handlePortStatusChange(event: xhci.Event, reader: anytype) Error!void {
     state.connected = status.connected;
     state.enabled = status.enabled;
     if (changed_lifetime) {
-        reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        reader.writeReg32(register_offset, xhci.controller.portStatusAcknowledge(raw_status));
         keyboardReports().clearPort(event.port_id);
         if (state.slot_id != 0 or commandTargets(event.port_id, .enable_slot)) {
             beginPortRetirement(event.port_id, state);
@@ -969,7 +688,7 @@ fn handlePortStatusChange(event: xhci.Event, reader: anytype) Error!void {
         return;
     }
     if (state.retiring) {
-        reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        reader.writeReg32(register_offset, xhci.controller.portStatusAcknowledge(raw_status));
         // Remember the replacement attachment, but never enumerate the old slot.
         state.speed_id = status.speed;
         state.action = .retire_slot;
@@ -977,8 +696,8 @@ fn handlePortStatusChange(event: xhci.Event, reader: anytype) Error!void {
     }
     if (!status.powered) return error.InvalidPortStatus;
     if (status.enabled) {
-        const initial_max_packet_size = try xhci.endpointZeroMaxPacketSize(protocol, status.speed);
-        reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        const initial_max_packet_size = try xhci.descriptors.endpointZeroMaxPacketSize(protocol, status.speed);
+        reader.writeReg32(register_offset, xhci.controller.portStatusAcknowledge(raw_status));
         state.speed_id = status.speed;
         state.reset_deadline = null;
         if (state.slot_id == 0 and !commandTargets(event.port_id, .enable_slot)) {
@@ -1030,11 +749,11 @@ fn handlePortStatusChange(event: xhci.Event, reader: anytype) Error!void {
         return;
     }
     if ((status.change_bits & PORT_RESET_COMPLETION_CHANGE_MASK) != 0) {
-        reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        reader.writeReg32(register_offset, xhci.controller.portStatusAcknowledge(raw_status));
         return error.InvalidPortStatus;
     }
     if (status.reset_active) {
-        reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        reader.writeReg32(register_offset, xhci.controller.portStatusAcknowledge(raw_status));
         if (state.reset_deadline == null) {
             state.reset_deadline = tsc_clock.afterMilliseconds(PORT_RESET_TIMEOUT_MILLISECONDS);
         }
@@ -1042,12 +761,12 @@ fn handlePortStatusChange(event: xhci.Event, reader: anytype) Error!void {
     }
     if (protocol.kind == .usb3 and !status.cold_attach) return error.InvalidPortStatus;
 
-    reader.writeReg32(register_offset, xhci.portResetWrite(raw_status, protocol));
+    reader.writeReg32(register_offset, xhci.controller.portResetWrite(raw_status, protocol));
     state.reset_deadline = tsc_clock.afterMilliseconds(PORT_RESET_TIMEOUT_MILLISECONDS);
 }
 
-fn handleCommandCompletion(event: xhci.Event, reader: anytype) Error!void {
-    const command = outstanding_command orelse return error.CommandRingStateInvalid;
+fn handleCommandCompletion(event: xhci.trb.Event, reader: anytype) Error!void {
+    const command = runtime.outstanding_command orelse return error.CommandRingStateInvalid;
     if (command.state_error_seen or event.parameter != command.trb_address) {
         return error.CommandRingStateInvalid;
     }
@@ -1061,7 +780,7 @@ fn handleCommandCompletion(event: xhci.Event, reader: anytype) Error!void {
             const bit = try failedEndpointBit(state, command.endpoint_id);
             if ((state.endpoint_state.failed_mask & bit) != 0) {
                 state.action = .retire_slot;
-                outstanding_command = null;
+                runtime.outstanding_command = null;
                 return;
             }
             if (!endpointTransferOwned(command.port_id, state, command.endpoint_id)) {
@@ -1069,7 +788,7 @@ fn handleCommandCompletion(event: xhci.Event, reader: anytype) Error!void {
             }
             // This completed Stop may precede its failed TD event. Keep its
             // original deadline and TD ownership; only exact CC4 permits Reset.
-            outstanding_command.?.state_error_seen = true;
+            runtime.outstanding_command.?.state_error_seen = true;
             return;
         }
         // 1.2c 4.6.5: USB Transaction Error leaves Address Device incomplete.
@@ -1083,7 +802,7 @@ fn handleCommandCompletion(event: xhci.Event, reader: anytype) Error!void {
         }
         try authenticatePortRetirement(command.port_id, state, reader);
         state.action = .retire_slot;
-        outstanding_command = null;
+        runtime.outstanding_command = null;
         return;
     }
     switch (command.kind) {
@@ -1091,7 +810,7 @@ fn handleCommandCompletion(event: xhci.Event, reader: anytype) Error!void {
             if (event.slot_id == 0 or event.slot_id > active_enabled_slots or state.slot_id != 0) {
                 return error.InvalidDeviceSlot;
             }
-            if (slot_to_port[event.slot_id] != 0) return error.InvalidDeviceSlot;
+            if (runtime.slot_to_port[event.slot_id] != 0) return error.InvalidDeviceSlot;
             var port_id: u16 = 1;
             while (port_id <= capabilities.max_ports) : (port_id += 1) {
                 if (ports[port_id].slot_id == event.slot_id) return error.InvalidDeviceSlot;
@@ -1099,7 +818,7 @@ fn handleCommandCompletion(event: xhci.Event, reader: anytype) Error!void {
             try clearDeviceContext(event.slot_id);
             try resetSlotTransferRings(event.slot_id);
             try writeDcbaaSlot(event.slot_id, try active_dma_plan.?.arena.deviceContextAddress(event.slot_id));
-            slot_to_port[event.slot_id] = command.port_id;
+            runtime.slot_to_port[event.slot_id] = command.port_id;
             state.slot_id = event.slot_id;
             state.addressed = false;
             clearPortDescriptorState(state);
@@ -1130,7 +849,6 @@ fn handleCommandCompletion(event: xhci.Event, reader: anytype) Error!void {
             state.endpoint_configured = true;
             state.endpoint_state.stopped_mask &= ~@as(u2, 2);
             state.action = .post_interrupt_report;
-            configure_endpoint_count +%= 1;
         },
         .evaluate_context => {
             if (command.slot_id == 0 or event.slot_id != command.slot_id or
@@ -1154,11 +872,11 @@ fn handleCommandCompletion(event: xhci.Event, reader: anytype) Error!void {
                 return error.CommandRingStateInvalid;
             }
             if (command.endpoint_id == xhci.ENDPOINT_ZERO_DCI) {
-                const transfer = outstanding_transfer orelse return error.TrbRingStateInvalid;
+                const transfer = runtime.outstanding_transfer orelse return error.TrbRingStateInvalid;
                 if (transfer.port_id != command.port_id or transfer.slot_id != state.slot_id) {
                     return error.TrbRingStateInvalid;
                 }
-                outstanding_transfer = null;
+                runtime.outstanding_transfer = null;
             } else {
                 try retireInterruptReport(state);
             }
@@ -1184,7 +902,7 @@ fn handleCommandCompletion(event: xhci.Event, reader: anytype) Error!void {
             }
             try writeDcbaaSlot(command.slot_id, 0);
             try clearDeviceContext(command.slot_id);
-            slot_to_port[command.slot_id] = 0;
+            runtime.slot_to_port[command.slot_id] = 0;
             state.slot_id = 0;
             state.addressed = false;
             clearPortDescriptorState(state);
@@ -1194,12 +912,12 @@ fn handleCommandCompletion(event: xhci.Event, reader: anytype) Error!void {
         },
     }
     if (state.retiring) state.action = .retire_slot;
-    outstanding_command = null;
+    runtime.outstanding_command = null;
 }
 
-fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!void {
+fn handleControlTransferCompletion(event: xhci.trb.Event, reader: anytype) Error!void {
     if (event.stoppedCompletion() != null) return handleStoppedTransferCompletion(event);
-    const transfer = outstanding_transfer orelse return error.TrbRingStateInvalid;
+    const transfer = runtime.outstanding_transfer orelse return error.TrbRingStateInvalid;
     if (event.completion_code == 4) {
         if (event.endpoint_id != xhci.ENDPOINT_ZERO_DCI or transfer.port_id == 0 or
             transfer.port_id >= ports.len or ports[transfer.port_id].slot_id != transfer.slot_id)
@@ -1208,7 +926,7 @@ fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!voi
         }
         const addresses = try controlTransferTrbAddresses(transfer);
         const count: usize = if (transfer.kind == .set_configuration or transfer.kind == .set_boot_protocol) 2 else 3;
-        try xhci.validateFailedTransferEvent(event, addresses[0..count], transfer.slot_id, xhci.ENDPOINT_ZERO_DCI);
+        try xhci.trb.validateFailedTransferEvent(event, addresses[0..count], transfer.slot_id, xhci.ENDPOINT_ZERO_DCI);
         const stage_bytes: u32 = if (event.parameter == addresses[0]) 0 else if (event.parameter == addresses[count - 1]) 8 else switch (transfer.kind) {
             .device_descriptor_prefix => xhci.USB_DEVICE_DESCRIPTOR_PREFIX_BYTES,
             .device_descriptor => xhci.USB_DEVICE_DESCRIPTOR_BYTES,
@@ -1232,7 +950,7 @@ fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!voi
     if (state.retiring) {
         if ((state.endpoint_state.failed_mask & 1) != 0) return error.TrbRingStateInvalid;
         if (state.slot_id != transfer.slot_id) return error.InvalidDeviceSlot;
-        outstanding_transfer = null;
+        runtime.outstanding_transfer = null;
         state.action = .retire_slot;
         return;
     }
@@ -1261,7 +979,7 @@ fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!voi
             }
             var descriptor_prefix: [xhci.USB_DEVICE_DESCRIPTOR_PREFIX_BYTES]u8 = undefined;
             for (&descriptor_prefix, 0..) |*byte, index| byte.* = source[index];
-            const max_packet_size = try xhci.deviceDescriptorEndpointZeroMaxPacketSize(
+            const max_packet_size = try xhci.descriptors.deviceDescriptorEndpointZeroMaxPacketSize(
                 protocol,
                 state.speed_id,
                 &descriptor_prefix,
@@ -1273,7 +991,6 @@ fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!voi
                 state.descriptor_prefix_valid = true;
                 state.action = .read_device_descriptor;
             }
-            descriptor_prefix_count +%= 1;
         },
         .device_descriptor => {
             if (!state.descriptor_prefix_valid or state.device_descriptor != null or
@@ -1283,7 +1000,7 @@ fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!voi
             }
             var descriptor_bytes: [xhci.USB_DEVICE_DESCRIPTOR_BYTES]u8 = undefined;
             for (&descriptor_bytes, 0..) |*byte, index| byte.* = source[index];
-            const descriptor = try xhci.parseUsbDeviceDescriptor(
+            const descriptor = try xhci.descriptors.parseUsbDeviceDescriptor(
                 protocol,
                 state.speed_id,
                 &descriptor_bytes,
@@ -1295,7 +1012,6 @@ fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!voi
             }
             state.device_descriptor = descriptor;
             state.action = .read_configuration_descriptor_header;
-            device_descriptor_count +%= 1;
         },
         .configuration_descriptor_header => {
             if (state.device_descriptor == null or
@@ -1306,7 +1022,7 @@ fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!voi
             }
             var descriptor_bytes: [xhci.USB_CONFIGURATION_DESCRIPTOR_BYTES]u8 = undefined;
             for (&descriptor_bytes, 0..) |*byte, index| byte.* = source[index];
-            const descriptor = try xhci.parseUsbConfigurationDescriptorHeader(
+            const descriptor = try xhci.descriptors.parseUsbConfigurationDescriptorHeader(
                 protocol,
                 &descriptor_bytes,
             );
@@ -1315,7 +1031,6 @@ fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!voi
             }
             state.configuration_descriptor_header = descriptor;
             state.action = .read_configuration_descriptor;
-            configuration_descriptor_header_count +%= 1;
         },
         .configuration_descriptor => {
             const expected = state.configuration_descriptor_header orelse
@@ -1335,7 +1050,6 @@ fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!voi
             state.configuration_descriptor = selection.configuration;
             state.boot_keyboard = selection.keyboard;
             state.action = .set_configuration;
-            configuration_descriptor_count +%= 1;
         },
         .set_configuration => {
             if (state.configuration_descriptor == null or state.boot_keyboard == null or
@@ -1346,7 +1060,6 @@ fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!voi
             }
             state.configuration_set = true;
             state.action = .set_boot_protocol;
-            set_configuration_count +%= 1;
         },
         .set_boot_protocol => {
             if (state.configuration_descriptor == null or state.boot_keyboard == null or
@@ -1357,23 +1070,22 @@ fn handleControlTransferCompletion(event: xhci.Event, reader: anytype) Error!voi
             }
             state.boot_protocol_set = true;
             state.action = .configure_endpoint;
-            set_boot_protocol_count +%= 1;
         },
     }
-    outstanding_transfer = null;
+    runtime.outstanding_transfer = null;
 }
 
-fn handleInterruptTransferCompletion(event: xhci.Event, reader: anytype) Error!void {
+fn handleInterruptTransferCompletion(event: xhci.trb.Event, reader: anytype) Error!void {
     if (event.stoppedCompletion() != null) return handleStoppedTransferCompletion(event);
     if (event.slot_id == 0 or event.slot_id > active_enabled_slots) {
         return error.InvalidDeviceSlot;
     }
-    const port_id = slot_to_port[event.slot_id];
+    const port_id = runtime.slot_to_port[event.slot_id];
     const capabilities = active_capabilities orelse return error.TrbRingStateInvalid;
     if (port_id == 0 or port_id > capabilities.max_ports) return error.InvalidDeviceSlot;
     const state = &ports[port_id];
     if (event.completion_code == 4) {
-        if (state.interrupt_report_trb_address == 0 or outstanding_interrupt_reports == 0 or
+        if (state.interrupt_report_trb_address == 0 or runtime.outstanding_interrupt_reports == 0 or
             event.transfer_length > xhci.HID_BOOT_KEYBOARD_REPORT_BYTES)
         {
             return error.TrbRingStateInvalid;
@@ -1384,7 +1096,7 @@ fn handleInterruptTransferCompletion(event: xhci.Event, reader: anytype) Error!v
     if (state.retiring) {
         if ((state.endpoint_state.failed_mask & 2) != 0) return error.TrbRingStateInvalid;
         const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
-        try xhci.validateInterruptTransferEvent(event, state.interrupt_report_trb_address, state.slot_id, keyboard.device_context_index);
+        try xhci.trb.validateInterruptTransferEvent(event, state.interrupt_report_trb_address, state.slot_id, keyboard.device_context_index);
         try retireInterruptReport(state);
         return;
     }
@@ -1396,7 +1108,7 @@ fn handleInterruptTransferCompletion(event: xhci.Event, reader: anytype) Error!v
     {
         return error.InvalidDeviceSlot;
     }
-    try xhci.validateInterruptTransferEvent(
+    try xhci.trb.validateInterruptTransferEvent(
         event,
         state.interrupt_report_trb_address,
         state.slot_id,
@@ -1404,8 +1116,8 @@ fn handleInterruptTransferCompletion(event: xhci.Event, reader: anytype) Error!v
     );
 
     const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
-    if (outstanding_interrupt_reports == 0) return error.TrbRingStateInvalid;
-    outstanding_interrupt_reports -= 1;
+    if (runtime.outstanding_interrupt_reports == 0) return error.TrbRingStateInvalid;
+    runtime.outstanding_interrupt_reports -= 1;
     const buffer_address = try plan.arena.interruptReportBufferAddress(state.slot_id);
     const buffer_alias = try active_dma_memory.aliasFor(
         buffer_address,
@@ -1419,11 +1131,11 @@ fn handleInterruptTransferCompletion(event: xhci.Event, reader: anytype) Error!v
     _ = try keyboardReports().publish(port_id, state.slot_id, keyboard, descriptor, &report);
 
     state.interrupt_report_trb_address = 0;
-    state.action = if (keyboardReports().hasCapacity(outstanding_interrupt_reports + 1))
+    state.action = if (keyboardReports().hasCapacity(runtime.outstanding_interrupt_reports + 1))
         .post_interrupt_report
     else
         .none;
-    keyboard_report_count +%= 1;
+    runtime.keyboard_report_count +%= 1;
 }
 
 fn controlTransferTrbAddresses(transfer: OutstandingTransfer) Error![3]u64 {
@@ -1453,38 +1165,35 @@ fn failedEndpointBit(state: *const PortRuntimeState, endpoint_id: u5) Error!u2 {
 fn authenticatePortRetirement(port_id: u8, state: *PortRuntimeState, reader: anytype) Error!void {
     if (!state.retiring) {
         const capabilities = active_capabilities orelse return error.InvalidPortStatus;
-        const register_offset = try xhci.portRegisterOffset(capabilities, port_id);
+        const register_offset = try xhci.controller.portRegisterOffset(capabilities, port_id);
         const raw_status = reader.readReg32(register_offset);
-        if (comptime @hasField(@TypeOf(reader.*), "mapping_error")) {
-            if (reader.mapping_error) |err| return err;
-        }
-        const status = xhci.decodePortStatus(raw_status);
+        const status = xhci.controller.decodePortStatus(raw_status);
         if (status.over_current or (status.connected and (status.change_bits & 1) == 0)) {
             return error.TrbRingStateInvalid;
         }
         state.connected = status.connected;
         state.enabled = status.enabled;
         if (status.connected) state.speed_id = status.speed;
-        reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+        reader.writeReg32(register_offset, xhci.controller.portStatusAcknowledge(raw_status));
         beginPortRetirement(port_id, state);
     }
 }
 
-fn handleDetachedTransferFailure(event: xhci.Event, port_id: u8, addresses: []const u64, reader: anytype) Error!void {
+fn handleDetachedTransferFailure(event: xhci.trb.Event, port_id: u8, addresses: []const u64, reader: anytype) Error!void {
     if (port_id == 0 or port_id >= ports.len) return error.InvalidDeviceSlot;
     const state = &ports[port_id];
     const bit = try failedEndpointBit(state, event.endpoint_id);
-    try xhci.validateFailedTransferEvent(event, addresses, state.slot_id, event.endpoint_id);
+    try xhci.trb.validateFailedTransferEvent(event, addresses, state.slot_id, event.endpoint_id);
     if ((state.endpoint_state.failed_mask & bit) != 0) return error.TrbRingStateInvalid;
     try authenticatePortRetirement(port_id, state, reader);
     // Retain the TD and its reservation until the Reset completion barrier.
     state.endpoint_state.failed_mask |= bit;
-    if (outstanding_command) |command| {
+    if (runtime.outstanding_command) |command| {
         if (command.kind == .stop_endpoint and command.state_error_seen and
             command.port_id == port_id and command.slot_id == state.slot_id and
             command.endpoint_id == event.endpoint_id)
         {
-            outstanding_command = null;
+            runtime.outstanding_command = null;
         }
     }
     state.action = .retire_slot;
@@ -1492,8 +1201,8 @@ fn handleDetachedTransferFailure(event: xhci.Event, port_id: u8, addresses: []co
 
 // xHCI 1.2c 4.6.9 orders the forced stopped Transfer Event before the
 // command completion on our single primary interrupter, even for an empty ring.
-fn handleStoppedTransferCompletion(event: xhci.Event) Error!void {
-    const command = if (outstanding_command) |*command| command else return error.CommandRingStateInvalid;
+fn handleStoppedTransferCompletion(event: xhci.trb.Event) Error!void {
+    const command = if (runtime.outstanding_command) |*command| command else return error.CommandRingStateInvalid;
     if (command.kind != .stop_endpoint or command.stopped_event_seen or command.state_error_seen or
         command.port_id == 0 or command.port_id >= ports.len)
     {
@@ -1512,12 +1221,12 @@ fn handleStoppedTransferCompletion(event: xhci.Event) Error!void {
             return error.InvalidDeviceSlot;
         }
     }
-    _ = try xhci.validateStoppedTransferEvent(event, if (control) try plan.arena.controlTransferRingAddress(state.slot_id) else try plan.arena.interruptTransferRingAddress(state.slot_id), if (control) plan.arena.control_transfer_ring_trbs else plan.arena.interrupt_transfer_ring_trbs, state.slot_id, command.endpoint_id);
+    _ = try xhci.trb.validateStoppedTransferEvent(event, if (control) try plan.arena.controlTransferRingAddress(state.slot_id) else try plan.arena.interruptTransferRingAddress(state.slot_id), if (control) plan.arena.control_transfer_ring_trbs else plan.arena.interrupt_transfer_ring_trbs, state.slot_id, command.endpoint_id);
     if (control) {
-        if (outstanding_transfer) |transfer| {
+        if (runtime.outstanding_transfer) |transfer| {
             if (transfer.port_id == command.port_id) {
                 if (transfer.slot_id != state.slot_id) return error.TrbRingStateInvalid;
-                outstanding_transfer = null;
+                runtime.outstanding_transfer = null;
             }
         }
     } else if (state.interrupt_report_trb_address != 0) {
@@ -1527,16 +1236,16 @@ fn handleStoppedTransferCompletion(event: xhci.Event) Error!void {
 }
 
 fn retireInterruptReport(state: *PortRuntimeState) Error!void {
-    if (state.interrupt_report_trb_address == 0 or outstanding_interrupt_reports == 0) {
+    if (state.interrupt_report_trb_address == 0 or runtime.outstanding_interrupt_reports == 0) {
         return error.TrbRingStateInvalid;
     }
-    outstanding_interrupt_reports -= 1;
+    runtime.outstanding_interrupt_reports -= 1;
     state.interrupt_report_trb_address = 0;
     state.action = .retire_slot;
     scheduleUnarmedInterruptReports();
 }
 
-fn outputEndpointState(slot_id: u8, endpoint_id: u5) Error!xhci.EndpointState {
+fn outputEndpointState(slot_id: u8, endpoint_id: u5) Error!xhci.trb.EndpointState {
     if (endpoint_id == 0) return error.InvalidDeviceSlot;
     const capabilities = active_capabilities orelse return error.CommandRingStateInvalid;
     const plan = active_dma_plan orelse return error.CommandRingStateInvalid;
@@ -1544,22 +1253,22 @@ fn outputEndpointState(slot_id: u8, endpoint_id: u5) Error!xhci.EndpointState {
     const offset = @as(u64, endpoint_id) * capabilities.context_size.byteCount();
     const address = try active_dma_memory.aliasFor(context_address + offset, @sizeOf(u32));
     const word: *const u32 = @ptrFromInt(address);
-    return xhci.decodeEndpointState(@atomicLoad(u32, word, .acquire));
+    return xhci.trb.decodeEndpointState(@atomicLoad(u32, word, .acquire));
 }
 
 const RetirementCommand = struct {
-    kind: xhci.CommandKind,
+    kind: xhci.trb.CommandKind,
     endpoint_id: u5 = 0,
 };
 
 fn endpointTransferOwned(port_id: u8, state: *const PortRuntimeState, endpoint_id: u5) bool {
     if (endpoint_id == xhci.ENDPOINT_ZERO_DCI) {
-        const transfer = outstanding_transfer orelse return false;
+        const transfer = runtime.outstanding_transfer orelse return false;
         return transfer.port_id == port_id and transfer.slot_id == state.slot_id;
     }
     const keyboard = state.boot_keyboard orelse return false;
     return state.endpoint_configured and endpoint_id == keyboard.device_context_index and
-        state.interrupt_report_trb_address != 0 and outstanding_interrupt_reports != 0;
+        state.interrupt_report_trb_address != 0 and runtime.outstanding_interrupt_reports != 0;
 }
 
 fn retirementEndpointCommand(port_id: u8, state: *const PortRuntimeState, endpoint_id: u5, bit: u2) Error!RetirementCommand {
@@ -1581,12 +1290,12 @@ fn nextRetirementCommand(state: *const PortRuntimeState) Error!RetirementCommand
     // 1.2c 4.8.3: Output EP State may lag errors and doorbells. Use the
     // transitions established by our commands/events, never an instant snapshot.
     if (state.addressed and (state.endpoint_state.stopped_mask & 1) == 0) {
-        return retirementEndpointCommand(slot_to_port[state.slot_id], state, xhci.ENDPOINT_ZERO_DCI, 1);
+        return retirementEndpointCommand(runtime.slot_to_port[state.slot_id], state, xhci.ENDPOINT_ZERO_DCI, 1);
     }
-    if (transferTargets(slot_to_port[state.slot_id])) return error.TrbRingStateInvalid;
+    if (transferTargets(runtime.slot_to_port[state.slot_id])) return error.TrbRingStateInvalid;
     if (state.endpoint_configured and (state.endpoint_state.stopped_mask & 2) == 0) {
         const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
-        return retirementEndpointCommand(slot_to_port[state.slot_id], state, keyboard.device_context_index, 2);
+        return retirementEndpointCommand(runtime.slot_to_port[state.slot_id], state, keyboard.device_context_index, 2);
     }
     if (state.interrupt_report_trb_address != 0 or state.endpoint_state.failed_mask != 0) {
         return error.TrbRingStateInvalid;
@@ -1601,44 +1310,29 @@ fn parseConfigurationDescriptorFromDma(
     speed_id: u4,
     source: [*]volatile u8,
     total_length: u16,
-) Error!xhci.UsbBootKeyboardSelection {
+) Error!xhci.descriptors.UsbBootKeyboardSelection {
     if (total_length < xhci.USB_CONFIGURATION_DESCRIPTOR_BYTES or
         total_length > xhci.USB_ENUMERATION_BUFFER_BYTES)
     {
         return error.InvalidUsbDescriptor;
     }
-    var parser = xhci.ConfigurationDescriptorParser.initForPort(protocol, speed_id);
-    var descriptor_storage: [std.math.maxInt(u8)]u8 = undefined;
-    var offset: usize = 0;
-    while (offset < total_length) {
-        if (offset + 2 > total_length) return error.InvalidUsbDescriptor;
-        const descriptor_length: usize = source[offset];
-        const end = std.math.add(usize, offset, descriptor_length) catch
-            return error.InvalidUsbDescriptor;
-        if (descriptor_length < 2 or end > total_length) {
-            return error.InvalidUsbDescriptor;
-        }
-        for (descriptor_storage[0..descriptor_length], 0..) |*byte, index| {
-            byte.* = source[offset + index];
-        }
-        try parser.consume(descriptor_storage[0..descriptor_length]);
-        offset = end;
-    }
+    var parser = xhci.descriptors.ConfigurationDescriptorParser.initForPort(protocol, speed_id);
+    try xhci.descriptors.walkConfigurationDescriptors(&parser, source, total_length);
     return parser.finishBootKeyboard(total_length);
 }
 
-fn commandTargets(port_id: u8, kind: xhci.CommandKind) bool {
-    const command = outstanding_command orelse return false;
+fn commandTargets(port_id: u8, kind: xhci.trb.CommandKind) bool {
+    const command = runtime.outstanding_command orelse return false;
     return command.port_id == port_id and command.kind == kind;
 }
 
 fn transferTargets(port_id: u8) bool {
-    const transfer = outstanding_transfer orelse return false;
+    const transfer = runtime.outstanding_transfer orelse return false;
     return transfer.port_id == port_id;
 }
 
 fn controlTransferTimedOut() bool {
-    const transfer = outstanding_transfer orelse return false;
+    const transfer = runtime.outstanding_transfer orelse return false;
     return !ports[transfer.port_id].retiring and transfer.deadline.expired();
 }
 
@@ -1651,7 +1345,7 @@ fn expiredPortDeadline(state: *const PortRuntimeState) ?PortDeadlineKind {
 }
 
 fn commandTimedOut() bool {
-    const command = outstanding_command orelse return false;
+    const command = runtime.outstanding_command orelse return false;
     return command.deadline.expired();
 }
 
@@ -1679,29 +1373,26 @@ fn lifecycleTimedOut() bool {
 }
 
 fn submitNextPortAction(reader: anytype) Error!void {
-    if (outstanding_command != null) return;
+    if (runtime.outstanding_command != null) return;
     const capabilities = active_capabilities orelse return error.CommandRingStateInvalid;
     const protocols = active_protocols orelse return error.MissingSupportedProtocols;
     const plan = active_dma_plan orelse return error.CommandRingStateInvalid;
     var inspected: u16 = 0;
     while (inspected < capabilities.max_ports) : (inspected += 1) {
-        const port_id: u8 = @intCast(next_port_scan);
-        next_port_scan = if (next_port_scan >= capabilities.max_ports) 1 else next_port_scan + 1;
+        const port_id: u8 = @intCast(runtime.next_port_scan);
+        runtime.next_port_scan = if (runtime.next_port_scan >= capabilities.max_ports) 1 else runtime.next_port_scan + 1;
         const state = &ports[port_id];
         if (state.action == .none) continue;
-        if (outstanding_transfer != null and !state.retiring) continue;
+        if (runtime.outstanding_transfer != null and !state.retiring) continue;
         switch (state.action) {
             .reset_port => {
                 const protocol = protocols.forPort(port_id) orelse return error.MissingPortProtocol;
-                const register_offset = try xhci.portRegisterOffset(capabilities, port_id);
+                const register_offset = try xhci.controller.portRegisterOffset(capabilities, port_id);
                 const raw_status = reader.readReg32(register_offset);
-                if (comptime @hasField(@TypeOf(reader.*), "mapping_error")) {
-                    if (reader.mapping_error) |err| return err;
-                }
-                const status = xhci.decodePortStatus(raw_status);
+                const status = xhci.controller.decodePortStatus(raw_status);
                 if (status.over_current) return error.InvalidPortStatus;
                 if (!status.connected) {
-                    reader.writeReg32(register_offset, xhci.portStatusAcknowledge(raw_status));
+                    reader.writeReg32(register_offset, xhci.controller.portStatusAcknowledge(raw_status));
                     state.connected = false;
                     state.enabled = false;
                     state.speed_id = 0;
@@ -1721,7 +1412,7 @@ fn submitNextPortAction(reader: anytype) Error!void {
                     return error.InvalidPortStatus;
                 }
                 if (!status.reset_active) {
-                    reader.writeReg32(register_offset, xhci.portResetWrite(raw_status, protocol));
+                    reader.writeReg32(register_offset, xhci.controller.portResetWrite(raw_status, protocol));
                 }
                 state.reset_deadline = tsc_clock.afterMilliseconds(PORT_RESET_TIMEOUT_MILLISECONDS);
                 state.action = .none;
@@ -1759,11 +1450,11 @@ fn submitNextPortAction(reader: anytype) Error!void {
                 return;
             },
             .set_configuration => {
-                try submitSetConfigurationTransfer(port_id, state, reader);
+                try submitSetRequestTransfer(.set_configuration, port_id, state, reader);
                 return;
             },
             .set_boot_protocol => {
-                try submitSetBootProtocolTransfer(port_id, state, reader);
+                try submitSetRequestTransfer(.set_boot_protocol, port_id, state, reader);
                 return;
             },
             .post_interrupt_report => {
@@ -1774,7 +1465,7 @@ fn submitNextPortAction(reader: anytype) Error!void {
         }
 
         var endpoint_id: u5 = 0;
-        const kind: xhci.CommandKind = switch (state.action) {
+        const kind: xhci.trb.CommandKind = switch (state.action) {
             .none, .reset_port => unreachable,
             .enable_slot => .enable_slot,
             .address_device => .address_device,
@@ -1795,50 +1486,50 @@ fn submitNextPortAction(reader: anytype) Error!void {
             },
         };
         const words = switch (kind) {
-            .reset_endpoint => try xhci.resetEndpointCommand(state.slot_id, endpoint_id, true, command_producer.cycle_state),
-            .stop_endpoint => try xhci.stopEndpointCommand(state.slot_id, endpoint_id, false, command_producer.cycle_state),
-            .enable_slot => xhci.enableSlotCommand(
+            .reset_endpoint => try xhci.trb.resetEndpointCommand(state.slot_id, endpoint_id, true, runtime.command_producer.cycle_state),
+            .stop_endpoint => try xhci.trb.stopEndpointCommand(state.slot_id, endpoint_id, false, runtime.command_producer.cycle_state),
+            .enable_slot => xhci.trb.enableSlotCommand(
                 (protocols.forPort(port_id) orelse return error.MissingPortProtocol).slot_type,
-                command_producer.cycle_state,
+                runtime.command_producer.cycle_state,
             ),
-            .disable_slot => try xhci.disableSlotCommand(
+            .disable_slot => try xhci.trb.disableSlotCommand(
                 state.slot_id,
-                command_producer.cycle_state,
+                runtime.command_producer.cycle_state,
             ),
             .address_device => address: {
                 try prepareAddressDeviceInputContext(port_id, state);
-                break :address try xhci.addressDeviceCommand(
+                break :address try xhci.trb.addressDeviceCommand(
                     plan.arena.input_context_address,
                     state.slot_id,
-                    command_producer.cycle_state,
+                    runtime.command_producer.cycle_state,
                 );
             },
             .configure_endpoint => configure: {
                 try prepareConfigureBootKeyboardInputContext(state);
-                break :configure try xhci.configureEndpointCommand(
+                break :configure try xhci.trb.configureEndpointCommand(
                     plan.arena.input_context_address,
                     state.slot_id,
-                    command_producer.cycle_state,
+                    runtime.command_producer.cycle_state,
                 );
             },
             .evaluate_context => evaluate: {
                 try prepareEvaluateEndpointZeroInputContext(state);
-                break :evaluate try xhci.evaluateContextCommand(
+                break :evaluate try xhci.trb.evaluateContextCommand(
                     plan.arena.input_context_address,
                     state.slot_id,
-                    command_producer.cycle_state,
+                    runtime.command_producer.cycle_state,
                 );
             },
         };
         const command_address = try writeRingTrb(
-            &command_producer,
+            &runtime.command_producer,
             plan.ring_plan.command_ring_address,
             plan.ring_plan.command_ring_trbs,
             words,
         );
         publishDmaStructures();
         state.action = .none;
-        outstanding_command = .{
+        runtime.outstanding_command = .{
             .kind = kind,
             .trb_address = command_address,
             .port_id = port_id,
@@ -1846,13 +1537,13 @@ fn submitNextPortAction(reader: anytype) Error!void {
             .endpoint_id = endpoint_id,
             .deadline = tsc_clock.afterMilliseconds(COMMAND_TIMEOUT_MILLISECONDS),
         };
-        try xhci.ringCommandDoorbell(capabilities, reader);
+        try xhci.controller.ringCommandDoorbell(capabilities, reader);
         return;
     }
 }
 
 fn writeRingTrb(
-    producer: *xhci.TrbRingProducer,
+    producer: *xhci.trb.TrbRingProducer,
     ring_address: u64,
     ring_trbs: u32,
     words: [4]u32,
@@ -1873,7 +1564,7 @@ fn writeRingTrb(
             link_address,
             @intCast(xhci.TRB_BYTES),
         ));
-        link[3] = xhci.ringLinkControl(cycle_state);
+        link[3] = xhci.trb.ringLinkControl(cycle_state);
     }
     return trb_address;
 }
@@ -1887,14 +1578,14 @@ fn submitInterruptReportTransfer(
     const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
     const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
     if (!state.connected or !state.enabled or !state.addressed or state.slot_id == 0 or
-        slot_to_port[state.slot_id] != port_id or !state.configuration_set or
+        runtime.slot_to_port[state.slot_id] != port_id or !state.configuration_set or
         !state.boot_protocol_set or !state.endpoint_configured or
         state.interrupt_report_trb_address != 0 or
         keyboard.max_packet_size < xhci.HID_BOOT_KEYBOARD_REPORT_BYTES)
     {
         return error.InvalidDeviceSlot;
     }
-    if (!keyboardReports().hasCapacity(outstanding_interrupt_reports + 1)) {
+    if (!keyboardReports().hasCapacity(runtime.outstanding_interrupt_reports + 1)) {
         state.action = .none;
         return;
     }
@@ -1907,8 +1598,8 @@ fn submitInterruptReportTransfer(
     for (0..xhci.HID_BOOT_KEYBOARD_REPORT_BYTES) |index| buffer[index] = 0;
 
     const ring_address = try plan.arena.interruptTransferRingAddress(state.slot_id);
-    const producer = &interrupt_producers[state.slot_id];
-    const words = try xhci.interruptInTransfer(
+    const producer = &runtime.interrupt_producers[state.slot_id];
+    const words = try xhci.trb.interruptInTransfer(
         buffer_address,
         xhci.HID_BOOT_KEYBOARD_REPORT_BYTES,
         producer.cycle_state,
@@ -1922,14 +1613,13 @@ fn submitInterruptReportTransfer(
     publishDmaStructures();
     state.action = .none;
     state.interrupt_report_trb_address = trb_address;
-    try xhci.ringDeviceDoorbell(
+    try xhci.controller.ringDeviceDoorbell(
         capabilities,
         state.slot_id,
         keyboard.device_context_index,
         reader,
     );
-    outstanding_interrupt_reports += 1;
-    interrupt_report_submission_count +%= 1;
+    runtime.outstanding_interrupt_reports += 1;
 }
 
 fn submitDescriptorTransfer(
@@ -1938,7 +1628,6 @@ fn submitDescriptorTransfer(
     state: *PortRuntimeState,
     reader: anytype,
 ) Error!void {
-    const capabilities = active_capabilities orelse return error.TrbRingStateInvalid;
     const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
     if (!state.connected or !state.enabled or !state.addressed or
         state.slot_id == 0 or state.endpoint_zero_max_packet_size == 0 or
@@ -2001,51 +1690,71 @@ fn submitDescriptorTransfer(
     for (0..transfer_bytes) |index| buffer[index] = 0;
 
     const ring_address = try plan.arena.controlTransferRingAddress(state.slot_id);
-    const producer = &control_producers[state.slot_id];
-    const setup = try xhci.getDescriptorSetupStage(
+    const producer = &runtime.control_producers[state.slot_id];
+    const setup = try xhci.trb.getDescriptorSetupStage(
         descriptor_type,
         0,
         @intCast(transfer_bytes),
         producer.cycle_state,
     );
     _ = try writeRingTrb(producer, ring_address, plan.arena.control_transfer_ring_trbs, setup);
-    const data = try xhci.controlInDataStage(
+    const data = try xhci.trb.controlInDataStage(
         plan.arena.enumeration_buffer_address,
         transfer_bytes,
         producer.cycle_state,
     );
     _ = try writeRingTrb(producer, ring_address, plan.arena.control_transfer_ring_trbs, data);
-    const status = xhci.controlOutStatusStage(producer.cycle_state);
+    const status = xhci.trb.controlOutStatusStage(producer.cycle_state);
     const status_address = try writeRingTrb(
         producer,
         ring_address,
         plan.arena.control_transfer_ring_trbs,
         status,
     );
+    try publishControlTransfer(kind, port_id, state, status_address, reader);
+}
+
+/// Publish the TRBs written to the slot's EP0 ring, own the transfer until
+/// its status stage completes, and ring EP0.
+fn publishControlTransfer(
+    kind: ControlTransferKind,
+    port_id: u8,
+    state: *PortRuntimeState,
+    status_address: u64,
+    reader: anytype,
+) Error!void {
+    const capabilities = active_capabilities orelse return error.TrbRingStateInvalid;
     publishDmaStructures();
     state.action = .none;
-    outstanding_transfer = .{
+    runtime.outstanding_transfer = .{
         .kind = kind,
         .status_trb_address = status_address,
         .port_id = port_id,
         .slot_id = state.slot_id,
         .deadline = tsc_clock.afterMilliseconds(CONTROL_TRANSFER_TIMEOUT_MILLISECONDS),
     };
-    try xhci.ringDeviceDoorbell(capabilities, state.slot_id, xhci.ENDPOINT_ZERO_DCI, reader);
+    try xhci.controller.ringDeviceDoorbell(capabilities, state.slot_id, xhci.ENDPOINT_ZERO_DCI, reader);
 }
 
-fn submitSetConfigurationTransfer(
+/// SET_CONFIGURATION then SET_PROTOCOL(boot): two no-data control requests
+/// that differ only in their setup stage and configured-state precondition.
+fn submitSetRequestTransfer(
+    kind: ControlTransferKind,
     port_id: u8,
     state: *PortRuntimeState,
     reader: anytype,
 ) Error!void {
-    const capabilities = active_capabilities orelse return error.TrbRingStateInvalid;
     const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
     const configuration = state.configuration_descriptor orelse
         return error.InvalidDeviceSlot;
     const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
+    const sets_boot_protocol = switch (kind) {
+        .set_configuration => false,
+        .set_boot_protocol => true,
+        else => return error.InvalidDeviceSlot,
+    };
     if (!state.connected or !state.enabled or !state.addressed or state.slot_id == 0 or
-        state.endpoint_zero_max_packet_size == 0 or state.configuration_set or
+        state.endpoint_zero_max_packet_size == 0 or state.configuration_set != sets_boot_protocol or
         state.boot_protocol_set or state.endpoint_configured or
         keyboard.configuration_value != configuration.configuration_value)
     {
@@ -2053,72 +1762,19 @@ fn submitSetConfigurationTransfer(
     }
 
     const ring_address = try plan.arena.controlTransferRingAddress(state.slot_id);
-    const producer = &control_producers[state.slot_id];
-    const setup = try xhci.setConfigurationSetupStage(
-        keyboard.configuration_value,
-        producer.cycle_state,
-    );
+    const producer = &runtime.control_producers[state.slot_id];
+    const setup = if (sets_boot_protocol)
+        xhci.trb.setBootProtocolSetupStage(keyboard.interface_number, producer.cycle_state)
+    else
+        try xhci.trb.setConfigurationSetupStage(keyboard.configuration_value, producer.cycle_state);
     _ = try writeRingTrb(producer, ring_address, plan.arena.control_transfer_ring_trbs, setup);
     const status_address = try writeRingTrb(
         producer,
         ring_address,
         plan.arena.control_transfer_ring_trbs,
-        xhci.controlInStatusStage(producer.cycle_state),
+        xhci.trb.controlInStatusStage(producer.cycle_state),
     );
-    publishDmaStructures();
-    state.action = .none;
-    outstanding_transfer = .{
-        .kind = .set_configuration,
-        .status_trb_address = status_address,
-        .port_id = port_id,
-        .slot_id = state.slot_id,
-        .deadline = tsc_clock.afterMilliseconds(CONTROL_TRANSFER_TIMEOUT_MILLISECONDS),
-    };
-    try xhci.ringDeviceDoorbell(capabilities, state.slot_id, xhci.ENDPOINT_ZERO_DCI, reader);
-}
-
-fn submitSetBootProtocolTransfer(
-    port_id: u8,
-    state: *PortRuntimeState,
-    reader: anytype,
-) Error!void {
-    const capabilities = active_capabilities orelse return error.TrbRingStateInvalid;
-    const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
-    const configuration = state.configuration_descriptor orelse
-        return error.InvalidDeviceSlot;
-    const keyboard = state.boot_keyboard orelse return error.InvalidDeviceSlot;
-    if (!state.connected or !state.enabled or !state.addressed or state.slot_id == 0 or
-        state.endpoint_zero_max_packet_size == 0 or !state.configuration_set or
-        state.boot_protocol_set or state.endpoint_configured or
-        keyboard.configuration_value != configuration.configuration_value)
-    {
-        return error.InvalidDeviceSlot;
-    }
-
-    const ring_address = try plan.arena.controlTransferRingAddress(state.slot_id);
-    const producer = &control_producers[state.slot_id];
-    _ = try writeRingTrb(
-        producer,
-        ring_address,
-        plan.arena.control_transfer_ring_trbs,
-        xhci.setBootProtocolSetupStage(keyboard.interface_number, producer.cycle_state),
-    );
-    const status_address = try writeRingTrb(
-        producer,
-        ring_address,
-        plan.arena.control_transfer_ring_trbs,
-        xhci.controlInStatusStage(producer.cycle_state),
-    );
-    publishDmaStructures();
-    state.action = .none;
-    outstanding_transfer = .{
-        .kind = .set_boot_protocol,
-        .status_trb_address = status_address,
-        .port_id = port_id,
-        .slot_id = state.slot_id,
-        .deadline = tsc_clock.afterMilliseconds(CONTROL_TRANSFER_TIMEOUT_MILLISECONDS),
-    };
-    try xhci.ringDeviceDoorbell(capabilities, state.slot_id, xhci.ENDPOINT_ZERO_DCI, reader);
+    try publishControlTransfer(kind, port_id, state, status_address, reader);
 }
 
 fn prepareAddressDeviceInputContext(port_id: u8, state: *PortRuntimeState) Error!void {
@@ -2129,12 +1785,12 @@ fn prepareAddressDeviceInputContext(port_id: u8, state: *PortRuntimeState) Error
         return error.InvalidDeviceSlot;
     }
     const protocol = protocols.forPort(port_id) orelse return error.MissingPortProtocol;
-    const max_packet_size = try xhci.endpointZeroMaxPacketSize(protocol, state.speed_id);
+    const max_packet_size = try xhci.descriptors.endpointZeroMaxPacketSize(protocol, state.speed_id);
     const input_context: [*]u8 = @ptrFromInt(try active_dma_memory.aliasFor(
         plan.arena.input_context_address,
         @intCast(plan.arena.input_context_bytes),
     ));
-    try xhci.initializeAddressDeviceInputContext(
+    try xhci.context.initializeAddressDeviceInputContext(
         capabilities.context_size,
         port_id,
         state.speed_id,
@@ -2162,7 +1818,7 @@ fn prepareConfigureBootKeyboardInputContext(state: *const PortRuntimeState) Erro
         plan.arena.input_context_address,
         @intCast(plan.arena.input_context_bytes),
     ));
-    try xhci.initializeConfigureInterruptInEndpointInputContext(
+    try xhci.context.initializeConfigureInterruptInEndpointInputContext(
         capabilities.context_size,
         keyboard,
         try plan.arena.interruptTransferRingAddress(state.slot_id),
@@ -2183,7 +1839,7 @@ fn prepareEvaluateEndpointZeroInputContext(state: *const PortRuntimeState) Error
         plan.arena.input_context_address,
         @intCast(plan.arena.input_context_bytes),
     ));
-    try xhci.initializeEvaluateEndpointZeroInputContext(
+    try xhci.context.initializeEvaluateEndpointZeroInputContext(
         capabilities.context_size,
         state.pending_endpoint_zero_max_packet_size,
         input_context[0..plan.arena.input_context_bytes],
@@ -2192,20 +1848,20 @@ fn prepareEvaluateEndpointZeroInputContext(state: *const PortRuntimeState) Error
 
 fn resetSlotTransferRings(slot_id: u8) Error!void {
     const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
-    try xhci.resetTransferRing(
+    try xhci.dma_plan.resetTransferRing(
         plan,
         active_dma_memory.bytes(),
         try plan.arena.controlTransferRingAddress(slot_id),
         plan.arena.control_transfer_ring_trbs,
     );
-    try xhci.resetTransferRing(
+    try xhci.dma_plan.resetTransferRing(
         plan,
         active_dma_memory.bytes(),
         try plan.arena.interruptTransferRingAddress(slot_id),
         plan.arena.interrupt_transfer_ring_trbs,
     );
-    control_producers[slot_id] = .{};
-    interrupt_producers[slot_id] = .{};
+    runtime.control_producers[slot_id] = .{};
+    runtime.interrupt_producers[slot_id] = .{};
     publishDmaStructures();
 }
 
@@ -2238,25 +1894,25 @@ fn clearDeviceContext(slot_id: u8) Error!void {
 fn currentEventReady() bool {
     const plan = active_dma_plan orelse return false;
     const control_address = plan.ring_plan.event_ring_address +
-        @as(u64, event_consumer.dequeue_index) * xhci.TRB_BYTES +
+        @as(u64, runtime.event_consumer.dequeue_index) * xhci.TRB_BYTES +
         3 * @sizeOf(u32);
     const control_alias = active_dma_memory.aliasFor(control_address, @sizeOf(u32)) catch
         return false;
     const control = @as(*volatile u32, @ptrFromInt(control_alias)).*;
-    return event_consumer.ready(control);
+    return runtime.event_consumer.ready(control);
 }
 
 fn readCurrentEvent() ?[4]u32 {
     const plan = active_dma_plan orelse return null;
     const trb_address = plan.ring_plan.event_ring_address +
-        @as(u64, event_consumer.dequeue_index) * xhci.TRB_BYTES;
+        @as(u64, runtime.event_consumer.dequeue_index) * xhci.TRB_BYTES;
     const trb_alias = active_dma_memory.aliasFor(
         trb_address,
         @intCast(xhci.TRB_BYTES),
     ) catch return null;
     const trb: [*]volatile u32 = @ptrFromInt(trb_alias);
     const control = trb[3];
-    if (!event_consumer.ready(control)) return null;
+    if (!runtime.event_consumer.ready(control)) return null;
     acquireEvent();
     return .{ trb[0], trb[1], trb[2], control };
 }
@@ -2266,52 +1922,41 @@ fn acquireEvent() void {
 }
 
 fn pollDmaFault() bool {
-    if (!intel_vtd.faultMonitoringEnabled()) {
-        containFailure("ZIGOS:XHCI:HW:FAULT_MONITOR_UNAVAILABLE\n");
-        return true;
-    }
-    if ((intel_vtd.pollFaultForDevice(active_device) catch {
-        containFailure("ZIGOS:XHCI:HW:FAULT_MONITOR_FAIL_CLOSED\n");
-        return true;
-    }) != null) {
-        containFailure("ZIGOS:XHCI:HW:DMA_FAULT_CONTAINED\n");
-        return true;
-    }
-    return false;
+    containFailure(switch (device_isolation.pollFault(active_device)) {
+        .clear => return false,
+        .monitoring_unavailable => "ZIGOS:XHCI:HW:FAULT_MONITOR_UNAVAILABLE\n",
+        .fail_closed => "ZIGOS:XHCI:HW:FAULT_MONITOR_FAIL_CLOSED\n",
+        .fault => "ZIGOS:XHCI:HW:DMA_FAULT_CONTAINED\n",
+    });
+    return true;
 }
 
 fn containFailure(marker: []const u8) void {
     publishControllerActive(false);
     @atomicStore(u32, &pending_interrupts, 0, .monotonic);
-    outstanding_command = null;
-    outstanding_transfer = null;
-    command_producer = .{};
-    control_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
+    // Containment is terminal for this lifetime; only the delivered report
+    // count survives until the next probe or activation.
+    runtime = .{ .keyboard_report_count = runtime.keyboard_report_count };
     resetControllerRuntimeState();
     if (active_capabilities) |capabilities| {
-        if (active_bar_address != 0) {
-            var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address, .bar_bytes = active_bar_bytes };
-            xhci.quiesceOwnedController(capabilities, &reader);
-        }
+        if (mmio.bytes != 0) xhci.controller.quiesceOwnedController(capabilities, &mmio);
     }
-    pci.disableMsi(active_device) catch {};
     pci.disableBusMastering(active_device);
+    device_isolation.revokeInterrupt(active_device);
     console.print(marker);
 }
 
 fn buildDmaWindows(
-    plan: xhci.ControllerDmaPlan,
+    plan: xhci.dma_plan.ControllerDmaPlan,
     windows: *[xhci.MAX_CONTROLLER_DMA_REGIONS]intel_vtd.DmaWindow,
 ) Error!usize {
-    var region_storage: [xhci.MAX_CONTROLLER_DMA_REGIONS]xhci.DmaAccessRegion = undefined;
-    const regions = try xhci.controllerDmaAccessRegions(plan, &region_storage);
+    var region_storage: [xhci.MAX_CONTROLLER_DMA_REGIONS]xhci.dma_plan.DmaAccessRegion = undefined;
+    const regions = try xhci.dma_plan.controllerDmaAccessRegions(plan, &region_storage);
     for (regions, 0..) |region, index| {
-        const region_end = std.math.add(u64, region.address, region.bytes) catch
+        _ = std.math.add(u64, region.address, region.bytes) catch
             return error.DmaIsolationPlanInvalid;
-        if (region_end > std.math.maxInt(u32)) return error.DmaIsolationPlanInvalid;
         windows[index] = .{
-            .base = std.math.cast(u32, region.address) orelse
-                return error.DmaIsolationPlanInvalid,
+            .base = region.address,
             .length = std.math.cast(u32, region.bytes) orelse
                 return error.DmaIsolationPlanInvalid,
             .device_readable = region.device_readable,
@@ -2339,31 +1984,6 @@ fn validateBar(device_info: pci.PCIDevice) Error!pci.MemoryBar {
     return bar;
 }
 
-fn validateExtendedCapabilityRange(bar_address: usize, first_offset: u32) Error!void {
-    if (first_offset == 0) return;
-    if (bar_address > std.math.maxInt(usize) - @as(usize, xhci.MAX_EXTENDED_CAPABILITY_OFFSET)) {
-        return error.BarRangeOverflow;
-    }
-}
-
-fn validateControllerRegisterRanges(
-    bar_address: usize,
-    capabilities: xhci.CapabilityRegisters,
-) Error!void {
-    const operational_bytes = @as(u64, 0x400) +
-        @as(u64, capabilities.max_ports) * 0x10;
-    const doorbell_bytes = (@as(u64, capabilities.max_device_slots) + 1) * @sizeOf(u32);
-    try validateBarRange(bar_address, capabilities.capability_length, operational_bytes);
-    try validateBarRange(bar_address, capabilities.runtime_register_offset, 0x40);
-    try validateBarRange(bar_address, capabilities.doorbell_offset, doorbell_bytes);
-}
-
-fn validateBarRange(bar_address: usize, offset: u64, byte_count: u64) Error!void {
-    const end = std.math.add(u64, offset, byte_count) catch return error.BarRangeOverflow;
-    const end_offset = std.math.cast(usize, end) orelse return error.BarRangeOverflow;
-    if (bar_address > std.math.maxInt(usize) - end_offset) return error.BarRangeOverflow;
-}
-
 inline fn validateControllerAperture(bar_bytes: u64, capabilities: xhci.CapabilityRegisters) Error!void {
     const operational_end = @as(u64, capabilities.capability_length) + 0x400 + @as(u64, capabilities.max_ports) * 0x10;
     const doorbell_end = @as(u64, capabilities.doorbell_offset) + (@as(u64, capabilities.max_device_slots) + 1) * @sizeOf(u32);
@@ -2371,39 +1991,31 @@ inline fn validateControllerAperture(bar_bytes: u64, capabilities: xhci.Capabili
     if (operational_end > bar_bytes or doorbell_end > bar_bytes or runtime_end > bar_bytes) return error.BarRangeOutsideAperture;
 }
 
-const ExtendedCapabilityReader = struct {
-    bar_address: usize,
-    bar_bytes: u64,
-    mapped_page_offset: ?usize = null,
-    mapped_writable: bool = false,
-    mapping_error: ?Error = null,
+/// The controller register aperture, mapped once at probe. Accesses past the
+/// mapped length read zero, drop writes and latch `out_of_bounds`; only the
+/// firmware-described extended capability walk can reach that bound, and
+/// probe fails closed when it does.
+const RegisterMmio = struct {
+    base: usize,
+    bytes: u32,
+    out_of_bounds: bool = false,
 
-    inline fn validAccess(self: *@This(), offset: u64, bytes: u64) bool {
-        if (self.mapping_error != null) return false;
-        if (offset > self.bar_bytes or bytes > self.bar_bytes - offset) {
-            self.mapping_error = error.BarRangeOutsideAperture;
-            return false;
+    inline fn address(self: *@This(), offset: u32, size: u32) ?usize {
+        if (offset > self.bytes or size > self.bytes - offset) {
+            self.out_of_bounds = true;
+            return null;
         }
-        return true;
+        return self.base + offset;
     }
 
     pub fn readDword(self: *@This(), offset: u32) u32 {
-        if (!self.validAccess(offset, @sizeOf(u32))) return 0;
-        const byte_offset: usize = @intCast(offset);
-        const page_offset = byte_offset & ~(PAGE_BYTES - 1);
-        if (!self.mapPage(page_offset, false)) return 0;
-        const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
-        return @as(*volatile u32, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).*;
+        const register = self.address(offset, @sizeOf(u32)) orelse return 0;
+        return @as(*volatile u32, @ptrFromInt(register)).*;
     }
 
     pub fn writeOsOwnedByte(self: *@This(), legacy_offset: u32, value: u8) void {
-        const byte_offset = @as(usize, legacy_offset) + OS_OWNED_BYTE_OFFSET;
-        if (!self.validAccess(byte_offset, 1)) return;
-        const page_offset = byte_offset & ~(PAGE_BYTES - 1);
-        if (!self.mapPage(page_offset, true)) return;
-        const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
-        @as(*volatile u8, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).* = value;
-        _ = self.mapPage(page_offset, false);
+        const register = self.address(legacy_offset +| OS_OWNED_BYTE_OFFSET, 1) orelse return;
+        @as(*volatile u8, @ptrFromInt(register)).* = value;
     }
 
     pub fn readReg32(self: *@This(), offset: u32) u32 {
@@ -2411,52 +2023,19 @@ const ExtendedCapabilityReader = struct {
     }
 
     pub fn readReg64(self: *@This(), offset: u32) u64 {
-        if (!self.validAccess(offset, @sizeOf(u64))) return 0;
         const low = self.readDword(offset);
-        const high = self.readDword(offset + @sizeOf(u32));
+        const high = self.readDword(offset +| @sizeOf(u32));
         return @as(u64, low) | (@as(u64, high) << 32);
     }
 
     pub fn writeReg32(self: *@This(), offset: u32, value: u32) void {
-        if (!self.validAccess(offset, @sizeOf(u32))) return;
-        const byte_offset: usize = @intCast(offset);
-        const page_offset = byte_offset & ~(PAGE_BYTES - 1);
-        if (!self.mapPage(page_offset, true)) return;
-        const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
-        @as(*volatile u32, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).* = value;
-        _ = self.mapPage(page_offset, false);
+        const register = self.address(offset, @sizeOf(u32)) orelse return;
+        @as(*volatile u32, @ptrFromInt(register)).* = value;
     }
 
     pub fn writeReg64(self: *@This(), offset: u32, value: u64) void {
-        if (!self.validAccess(offset, @sizeOf(u64))) return;
         self.writeReg32(offset, @truncate(value));
-        self.writeReg32(offset + @sizeOf(u32), @truncate(value >> 32));
-    }
-
-    fn mapPage(self: *@This(), page_offset: usize, writable: bool) bool {
-        return self.mapPageWith(paging, page_offset, writable);
-    }
-
-    inline fn mapPageWith(self: *@This(), comptime Mapper: type, page_offset: usize, writable: bool) bool {
-        if (!self.validAccess(page_offset, PAGE_BYTES)) return false;
-        if (self.mapped_page_offset != null and
-            self.mapped_page_offset.? == page_offset and
-            self.mapped_writable == writable)
-        {
-            return true;
-        }
-        Mapper.mapKernelDeviceRange(
-            mmio_windows.xhci.base,
-            self.bar_address + page_offset,
-            PAGE_BYTES,
-            writable,
-        ) catch {
-            self.mapping_error = error.MmioMappingFailed;
-            return false;
-        };
-        self.mapped_page_offset = page_offset;
-        self.mapped_writable = writable;
-        return true;
+        self.writeReg32(offset +| @sizeOf(u32), @truncate(value >> 32));
     }
 };
 
@@ -2465,7 +2044,7 @@ fn readCapabilitySnapshot(base: usize) [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
     var offset: usize = 0;
     while (offset < snapshot.len) : (offset += @sizeOf(u32)) {
         const value = @as(*volatile u32, @ptrFromInt(base + offset)).*;
-        endian.writeU32Le(snapshot[offset..][0..@sizeOf(u32)], value);
+        std.mem.writeInt(u32, snapshot[offset..][0..@sizeOf(u32)], value, .little);
     }
     return snapshot;
 }
@@ -2473,12 +2052,12 @@ fn readCapabilitySnapshot(base: usize) [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
 fn validTestSnapshot() [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
     var snapshot = @as([xhci.CAPABILITY_REGISTERS_BYTES]u8, @splat(0));
     snapshot[0] = 0x40;
-    endian.writeU16Le(snapshot[2..4], 0x0110);
-    endian.writeU32Le(snapshot[4..8], 32 | (@as(u32, 8) << 8) | (@as(u32, 12) << 24));
-    endian.writeU32Le(snapshot[0x08..0x0C], (@as(u32, 1) << 21) | (@as(u32, 1) << 27));
-    endian.writeU32Le(snapshot[0x10..0x14], 1 | (@as(u32, 1) << 2) | (@as(u32, 0x2000) << 16));
-    endian.writeU32Le(snapshot[0x14..0x18], 0x2000);
-    endian.writeU32Le(snapshot[0x18..0x1C], 0x1000);
+    std.mem.writeInt(u16, snapshot[2..4], 0x0110, .little);
+    std.mem.writeInt(u32, snapshot[4..8], 32 | (@as(u32, 8) << 8) | (@as(u32, 12) << 24), .little);
+    std.mem.writeInt(u32, snapshot[0x08..0x0C], (@as(u32, 1) << 21) | (@as(u32, 1) << 27), .little);
+    std.mem.writeInt(u32, snapshot[0x10..0x14], 1 | (@as(u32, 1) << 2) | (@as(u32, 0x2000) << 16), .little);
+    std.mem.writeInt(u32, snapshot[0x14..0x18], 0x2000, .little);
+    std.mem.writeInt(u32, snapshot[0x18..0x1C], 0x1000, .little);
     return snapshot;
 }
 
@@ -2512,7 +2091,7 @@ test "xHCI hardware probe validates the controller and BAR before MMIO mapping" 
 
 test "xHCI hardware capability snapshot uses the shared modern parser" {
     const snapshot = validTestSnapshot();
-    const capabilities = try xhci.parseCapabilityRegisters(&snapshot);
+    const capabilities = try xhci.caps.testing.parseCapabilityRegisters(&snapshot);
     try std.testing.expectEqual(@as(u16, 0x0110), capabilities.interface_version);
     try std.testing.expectEqual(@as(u8, 32), capabilities.max_device_slots);
     try std.testing.expectEqual(@as(u8, 12), capabilities.max_ports);
@@ -2524,8 +2103,6 @@ test "xHCI hardware capability snapshot uses the shared modern parser" {
 }
 
 test "xHCI controller runtime state allocation follows reported hardware capacity" {
-    try std.testing.expect(INTERRUPT_STATE_USES_PROTOCOL_ORDERING);
-    try std.testing.expect(CONTROLLER_RUNTIME_STATE_USES_GENERAL_MEMORY);
     try std.testing.expectEqual(@as(usize, 104), @sizeOf(PortRuntimeState));
     try std.testing.expectEqual(@as(usize, 1_352), keyboardReportPublisherOffsetFor(12));
     try std.testing.expectEqual(@as(usize, 2_936), supportedProtocolsOffsetFor(12));
@@ -2536,28 +2113,8 @@ test "xHCI controller runtime state allocation follows reported hardware capacit
     );
 }
 
-test "xHCI hardware probe bounds extended capability BAR arithmetic" {
-    try validateExtendedCapabilityRange(0xFEB0_0000, 0x8000);
-    try validateExtendedCapabilityRange(std.math.maxInt(usize), 0);
-    try std.testing.expectError(
-        error.BarRangeOverflow,
-        validateExtendedCapabilityRange(std.math.maxInt(usize), 0x8000),
-    );
-
-    const capabilities = xhci.defaultCapabilityRegisters();
-    try validateControllerRegisterRanges(0xFEB0_0000, capabilities);
-    try std.testing.expectError(
-        error.BarRangeOverflow,
-        validateControllerRegisterRanges(std.math.maxInt(usize), capabilities),
-    );
-    try std.testing.expectError(
-        error.BarRangeOverflow,
-        validateBarRange(0, std.math.maxInt(u64), 2),
-    );
-}
-
 test "xHCI register ranges must fit the sized BAR aperture" {
-    var capabilities = try xhci.parseCapabilityRegisters(&validTestSnapshot());
+    var capabilities = try xhci.caps.testing.parseCapabilityRegisters(&validTestSnapshot());
     try validateControllerAperture(0x2084, capabilities);
     try std.testing.expectError(error.BarRangeOutsideAperture, validateControllerAperture(0x2083, capabilities));
     capabilities.runtime_register_offset = 0x3000;
@@ -2571,57 +2128,33 @@ test "xHCI register ranges must fit the sized BAR aperture" {
     try validateControllerAperture(0x1430, capabilities);
 }
 
-test "xHCI scratch mapping failure preserves prior metadata and suppresses later accesses" {
-    const Mapper = struct {
-        var calls: usize = 0;
-        var fail: bool = false;
-        var last_physical: u64 = 0;
-        var last_writable: bool = false;
-
-        pub fn mapKernelDeviceRange(virtual: usize, physical: u64, bytes: usize, writable: bool) error{Rejected}!void {
-            std.debug.assert(virtual == mmio_windows.xhci.base and bytes == PAGE_BYTES);
-            calls += 1;
-            if (fail) return error.Rejected;
-            last_physical = physical;
-            last_writable = writable;
-        }
-    };
-    Mapper.calls = 0;
-    Mapper.fail = false;
-    var reader = ExtendedCapabilityReader{ .bar_address = 0xfeb00000, .bar_bytes = PAGE_BYTES * 3 };
-    try std.testing.expect(reader.mapPageWith(Mapper, 0, false));
-    try std.testing.expect(reader.mapPageWith(Mapper, 0, false));
-    try std.testing.expectEqual(@as(usize, 1), Mapper.calls);
-    try std.testing.expect(reader.mapPageWith(Mapper, PAGE_BYTES, true));
-    try std.testing.expectEqual(@as(u64, 0xfeb01000), Mapper.last_physical);
-    try std.testing.expect(Mapper.last_writable);
-    Mapper.fail = true;
-    try std.testing.expect(!reader.mapPageWith(Mapper, PAGE_BYTES, false));
-    try std.testing.expectEqual(@as(?usize, PAGE_BYTES), reader.mapped_page_offset);
-    try std.testing.expect(reader.mapped_writable);
-    try std.testing.expectEqual(@as(?Error, error.MmioMappingFailed), reader.mapping_error);
-    try std.testing.expect(!reader.mapPageWith(Mapper, PAGE_BYTES * 2, true));
-    try std.testing.expectEqual(@as(u32, 0), reader.readDword(0));
-    reader.writeReg32(0, 1);
-    reader.writeOsOwnedByte(0, 1);
-    try std.testing.expectEqual(@as(usize, 3), Mapper.calls);
-
-    var out_of_bounds = ExtendedCapabilityReader{ .bar_address = 0, .bar_bytes = PAGE_BYTES };
-    try std.testing.expectEqual(@as(u32, 0), out_of_bounds.readDword(PAGE_BYTES));
-    try std.testing.expectEqual(@as(?Error, error.BarRangeOutsideAperture), out_of_bounds.mapping_error);
-    out_of_bounds.writeReg64(0, 1);
-    try std.testing.expectEqual(@as(?usize, null), out_of_bounds.mapped_page_offset);
+test "xHCI register reader latches accesses beyond the mapped aperture" {
+    var registers = @as([4]u32, @splat(0x5a5a_5a5a));
+    var reader = RegisterMmio{ .base = @intFromPtr(&registers), .bytes = @sizeOf(@TypeOf(registers)) };
+    try std.testing.expectEqual(@as(u64, 0x5a5a_5a5a_5a5a_5a5a), reader.readReg64(8));
+    reader.writeOsOwnedByte(8, 1);
+    try std.testing.expectEqual(@as(u8, 1), std.mem.asBytes(&registers)[11]);
+    try std.testing.expect(!reader.out_of_bounds);
+    try std.testing.expectEqual(@as(u32, 0), reader.readDword(16));
+    try std.testing.expect(reader.out_of_bounds);
+    reader.out_of_bounds = false;
+    reader.writeOsOwnedByte(13, 1);
+    try std.testing.expect(reader.out_of_bounds);
+    reader.out_of_bounds = false;
+    reader.writeReg64(12, 0);
+    try std.testing.expect(reader.out_of_bounds);
+    try std.testing.expectEqual(@as(u32, 0), registers[3]);
 }
 
 test "xHCI hardware DMA windows retain page-granular access directions" {
     var capabilities = xhci.defaultCapabilityRegisters();
     capabilities.max_device_slots = 1;
     capabilities.max_scratchpad_buffers = 2;
-    const plan = try xhci.planControllerDma(capabilities, 1, 0x1000);
+    const plan = try xhci.dma_plan.planControllerDma(capabilities, 1, 0x1000);
     var windows: [xhci.MAX_CONTROLLER_DMA_REGIONS]intel_vtd.DmaWindow = undefined;
     const count = try buildDmaWindows(plan, &windows);
     try std.testing.expectEqual(@as(usize, 8), count);
-    try std.testing.expectEqual(@as(u32, 0x1000), windows[0].base);
+    try std.testing.expectEqual(@as(u64, 0x1000), windows[0].base);
     try std.testing.expect(windows[0].device_readable and !windows[0].device_writable);
     try std.testing.expect(windows[1].device_readable and windows[1].device_writable);
     try std.testing.expect(windows[2].device_readable and !windows[2].device_writable);
@@ -2629,15 +2162,19 @@ test "xHCI hardware DMA windows retain page-granular access directions" {
     try std.testing.expect(windows[6].device_readable and !windows[6].device_writable);
     try std.testing.expect(!windows[7].device_readable and windows[7].device_writable);
 
-    const outside_managed_width = try xhci.planControllerDma(
-        capabilities,
-        1,
-        @as(u64, std.math.maxInt(u32)) & ~(xhci.XHCI_PAGE_BYTES - 1),
-    );
-    try std.testing.expectError(
-        error.DmaIsolationPlanInvalid,
-        buildDmaWindows(outside_managed_width, &windows),
-    );
+    // AC64 controllers address DMA above 4 GiB; windows keep the exact base.
+    const high = try xhci.dma_plan.planControllerDma(capabilities, 1, 0x1_0000_0000);
+    try std.testing.expectEqual(count, try buildDmaWindows(high, &windows));
+    try std.testing.expectEqual(@as(u64, 0x1_0000_0000), windows[0].base);
+}
+
+test "xHCI controller DMA at its largest reportable size fits one VT-d domain span" {
+    var capabilities = xhci.defaultCapabilityRegisters();
+    capabilities.max_device_slots = xhci.maxDeviceSlotsU8();
+    capabilities.context_size = .bytes_64;
+    capabilities.max_scratchpad_buffers = 1023;
+    const frames = try xhci.dma_plan.controllerDmaFrameCount(capabilities, xhci.maxDeviceSlotsU8());
+    try std.testing.expect(@as(u64, frames) * PAGE_BYTES <= intel_vtd.MAX_DOMAIN_SPAN_BYTES);
 }
 
 test "keyboard repeat continuity changes across device teardown and controller reset" {
@@ -2670,34 +2207,20 @@ test "keyboard repeat continuity changes across device teardown and controller r
 const HotplugTestFixture = struct {
     states: [3]PortRuntimeState = @splat(.{}),
     reports: xhci.BootKeyboardReportPublisher = .{},
-    protocols: xhci.SupportedProtocols = .{},
+    protocols: xhci.caps.SupportedProtocols = .{},
     status: u32 = 0,
     dma: []align(64) u8 = &.{},
     command_doorbells: usize = 0,
     port_writes: usize = 0,
     transfer_doorbells: usize = 0,
-    saved_plan: ?xhci.ControllerDmaPlan,
+    saved_plan: ?xhci.dma_plan.ControllerDmaPlan,
     saved_memory: ControllerDmaMemory,
-    saved_command_producer: xhci.TrbRingProducer,
-    saved_control_producers: [xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer,
-    saved_interrupt_producers: [xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer,
-    saved_consumer: xhci.EventRingConsumer,
-    saved_scan: u16,
-    saved_port_events: u64,
-    saved_command_events: u64,
-    saved_transfer_events: u64,
-    saved_configure_count: u64,
-    saved_keyboard_count: u64,
-    saved_submission_count: u64,
+    saved_runtime: Runtime,
     saved_ports: []PortRuntimeState,
     saved_reports: ?*xhci.BootKeyboardReportPublisher,
-    saved_protocols: ?*const xhci.SupportedProtocols,
+    saved_protocols: ?*const xhci.caps.SupportedProtocols,
     saved_capabilities: ?xhci.CapabilityRegisters,
     saved_slots: u8,
-    saved_slot_to_port: [xhci.MAX_DEVICE_SLOTS + 1]u8,
-    saved_interrupt_reports: usize,
-    saved_command: ?OutstandingCommand,
-    saved_transfer: ?OutstandingTransfer,
     saved_epoch: u64,
     saved_active: bool,
     saved_clock_frequency: u64 = 0,
@@ -2706,26 +2229,12 @@ const HotplugTestFixture = struct {
         return .{
             .saved_plan = active_dma_plan,
             .saved_memory = active_dma_memory,
-            .saved_command_producer = command_producer,
-            .saved_control_producers = control_producers,
-            .saved_interrupt_producers = interrupt_producers,
-            .saved_consumer = event_consumer,
-            .saved_scan = next_port_scan,
-            .saved_port_events = port_status_change_count,
-            .saved_command_events = command_completion_count,
-            .saved_transfer_events = transfer_completion_count,
-            .saved_configure_count = configure_endpoint_count,
-            .saved_keyboard_count = keyboard_report_count,
-            .saved_submission_count = interrupt_report_submission_count,
+            .saved_runtime = runtime,
             .saved_ports = ports,
             .saved_reports = active_keyboard_reports,
             .saved_protocols = active_protocols,
             .saved_capabilities = active_capabilities,
             .saved_slots = active_enabled_slots,
-            .saved_slot_to_port = slot_to_port,
-            .saved_interrupt_reports = outstanding_interrupt_reports,
-            .saved_command = outstanding_command,
-            .saved_transfer = outstanding_transfer,
             .saved_epoch = keyboard_continuity_epoch,
             .saved_active = controllerActive(),
         };
@@ -2736,17 +2245,13 @@ const HotplugTestFixture = struct {
         capabilities.max_ports = 2;
         capabilities.max_device_slots = 2;
         capabilities.max_scratchpad_buffers = 0;
-        const plan = try xhci.planControllerDma(capabilities, 2, 0x1000);
+        const plan = try xhci.dma_plan.planControllerDma(capabilities, 2, 0x1000);
         self.dma = try std.testing.allocator.alignedAlloc(u8, .@"64", @intCast(plan.total_bytes));
         @memset(self.dma, 0);
         self.saved_clock_frequency = tsc_clock.swapTestFrequency(1_000_000_000);
         active_dma_plan = plan;
         active_dma_memory = .{ .physical_base = 0x1000, .alias_base = @intFromPtr(self.dma.ptr), .byte_len = self.dma.len };
-        command_producer = .{};
-        control_producers = @splat(.{});
-        interrupt_producers = @splat(.{});
-        event_consumer = .{};
-        next_port_scan = 1;
+        runtime = .{};
         active_capabilities = capabilities;
         @atomicStore(bool, &active, true, .release);
         active_enabled_slots = 2;
@@ -2757,11 +2262,8 @@ const HotplugTestFixture = struct {
         active_protocols = &self.protocols;
         ports = &self.states;
         active_keyboard_reports = &self.reports;
-        slot_to_port = @splat(0);
-        slot_to_port[1] = 1;
-        outstanding_interrupt_reports = 1;
-        outstanding_command = null;
-        outstanding_transfer = null;
+        runtime.slot_to_port[1] = 1;
+        runtime.outstanding_interrupt_reports = 1;
         self.states[1] = .{
             .connected = true,
             .enabled = true,
@@ -2799,12 +2301,12 @@ const HotplugTestFixture = struct {
             .endpoint_zero_max_packet_size = 64,
             .interrupt_report_trb_address = try plan.arena.interruptTransferRingAddress(1),
         };
-        interrupt_producers[1].enqueue_index = 1;
+        runtime.interrupt_producers[1].enqueue_index = 1;
         try self.endpointState(xhci.ENDPOINT_ZERO_DCI, .running);
         try self.endpointState(3, .running);
     }
 
-    fn endpointState(_: *@This(), endpoint_id: u5, value: xhci.EndpointState) !void {
+    fn endpointState(_: *@This(), endpoint_id: u5, value: xhci.trb.EndpointState) !void {
         const address = try active_dma_plan.?.arena.deviceContextAddress(1);
         const offset = @as(u64, endpoint_id) * active_capabilities.?.context_size.byteCount();
         const alias = try active_dma_memory.aliasFor(address + offset, @sizeOf(u32));
@@ -2814,34 +2316,20 @@ const HotplugTestFixture = struct {
     fn restore(self: *@This()) void {
         active_dma_plan = self.saved_plan;
         active_dma_memory = self.saved_memory;
-        command_producer = self.saved_command_producer;
-        control_producers = self.saved_control_producers;
-        interrupt_producers = self.saved_interrupt_producers;
-        event_consumer = self.saved_consumer;
-        next_port_scan = self.saved_scan;
-        port_status_change_count = self.saved_port_events;
-        command_completion_count = self.saved_command_events;
-        transfer_completion_count = self.saved_transfer_events;
-        configure_endpoint_count = self.saved_configure_count;
-        keyboard_report_count = self.saved_keyboard_count;
-        interrupt_report_submission_count = self.saved_submission_count;
+        runtime = self.saved_runtime;
         std.testing.allocator.free(self.dma);
         ports = self.saved_ports;
         active_keyboard_reports = self.saved_reports;
         active_protocols = self.saved_protocols;
         active_capabilities = self.saved_capabilities;
         active_enabled_slots = self.saved_slots;
-        slot_to_port = self.saved_slot_to_port;
-        outstanding_interrupt_reports = self.saved_interrupt_reports;
-        outstanding_command = self.saved_command;
-        outstanding_transfer = self.saved_transfer;
         keyboard_continuity_epoch = self.saved_epoch;
         @atomicStore(bool, &active, self.saved_active, .release);
         _ = tsc_clock.swapTestFrequency(self.saved_clock_frequency);
     }
 
     pub fn readReg32(self: *@This(), offset: u32) u32 {
-        std.debug.assert(offset == xhci.portRegisterOffset(active_capabilities.?, 1) catch unreachable);
+        std.debug.assert(offset == xhci.controller.portRegisterOffset(active_capabilities.?, 1) catch unreachable);
         return self.status;
     }
 
@@ -2851,25 +2339,25 @@ const HotplugTestFixture = struct {
         } else if (offset == active_capabilities.?.doorbell_offset + @sizeOf(u32)) {
             self.transfer_doorbells += 1;
         } else {
-            std.debug.assert(offset == xhci.portRegisterOffset(active_capabilities.?, 1) catch unreachable);
+            std.debug.assert(offset == xhci.controller.portRegisterOffset(active_capabilities.?, 1) catch unreachable);
             self.port_writes += 1;
         }
     }
 
     fn queuedEvents(self: *@This(), events: []const [4]u32) Error!void {
         const plan = active_dma_plan.?;
-        if (event_consumer.dequeue_index + events.len > plan.ring_plan.event_ring_trbs) {
+        if (runtime.event_consumer.dequeue_index + events.len > plan.ring_plan.event_ring_trbs) {
             return error.EventRingStateInvalid;
         }
         for (events, 0..) |words, index| {
             const address = plan.ring_plan.event_ring_address +
-                (@as(u64, event_consumer.dequeue_index) + index) * xhci.TRB_BYTES;
+                (@as(u64, runtime.event_consumer.dequeue_index) + index) * xhci.TRB_BYTES;
             const trb: *[4]u32 = @ptrFromInt(try active_dma_memory.aliasFor(address, xhci.TRB_BYTES));
             trb.* = words;
         }
         for (events) |_| {
             const words = readCurrentEvent() orelse return error.EventRingStateInvalid;
-            const event = (try event_consumer.consume(words, plan.ring_plan.event_ring_trbs)) orelse
+            const event = (try runtime.event_consumer.consume(words, plan.ring_plan.event_ring_trbs)) orelse
                 return error.EventRingStateInvalid;
             try handleEvent(event, self);
         }
@@ -2884,8 +2372,8 @@ const HotplugTestFixture = struct {
     }
 
     fn finishStop(self: *@This()) !void {
-        const command = outstanding_command.?;
-        try std.testing.expectEqual(xhci.CommandKind.stop_endpoint, command.kind);
+        const command = runtime.outstanding_command.?;
+        try std.testing.expectEqual(xhci.trb.CommandKind.stop_endpoint, command.kind);
         const plan = active_dma_plan.?;
         const control = command.endpoint_id == xhci.ENDPOINT_ZERO_DCI;
         const ring = if (control) try plan.arena.controlTransferRingAddress(1) else try plan.arena.interruptTransferRingAddress(1);
@@ -2898,37 +2386,11 @@ const HotplugTestFixture = struct {
     fn portEvent(self: *@This(), connected: bool) Error!void {
         self.status = (1 << 17) | (1 << 9) |
             (if (connected) @as(u32, 1 | (1 << 1) | (3 << 10)) else 0);
-        try handlePortStatusChange(xhci.decodeEvent(.{
+        try handlePortStatusChange(xhci.trb.decodeEvent(.{
             1 << 24, 0, 1 << 24, (34 << 10) | 1,
         }), self);
     }
 };
-
-test "xHCI failed MMIO read cannot authenticate a detached device lifetime" {
-    const Reader = struct {
-        mapping_error: ?Error = error.MmioMappingFailed,
-        writes: usize = 0,
-
-        fn readReg32(_: *@This(), _: u32) u32 {
-            return 0;
-        }
-
-        fn writeReg32(self: *@This(), _: u32, _: u32) void {
-            self.writes += 1;
-        }
-    };
-    var fixture = HotplugTestFixture.init();
-    try fixture.activate();
-    defer fixture.restore();
-    const previous = fixture.states[1];
-    const epoch = keyboard_continuity_epoch;
-    var reader = Reader{};
-    try std.testing.expectError(error.MmioMappingFailed, authenticatePortRetirement(1, &fixture.states[1], &reader));
-    try std.testing.expectEqualDeep(previous, fixture.states[1]);
-    try std.testing.expectEqual(epoch, keyboard_continuity_epoch);
-    try std.testing.expectEqual(@as(usize, 0), reader.writes);
-    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
-}
 
 test "xHCI hotplug accepts queued late keyboard completion without publishing" {
     var fixture = HotplugTestFixture.init();
@@ -2938,11 +2400,11 @@ test "xHCI hotplug accepts queued late keyboard completion without publishing" {
     const report_trb = fixture.states[1].interrupt_report_trb_address;
     try fixture.portEvent(false);
     try std.testing.expectEqual(@as(usize, 0), fixture.reports.pendingCount());
-    try handleInterruptTransferCompletion(xhci.decodeEvent(.{
+    try handleInterruptTransferCompletion(xhci.trb.decodeEvent(.{
         @truncate(report_trb), @truncate(report_trb >> 32), 1 << 24, (32 << 10) | (3 << 16) | (1 << 24) | 1,
     }), &fixture);
     try std.testing.expectEqual(@as(usize, 0), fixture.reports.pendingCount());
-    try std.testing.expectEqual(@as(usize, 0), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 0), runtime.outstanding_interrupt_reports);
     try std.testing.expectEqual(@as(u8, 1), fixture.states[1].slot_id);
 }
 
@@ -2952,7 +2414,7 @@ test "xHCI pending work keeps idle report rings quiet and observes queued DMA ev
     defer fixture.restore();
     const saved_pending = @atomicRmw(u32, &pending_interrupts, .Xchg, 0, .monotonic);
     defer @atomicStore(u32, &pending_interrupts, saved_pending, .monotonic);
-    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 1), runtime.outstanding_interrupt_reports);
     try std.testing.expect(!eventWorkPending());
     try std.testing.expect(!lifecyclePending());
     const address = active_dma_plan.?.ring_plan.event_ring_address;
@@ -2974,18 +2436,18 @@ test "xHCI pending work retains control and retirement watchdogs until owned com
     defer fixture.restore();
     try std.testing.expect(!lifecyclePending());
     try submitDescriptorTransfer(.configuration_descriptor_header, 1, &fixture.states[1], &fixture);
-    try std.testing.expect(outstanding_transfer != null);
+    try std.testing.expect(runtime.outstanding_transfer != null);
     try std.testing.expect(lifecyclePending());
     try fixture.portEvent(false);
     try std.testing.expect(fixture.states[1].retiring);
     try std.testing.expect(fixture.states[1].reset_deadline != null);
     try std.testing.expect(lifecyclePending());
     try submitNextPortAction(&fixture);
-    try std.testing.expect(outstanding_command != null);
+    try std.testing.expect(runtime.outstanding_command != null);
     try std.testing.expectEqual(PortAction.none, fixture.states[1].action);
     try std.testing.expect(lifecyclePending());
     try fixture.finishStop();
-    try std.testing.expect(outstanding_transfer == null and outstanding_command == null);
+    try std.testing.expect(runtime.outstanding_transfer == null and runtime.outstanding_command == null);
     // Isolate the anchored retirement deadline from the next queued command.
     const action = fixture.states[1].action;
     fixture.states[1].action = .none;
@@ -2995,9 +2457,9 @@ test "xHCI pending work retains control and retirement watchdogs until owned com
     try fixture.finishStop();
     try std.testing.expect(lifecyclePending());
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(xhci.CommandKind.disable_slot, outstanding_command.?.kind);
+    try std.testing.expectEqual(xhci.trb.CommandKind.disable_slot, runtime.outstanding_command.?.kind);
     try std.testing.expect(lifecyclePending());
-    try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(outstanding_command.?, 1)});
+    try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(runtime.outstanding_command.?, 1)});
     try std.testing.expect(!fixture.states[1].retiring);
     try std.testing.expect(!lifecyclePending());
 }
@@ -3007,12 +2469,12 @@ test "xHCI pending work retains reset deadlines and queued attach actions withou
     try fixture.activate();
     defer fixture.restore();
     fixture.states[1] = .{};
-    outstanding_interrupt_reports = 0;
-    slot_to_port[1] = 0;
+    runtime.outstanding_interrupt_reports = 0;
+    runtime.slot_to_port[1] = 0;
     // A real reset-in-progress notification owns a watchdog even when the
     // event ring is empty and no command or control TD has been submitted.
     fixture.status = (1 << 17) | (1 << 9) | (1 << 4) | (3 << 10) | 1;
-    const notification = xhci.decodeEvent(.{ 1 << 24, 0, 1 << 24, (34 << 10) | 1 });
+    const notification = xhci.trb.decodeEvent(.{ 1 << 24, 0, 1 << 24, (34 << 10) | 1 });
     try handlePortStatusChange(notification, &fixture);
     try std.testing.expect(fixture.states[1].reset_deadline != null);
     try std.testing.expectEqual(PortAction.none, fixture.states[1].action);
@@ -3021,10 +2483,10 @@ test "xHCI pending work retains reset deadlines and queued attach actions withou
     try fixture.portEvent(true);
     try std.testing.expect(fixture.states[1].reset_deadline == null);
     try std.testing.expectEqual(PortAction.enable_slot, fixture.states[1].action);
-    try std.testing.expect(outstanding_command == null and outstanding_transfer == null);
+    try std.testing.expect(runtime.outstanding_command == null and runtime.outstanding_transfer == null);
     try std.testing.expect(lifecyclePending());
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(xhci.CommandKind.enable_slot, outstanding_command.?.kind);
+    try std.testing.expectEqual(xhci.trb.CommandKind.enable_slot, runtime.outstanding_command.?.kind);
     try std.testing.expectEqual(PortAction.none, fixture.states[1].action);
     try std.testing.expect(lifecyclePending());
 }
@@ -3049,26 +2511,26 @@ test "xHCI hotplug stops both owned endpoints before disable and reconnect" {
     try fixture.portEvent(true);
     try std.testing.expectEqualDeep(deadline, fixture.states[1].reset_deadline.?);
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(xhci.ENDPOINT_ZERO_DCI, outstanding_command.?.endpoint_id);
+    try std.testing.expectEqual(xhci.ENDPOINT_ZERO_DCI, runtime.outstanding_command.?.endpoint_id);
     try fixture.finishStop();
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(@as(u5, 3), outstanding_command.?.endpoint_id);
+    try std.testing.expectEqual(@as(u5, 3), runtime.outstanding_command.?.endpoint_id);
     // The successful report can precede the additional forced idle-ring event.
     try fixture.queuedEvents(&.{HotplugTestFixture.transferEvent(report_trb, 3, 1)});
-    try std.testing.expectEqual(@as(usize, 0), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 0), runtime.outstanding_interrupt_reports);
     try fixture.finishStop();
-    try std.testing.expectEqual(@as(usize, 0), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 0), runtime.outstanding_interrupt_reports);
     try std.testing.expectEqual(@as(usize, 0), fixture.reports.pendingCount());
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(xhci.CommandKind.disable_slot, outstanding_command.?.kind);
-    try std.testing.expectEqual(@as(u8, 1), slot_to_port[1]);
-    try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(outstanding_command.?, 1)});
-    try std.testing.expectEqual(@as(u8, 0), slot_to_port[1]);
+    try std.testing.expectEqual(xhci.trb.CommandKind.disable_slot, runtime.outstanding_command.?.kind);
+    try std.testing.expectEqual(@as(u8, 1), runtime.slot_to_port[1]);
+    try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(runtime.outstanding_command.?, 1)});
+    try std.testing.expectEqual(@as(u8, 0), runtime.slot_to_port[1]);
     try std.testing.expectEqual(@as(u8, 0), fixture.states[1].slot_id);
     try std.testing.expect(!fixture.states[1].retiring);
     try std.testing.expectEqual(PortAction.enable_slot, fixture.states[1].action);
     try std.testing.expectEqual(@as(usize, 3), fixture.command_doorbells);
-    try std.testing.expectError(error.InvalidDeviceSlot, handleInterruptTransferCompletion(xhci.decodeEvent(HotplugTestFixture.transferEvent(report_trb, 3, 1)), &fixture));
+    try std.testing.expectError(error.InvalidDeviceSlot, handleInterruptTransferCompletion(xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(report_trb, 3, 1)), &fixture));
 }
 
 test "xHCI hotplug stops a pending control TD without extending the retirement deadline" {
@@ -3076,7 +2538,7 @@ test "xHCI hotplug stops a pending control TD without extending the retirement d
     try fixture.activate();
     defer fixture.restore();
     const ring = try active_dma_plan.?.arena.controlTransferRingAddress(1);
-    outstanding_transfer = .{ .kind = .device_descriptor, .status_trb_address = ring + 2 * xhci.TRB_BYTES, .port_id = 1, .slot_id = 1, .deadline = .{ .value = .{ .start_ticks = 0, .interval_ticks = 1 } } };
+    runtime.outstanding_transfer = .{ .kind = .device_descriptor, .status_trb_address = ring + 2 * xhci.TRB_BYTES, .port_id = 1, .slot_id = 1, .deadline = .{ .value = .{ .start_ticks = 0, .interval_ticks = 1 } } };
     try std.testing.expect(controlTransferTimedOut());
     try fixture.portEvent(false);
     const retirement_deadline = fixture.states[1].reset_deadline.?;
@@ -3085,14 +2547,14 @@ test "xHCI hotplug stops a pending control TD without extending the retirement d
     try fixture.portEvent(true);
     try std.testing.expectEqualDeep(retirement_deadline, fixture.states[1].reset_deadline.?);
     try submitNextPortAction(&fixture);
-    const command = outstanding_command.?;
-    try std.testing.expectEqual(xhci.CommandKind.stop_endpoint, command.kind);
+    const command = runtime.outstanding_command.?;
+    try std.testing.expectEqual(xhci.trb.CommandKind.stop_endpoint, command.kind);
     try std.testing.expectEqual(xhci.ENDPOINT_ZERO_DCI, command.endpoint_id);
     try fixture.endpointState(1, .stopped);
     // Stop can interrupt Setup/Data, rather than the final Status TRB.
     try fixture.queuedEvents(&.{ HotplugTestFixture.transferEvent(ring, 1, 26), HotplugTestFixture.commandEvent(command, 1) });
-    try std.testing.expect(outstanding_transfer == null);
-    try std.testing.expect(outstanding_command == null);
+    try std.testing.expect(runtime.outstanding_transfer == null);
+    try std.testing.expect(runtime.outstanding_command == null);
     try std.testing.expectEqual(PortAction.retire_slot, fixture.states[1].action);
 }
 
@@ -3100,18 +2562,18 @@ test "xHCI hotplug empty control stop preserves another port transfer" {
     var fixture = HotplugTestFixture.init();
     try fixture.activate();
     defer fixture.restore();
-    outstanding_transfer = .{ .kind = .device_descriptor, .status_trb_address = try active_dma_plan.?.arena.controlTransferRingAddress(2), .port_id = 2, .slot_id = 2, .deadline = tsc_clock.afterMilliseconds(1_000) };
-    const transfer = outstanding_transfer.?;
+    runtime.outstanding_transfer = .{ .kind = .device_descriptor, .status_trb_address = try active_dma_plan.?.arena.controlTransferRingAddress(2), .port_id = 2, .slot_id = 2, .deadline = tsc_clock.afterMilliseconds(1_000) };
+    const transfer = runtime.outstanding_transfer.?;
     try fixture.portEvent(false);
     try submitNextPortAction(&fixture);
     try fixture.finishStop();
-    try std.testing.expectEqualDeep(transfer, outstanding_transfer.?);
+    try std.testing.expectEqualDeep(transfer, runtime.outstanding_transfer.?);
     try submitNextPortAction(&fixture);
     try fixture.finishStop();
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(xhci.CommandKind.disable_slot, outstanding_command.?.kind);
-    try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(outstanding_command.?, 1)});
-    try std.testing.expectEqualDeep(transfer, outstanding_transfer.?);
+    try std.testing.expectEqual(xhci.trb.CommandKind.disable_slot, runtime.outstanding_command.?.kind);
+    try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(runtime.outstanding_command.?, 1)});
+    try std.testing.expectEqualDeep(transfer, runtime.outstanding_transfer.?);
 }
 
 test "xHCI hotplug rejects unordered duplicate and unowned stopped events" {
@@ -3120,17 +2582,17 @@ test "xHCI hotplug rejects unordered duplicate and unowned stopped events" {
     defer fixture.restore();
     try fixture.portEvent(false);
     try submitNextPortAction(&fixture);
-    const command = outstanding_command.?;
+    const command = runtime.outstanding_command.?;
     try fixture.endpointState(1, .stopped);
-    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.decodeEvent(HotplugTestFixture.commandEvent(command, 1)), &fixture));
+    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.trb.decodeEvent(HotplugTestFixture.commandEvent(command, 1)), &fixture));
     const ring = try active_dma_plan.?.arena.controlTransferRingAddress(1);
-    try std.testing.expectError(error.TrbRingStateInvalid, handleControlTransferCompletion(xhci.decodeEvent(HotplugTestFixture.transferEvent(ring + 1, 1, 27)), &fixture));
-    try std.testing.expectError(error.TrbRingStateInvalid, handleInterruptTransferCompletion(xhci.decodeEvent(HotplugTestFixture.transferEvent(ring, 3, 27)), &fixture));
-    const stopped = xhci.decodeEvent(HotplugTestFixture.transferEvent(ring, 1, 27));
+    try std.testing.expectError(error.TrbRingStateInvalid, handleControlTransferCompletion(xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(ring + 1, 1, 27)), &fixture));
+    try std.testing.expectError(error.TrbRingStateInvalid, handleInterruptTransferCompletion(xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(ring, 3, 27)), &fixture));
+    const stopped = xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(ring, 1, 27));
     try handleControlTransferCompletion(stopped, &fixture);
     try std.testing.expectError(error.CommandRingStateInvalid, handleControlTransferCompletion(stopped, &fixture));
-    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
-    try handleCommandCompletion(xhci.decodeEvent(HotplugTestFixture.commandEvent(command, 1)), &fixture);
+    try std.testing.expectEqual(@as(usize, 1), runtime.outstanding_interrupt_reports);
+    try handleCommandCompletion(xhci.trb.decodeEvent(HotplugTestFixture.commandEvent(command, 1)), &fixture);
 }
 
 test "xHCI hotplug unowned endpoint errors cannot authorize Reset or Disable" {
@@ -3149,13 +2611,13 @@ test "xHCI hotplug unowned endpoint errors cannot authorize Reset or Disable" {
     try std.testing.expectError(error.EndpointContextStateInvalid, submitNextPortAction(&fixture));
     try fixture.endpointState(1, .running);
     try submitNextPortAction(&fixture);
-    const command = outstanding_command.?;
-    try std.testing.expectEqual(xhci.CommandKind.stop_endpoint, command.kind);
+    const command = runtime.outstanding_command.?;
+    try std.testing.expectEqual(xhci.trb.CommandKind.stop_endpoint, command.kind);
     // No EP0 TD is owned, so Context State Error cannot wait for or authorize recovery.
-    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.decodeEvent(HotplugTestFixture.commandEvent(command, 19)), &fixture));
+    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.trb.decodeEvent(HotplugTestFixture.commandEvent(command, 19)), &fixture));
     try std.testing.expectEqual(@as(u2, 0), fixture.states[1].endpoint_state.failed_mask);
     try std.testing.expectEqual(@as(u8, 1), fixture.states[1].slot_id);
-    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 1), runtime.outstanding_interrupt_reports);
 }
 
 test "xHCI hotplug reconnect resets a replacement that is not enabled" {
@@ -3164,19 +2626,19 @@ test "xHCI hotplug reconnect resets a replacement that is not enabled" {
     defer fixture.restore();
     try fixture.portEvent(false);
     fixture.status = (1 << 17) | (1 << 9) | 1;
-    try handlePortStatusChange(xhci.decodeEvent(.{ 1 << 24, 0, 1 << 24, (34 << 10) | 1 }), &fixture);
+    try handlePortStatusChange(xhci.trb.decodeEvent(.{ 1 << 24, 0, 1 << 24, (34 << 10) | 1 }), &fixture);
     try submitNextPortAction(&fixture);
     try fixture.finishStop();
     try submitNextPortAction(&fixture);
     try fixture.finishStop();
     try submitNextPortAction(&fixture);
-    try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(outstanding_command.?, 1)});
+    try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(runtime.outstanding_command.?, 1)});
     try std.testing.expectEqual(PortAction.reset_port, fixture.states[1].action);
     const writes = fixture.port_writes;
     try submitNextPortAction(&fixture);
     try std.testing.expectEqual(writes + 1, fixture.port_writes);
     try std.testing.expect(fixture.states[1].reset_deadline != null);
-    try std.testing.expect(outstanding_command == null);
+    try std.testing.expect(runtime.outstanding_command == null);
     try std.testing.expectEqual(@as(u8, 0), fixture.states[1].slot_id);
     // The real reset completion now begins a new slot lifetime.
     try fixture.portEvent(true);
@@ -3184,20 +2646,20 @@ test "xHCI hotplug reconnect resets a replacement that is not enabled" {
 }
 
 test "xHCI hotplug retains retirement across every in-flight enumeration command" {
-    for ([_]xhci.CommandKind{ .enable_slot, .address_device, .evaluate_context, .configure_endpoint }) |kind| {
+    for ([_]xhci.trb.CommandKind{ .enable_slot, .address_device, .evaluate_context, .configure_endpoint }) |kind| {
         var fixture = HotplugTestFixture.init();
         try fixture.activate();
         defer fixture.restore();
         const state = &fixture.states[1];
         state.interrupt_report_trb_address = 0;
-        outstanding_interrupt_reports = 0;
+        runtime.outstanding_interrupt_reports = 0;
         state.endpoint_configured = false;
         try fixture.endpointState(3, .disabled);
         switch (kind) {
             .enable_slot => {
                 state.slot_id = 0;
                 state.addressed = false;
-                slot_to_port[1] = 0;
+                runtime.slot_to_port[1] = 0;
                 try fixture.endpointState(1, .disabled);
             },
             .address_device => state.addressed = false,
@@ -3212,21 +2674,17 @@ test "xHCI hotplug retains retirement across every in-flight enumeration command
             },
             else => unreachable,
         }
-        outstanding_command = .{ .kind = kind, .trb_address = active_dma_plan.?.ring_plan.command_ring_address, .port_id = 1, .slot_id = state.slot_id, .deadline = tsc_clock.afterMilliseconds(1_000) };
+        runtime.outstanding_command = .{ .kind = kind, .trb_address = active_dma_plan.?.ring_plan.command_ring_address, .port_id = 1, .slot_id = state.slot_id, .deadline = tsc_clock.afterMilliseconds(1_000) };
         try fixture.portEvent(false);
         try fixture.portEvent(true);
-        var completion = HotplugTestFixture.commandEvent(outstanding_command.?, 1);
+        var completion = HotplugTestFixture.commandEvent(runtime.outstanding_command.?, 1);
         completion[3] |= 1 << 24; // Enable Slot assigns the returned slot id.
         try fixture.queuedEvents(&.{completion});
         try std.testing.expect(state.retiring);
         try std.testing.expectEqual(PortAction.retire_slot, state.action);
         try std.testing.expectEqual(@as(u8, 1), state.slot_id);
-        try std.testing.expect(deviceDescriptorForPort(1) == null);
-        try std.testing.expect(configurationDescriptorForPort(1) == null);
-        try std.testing.expect(bootKeyboardConfigurationForPort(1) == null);
-        try std.testing.expect(!portConfigured(1));
         try submitNextPortAction(&fixture);
-        try std.testing.expectEqual(if (kind == .enable_slot) xhci.CommandKind.disable_slot else xhci.CommandKind.stop_endpoint, outstanding_command.?.kind);
+        try std.testing.expectEqual(if (kind == .enable_slot) xhci.trb.CommandKind.disable_slot else xhci.trb.CommandKind.stop_endpoint, runtime.outstanding_command.?.kind);
     }
 }
 
@@ -3236,13 +2694,13 @@ test "xHCI hotplug drains each exact late control completion without parsing" {
         try fixture.activate();
         defer fixture.restore();
         const status = (try active_dma_plan.?.arena.controlTransferRingAddress(1)) + 2 * xhci.TRB_BYTES;
-        outstanding_transfer = .{ .kind = kind, .status_trb_address = status, .port_id = 1, .slot_id = 1, .deadline = tsc_clock.afterMilliseconds(1_000) };
+        runtime.outstanding_transfer = .{ .kind = kind, .status_trb_address = status, .port_id = 1, .slot_id = 1, .deadline = tsc_clock.afterMilliseconds(1_000) };
         try fixture.portEvent(false);
         try fixture.queuedEvents(&.{HotplugTestFixture.transferEvent(status, 1, 1)});
-        try std.testing.expect(outstanding_transfer == null);
+        try std.testing.expect(runtime.outstanding_transfer == null);
         try std.testing.expectEqual(PortAction.retire_slot, fixture.states[1].action);
         try std.testing.expectEqual(@as(usize, 0), fixture.reports.pendingCount());
-        try std.testing.expectError(error.TrbRingStateInvalid, handleControlTransferCompletion(xhci.decodeEvent(HotplugTestFixture.transferEvent(status, 1, 1)), &fixture));
+        try std.testing.expectError(error.TrbRingStateInvalid, handleControlTransferCompletion(xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(status, 1, 1)), &fixture));
     }
 }
 
@@ -3254,26 +2712,26 @@ test "xHCI hotplug accepts only the owned Address Device detach failure" {
     state.addressed = false;
     state.endpoint_configured = false;
     state.interrupt_report_trb_address = 0;
-    outstanding_interrupt_reports = 0;
+    runtime.outstanding_interrupt_reports = 0;
     try fixture.endpointState(3, .disabled);
     const command: OutstandingCommand = .{ .kind = .address_device, .trb_address = active_dma_plan.?.ring_plan.command_ring_address, .port_id = 1, .slot_id = 1, .deadline = tsc_clock.afterMilliseconds(1_000) };
-    outstanding_command = command;
+    runtime.outstanding_command = command;
     fixture.status = (1 << 9) | 1 | (1 << 1) | (3 << 10);
-    try std.testing.expectError(error.TrbRingStateInvalid, handleCommandCompletion(xhci.decodeEvent(HotplugTestFixture.commandEvent(command, 4)), &fixture));
+    try std.testing.expectError(error.TrbRingStateInvalid, handleCommandCompletion(xhci.trb.decodeEvent(HotplugTestFixture.commandEvent(command, 4)), &fixture));
     try std.testing.expect(!state.retiring);
     fixture.status = (1 << 17) | (1 << 9); // Detach precedes its queued PSC.
     for ([_]u8{ 7, 11, 17, 19, 25 }) |code| {
-        try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.decodeEvent(HotplugTestFixture.commandEvent(command, code)), &fixture));
+        try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.trb.decodeEvent(HotplugTestFixture.commandEvent(command, code)), &fixture));
     }
     var wrong_slot = HotplugTestFixture.commandEvent(command, 4);
     wrong_slot[3] ^= 3 << 24;
-    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.decodeEvent(wrong_slot), &fixture));
+    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.trb.decodeEvent(wrong_slot), &fixture));
     try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(command, 4)});
-    try std.testing.expect(outstanding_command == null);
+    try std.testing.expect(runtime.outstanding_command == null);
     try std.testing.expect(state.retiring);
     // Default Address failure has no TD and may Disable even with idle Running EP0.
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(xhci.CommandKind.disable_slot, outstanding_command.?.kind);
+    try std.testing.expectEqual(xhci.trb.CommandKind.disable_slot, runtime.outstanding_command.?.kind);
 }
 
 test "xHCI hotplug released report reservation schedules a healthy waiting port" {
@@ -3283,7 +2741,7 @@ test "xHCI hotplug released report reservation schedules a healthy waiting port"
     fixture.states[2] = fixture.states[1];
     fixture.states[2].slot_id = 2;
     fixture.states[2].interrupt_report_trb_address = 0;
-    slot_to_port[2] = 2;
+    runtime.slot_to_port[2] = 2;
     for (0..fixture.reports.reports.len - 1) |_| {
         _ = try fixture.reports.publish(2, 2, fixture.states[2].boot_keyboard.?, fixture.states[2].device_descriptor.?, &.{ 0, 0, 4, 0, 0, 0, 0, 0 });
     }
@@ -3291,7 +2749,7 @@ test "xHCI hotplug released report reservation schedules a healthy waiting port"
     try fixture.portEvent(false);
     try std.testing.expectEqual(PortAction.none, fixture.states[2].action);
     try fixture.queuedEvents(&.{HotplugTestFixture.transferEvent(report_trb, 3, 1)});
-    try std.testing.expectEqual(@as(usize, 0), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 0), runtime.outstanding_interrupt_reports);
     try std.testing.expectEqual(PortAction.post_interrupt_report, fixture.states[2].action);
     try std.testing.expectEqual(PortAction.retire_slot, fixture.states[1].action);
     try std.testing.expectEqual(fixture.reports.reports.len - 1, fixture.reports.pendingCount());
@@ -3304,9 +2762,9 @@ test "xHCI hotplug coalesced port events neither erase ownership nor extend dead
     try fixture.portEvent(false);
     const deadline = fixture.states[1].reset_deadline.?;
     fixture.status &= ~@as(u32, 0x7F << 17);
-    try handlePortStatusChange(xhci.decodeEvent(.{ 1 << 24, 0, 1 << 24, (34 << 10) | 1 }), &fixture);
+    try handlePortStatusChange(xhci.trb.decodeEvent(.{ 1 << 24, 0, 1 << 24, (34 << 10) | 1 }), &fixture);
     try std.testing.expectEqualDeep(deadline, fixture.states[1].reset_deadline.?);
-    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 1), runtime.outstanding_interrupt_reports);
     try std.testing.expectEqual(PortAction.retire_slot, fixture.states[1].action);
 }
 
@@ -3316,8 +2774,8 @@ test "xHCI hotplug replacement can detach again before its delayed port event" {
     defer fixture.restore();
     fixture.states[1] = .{ .connected = true, .action = .reset_port };
     fixture.status = (1 << 17) | (1 << 9);
-    outstanding_interrupt_reports = 0;
-    slot_to_port[1] = 0;
+    runtime.outstanding_interrupt_reports = 0;
+    runtime.slot_to_port[1] = 0;
     try submitNextPortAction(&fixture);
     try std.testing.expect(!fixture.states[1].connected);
     try std.testing.expectEqual(PortAction.none, fixture.states[1].action);
@@ -3336,9 +2794,9 @@ test "xHCI hotplug coalesced detach and reconnect retires the previous slot" {
     try std.testing.expect(fixture.states[1].connected);
     try std.testing.expectEqual(PortAction.retire_slot, fixture.states[1].action);
     try std.testing.expectEqual(@as(usize, 0), fixture.reports.pendingCount());
-    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 1), runtime.outstanding_interrupt_reports);
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(xhci.CommandKind.stop_endpoint, outstanding_command.?.kind);
+    try std.testing.expectEqual(xhci.trb.CommandKind.stop_endpoint, runtime.outstanding_command.?.kind);
 }
 
 test "xHCI hotplug owned report error before port event recovers through Reset" {
@@ -3353,23 +2811,23 @@ test "xHCI hotplug owned report error before port event recovers through Reset" 
         try fixture.queuedEvents(&.{HotplugTestFixture.transferEvent(report, 3, 4)});
         try std.testing.expect(fixture.states[1].retiring);
         try std.testing.expectEqual(@as(u2, 2), fixture.states[1].endpoint_state.failed_mask);
-        try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+        try std.testing.expectEqual(@as(usize, 1), runtime.outstanding_interrupt_reports);
         try std.testing.expectEqual(report, fixture.states[1].interrupt_report_trb_address);
-        try std.testing.expectError(error.TrbRingStateInvalid, handleInterruptTransferCompletion(xhci.decodeEvent(HotplugTestFixture.transferEvent(report, 3, 4)), &fixture));
+        try std.testing.expectError(error.TrbRingStateInvalid, handleInterruptTransferCompletion(xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(report, 3, 4)), &fixture));
         try submitNextPortAction(&fixture);
         try fixture.finishStop();
         try submitNextPortAction(&fixture);
-        const reset = outstanding_command.?;
-        try std.testing.expectEqual(xhci.CommandKind.reset_endpoint, reset.kind);
+        const reset = runtime.outstanding_command.?;
+        try std.testing.expectEqual(xhci.trb.CommandKind.reset_endpoint, reset.kind);
         try std.testing.expectEqual(@as(u5, 3), reset.endpoint_id);
-        try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.decodeEvent(HotplugTestFixture.commandEvent(reset, 1)), &fixture));
+        try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.trb.decodeEvent(HotplugTestFixture.commandEvent(reset, 1)), &fixture));
         try fixture.endpointState(3, .stopped);
         try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(reset, 1)});
-        try std.testing.expectEqual(@as(usize, 0), outstanding_interrupt_reports);
+        try std.testing.expectEqual(@as(usize, 0), runtime.outstanding_interrupt_reports);
         try std.testing.expectEqual(@as(u2, 0), fixture.states[1].endpoint_state.failed_mask);
         try submitNextPortAction(&fixture);
-        try std.testing.expectEqual(xhci.CommandKind.disable_slot, outstanding_command.?.kind);
-        try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(outstanding_command.?, 1)});
+        try std.testing.expectEqual(xhci.trb.CommandKind.disable_slot, runtime.outstanding_command.?.kind);
+        try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(runtime.outstanding_command.?, 1)});
         try std.testing.expectEqual(if (reconnected) PortAction.enable_slot else PortAction.none, fixture.states[1].action);
         try std.testing.expectEqual(@as(usize, 0), fixture.reports.pendingCount());
     }
@@ -3383,22 +2841,22 @@ test "xHCI hotplug authenticated transfer error can race an outstanding Stop" {
     try submitNextPortAction(&fixture);
     try fixture.finishStop();
     try submitNextPortAction(&fixture);
-    const stop = outstanding_command.?;
+    const stop = runtime.outstanding_command.?;
     try std.testing.expectEqual(@as(u5, 3), stop.endpoint_id);
     try fixture.endpointState(3, .halted);
     const report = fixture.states[1].interrupt_report_trb_address;
     try fixture.queuedEvents(&.{ HotplugTestFixture.transferEvent(report, 3, 4), HotplugTestFixture.commandEvent(stop, 19) });
-    try std.testing.expect(outstanding_command == null);
-    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+    try std.testing.expect(runtime.outstanding_command == null);
+    try std.testing.expectEqual(@as(usize, 1), runtime.outstanding_interrupt_reports);
     try submitNextPortAction(&fixture);
-    const reset = outstanding_command.?;
-    try std.testing.expectEqual(xhci.CommandKind.reset_endpoint, reset.kind);
-    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.decodeEvent(HotplugTestFixture.commandEvent(reset, 19)), &fixture));
+    const reset = runtime.outstanding_command.?;
+    try std.testing.expectEqual(xhci.trb.CommandKind.reset_endpoint, reset.kind);
+    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.trb.decodeEvent(HotplugTestFixture.commandEvent(reset, 19)), &fixture));
     try fixture.endpointState(3, .stopped);
     try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(reset, 1)});
-    try std.testing.expectEqual(@as(usize, 0), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 0), runtime.outstanding_interrupt_reports);
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(xhci.CommandKind.disable_slot, outstanding_command.?.kind);
+    try std.testing.expectEqual(xhci.trb.CommandKind.disable_slot, runtime.outstanding_command.?.kind);
 }
 
 test "xHCI hotplug failed control TD ownership crosses Link wrap exactly" {
@@ -3408,33 +2866,33 @@ test "xHCI hotplug failed control TD ownership crosses Link wrap exactly" {
         defer fixture.restore();
         fixture.states[1].endpoint_configured = false;
         fixture.states[1].interrupt_report_trb_address = 0;
-        outstanding_interrupt_reports = 0;
+        runtime.outstanding_interrupt_reports = 0;
         try fixture.endpointState(3, .disabled);
         const plan = active_dma_plan.?;
         const ring = try plan.arena.controlTransferRingAddress(1);
-        outstanding_transfer = .{ .kind = kind, .status_trb_address = ring, .port_id = 1, .slot_id = 1, .deadline = tsc_clock.afterMilliseconds(1_000) };
-        const addresses = try controlTransferTrbAddresses(outstanding_transfer.?);
+        runtime.outstanding_transfer = .{ .kind = kind, .status_trb_address = ring, .port_id = 1, .slot_id = 1, .deadline = tsc_clock.afterMilliseconds(1_000) };
+        const addresses = try controlTransferTrbAddresses(runtime.outstanding_transfer.?);
         try std.testing.expectEqual(ring + (plan.arena.control_transfer_ring_trbs - 2) * xhci.TRB_BYTES, addresses[1]);
         try fixture.endpointState(1, .running); // CC4 is authoritative despite lagging output.
         fixture.status = (1 << 17) | (1 << 9);
         // Link is inside the ring but is not part of this posted TD.
         const link = ring + (plan.arena.control_transfer_ring_trbs - 1) * xhci.TRB_BYTES;
-        try std.testing.expectError(error.TrbRingStateInvalid, handleControlTransferCompletion(xhci.decodeEvent(HotplugTestFixture.transferEvent(link, 1, 4)), &fixture));
+        try std.testing.expectError(error.TrbRingStateInvalid, handleControlTransferCompletion(xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(link, 1, 4)), &fixture));
         try std.testing.expect(!fixture.states[1].retiring);
         if (kind == .set_configuration) {
-            try std.testing.expectError(error.TrbRingStateInvalid, handleControlTransferCompletion(xhci.decodeEvent(HotplugTestFixture.transferEvent(ring + xhci.TRB_BYTES, 1, 4)), &fixture));
-            try std.testing.expectError(error.TrbRingStateInvalid, handleControlTransferCompletion(xhci.decodeEvent(HotplugTestFixture.transferEvent(addresses[2], 1, 4)), &fixture));
+            try std.testing.expectError(error.TrbRingStateInvalid, handleControlTransferCompletion(xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(ring + xhci.TRB_BYTES, 1, 4)), &fixture));
+            try std.testing.expectError(error.TrbRingStateInvalid, handleControlTransferCompletion(xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(addresses[2], 1, 4)), &fixture));
         }
         try fixture.queuedEvents(&.{HotplugTestFixture.transferEvent(addresses[1], 1, 4)});
-        try std.testing.expect(outstanding_transfer != null);
+        try std.testing.expect(runtime.outstanding_transfer != null);
         try submitNextPortAction(&fixture);
-        const reset = outstanding_command.?;
-        try std.testing.expectEqual(xhci.CommandKind.reset_endpoint, reset.kind);
+        const reset = runtime.outstanding_command.?;
+        try std.testing.expectEqual(xhci.trb.CommandKind.reset_endpoint, reset.kind);
         try fixture.endpointState(1, .stopped);
         try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(reset, 1)});
-        try std.testing.expect(outstanding_transfer == null);
+        try std.testing.expect(runtime.outstanding_transfer == null);
         try submitNextPortAction(&fixture);
-        try std.testing.expectEqual(xhci.CommandKind.disable_slot, outstanding_command.?.kind);
+        try std.testing.expectEqual(xhci.trb.CommandKind.disable_slot, runtime.outstanding_command.?.kind);
     }
 }
 
@@ -3445,7 +2903,7 @@ test "xHCI hotplug rejects unproven detach errors and expires retirement bounds"
     const report = fixture.states[1].interrupt_report_trb_address;
     try fixture.endpointState(3, .halted);
     fixture.status = (1 << 9) | 1 | (1 << 1) | (3 << 10); // Same lifetime, no CSC.
-    try std.testing.expectError(error.TrbRingStateInvalid, handleInterruptTransferCompletion(xhci.decodeEvent(HotplugTestFixture.transferEvent(report, 3, 4)), &fixture));
+    try std.testing.expectError(error.TrbRingStateInvalid, handleInterruptTransferCompletion(xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(report, 3, 4)), &fixture));
     try std.testing.expect(!fixture.states[1].retiring);
     try fixture.portEvent(false);
     fixture.states[1].reset_deadline = .{ .value = .{ .start_ticks = 0, .interval_ticks = 1 } };
@@ -3469,13 +2927,13 @@ test "xHCI hotplug changes preserve ordinary keyboard report delivery and rearmi
     const original_trb = fixture.states[1].interrupt_report_trb_address;
     try fixture.queuedEvents(&.{HotplugTestFixture.transferEvent(original_trb, 3, 1)});
     try std.testing.expect(!fixture.states[1].retiring);
-    try std.testing.expectEqual(@as(usize, 0), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 0), runtime.outstanding_interrupt_reports);
     const report = pollKeyboardReport().?;
     try std.testing.expectEqualDeep(bytes.*, report.bytes);
     try std.testing.expectEqual(@as(u8, 1), report.port_id);
     try std.testing.expectEqual(PortAction.post_interrupt_report, fixture.states[1].action);
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 1), runtime.outstanding_interrupt_reports);
     try std.testing.expectEqual(original_trb + xhci.TRB_BYTES, fixture.states[1].interrupt_report_trb_address);
     try std.testing.expectEqual(@as(usize, 1), fixture.transfer_doorbells);
     try std.testing.expectEqual(@as(usize, 0), fixture.command_doorbells);
@@ -3488,25 +2946,25 @@ test "xHCI hotplug authoritative failed TD overrides a lagging Running context" 
     const report = fixture.states[1].interrupt_report_trb_address;
     fixture.status = (1 << 17) | (1 << 9);
     // No output-context Halted update has been published yet.
-    try std.testing.expectEqual(xhci.EndpointState.running, try outputEndpointState(1, 3));
+    try std.testing.expectEqual(xhci.trb.EndpointState.running, try outputEndpointState(1, 3));
     try fixture.queuedEvents(&.{HotplugTestFixture.transferEvent(report, 3, 4)});
     try std.testing.expectEqual(@as(u2, 2), fixture.states[1].endpoint_state.failed_mask);
-    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 1), runtime.outstanding_interrupt_reports);
     try submitNextPortAction(&fixture);
     try fixture.finishStop();
     try std.testing.expectEqual(@as(u2, 1), fixture.states[1].endpoint_state.stopped_mask);
     try submitNextPortAction(&fixture);
-    const reset = outstanding_command.?;
-    try std.testing.expectEqual(xhci.CommandKind.reset_endpoint, reset.kind);
+    const reset = runtime.outstanding_command.?;
+    try std.testing.expectEqual(xhci.trb.CommandKind.reset_endpoint, reset.kind);
     try std.testing.expectEqual(@as(u5, 3), reset.endpoint_id);
-    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.decodeEvent(HotplugTestFixture.commandEvent(reset, 1)), &fixture));
+    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.trb.decodeEvent(HotplugTestFixture.commandEvent(reset, 1)), &fixture));
     try fixture.endpointState(3, .stopped);
     try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(reset, 1)});
     try std.testing.expectEqual(@as(u2, 3), fixture.states[1].endpoint_state.stopped_mask);
     try std.testing.expectEqual(@as(u2, 0), fixture.states[1].endpoint_state.failed_mask);
-    try std.testing.expectEqual(@as(usize, 0), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 0), runtime.outstanding_interrupt_reports);
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(xhci.CommandKind.disable_slot, outstanding_command.?.kind);
+    try std.testing.expectEqual(xhci.trb.CommandKind.disable_slot, runtime.outstanding_command.?.kind);
 }
 
 test "xHCI hotplug Stop state error before its failed TD retains the original bound" {
@@ -3517,47 +2975,47 @@ test "xHCI hotplug Stop state error before its failed TD retains the original bo
     try submitNextPortAction(&fixture);
     try fixture.finishStop();
     const planned = try nextRetirementCommand(&fixture.states[1]);
-    try std.testing.expectEqual(xhci.CommandKind.stop_endpoint, planned.kind);
+    try std.testing.expectEqual(xhci.trb.CommandKind.stop_endpoint, planned.kind);
     try fixture.endpointState(3, .halted);
     // The same decision stays Stop when an unprocessed failure changes DMA state.
-    try std.testing.expectEqual(xhci.CommandKind.stop_endpoint, planned.kind);
+    try std.testing.expectEqual(xhci.trb.CommandKind.stop_endpoint, planned.kind);
     try submitNextPortAction(&fixture);
-    const stop = outstanding_command.?;
-    try std.testing.expectEqual(xhci.CommandKind.stop_endpoint, stop.kind);
+    const stop = runtime.outstanding_command.?;
+    try std.testing.expectEqual(xhci.trb.CommandKind.stop_endpoint, stop.kind);
     const retirement_deadline = fixture.states[1].reset_deadline.?;
     try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(stop, 19)});
-    try std.testing.expect(outstanding_command.?.state_error_seen);
-    try std.testing.expectEqualDeep(stop.deadline, outstanding_command.?.deadline);
+    try std.testing.expect(runtime.outstanding_command.?.state_error_seen);
+    try std.testing.expectEqualDeep(stop.deadline, runtime.outstanding_command.?.deadline);
     try std.testing.expectEqualDeep(retirement_deadline, fixture.states[1].reset_deadline.?);
-    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 1), runtime.outstanding_interrupt_reports);
     try std.testing.expectEqual(@as(u2, 0), fixture.states[1].endpoint_state.failed_mask);
     const doorbells = fixture.command_doorbells;
     try submitNextPortAction(&fixture);
     try std.testing.expectEqual(doorbells, fixture.command_doorbells);
-    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.decodeEvent(HotplugTestFixture.commandEvent(stop, 19)), &fixture));
-    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.decodeEvent(HotplugTestFixture.commandEvent(stop, 1)), &fixture));
+    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.trb.decodeEvent(HotplugTestFixture.commandEvent(stop, 19)), &fixture));
+    try std.testing.expectError(error.CommandRingStateInvalid, handleCommandCompletion(xhci.trb.decodeEvent(HotplugTestFixture.commandEvent(stop, 1)), &fixture));
     const report = fixture.states[1].interrupt_report_trb_address;
-    try std.testing.expectError(error.CommandRingStateInvalid, handleInterruptTransferCompletion(xhci.decodeEvent(HotplugTestFixture.transferEvent(report, 3, 27)), &fixture));
-    try std.testing.expectError(error.TrbRingStateInvalid, handleInterruptTransferCompletion(xhci.decodeEvent(HotplugTestFixture.transferEvent(report + xhci.TRB_BYTES, 3, 4)), &fixture));
-    try std.testing.expect(outstanding_command.?.state_error_seen);
+    try std.testing.expectError(error.CommandRingStateInvalid, handleInterruptTransferCompletion(xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(report, 3, 27)), &fixture));
+    try std.testing.expectError(error.TrbRingStateInvalid, handleInterruptTransferCompletion(xhci.trb.decodeEvent(HotplugTestFixture.transferEvent(report + xhci.TRB_BYTES, 3, 4)), &fixture));
+    try std.testing.expect(runtime.outstanding_command.?.state_error_seen);
     // Waiting for the event retains the original command timeout, even though
     // its completion has already arrived.
-    outstanding_command.?.deadline = .{ .value = .{ .start_ticks = 0, .interval_ticks = 1 } };
+    runtime.outstanding_command.?.deadline = .{ .value = .{ .start_ticks = 0, .interval_ticks = 1 } };
     try std.testing.expect(commandTimedOut());
-    outstanding_command.?.deadline = stop.deadline;
+    runtime.outstanding_command.?.deadline = stop.deadline;
     // The error's output-context update may still be stale in either direction.
     try fixture.endpointState(3, .running);
     try fixture.queuedEvents(&.{HotplugTestFixture.transferEvent(report, 3, 4)});
-    try std.testing.expect(outstanding_command == null);
-    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+    try std.testing.expect(runtime.outstanding_command == null);
+    try std.testing.expectEqual(@as(usize, 1), runtime.outstanding_interrupt_reports);
     try submitNextPortAction(&fixture);
-    const reset = outstanding_command.?;
-    try std.testing.expectEqual(xhci.CommandKind.reset_endpoint, reset.kind);
+    const reset = runtime.outstanding_command.?;
+    try std.testing.expectEqual(xhci.trb.CommandKind.reset_endpoint, reset.kind);
     try fixture.endpointState(3, .stopped);
     try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(reset, 1)});
-    try std.testing.expectEqual(@as(usize, 0), outstanding_interrupt_reports);
+    try std.testing.expectEqual(@as(usize, 0), runtime.outstanding_interrupt_reports);
     try submitNextPortAction(&fixture);
-    try std.testing.expectEqual(xhci.CommandKind.disable_slot, outstanding_command.?.kind);
+    try std.testing.expectEqual(xhci.trb.CommandKind.disable_slot, runtime.outstanding_command.?.kind);
 }
 
 test "xHCI hotplug completion state masks clear before a fresh slot lifetime" {
@@ -3565,10 +3023,10 @@ test "xHCI hotplug completion state masks clear before a fresh slot lifetime" {
     try fixture.activate();
     defer fixture.restore();
     fixture.states[1] = .{ .connected = true, .enabled = true, .speed_id = 3, .endpoint_state = .{ .failed_mask = 3, .stopped_mask = 3 } };
-    outstanding_interrupt_reports = 0;
-    slot_to_port[1] = 0;
-    outstanding_command = .{ .kind = .enable_slot, .trb_address = active_dma_plan.?.ring_plan.command_ring_address, .port_id = 1, .slot_id = 0, .deadline = tsc_clock.afterMilliseconds(1_000) };
-    var event = HotplugTestFixture.commandEvent(outstanding_command.?, 1);
+    runtime.outstanding_interrupt_reports = 0;
+    runtime.slot_to_port[1] = 0;
+    runtime.outstanding_command = .{ .kind = .enable_slot, .trb_address = active_dma_plan.?.ring_plan.command_ring_address, .port_id = 1, .slot_id = 0, .deadline = tsc_clock.afterMilliseconds(1_000) };
+    var event = HotplugTestFixture.commandEvent(runtime.outstanding_command.?, 1);
     event[3] |= 1 << 24;
     try fixture.queuedEvents(&.{event});
     try std.testing.expectEqual(@as(u2, 0), fixture.states[1].endpoint_state.failed_mask);

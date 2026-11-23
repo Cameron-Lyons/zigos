@@ -1,7 +1,6 @@
 pub const boot_start = "BOOT:START";
 pub const boot_profile_zigos_native = "BOOT:PROFILE:zigos_native";
 pub const boot_profile_recovery = "BOOT:PROFILE:recovery";
-pub const boot_profile_benchmark = "BOOT:PROFILE:benchmark";
 pub const kernel_role_production = "BOOT:ROLE:production";
 pub const identity_owner_attached = "ZIGOS:IDENTITY:OWNER:ATTACHED";
 pub const kernel_role_verification = "BOOT:ROLE:verification";
@@ -17,6 +16,8 @@ pub const cpu_umip_enabled = "ZIGOS:CPU:UMIP:ENABLED";
 pub const cpu_pge_enabled = "ZIGOS:CPU:PGE:ENABLED";
 pub const cpu_syscall_enabled = "ZIGOS:CPU:SYSCALL:ENABLED";
 pub const cpu_fred_enabled = "ZIGOS:CPU:FRED:ENABLED";
+/// Printed after either FRED or SYSCALL entry is armed.
+pub const cpu_native_entry_ready = "ZIGOS:CPU:NATIVE_ENTRY:READY";
 pub const cpu_pcid_enabled = "ZIGOS:CPU:PCID:ENABLED";
 pub const cpu_pcid_software_fallback = "ZIGOS:CPU:PCID:SOFTWARE_FALLBACK";
 pub const cpu_pcid_ready = "ZIGOS:CPU:PCID:READY";
@@ -27,9 +28,7 @@ pub const smp_ready = "ZIGOS:SMP:READY";
 pub const kernel_wx_enforced = "ZIGOS:KERNEL:W_X:ENFORCED";
 
 pub const bench_start = "BENCH:START";
-pub const bench_summary_prefix = "BENCH:SUMMARY";
 pub const bench_pass = "BENCH:PASS";
-pub const bench_fail = "BENCH:FAIL";
 
 pub const recovery_start = "RECOVERY:START";
 pub const recovery_break_glass_audited = "RECOVERY:BREAK_GLASS:AUDITED";
@@ -129,8 +128,6 @@ pub const service_boot_storage_rebind_ok = "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_RE
 pub const service_boot_storage_controller_revoke_rejected = "ZIGOS:SERVICE_BOOT:DRIVER:CONTROLLER_REVOKE_REJECTED";
 pub const service_boot_storage_republish_after_revoke_ok = "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_REPUBLISH_AFTER_REVOKE_OK";
 pub const service_boot_storage_io_after_restart_ok = "ZIGOS:SERVICE_BOOT:DRIVER:STORAGE_IO_AFTER_RESTART_OK";
-pub const service_boot_accelerator_queue_owned = "ZIGOS:SERVICE_BOOT:DRIVER:ACCELERATOR_QUEUE_OWNED";
-pub const service_boot_accelerator_completion_interrupt = "ZIGOS:SERVICE_BOOT:DRIVER:ACCELERATOR_COMPLETION_INTERRUPT";
 
 pub const storage_object_store_ready = "ZIGOS:STORAGE:OBJECT_STORE:READY";
 pub const storage_workspace_transaction_ok = "ZIGOS:STORAGE:WORKSPACE:TRANSACTION_OK";
@@ -188,8 +185,6 @@ pub const platform_health_checks_storage_rollback = "ZIGOS:PLATFORM:HEALTH_CHECK
 pub const platform_health_checks_network_rollback = "ZIGOS:PLATFORM:HEALTH_CHECKS:NETWORK_ROLLBACK";
 pub const platform_health_checks_ui_rollback = "ZIGOS:PLATFORM:HEALTH_CHECKS:UI_ROLLBACK";
 pub const platform_health_checks_promote_ok = "ZIGOS:PLATFORM:HEALTH_CHECKS:PROMOTE_OK";
-pub const platform_crash_record_persisted = "ZIGOS:PLATFORM:CRASH_RECORD:PERSISTED";
-pub const platform_update_rollback_power_cycle_ok = "ZIGOS:PLATFORM:UPDATE_ROLLBACK:POWER_CYCLE_OK";
 pub const platform_build_artifact_manifest_verified = "ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED";
 pub const platform_boot_descriptor_verified = "ZIGOS:PLATFORM:BOOT_DESCRIPTOR:VERIFIED";
 pub const platform_bootloader_measurement_tamper_rejected = "ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:TAMPER_REJECTED";

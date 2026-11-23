@@ -60,7 +60,6 @@ pub const ShareCapabilityError = AuthorityError || workspace.Error || capability
 
 pub const DeferredCheckpointCount = u16;
 pub const CheckpointBatchDepth = u16;
-pub const COMPACT_CHECKPOINT_METADATA = true;
 pub const STORAGE_CORE_SIZE_BYTES: usize = 72;
 
 comptime {
@@ -173,14 +172,6 @@ pub const StorageCore = struct {
         return result;
     }
 
-    pub fn putVersionFromSharedMemory(
-        self: *Service,
-        request: object_store.PutRequest,
-        transfer: SharedPayloadTransfer,
-    ) SharedPayloadError!object_store.PutResult {
-        return self.putVersionFromSharedMemoryRef(&request, transfer);
-    }
-
     pub fn putVersionFromSharedMemoryRef(
         self: *Service,
         request: *const object_store.PutRequest,
@@ -244,8 +235,11 @@ pub const StorageCore = struct {
     }
 
     pub fn replaceEntries(self: *Service, workspace_id: anytype, target_entries: []const workspace.Entry, tick: u64) workspace.Error!u32 {
-        const generation = try self.workspaces.replaceEntries(workspaceId(workspace_id), target_entries, tick);
-        self.noteMutation(true);
+        const id = workspaceId(workspace_id);
+        const previous_generation = if (self.workspaces.findConst(id)) |record| record.generation else null;
+        const generation = try self.workspaces.replaceEntries(id, target_entries, tick);
+        // An identical target keeps its generation and needs no checkpoint.
+        if (previous_generation != generation) self.noteMutation(true);
         return generation;
     }
 
@@ -423,13 +417,6 @@ pub const StorageCore = struct {
         output: []object_store.ObjectHistoryEntry,
     ) object_store.Error![]const object_store.ObjectHistoryEntry {
         return self.store.objectHistory(objectId(object_id), output);
-    }
-
-    pub fn objectOperatingModel(
-        self: *const Service,
-        object_id: anytype,
-    ) object_store.Error!object_store.ObjectOperatingModel {
-        return self.store.objectOperatingModel(objectId(object_id));
     }
 
     pub fn findEntryForObject(self: *const Service, workspace_id: anytype, object_id: anytype) workspace.Error!workspace.Entry {
@@ -772,15 +759,6 @@ pub const StoragePort = struct {
     ) (AuthorityError || object_store.Error)![]const object_store.ObjectHistoryEntry {
         _ = try self.requireObjectAuthority(authority, objectId(object_id), .read);
         return self.core.objectHistory(object_id, output);
-    }
-
-    pub fn objectOperatingModel(
-        self: *StoragePort,
-        authority: AuthorityContext,
-        object_id: anytype,
-    ) (AuthorityError || object_store.Error)!object_store.ObjectOperatingModel {
-        _ = try self.requireObjectAuthority(authority, objectId(object_id), .read);
-        return self.core.objectOperatingModel(object_id);
     }
 
     pub fn openEntry(

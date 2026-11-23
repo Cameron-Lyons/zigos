@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -15,62 +14,19 @@ const model = @import("package_service_model.zig");
 const service_authority = @import("service_authority.zig");
 const signing = @import("../core/signing.zig");
 const units = @import("../core/units.zig");
-const root = @import("root");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 
-pub const MAX_INSTALLED_BUNDLES = model.MAX_INSTALLED_BUNDLES;
-pub const MAX_LABEL_BYTES = model.MAX_LABEL_BYTES;
 pub const MAX_COMPONENTS_PER_BUNDLE = model.MAX_COMPONENTS_PER_BUNDLE;
 pub const MAX_ASSETS_PER_BUNDLE = model.MAX_ASSETS_PER_BUNDLE;
-pub const MAX_COMPONENT_ID_BYTES = model.MAX_COMPONENT_ID_BYTES;
-pub const MAX_COMPONENT_ENTRY_BYTES = model.MAX_COMPONENT_ENTRY_BYTES;
-pub const MAX_ASSET_PATH_BYTES = model.MAX_ASSET_PATH_BYTES;
-pub const MAX_CONTENT_TYPE_BYTES = model.MAX_CONTENT_TYPE_BYTES;
-pub const MAX_INTERFACES_PER_BUNDLE = model.MAX_INTERFACES_PER_BUNDLE;
-pub const MAX_INTERFACE_NAME_BYTES = model.MAX_INTERFACE_NAME_BYTES;
 pub const MAX_PERMISSIONS_PER_BUNDLE = model.MAX_PERMISSIONS_PER_BUNDLE;
-pub const MAX_PERMISSION_RESOURCE_BYTES = model.MAX_PERMISSION_RESOURCE_BYTES;
-pub const MAX_PERMISSION_TEXT_BYTES_PER_REVISION = model.MAX_PERMISSION_TEXT_BYTES_PER_REVISION;
-pub const MAX_BACKGROUND_TASKS_PER_BUNDLE = model.MAX_BACKGROUND_TASKS_PER_BUNDLE;
-pub const MAX_BACKGROUND_TASK_ID_BYTES = model.MAX_BACKGROUND_TASK_ID_BYTES;
-pub const MAX_MODEL_FAMILY_BYTES = model.MAX_MODEL_FAMILY_BYTES;
-pub const MAX_SIGNATURE_FORMAT_BYTES = model.MAX_SIGNATURE_FORMAT_BYTES;
-pub const MAX_SIGNATURE_SIGNER_BYTES = model.MAX_SIGNATURE_SIGNER_BYTES;
 pub const MAX_INSTALL_SOURCE_BYTES = model.MAX_INSTALL_SOURCE_BYTES;
-pub const DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS = model.DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS;
-pub const COMPACT_PACKAGE_RESULT_METADATA = model.COMPACT_PACKAGE_RESULT_METADATA;
-pub const REMOVE_RESULT_SIZE_CEILING_BYTES = model.REMOVE_RESULT_SIZE_CEILING_BYTES;
-pub const OFFBOARD_RESULT_SIZE_CEILING_BYTES = model.OFFBOARD_RESULT_SIZE_CEILING_BYTES;
-pub const PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES = model.PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES;
-pub const LAUNCH_PLAN_SIZE_CEILING_BYTES = model.LAUNCH_PLAN_SIZE_CEILING_BYTES;
-pub const STORED_PERMISSION_SIZE_CEILING_BYTES = model.STORED_PERMISSION_SIZE_CEILING_BYTES;
-pub const BUNDLE_REVISION_SIZE_CEILING_BYTES = model.BUNDLE_REVISION_SIZE_CEILING_BYTES;
-pub const INSTALLED_BUNDLE_SIZE_CEILING_BYTES = model.INSTALLED_BUNDLE_SIZE_CEILING_BYTES;
-pub const REUSES_REVISION_METADATA_BACKING = bundle_ops.REUSES_REVISION_METADATA_BACKING;
 pub const InstallRequest = model.InstallRequest;
 pub const InstallResult = model.InstallResult;
 pub const RemoveResult = model.RemoveResult;
 pub const OffboardResult = model.OffboardResult;
-pub const ReleaseTransparencyEvidence = model.ReleaseTransparencyEvidence;
 pub const StoredComponent = model.StoredComponent;
-pub const StoredAsset = model.StoredAsset;
-pub const LaunchPlan = model.LaunchPlan;
 pub const PackageLaunchProvenance = model.PackageLaunchProvenance;
-pub const StoredInterface = model.StoredInterface;
-pub const StoredPermission = model.StoredPermission;
-pub const StoredBackgroundTask = model.StoredBackgroundTask;
-pub const StoredAiMetadata = model.StoredAiMetadata;
-pub const StoredDataRights = model.StoredDataRights;
-pub const StoredSupplyChain = model.StoredSupplyChain;
-pub const StoredSignature = model.StoredSignature;
-pub const StoredObjectResilience = model.StoredObjectResilience;
-pub const StoredSemanticIndex = model.StoredSemanticIndex;
 pub const ResolvedManifest = model.ResolvedManifest;
-pub const BundleRevision = model.BundleRevision;
-pub const InstalledBundle = model.InstalledBundle;
 pub const AuthorityContext = service_authority.Context;
 pub const AuthorityError = service_authority.Error;
 pub const Digest = bundle_digest.Digest;
@@ -126,20 +82,18 @@ pub const RemoveRequest = struct {
 };
 
 const BundleSlot = model.BundleSlot;
-const BUNDLE_INDEX_CAPACITY: usize = MAX_INSTALLED_BUNDLES * 2;
-pub const BundleArena = indexed_arena.IndexedArenaWithKey(u64, BundleSlot, MAX_INSTALLED_BUNDLES, BUNDLE_INDEX_CAPACITY, bundleSlotKey);
-const heap_backed_bundle_arena = builtin.target.os.tag == .freestanding;
-const BundleArenaBacking = if (heap_backed_bundle_arena) ?*BundleArena else BundleArena;
+const BUNDLE_INDEX_CAPACITY: usize = model.MAX_INSTALLED_BUNDLES * 2;
+pub const BundleArena = indexed_arena.IndexedArenaWithKey(u64, BundleSlot, model.MAX_INSTALLED_BUNDLES, BUNDLE_INDEX_CAPACITY, bundleSlotKey);
 const zeroBundle = model.zeroBundle;
 
 pub const Service = struct {
     service_id: u64 = 0,
     owner: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
-    slots: BundleArenaBacking = if (heap_backed_bundle_arena) null else BundleArena.init(),
+    slots: table_backing.Lazy(BundleArena, null) = .{},
     trust_store: principal.Keyring = principal.Keyring.init(),
 
     comptime {
-        if (heap_backed_bundle_arena and @sizeOf(@This()) > units.kibibytes(16)) {
+        if (@sizeOf(@This()) > units.kibibytes(16)) {
             @compileError("heap-backed package services exceed their compact resident layout");
         }
     }
@@ -149,14 +103,8 @@ pub const Service = struct {
     }
 
     pub fn initializeAllocated(self: *Service) void {
-        self.service_id = 0;
+        @memset(std.mem.asBytes(self), 0);
         self.owner = .{ .kind = .service, .serial = 0 };
-        if (comptime heap_backed_bundle_arena) {
-            self.slots = null;
-        } else {
-            self.slots.initializeAllocated();
-        }
-        self.trust_store.initializeAllocated();
     }
 
     pub fn reset(self: *Service) void {
@@ -165,35 +113,19 @@ pub const Service = struct {
     }
 
     pub fn deinit(self: *Service) void {
-        if (comptime heap_backed_bundle_arena) {
-            if (self.slots) |slots| {
-                @memset(std.mem.asBytes(slots), 0);
-                kernel_memory.kfree(@ptrCast(slots));
-                self.slots = null;
-            }
-        }
+        self.slots.release();
     }
 
     fn bundleArena(self: *Service) ?*BundleArena {
-        if (comptime heap_backed_bundle_arena) return self.slots;
-        return &self.slots;
+        return self.slots.get();
     }
 
     fn bundleArenaConst(self: *const Service) ?*const BundleArena {
-        if (comptime heap_backed_bundle_arena) return self.slots;
-        return &self.slots;
+        return self.slots.get();
     }
 
     fn ensureBundleArena(self: *Service) error{NoSpaceLeft}!*BundleArena {
-        if (self.bundleArena()) |slots| return slots;
-        if (comptime heap_backed_bundle_arena) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(BundleArena)) orelse return error.NoSpaceLeft;
-            const slots: *BundleArena = @ptrCast(@alignCast(allocation));
-            initializeBundleArena(slots);
-            self.slots = slots;
-            return slots;
-        }
-        return &self.slots;
+        return self.slots.ensure();
     }
 
     pub fn bind(self: *Service, service_id: u64, owner: principal.PrincipalId) void {
@@ -223,39 +155,33 @@ pub const Service = struct {
         return self.trust_store.revokePrincipal(publisher_principal);
     }
 
+    // Every active signed policy for the installing subjects must admit the
+    // source and the bundle's supply-chain evidence. An empty Directory admits
+    // any trusted publisher.
     pub fn install(
         self: *Service,
         request: InstallRequest,
-        policy: ?*const policy_object.PolicyObject,
+        policies: *const policy_object.Directory,
+        subjects: policy_object.SubjectSet,
     ) Error!InstallResult {
         try validateInstallRequestShape(request);
         try manifest.validate(request.bundle);
         try manifest.validateApplicationPackaging(request.bundle);
-        try bundle_ops.validateInstallStorageShape(InstalledBundle, request.bundle);
+        try bundle_ops.validateInstallStorageShape(request.bundle);
         const digest = bundle_digest.digestBundle(request.bundle);
-        if (!signing.verifyWithDefaultRegistry(request.bundle.signature, &digest)) {
+        if (!signing.verify(request.bundle.signature, &digest)) {
             return error.InvalidManifestSignature;
         }
-        const trusted = self.trust_store.trustedPublisherSignature(request.bundle.publisher, request.bundle.signature);
-        if (!trusted) {
-            if (publisherKeyWasRevoked(&self.trust_store, request.bundle.publisher, request.bundle.signature)) {
-                return error.PublisherKeyRevoked;
-            }
-            return error.UntrustedManifestSigner;
-        }
-        if (policy) |active_policy| {
-            if (!active_policy.allowsInstallSource(request.source_identity)) {
-                return error.InstallSourceDenied;
-            }
-            if (!active_policy.allowsPackageProvenance(.{
-                .sbom_present = request.bundle.supply_chain.sbom_digest.len != 0,
-                .source_archive_present = request.bundle.supply_chain.source_archive_digest.len != 0,
-                .build_recipe_present = request.bundle.supply_chain.build_recipe_digest.len != 0,
-                .reproducible_build = request.bundle.supply_chain.reproducible_build,
-                .trusted_builder = request.bundle.supply_chain.trusted_builder,
-                .vulnerability_scan_present = request.bundle.supply_chain.vulnerability_scan_digest.len != 0,
-            })) return error.PackageProvenanceDenied;
-        }
+        try requireTrustedSigner(&self.trust_store, request.bundle.publisher, request.bundle.signature);
+        try requirePolicy(policies.installSourceDecision(subjects, request.source_identity), error.InstallSourceDenied);
+        try requirePolicy(policies.packageProvenanceDecision(subjects, .{
+            .sbom_present = request.bundle.supply_chain.sbom_digest.len != 0,
+            .source_archive_present = request.bundle.supply_chain.source_archive_digest.len != 0,
+            .build_recipe_present = request.bundle.supply_chain.build_recipe_digest.len != 0,
+            .reproducible_build = request.bundle.supply_chain.reproducible_build,
+            .trusted_builder = request.bundle.supply_chain.trusted_builder,
+            .vulnerability_scan_present = request.bundle.supply_chain.vulnerability_scan_digest.len != 0,
+        }), error.PackageProvenanceDenied);
 
         const permission_digest = bundle_digest.permissionDigest(request.bundle.requested_permissions);
         const existing = self.find(request.bundle.bundle_id);
@@ -317,7 +243,7 @@ pub const Service = struct {
         const bundle = self.find(request.bundle_id) orelse return error.BundleNotFound;
         try requireActiveRevisionDigest(bundle, request.expected_active_digest);
         const rollback_revision = bundle.rollbackRevision() orelse return error.NoRollbackVersion;
-        try self.validateRollbackRevisionTrusted(rollback_revision);
+        try self.validateRevisionTrusted(rollback_revision);
         const active_revision = bundle.activeRevision();
         const permissions_changed = !std.mem.eql(u8, &active_revision.permission_digest, &rollback_revision.permission_digest);
         bundle_ops.rollback(bundle);
@@ -330,18 +256,8 @@ pub const Service = struct {
         };
     }
 
-    fn validateRollbackRevisionTrusted(self: *const Service, revision: *const BundleRevision) Error!void {
-        return self.validateRevisionTrusted(revision);
-    }
-
-    fn validateRevisionTrusted(self: *const Service, revision: *const BundleRevision) Error!void {
-        const signature = revision.signature.toManifest();
-        if (!self.trust_store.trustedPublisherSignature(revision.publisherSlice(), signature)) {
-            if (publisherKeyWasRevoked(&self.trust_store, revision.publisherSlice(), signature)) {
-                return error.PublisherKeyRevoked;
-            }
-            return error.UntrustedManifestSigner;
-        }
+    fn validateRevisionTrusted(self: *const Service, revision: *const model.BundleRevision) Error!void {
+        try requireTrustedSigner(&self.trust_store, revision.publisherSlice(), revision.signature.toManifest());
         if (publicStoreSource(revision.sourceIdentitySlice()) and !revision.release_transparency.present()) {
             return error.StoreTransparencyMissing;
         }
@@ -350,8 +266,12 @@ pub const Service = struct {
     fn remove(self: *Service, request: RemoveRequest) Error!RemoveResult {
         const bundle = self.find(request.bundle_id) orelse return error.BundleNotFound;
         try requireActiveRevisionDigest(bundle, request.expected_active_digest);
+        return self.removeBundle(bundle);
+    }
+
+    fn removeBundle(self: *Service, bundle: *const model.InstalledBundle) RemoveResult {
         const removed_revision_count = bundle.revisionCount();
-        _ = self.bundleArena().?.remove(bundleKey(request.bundle_id));
+        _ = self.bundleArena().?.remove(bundleKey(bundle.bundleIdSlice()));
         return .{
             .removed_existing = true,
             .removed_revision_count = removed_revision_count,
@@ -366,7 +286,6 @@ pub const Service = struct {
         ledger: ?*event_ledger.Ledger,
     ) (Error || event_ledger.Error)!OffboardResult {
         const target = self.find(request.bundle_id) orelse return error.BundleNotFound;
-        const expected_active_digest = activeRevisionDigest(target);
         const removed_bundle_digest = offboardRemovedBundleDigest(target);
         const decision = policies.dataRightsDecision(subjects, .{
             .operation = .delete,
@@ -379,10 +298,7 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const removed = try self.remove(.{
-            .bundle_id = request.bundle_id,
-            .expected_active_digest = expected_active_digest,
-        });
+        const removed = self.removeBundle(target);
         try recordOffboard(ledger, request, true);
         return .{
             .removed_existing = removed.removed_existing,
@@ -392,7 +308,7 @@ pub const Service = struct {
         };
     }
 
-    pub fn find(self: *Service, bundle_id: []const u8) ?*InstalledBundle {
+    pub fn find(self: *Service, bundle_id: []const u8) ?*model.InstalledBundle {
         const slots = self.bundleArena() orelse return null;
         const slot = slots.get(bundleKey(bundle_id)) orelse return null;
         if (!std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return null;
@@ -404,7 +320,7 @@ pub const Service = struct {
         slots.rebuildPrimaryIndex();
     }
 
-    pub fn buildLaunchPlan(self: *const Service, bundle_id: []const u8) Error!LaunchPlan {
+    pub fn buildLaunchPlan(self: *const Service, bundle_id: []const u8) Error!model.LaunchPlan {
         const bundle = self.findConst(bundle_id) orelse return error.BundleNotFound;
         const active_revision = bundle.activeRevision();
         try self.validateRevisionTrusted(active_revision);
@@ -425,20 +341,13 @@ pub const Service = struct {
         return bundle_ops.resolveActiveManifest(bundle, resolved);
     }
 
-    fn findConst(self: *const Service, bundle_id: []const u8) ?*const InstalledBundle {
+    fn findConst(self: *const Service, bundle_id: []const u8) ?*const model.InstalledBundle {
         const slots = self.bundleArenaConst() orelse return null;
         const slot = slots.getConst(bundleKey(bundle_id)) orelse return null;
         if (!std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return null;
         return &slot.bundle;
     }
 };
-
-fn initializeBundleArena(slots: *BundleArena) void {
-    @memset(std.mem.asBytes(slots), 0);
-    const free_no_index = indexed_arena.reusableNoIndex(MAX_INSTALLED_BUNDLES);
-    @memset(slots.free_next[0..], free_no_index);
-    slots.free_head = free_no_index;
-}
 
 fn recordOffboard(
     ledger: ?*event_ledger.Ledger,
@@ -504,10 +413,11 @@ pub const PackagePort = struct {
         self: *PackagePort,
         authority: AuthorityContext,
         request: InstallRequest,
-        policy: ?*const policy_object.PolicyObject,
+        policies: *const policy_object.Directory,
+        subjects: policy_object.SubjectSet,
     ) (AuthorityError || Error)!InstallResult {
         _ = try self.requirePackageAuthority(authority, .endpoint_connect);
-        return self.service.install(request, policy);
+        return self.service.install(request, policies, subjects);
     }
 
     pub fn rollback(
@@ -554,6 +464,11 @@ pub const PackagePort = struct {
     }
 };
 
+fn requirePolicy(decision: policy_object.PolicyDecision, denied: Error) Error!void {
+    if (decision.allowed) return;
+    return if (decision.reason == .unsigned_policy) error.PolicyDenied else denied;
+}
+
 fn validateInstallRequestShape(request: InstallRequest) Error!void {
     if (request.source_identity.len == 0) return error.InstallSourceMissing;
     if (request.source_identity.len > MAX_INSTALL_SOURCE_BYTES) return error.InstallSourceTooLong;
@@ -572,7 +487,7 @@ fn validateInstallRequestShape(request: InstallRequest) Error!void {
 }
 
 fn validateRevisionTransition(
-    active_revision: *const BundleRevision,
+    active_revision: *const model.BundleRevision,
     incoming: manifest.BundleManifest,
     incoming_schema_version: u32,
 ) Error!void {
@@ -596,7 +511,7 @@ fn validateRevisionTransition(
 }
 
 fn validateTransparencyTransition(
-    installed: *const InstalledBundle,
+    installed: *const model.InstalledBundle,
     request: InstallRequest,
 ) Error!void {
     if (!publicStoreSource(request.source_identity)) return;
@@ -609,8 +524,8 @@ fn validateTransparencyTransition(
 }
 
 fn launchProvenance(
-    bundle: *const InstalledBundle,
-    revision: *const BundleRevision,
+    bundle: *const model.InstalledBundle,
+    revision: *const model.BundleRevision,
 ) PackageLaunchProvenance {
     const signature = revision.signature.toManifest();
     return .{
@@ -631,29 +546,29 @@ fn launchProvenance(
     };
 }
 
-pub fn activeRevisionDigest(bundle: *const InstalledBundle) Digest {
+pub fn activeRevisionDigest(bundle: *const model.InstalledBundle) Digest {
     return installedBundleRevisionDigest(bundle, "zigos.package.active-revision");
 }
 
-pub fn rollbackRequestForActive(bundle: *const InstalledBundle) RollbackRequest {
+pub fn rollbackRequestForActive(bundle: *const model.InstalledBundle) RollbackRequest {
     return .{
         .bundle_id = bundle.bundleIdSlice(),
         .expected_active_digest = activeRevisionDigest(bundle),
     };
 }
 
-pub fn removeRequestForActive(bundle: *const InstalledBundle) RemoveRequest {
+pub fn removeRequestForActive(bundle: *const model.InstalledBundle) RemoveRequest {
     return .{
         .bundle_id = bundle.bundleIdSlice(),
         .expected_active_digest = activeRevisionDigest(bundle),
     };
 }
 
-pub fn offboardRemovedBundleDigest(bundle: *const InstalledBundle) Digest {
+pub fn offboardRemovedBundleDigest(bundle: *const model.InstalledBundle) Digest {
     return installedBundleRevisionDigest(bundle, "zigos.package.offboard.removed-bundle");
 }
 
-fn installedBundleRevisionDigest(bundle: *const InstalledBundle, schema: []const u8) Digest {
+fn installedBundleRevisionDigest(bundle: *const model.InstalledBundle, schema: []const u8) Digest {
     const revision = bundle.activeRevision();
     const signature = revision.signature.toManifest();
     var hasher = crypto_hash.init();
@@ -790,7 +705,7 @@ fn installedBundleRevisionDigest(bundle: *const InstalledBundle, schema: []const
     return crypto_hash.finalize(&hasher);
 }
 
-fn requireActiveRevisionDigest(bundle: *const InstalledBundle, expected: Digest) Error!void {
+fn requireActiveRevisionDigest(bundle: *const model.InstalledBundle, expected: Digest) Error!void {
     const actual = activeRevisionDigest(bundle);
     if (!std.mem.eql(u8, &actual, &expected)) return error.PackageActiveRevisionMismatch;
 }
@@ -799,12 +714,14 @@ fn publicStoreSource(source_identity: []const u8) bool {
     return std.mem.startsWith(u8, source_identity, "store:zigos/public");
 }
 
-fn publisherKeyWasRevoked(
+fn requireTrustedSigner(
     trust_store: *const principal.Keyring,
     publisher: []const u8,
     signature: manifest.Signature,
-) bool {
-    return trust_store.revokedPublisherSignature(publisher, signature);
+) Error!void {
+    if (trust_store.trustedPublisherSignature(publisher, signature)) return;
+    if (trust_store.revokedPublisherSignature(publisher, signature)) return error.PublisherKeyRevoked;
+    return error.UntrustedManifestSigner;
 }
 
 fn bundleKey(bundle_id: []const u8) u64 {
@@ -871,14 +788,13 @@ fn mintPackageServiceAuthority(
 }
 
 fn signTestReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
-    return signing.signWithDefaultRegistry(
-        .ed25519,
+    return signing.sign(
         identity,
         &digestBundle(bundle),
     );
 }
 
-fn publicStoreTransparency(sequence: u64, root_byte: u8, log_head_byte: u8) ReleaseTransparencyEvidence {
+fn publicStoreTransparency(sequence: u64, root_byte: u8, log_head_byte: u8) model.ReleaseTransparencyEvidence {
     return .{
         .sequence = sequence,
         .root = crypto_hash.digestFromByte(root_byte),
@@ -929,7 +845,7 @@ test "package port requires service authority before install update rollback and
         .bundle = bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     const mint_only = try mintPackageServiceAuthority(&capabilities, service.service_id, actor, task_id, .{ .service = .{
         .capability_mint = true,
@@ -952,7 +868,7 @@ test "package port requires service authority before install update rollback and
         .bundle = bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     const package_authority = try mintPackageServiceAuthority(&capabilities, service.service_id, actor, task_id, .{ .service = .{
         .endpoint_connect = true,
@@ -968,7 +884,7 @@ test "package port requires service authority before install update rollback and
         .bundle = bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expect(installed.installed_new);
     const stale_rollback_request = rollbackRequestForActive(service.find(bundle.bundle_id).?);
 
@@ -979,7 +895,7 @@ test "package port requires service authority before install update rollback and
         .bundle = updated_bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expect(updated.rollback_available);
     const stale_remove_request = removeRequestForActive(service.find(bundle.bundle_id).?);
     try std.testing.expectError(error.PackageActiveRevisionMismatch, port.rollback(install_authority, stale_rollback_request));
@@ -1007,7 +923,7 @@ test "package port requires service authority before install update rollback and
 
 test "package service enforces signed manifests policy gated sources updates rollback and remove" {
     var policies = policy_object.Directory.init();
-    const org_policy = try policies.create(.{
+    _ = try policies.create(.{
         .scope = .organization,
         .subject_id = 1,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },
@@ -1062,7 +978,7 @@ test "package service enforces signed manifests policy gated sources updates rol
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, org_policy);
+    }, &policies, .{ .organization_id = 1 });
     try std.testing.expect(first.installed_new);
     try std.testing.expect(!first.rollback_available);
 
@@ -1070,7 +986,7 @@ test "package service enforces signed manifests policy gated sources updates rol
         .bundle = v1,
         .source_identity = "repo:personal",
         .data_schema_version = 1,
-    }, org_policy));
+    }, &policies, .{ .organization_id = 1 }));
 
     const v2_permissions = [_]manifest.PermissionRequest{
         .{
@@ -1132,14 +1048,14 @@ test "package service enforces signed manifests policy gated sources updates rol
         .bundle = v2,
         .source_identity = "repo:corp",
         .data_schema_version = 2,
-    }, org_policy));
+    }, &policies, .{ .organization_id = 1 }));
 
     const updated = try service.install(.{
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
         .declared_permission_change = true,
-    }, org_policy);
+    }, &policies, .{ .organization_id = 1 });
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.permissions_changed);
     try std.testing.expect(updated.rollback_available);
@@ -1218,7 +1134,7 @@ test "package service offboarding requires deletion receipt removes bundle and r
         .bundle = bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expect(installed.installed_new);
 
     var policies = policy_object.Directory.init();
@@ -1327,12 +1243,12 @@ test "package service rejects invalid signatures and rollback before any update"
     try std.testing.expectError(error.InvalidManifestSignature, service.install(.{
         .bundle = tampered,
         .source_identity = "store:zigos",
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     _ = try service.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expectError(error.NoRollbackVersion, service.rollback(rollbackRequestForActive(service.find("app.notes").?)));
 }
 
@@ -1479,46 +1395,46 @@ test "package service rejects stale update metadata publisher drift and channel 
         .bundle = v1,
         .source_identity = "",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
     try std.testing.expectError(error.InvalidDataSchemaVersion, service.install(.{
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 0,
-    }, null));
+    }, &policy_object.unattached, .{}));
     const oversized_source = @as([MAX_INSTALL_SOURCE_BYTES + 1]u8, @splat('s'));
     try std.testing.expectError(error.InstallSourceTooLong, service.install(.{
         .bundle = v1,
         .source_identity = oversized_source[0..],
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
     try std.testing.expectError(error.InstallSourceInvalid, service.install(.{
         .bundle = v1,
         .source_identity = "store:zigos beta",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
     try std.testing.expectError(error.InstallSourceInvalid, service.install(.{
         .bundle = v1,
         .source_identity = "store:zigos\nmirror",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     _ = try service.install(.{
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &policy_object.unattached, .{});
 
     try std.testing.expectError(error.VersionReplayRejected, service.install(.{
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     try std.testing.expectError(error.SchemaChangeRequiresExplicitVersion, service.install(.{
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     const widened_permissions = [_]manifest.PermissionRequest{
         manifest_fixtures.notes_permissions[0],
@@ -1538,7 +1454,7 @@ test "package service rejects stale update metadata publisher drift and channel 
         .source_identity = "store:zigos",
         .data_schema_version = 1,
         .declared_permission_change = true,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     var other_publisher = v1;
     other_publisher.publisher = "Other Software";
@@ -1548,7 +1464,7 @@ test "package service rejects stale update metadata publisher drift and channel 
         .bundle = other_publisher,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     var channel_changed = v1;
     channel_changed.update_channel = .stable;
@@ -1558,7 +1474,7 @@ test "package service rejects stale update metadata publisher drift and channel 
         .bundle = channel_changed,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     var v11 = v1;
     v11.version_minor = 1;
@@ -1567,12 +1483,12 @@ test "package service rejects stale update metadata publisher drift and channel 
         .bundle = v11,
         .source_identity = "repo:mirror",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
     const updated_minor = try service.install(.{
         .bundle = v11,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expect(updated_minor.updated_existing);
     try std.testing.expect(updated_minor.rollback_available);
 
@@ -1580,12 +1496,12 @@ test "package service rejects stale update metadata publisher drift and channel 
         .bundle = v11,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
     try std.testing.expectError(error.VersionRegressionRejected, service.install(.{
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     var v20 = v1;
     v20.version_major = 2;
@@ -1595,7 +1511,7 @@ test "package service rejects stale update metadata publisher drift and channel 
         .bundle = v20,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expect(updated_major.updated_existing);
     try std.testing.expectEqual(@as(u16, 2), service.find("app.notes").?.versionMajor());
 
@@ -1606,7 +1522,7 @@ test "package service rejects stale update metadata publisher drift and channel 
         .bundle = lower_major,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     const rollback = try service.rollback(rollbackRequestForActive(service.find("app.notes").?));
     try std.testing.expect(!rollback.permissions_changed);
@@ -1616,7 +1532,7 @@ test "package service rejects stale update metadata publisher drift and channel 
         .bundle = v11,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 }
 
 test "package service preserves and advances public store transparency evidence" {
@@ -1634,14 +1550,14 @@ test "package service preserves and advances public store transparency evidence"
         .bundle = v1,
         .source_identity = "store:zigos/public",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     _ = try service.install(.{
         .bundle = v1,
         .source_identity = "store:zigos/public",
         .data_schema_version = 1,
         .release_transparency = publicStoreTransparency(1, 0x61, 0x61),
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expectEqual(
         @as(u64, 1),
         service.find("app.notes").?.activeRevision().release_transparency.sequence,
@@ -1655,14 +1571,14 @@ test "package service preserves and advances public store transparency evidence"
         .source_identity = "store:zigos/public",
         .data_schema_version = 1,
         .release_transparency = publicStoreTransparency(1, 0x61, 0x61),
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     _ = try service.install(.{
         .bundle = v11,
         .source_identity = "store:zigos/public",
         .data_schema_version = 1,
         .release_transparency = publicStoreTransparency(2, 0x62, 0x62),
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expectEqual(
         @as(u64, 2),
         service.find("app.notes").?.activeRevision().release_transparency.sequence,
@@ -1688,14 +1604,14 @@ test "package service preserves and advances public store transparency evidence"
         .source_identity = "store:zigos/public",
         .data_schema_version = 1,
         .release_transparency = publicStoreTransparency(2, 0x62, 0x62),
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     const updated = try service.install(.{
         .bundle = v20,
         .source_identity = "store:zigos/public",
         .data_schema_version = 1,
         .release_transparency = publicStoreTransparency(3, 0x63, 0x63),
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expect(updated.updated_existing);
     try std.testing.expectEqual(
         @as(u64, 3),
@@ -1718,7 +1634,7 @@ test "package service refuses runtime use of public store revisions with strippe
         .source_identity = "store:zigos/public",
         .data_schema_version = 1,
         .release_transparency = publicStoreTransparency(1, 0x71, 0x71),
-    }, null);
+    }, &policy_object.unattached, .{});
 
     var resolved: ResolvedManifest = undefined;
     _ = try service.buildLaunchPlan("app.notes");
@@ -1739,7 +1655,7 @@ test "package service refuses runtime use of public store revisions with strippe
         .source_identity = "store:zigos/public",
         .data_schema_version = 1,
         .release_transparency = publicStoreTransparency(2, 0x72, 0x72),
-    }, null);
+    }, &policy_object.unattached, .{});
 
     const rollback_slot = service.find("app.notes").?.rollback_revision_slot.?;
     service.find("app.notes").?.revisions[rollback_slot].release_transparency = .{};
@@ -1771,7 +1687,7 @@ test "package service refuses rollback to a revision whose publisher key was rev
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &policy_object.unattached, .{});
 
     var v11 = v1;
     v11.version_minor = 1;
@@ -1780,7 +1696,7 @@ test "package service refuses rollback to a revision whose publisher key was rev
         .bundle = v11,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &policy_object.unattached, .{});
 
     try service.revokePublisher(publisher_principal);
     try std.testing.expectError(error.PublisherKeyRevoked, service.buildLaunchPlan("app.notes"));
@@ -1819,7 +1735,7 @@ test "package service rejects untrusted self-signed and revoked publisher bundle
     try std.testing.expectError(error.UntrustedManifestSigner, service.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     const publisher_principal = principal.PrincipalId{ .kind = .app, .serial = 38 };
     _ = try service.trustPublisher(
@@ -1833,7 +1749,7 @@ test "package service rejects untrusted self-signed and revoked publisher bundle
     try std.testing.expectError(error.PublisherKeyRevoked, service.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",
-    }, null));
+    }, &policy_object.unattached, .{}));
 }
 
 test "package service rejects oversized manifests instead of truncating stored metadata" {
@@ -1843,7 +1759,7 @@ test "package service rejects oversized manifests instead of truncating stored m
         .seed = signing.seedFromByte(0x36),
     };
     try trustTestPublisher(&service, signer_identity, "Example Software");
-    const long_bundle_id = @as([MAX_LABEL_BYTES + 1]u8, @splat('b'));
+    const long_bundle_id = @as([model.MAX_LABEL_BYTES + 1]u8, @splat('b'));
     const interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
         .{ .name = "zigos.object.workspace" },
@@ -1868,7 +1784,7 @@ test "package service rejects oversized manifests instead of truncating stored m
     try std.testing.expectError(error.BundleIdTooLong, service.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     bundle.bundle_id = "app.notes";
     bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
@@ -1881,7 +1797,7 @@ test "package service rejects oversized manifests instead of truncating stored m
     try std.testing.expectError(error.ComponentIdTooLong, service.install(.{
         .bundle = oversized_component_bundle,
         .source_identity = "store:zigos",
-    }, null));
+    }, &policy_object.unattached, .{}));
 }
 
 test "package service treats lease and target scope changes as declared permission changes" {
@@ -1926,7 +1842,7 @@ test "package service treats lease and target scope changes as declared permissi
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &policy_object.unattached, .{});
 
     const v2_permissions = [_]manifest.PermissionRequest{
         .{
@@ -1957,14 +1873,14 @@ test "package service treats lease and target scope changes as declared permissi
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     const updated = try service.install(.{
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
         .declared_permission_change = true,
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.permissions_changed);
 }
@@ -2008,7 +1924,7 @@ test "package service requires schema changes to carry an explicit signed versio
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &policy_object.unattached, .{});
 
     var hidden_schema_change = v1;
     hidden_schema_change.signature = try signTestReleaseBundle(signer_identity, hidden_schema_change);
@@ -2016,7 +1932,7 @@ test "package service requires schema changes to carry an explicit signed versio
         .bundle = hidden_schema_change,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
-    }, null));
+    }, &policy_object.unattached, .{}));
 
     var v2 = v1;
     v2.version_minor = 1;
@@ -2026,7 +1942,7 @@ test "package service requires schema changes to carry an explicit signed versio
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expect(updated.updated_existing);
     try std.testing.expectEqual(@as(u32, 2), service.find("app.notes").?.schemaVersion());
 
@@ -2037,7 +1953,7 @@ test "package service requires schema changes to carry an explicit signed versio
         .bundle = schema_downgrade,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 }
 
 test "package service resolves installed manifests with stable slices" {
@@ -2145,7 +2061,7 @@ test "package service resolves installed manifests with stable slices" {
     _ = try service.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",
-    }, null);
+    }, &policy_object.unattached, .{});
 
     var resolved: ResolvedManifest = undefined;
     const current = try service.resolveCurrentManifest("app.notes", &resolved);
@@ -2189,7 +2105,7 @@ test "package service resolves installed manifests with stable slices" {
 
 test "package service enforces package supply chain policy before install" {
     var policies = policy_object.Directory.init();
-    const policy = try policies.create(.{
+    _ = try policies.create(.{
         .scope = .organization,
         .subject_id = 94,
         .issuer = .{ .kind = .policy_authority, .serial = 97 },
@@ -2226,7 +2142,7 @@ test "package service enforces package supply chain policy before install" {
     try std.testing.expectError(error.PackageProvenanceDenied, service.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",
-    }, policy));
+    }, &policies, .{ .organization_id = 94 }));
 
     bundle.supply_chain = .{
         .sbom_digest = "sha256:supply-sbom",
@@ -2241,7 +2157,61 @@ test "package service enforces package supply chain policy before install" {
     const installed = try service.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",
-    }, policy);
+    }, &policies, .{ .organization_id = 94 });
+    try std.testing.expect(installed.installed_new);
+}
+
+test "package install composes device scope policy and refuses tampered policy" {
+    var policies = policy_object.Directory.init();
+    const device_policy = try policies.create(.{
+        .scope = .device,
+        .subject_id = 701,
+        .issuer = .{ .kind = .policy_authority, .serial = 98 },
+        .label = "device-store-only",
+        .install_source_mode = .platform_store_only,
+    }, .{
+        .label = "device-install-policy-key",
+        .seed = signing.seedFromByte(0x3C),
+    });
+
+    var service = Service.init();
+    const signer_identity = signing.SignerIdentity{
+        .label = "pkg-test-device-scope",
+        .seed = signing.seedFromByte(0x3D),
+    };
+    try trustTestPublisher(&service, signer_identity, "Example Software");
+    var bundle = manifest.BundleManifest{
+        .bundle_id = "app.device-scoped",
+        .display_name = "Device Scoped",
+        .publisher = "Example Software",
+        .provided_interfaces = &.{.{ .name = "zigos.device-scoped.example" }},
+        .components = &.{.{
+            .id = "device-scoped",
+            .entry = "app.device-scoped",
+        }},
+        .assets = &.{.{ .path = "assets/icon.svg", .content_type = "image/svg+xml" }},
+    };
+    bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
+    const subjects = policy_object.SubjectSet{ .user_id = 70, .device_id = 701 };
+
+    try std.testing.expectError(error.InstallSourceDenied, service.install(.{
+        .bundle = bundle,
+        .source_identity = "repo:sideload",
+    }, &policies, subjects));
+    try std.testing.expect(service.find(bundle.bundle_id) == null);
+
+    device_policy.install_source_mode = .any_signed;
+    try std.testing.expectError(error.PolicyDenied, service.install(.{
+        .bundle = bundle,
+        .source_identity = "repo:sideload",
+    }, &policies, subjects));
+    try std.testing.expect(service.find(bundle.bundle_id) == null);
+    device_policy.install_source_mode = .platform_store_only;
+
+    const installed = try service.install(.{
+        .bundle = bundle,
+        .source_identity = "store:zigos",
+    }, &policies, subjects);
     try std.testing.expect(installed.installed_new);
 }
 
@@ -2265,8 +2235,9 @@ test "package service indexes rebuild after persisted slots are loaded" {
     bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
     try trustTestPublisher(&service, signer_identity, "Example Software");
 
-    service.slots.slots[3].in_use = true;
-    try bundle_ops.installNew(&service.slots.slots[3].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x11));
+    const slots = try service.ensureBundleArena();
+    slots.slots[3].in_use = true;
+    try bundle_ops.installNew(&slots.slots[3].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x11));
     service.rebuildIndexes();
 
     const launch_plan = try service.buildLaunchPlan("app.notes");
@@ -2288,7 +2259,7 @@ test "package service round-trips the example writer manifest fields without wid
     _ = try service.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",
-    }, null);
+    }, &policy_object.unattached, .{});
 
     var resolved: ResolvedManifest = undefined;
     const current = try service.resolveCurrentManifest("com.example.writer", &resolved);
@@ -2333,9 +2304,9 @@ test "package bundle ops reject semantically invalid manifests before storage" {
 
     try std.testing.expectError(
         error.DuplicatePermissionRequest,
-        bundle_ops.installNew(&service.slots.slots[0].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x66)),
+        bundle_ops.installNew(&(try service.ensureBundleArena()).slots[0].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x66)),
     );
-    try std.testing.expectEqual(@as(u8, 0), service.slots.slots[0].bundle.revisionCount());
+    try std.testing.expectEqual(@as(u8, 0), service.bundleArena().?.slots[0].bundle.revisionCount());
 }
 
 test "package revisions pool permission text and preserve rollback values" {
@@ -2431,7 +2402,7 @@ test "package revisions pool permission text and preserve rollback values" {
 
     const recycled_revision = bundle.activeRevision();
     const recycled_permission_text_len: usize = recycled_revision.permission_text_len;
-    const zero_permission_text = @as([MAX_PERMISSION_TEXT_BYTES_PER_REVISION]u8, @splat(0));
+    const zero_permission_text = @as([model.MAX_PERMISSION_TEXT_BYTES_PER_REVISION]u8, @splat(0));
     try std.testing.expect(recycled_permission_text_len < previous_permission_text_len);
     try std.testing.expectEqualSlices(
         u8,
@@ -2443,9 +2414,9 @@ test "package revisions pool permission text and preserve rollback values" {
 }
 
 test "package permission text storage enforces individual and revision budgets" {
-    const full_resource = @as([MAX_PERMISSION_RESOURCE_BYTES]u8, @splat('r'));
+    const full_resource = @as([model.MAX_PERMISSION_RESOURCE_BYTES]u8, @splat('r'));
     const full_reason = @as([model.MAX_PERMISSION_REASON_BYTES]u8, @splat('q'));
-    var resources = @as([7][MAX_PERMISSION_RESOURCE_BYTES]u8, @splat(full_resource));
+    var resources = @as([7][model.MAX_PERMISSION_RESOURCE_BYTES]u8, @splat(full_resource));
     var permissions: [resources.len]manifest.PermissionRequest = undefined;
     for (&permissions, 0..) |*permission, index| {
         resources[index][0] = @intCast(index + 1);
@@ -2477,7 +2448,7 @@ test "package permission text storage enforces individual and revision budgets" 
     );
     try std.testing.expectEqual(@as(u8, 0), bundle.revisionCount());
 
-    const oversized_resource = @as([MAX_PERMISSION_RESOURCE_BYTES + 1]u8, @splat('r'));
+    const oversized_resource = @as([model.MAX_PERMISSION_RESOURCE_BYTES + 1]u8, @splat('r'));
     const oversized_permission = [_]manifest.PermissionRequest{.{
         .kind = .object_access,
         .resource = oversized_resource[0..],
@@ -2506,7 +2477,7 @@ test "package service rejects example writer manifest updates that widen permiss
         .bundle = bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &policy_object.unattached, .{});
     try std.testing.expect(installed.installed_new);
 
     const widened_permissions = [_]manifest.PermissionRequest{
@@ -2530,5 +2501,5 @@ test "package service rejects example writer manifest updates that widen permiss
         .bundle = widened,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &policy_object.unattached, .{}));
 }

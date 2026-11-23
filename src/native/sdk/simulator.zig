@@ -12,6 +12,7 @@ const package_service = @import("../services/package_service.zig");
 const permissions = @import("permissions.zig");
 const permission_review = @import("../policy/permission_review.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
+const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const sync_api = @import("sync_api.zig");
@@ -26,7 +27,6 @@ pub const SDK_POLICY_AUTHORITY = principal.PrincipalId{ .kind = .policy_authorit
 pub const SDK_PACKAGE_OWNER = principal.PrincipalId{ .kind = .service, .serial = 60_005 };
 pub const SDK_FIRST_APP_SURFACE_ID: u64 = 61_000;
 pub const MAX_PERMISSION_REVIEW_TEXT: usize = permissions.MAX_REVIEW_TEXT_BYTES;
-pub const COMPACT_SIMULATOR_RESULT_METADATA = true;
 pub const PERMISSION_REVIEW_RESULT_SIZE_CEILING_BYTES: usize = 4_744;
 pub const LAUNCH_RESULT_SIZE_CEILING_BYTES: usize = 16;
 pub const NATIVE_APP_HARNESS_RESULT_SIZE_CEILING_BYTES: usize = 56;
@@ -123,8 +123,7 @@ comptime {
 }
 
 fn signSdkReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
-    return signing.signWithDefaultRegistry(
-        .ed25519,
+    return signing.sign(
         identity,
         &package_service.digestBundle(bundle),
     );
@@ -132,6 +131,7 @@ fn signSdkReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.Bundl
 
 pub const Simulator = struct {
     packages: package_service.Service = package_service.Service.init(),
+    policies: policy_object.Directory = .{},
     capabilities: capability.CapabilityTable = capability.CapabilityTable.init(),
     runtime: task_runtime.Runtime = task_runtime.Runtime.init(),
     debug: debugger.Session = debugger.Session.init(),
@@ -246,7 +246,7 @@ pub const Simulator = struct {
             .source_identity = package.source_identity,
             .data_schema_version = package.data_schema_version,
             .declared_permission_change = package.declared_permission_change,
-        }, null);
+        }, &self.policies, .{});
         try self.debug.record(
             if (result.installed_new) .package_installed else .package_updated,
             self.advanceClock(),
@@ -326,7 +326,6 @@ pub const Simulator = struct {
             .launch = .{
                 .boundary = .direct_request,
                 .image_id = appImageId(bundle),
-                .component_abi_version = 1,
                 .signed = bundle.signature.isComplete(),
                 .bundle_id = bundle.bundle_id,
                 .source_identity = launch_plan.provenance.source_identity,
@@ -376,14 +375,6 @@ pub const Simulator = struct {
         const resumed = try self.runtime.resumeTask(task_id, self.advanceClock());
         try self.debug.record(.native_app_resumed, self.advanceClock(), task.launchBundleIdSlice(), "resume", resumed);
         return resumed;
-    }
-
-    pub fn stopNativeApp(self: *Simulator, task_id: u64) !bool {
-        const task = self.runtime.find(task_id) orelse return error.TaskNotFound;
-        const bundle_id = task.launchBundleIdSlice();
-        const stopped = try self.runtime.terminateTask(task_id, self.advanceClock());
-        try self.debug.record(.native_app_stopped, self.advanceClock(), bundle_id, "stop", stopped);
-        return stopped;
     }
 
     pub fn rollback(self: *Simulator, bundle_id: []const u8) !package_service.InstallResult {
@@ -551,9 +542,8 @@ test "SDK simulator installs updates rolls back launches and debugs native first
 
     var sim = Simulator.init();
     const suite = examples.firstPartySuite();
-    var launched_task_ids = @as([suite.len]u64, @splat(0));
 
-    for (suite, 0..) |package, index| {
+    for (suite) |package| {
         var compiled: app_platform.CompiledPackage = undefined;
         try app_platform.compileInto(package, &compiled);
         try std.testing.expect(compiled.operationCount() >= 4);
@@ -578,7 +568,6 @@ test "SDK simulator installs updates rolls back launches and debugs native first
         try std.testing.expect(installed.installed_new);
 
         const launched = try sim.launchNativeApp(package.bundle.bundle_id);
-        launched_task_ids[index] = launched.task_id;
         try std.testing.expectEqual(@as(u8, @intCast(package.bundle.components.len)), launched.component_count);
         try std.testing.expectEqual(@as(u8, @intCast(package.bundle.assets.len)), launched.asset_count);
         try std.testing.expect(launched.signed_provenance);
@@ -608,11 +597,6 @@ test "SDK simulator installs updates rolls back launches and debugs native first
     const current = try sim.resolveCurrentManifest(suite[0].bundle.bundle_id, &resolved);
     try std.testing.expectEqual(suite[0].bundle.version_minor, current.version_minor);
 
-    for (launched_task_ids) |task_id| {
-        try std.testing.expect(try sim.stopNativeApp(task_id));
-        try std.testing.expectEqual(task_runtime.TaskState.terminated, sim.runtime.find(task_id).?.state);
-    }
-
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.package_installed));
     try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_updated));
     try std.testing.expectEqual(@as(usize, 1), sim.debug.countKind(.package_rolled_back));
@@ -620,7 +604,6 @@ test "SDK simulator installs updates rolls back launches and debugs native first
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_launched));
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_suspended));
     try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_resumed));
-    try std.testing.expectEqual(@as(usize, suite.len), sim.debug.countKind(.native_app_stopped));
 }
 
 test "SDK simulator runs a radically native app harness without POSIX" {

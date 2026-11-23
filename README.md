@@ -360,11 +360,9 @@ the first-target readiness track remains blocked on real hardware validation.
   Revocation retires CPU mappings first; accelerator pins retain the original
   object slot and backing until matching completion permits release. Pending
   pins consume the existing 24-object capacity, and session reset requires them
-  to drain before dropping owners. Scheduler claims bind the exact table, object,
-  broker and queue generation; cancellation keeps incomplete work owned. Media
-  jobs publish completion only after claim release and retry notice publication
-  without releasing twice. Full notification tables reject submissions before
-  reserving an accelerator claim.
+  to drain before dropping owners. Accelerator engine claims live only in the
+  userspace scheduler; the accelerator planner maps telemetry to an engine
+  without holding claims.
 - The first daily-driver slice is Notes/docs: signed native package install,
   workspace and document open, local permission review, object-scoped sharing,
   local-first sync, update rollback, recovery, and package removal are exercised
@@ -888,9 +886,9 @@ the first-target readiness track remains blocked on real hardware validation.
   Cooperative host tests exercise the actual worker and storage service;
   physical latency and fault/recovery measurements remain pending.
 - Text surfaces use compositor-owned snapshots and the firmware framebuffer in
-  production, with writes limited to changed cells. The shared-buffer handle,
-  revision, and readiness-fence path still records modeled display requests;
-  accelerated scanout and modesetting remain open.
+  production, with writes limited to changed cells. A surface present carries
+  only a surface ID, a revision and the bounded text snapshot; the kernel
+  compositor draws every pixel. Accelerated scanout and modesetting remain open.
 - Local-first sync is modeled as core OS behavior: trusted device graph,
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and
@@ -975,9 +973,8 @@ the first-target readiness track remains blocked on real hardware validation.
   Measured policy roots cover boot service, device, and policy authority while
   excluding live resource grants and runtime issuance timestamps, so identical
   cold boots remain reproducible regardless of user activity or timer phase.
-  Ed25519 is the classical signing baseline; production PQC is represented
-  by a separate ML-DSA-65 provider boundary with FIPS validation metadata
-  and fail-closed verifier requirements.
+  Ed25519 is the only implemented signing profile; ML-DSA-65 signatures are
+  parsed and rejected until a validated FIPS 204 provider exists.
 
 The spec contract is now the machine-readable manifest in
 `spec/coverage.json`; this checkout does not require a separate prose spec
@@ -1085,8 +1082,8 @@ YMM registers within a fixed 832-byte save image. The baseline-compiled UEFI stu
 checks real CPUID features and the exact YMM save geometry before entering native
 code. Every bootstrap and secondary CPU entry repeats admission, establishes
 XCR0 and resets x87/MXCSR controls before its first compiled instruction; explicit emulator boots retain these
-gates. Build configuration accepts exactly
-`-Dcpu=x86_64_v3+aes+pclmul+sha`. AVX-512 and AMX require a larger task-state
+gates. The build pins the kernel instruction floor to
+`x86_64_v3+aes+pclmul+sha`. AVX-512 and AMX require a larger task-state
 contract before generated code can use them. Hosted alignment and
 dispatch regressions pass; the full assembly
 roundtrip explicitly skips hosts without OSXSAVE or enabled YMM state.
@@ -1226,18 +1223,28 @@ committed set is reconstructed from the selected root's version watermark;
 failed barriers retain dirty state, and retries or cold replay require no
 separate durability cache. Workspace-only and clean saves avoid reconstructing
 that set.
-Volume root format 6 uses seed-zero XXH64 for root and log corruption checksums.
-Earlier root formats are rejected on load and save without rewriting the image;
-there is no automatic migration. SHA-256 content addresses and signed metadata
-remain the authentication boundary. `zig build storage-checksum-benchmark`
-compares the checksum algorithms in one host build.
+Volume root format 8 uses seed-zero XXH64 for root and log corruption checksums.
+A volume with no current-format root is refused on load and save without
+rewriting the image; there is no automatic migration. SHA-256 content addresses
+and signed metadata remain the authentication boundary. Workspace summaries in
+the root record the persisted mutation count and a fingerprint of the
+workspace's identity, owner, label and logged mutations. While the live record
+still begins with that fingerprinted prefix, an append logs only its newer
+mutations plus its share grants and recoverable deletes; replay applies such a
+delta only to its exact base and rejects the root unless the result hashes like
+the committed summary. Mutation-log compaction, reseeding, another writer's
+root or any other change to the prefix falls back to a whole-workspace record.
+Backend saves reuse the root and last log sector they committed while no other
+write or attachment reached the device, so an unbatched checkpoint reads
+nothing and writes the appended log as whole sectors in one transfer.
 Object hashing and blob replay initialize each live chunk reference and Merkle
 node before use, avoiding redundant clears of their local scratch arrays.
 Stored record tails retain canonical zeros; content addresses and signatures
 retain their exact bytes.
-Quota collection counts persistable workspaces and snapshots while finding their
-maximum entry count in one pass over each bounded arena. Attached byte transfers
-reject overflowing or out-of-image ranges before calling the device backend.
+The fixed object and workspace tables are the storage capacity limits; saves
+refuse any live slot whose counts could not be encoded. Attached byte reads and
+log writes reject overflowing or out-of-image ranges before calling the device
+backend.
 Workspace path and object indexes close affected probe chains after deletion,
 so repeated directory edits leave no tombstones. Object sync positions a
 verified chunk cursor at each transport range rather than visiting every
@@ -1251,9 +1258,13 @@ signed-package restore with its normal mutation history reduced the median from
 checksums. Timings include signature verification and exclude fixture preparation
 and result checks.
 
+The desktop recomposes only when the compositor's display revision, trusted
+view or document chrome changes; an unchanged desktop frame costs one key
+comparison, while native identity screens always recompose.
 Text scanout compares visible cell metadata and grapheme bytes independently
 of pool offsets, so recomposing an unchanged Unicode frame causes no pixel
-writes. Damaged cells resolve glyph scaling and cursor coverage into row masks
+writes. Glyph lookup binary-searches a small table of code-point runs and then
+indexes width-packed rows directly. Damaged cells resolve glyph scaling and cursor coverage into row masks
 before writing the framebuffer. The `text-scanout-benchmark` target measures
 full redraws, single-cell edits, and pool reordering on host memory.
 The compositor locates the caret and retains visible rows in one layout pass
@@ -1482,9 +1493,8 @@ concurrent cached reuse while another CPU requests large spans.
 
 Use the pinned toolchain and repo entrypoints:
 
-- Preinstalled Zig 0.17.0 on `PATH` (pinned in `.tool-versions` and `mise.toml`)
-- Jujutsu `jj` (pinned in `.tool-versions` and `mise.toml`)
-- `nasm`
+- Preinstalled Zig 0.17.0 on `PATH` (pinned in `.tool-versions`)
+- Jujutsu `jj` (pinned in `.tool-versions`)
 - `qemu-system-x86_64`
 - Python 3 only for the external `virt-fw-vars` tool used by unified EFI tests
 - An x86-64 CPU with NX, SMEP, SMAP, UMIP, RDSEED, RDPID, PGE, PCID/INVPCID,
@@ -1664,13 +1674,9 @@ Use the pinned toolchain and repo entrypoints:
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses
   them when available
 
-For ISO and full disk-image workflows, install the tools verified by
-`zig build setup-deps`:
-
-- x86-64 EFI-capable GRUB `mkrescue` and modules
-- `xorriso`
-- `mtools`
-- `dosfstools`
+For ISO and full disk-image workflows, install `xorriso`, which
+`zig build setup-deps` verifies; the EFI system partition itself is written
+natively.
 
 `build.zig` rejects any Zig version other than the repo pin. Install Zig 0.17.0
 before setup and invoke it directly as `zig` from `PATH`.
@@ -1719,7 +1725,7 @@ SetupMode must be zero; AuditMode, if present, must be zero. Missing required
 state, malformed values, and read errors leave the boot unverified.
 Unsigned QEMU boots cannot claim an authenticated root or
 use it for runtime measured-state attestation. Runtime measurement snapshots and the embedded
-fixture-signed manifests check consistency; they do not establish release
+build artifact manifest check consistency; they do not establish release
 authority, prove TPM PCR values, or enforce rollback protection.
 
 When firmware provides TCG2 with an active SHA-256 bank, the loader extends
@@ -1762,7 +1768,7 @@ key enrollment, manufacturer/EK certification, release-policy approval of PCR
 values, and PCR-bound secret policies
 remain open; a valid signature alone does not establish those trust decisions.
 
-The attestation service now has a separate TPM response path. The verifier owns
+The attestation service answers remote requests with TPM quotes. The verifier owns
 the enrolled device/key/generation and approved PCR value, generates a fresh
 32-byte nonce, and binds the complete request and PCR expectation into the
 quote's signed extraData. Responses contain only bounded TPM evidence. Acceptance
@@ -1805,15 +1811,9 @@ completed delivery, then retries successfully with the same challenge. Native
 provisioning must supply the enrolled key, encrypted blob, parent pin and
 revocable authorization; the worker installs no default credentials.
 
-Remote attestation service signatures bind the complete verifier request and
-the provider's actual metadata digest through a domain-separated context.
-Changing policy, key restrictions, revocations, or metadata invalidates the
-signature, and standalone statements cannot be repackaged as remote responses.
-The response remains 616 bytes. Verification checks bounded lengths and canonical
-unused fields before hashing, then checks the signature once against the trusted
-root. Failed signing and provisioning leave committed service state unchanged.
-Verified service-identity connections also require the signed device identity to
-match the selected peer before opening a connection.
+TPM quotes are the only remote attestation evidence. Verified service-identity
+connections also require the enrolled device identity to match the selected
+peer before opening a connection.
 
 `zig build unified-efi-qemu-test` checks firmware authorization of
 the complete EFI image, rejection of changes to either embedded payload, and
@@ -1827,8 +1827,10 @@ firmware image hash and prepares the tampered images.
 Set `OVMF_SECURE_BOOT_CODE` and matching `OVMF_SECURE_BOOT_VARS` (or `OVMF_VARS`);
 `EFI_VARS_TOOL` can select the variables tool installed in an isolated Python
 virtual environment. The test enrolls
-only disposable VM variables and never accesses host firmware. CI supplies the
-isolated tools, and release-security-preflight includes this gate. The production
+only disposable VM variables and never accesses host firmware. No CI job runs
+this test; a job that does must set the setup action's `install-efi-auth-tools`
+and `install-build-dependencies` inputs to install the isolated tools.
+release-security-preflight includes this gate. The production
 hardware proof requires Secure Boot enabled, a firmware-authenticated image,
 and a verified live TPM boot measurement.
 Release signing, signer enrollment, TPM measured-boot quotes, and anti-rollback
@@ -1864,8 +1866,9 @@ zig build setup-deps
 
 The native setup command requires preinstalled Zig 0.17.0 and supports macOS
 through Homebrew and Linux through `apt`, `dnf`, or `pacman`. It installs and
-verifies the remaining dependencies and discovers GRUB and OVMF paths. It is
-also available as `zig build tool -- setup-deps`.
+verifies the remaining dependencies and discovers OVMF firmware. `swtpm` and
+Python 3 are reported as optional because only the TPM and unified EFI QEMU
+tests use them. It is also available as `zig build tool -- setup-deps`.
 
 ```sh
 # Verify dependencies without installing packages.
@@ -1891,7 +1894,7 @@ zig build native-store-image
 zig build run
 ```
 
-`run` and `run-zigos-native` attach `build/native-store.img`. Build targets that
+`run` attaches `build/native-store.img`. Build targets that
 boot or package the system depend on the generated userspace archive from the
 registry before they consume the kernel artifact.
 
@@ -1925,10 +1928,11 @@ zig build iso-verification
 ```
 
 The published `zig-out/bin/kernel-zigos-native.elf` is the exact ELF embedded
-in the production EFI image. It retains static symbols for the role gate while
-omitting non-loadable debug sections. The full diagnostic ELF is installed at
-`zig-out/kernel-debug/kernel-zigos-native.elf` under the same role gate; use it
-with `llvm-addr2line` for source locations, or a debugger for type information.
+in the production EFI image, produced by one whole-kernel LTO link. It retains
+static symbols for the role gate while omitting non-loadable debug sections.
+`zig build kernel-debug` links the full diagnostic ELFs into
+`zig-out/kernel-debug/`; use them with `llvm-addr2line` for source locations,
+or a debugger for type information.
 Optimized EFI images
 omit host-specific debugging metadata before packaging or signing.
 
@@ -2186,15 +2190,15 @@ The remaining data and test helpers also use the native host utility:
   prepares the firmware-authentication fixtures.
 - `zig build tool -- qemu-peer-relay --upstream-port PORT --drop-confirmations 2`
   runs the bounded localhost relay used by the two-node proof.
-- `zig build qemu-peer-relay-tests` runs its framing and live socket
-  tests; the two-node QEMU build gate runs them before starting the VMs.
+- `zig build host-tool-tests` runs its framing and live socket tests.
 
 ## Repository Map
 
 - `src/main.zig`: kernel entry/export surface and typed native syscall dispatch.
 - `src/arch/`: architecture-specific assembly, syscall entry glue, and linker
   scripts.
-- `src/boot/`: boot assembly and GRUB config used by kernel and ISO builds.
+- `src/boot/`: boot assembly, EFI loader and command lines used by kernel and
+  ISO builds.
 - `src/kernel/`: low-level boot, interrupt, timer, memory, driver, network, and
   utility code.
 - `src/kernel/boot/profiles/`: native, recovery, and benchmark boot profiles.
@@ -2213,8 +2217,8 @@ The remaining data and test helpers also use the native host utility:
   logic, storage volume backend, file bridge, and IPC paths.
 - `src/native/sync/`: device graph, sync service, sync state, adapters, network
   policy, and transport harnesses.
-- `src/native/policy/`: policy objects, manifest fixtures, mediation,
-  permission review, enterprise management, and denial explanations.
+- `src/native/policy/`: signed policy objects, manifest fixtures, mediation,
+  permission review, and denial explanations.
 - `src/native/platform/`: measured boot, attestation, recovery, update health,
   event ledger, compositor/session UX, rendered shell, and platform signals.
 - `src/native/services/`: service registry, service authority, package service,
@@ -2243,14 +2247,14 @@ The remaining data and test helpers also use the native host utility:
 GitHub Actions run these primary jobs:
 
 - lint
-- kernel build
-- spec conformance
-- host tests
-- native smoke
-- native CPU and crypto proofs
+- spec conformance: spec tests and the recovery QEMU proof
+- host tests, production readiness and release-security gates
+- native smoke, including the negative tamper boots
+- native CPU, crypto and upper-half entry proofs
+- TPM quotes
 - native benchmarks
-- ISO build
+- kernel and ISO build
 
-CI installs the pinned Zig toolchain first, then uses direct `zig` commands and
-the shared `.github/actions/setup-zigos-ci` action to install and verify the
-remaining dependencies.
+The shared `.github/actions/setup-zigos-ci` action installs the Zig and
+Jujutsu versions pinned in `.tool-versions`, then uses direct `zig` commands to
+install and verify the remaining dependencies.

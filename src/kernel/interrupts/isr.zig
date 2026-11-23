@@ -6,7 +6,7 @@ const io = @import("../utils/io.zig");
 const console = @import("../utils/console.zig");
 const numfmt = @import("../utils/numfmt.zig");
 const timer = @import("../timer/timer.zig");
-const intel_i225_hw = @import("../drivers/intel_i225_hw.zig");
+const network_hw = @import("../drivers/network_hw.zig");
 const nvme_hw = @import("../drivers/nvme_hw.zig");
 const xhci_hw = @import("../drivers/xhci_hw.zig");
 const smp = @import("../smp.zig");
@@ -19,6 +19,7 @@ const GateHandler = *const fn () callconv(.c) void;
 
 const IDT_INTERRUPT_GATE: u8 = 0x8E;
 const EXCEPTION_VECTOR_COUNT: u32 = 32;
+const NMI_VECTOR: u8 = 2;
 const DOUBLE_FAULT_VECTOR: u8 = 8;
 const PAGE_FAULT_VECTOR: u32 = 14;
 const USERSPACE_YIELD_VECTOR: u8 = 129;
@@ -214,7 +215,7 @@ pub fn setRuntimePreemption(handler: InterruptHandler) void {
 
 fn deviceWorkPending(vector: usize) bool {
     return switch (vector) {
-        intel_i225_hw.INTERRUPT_VECTOR => event_wake.peek().network,
+        network_hw.INTERRUPT_VECTOR => event_wake.peek().network,
         // NVMe also raises a deferred-work latch. Preserve the same owner
         // boundary without processing completions in this interrupt hook.
         nvme_hw.INTERRUPT_VECTOR => event_wake.peek().nvme,
@@ -240,12 +241,11 @@ pub fn withTestHandlers(context: anytype, callback: anytype) !void {
 
 const external_handler_vectors = [_]u8{
     timer.INTERRUPT_VECTOR,
-    intel_i225_hw.INTERRUPT_VECTOR,
+    network_hw.INTERRUPT_VECTOR,
     nvme_hw.INTERRUPT_VECTOR,
     xhci_hw.INTERRUPT_VECTOR,
     smp.TLB_IPI_VECTOR,
     USERSPACE_YIELD_VECTOR,
-    timer.SPURIOUS_VECTOR,
 };
 const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 320;
 
@@ -294,12 +294,13 @@ pub fn init() void {
         gdt.DOUBLE_FAULT_IST_INDEX,
     );
     registerHandler(DOUBLE_FAULT_VECTOR, doubleFaultInterrupt);
+    registerHandler(NMI_VECTOR, nmiInterrupt);
 
     disableLegacyPic();
     setKernelGate(timer.INTERRUPT_VECTOR, &isr64);
     registerHandler(timer.INTERRUPT_VECTOR, timerInterrupt);
-    setKernelGate(intel_i225_hw.INTERRUPT_VECTOR, &isr65);
-    registerHandler(intel_i225_hw.INTERRUPT_VECTOR, i225Interrupt);
+    setKernelGate(network_hw.INTERRUPT_VECTOR, &isr65);
+    registerHandler(network_hw.INTERRUPT_VECTOR, networkInterrupt);
     setKernelGate(nvme_hw.INTERRUPT_VECTOR, &isr66);
     registerHandler(nvme_hw.INTERRUPT_VECTOR, nvmeInterrupt);
     setKernelGate(xhci_hw.INTERRUPT_VECTOR, &isr67);
@@ -310,10 +311,19 @@ pub fn init() void {
     setKernelGate(smp.SYSCALL_REQUEST_IPI_VECTOR, &isr114);
     setKernelGate(smp.SYSCALL_COMPLETION_IPI_VECTOR, &isr115);
     setKernelGate(smp.PREPARED_EXECUTION_IPI_VECTOR, &isr116);
+    // Spurious vectors take no handler and no EOI.
     setKernelGate(timer.SPURIOUS_VECTOR, &isr255);
-    registerHandler(timer.SPURIOUS_VECTOR, spuriousInterrupt);
 
     idt.init();
+}
+
+// A panicking CPU stops every other CPU with an NMI; any other NMI stays fatal.
+fn nmiInterrupt(frame: *InterruptFrame) void {
+    if (@import("../utils/panic.zig").panicking()) {
+        asm volatile ("cli");
+        while (true) asm volatile ("hlt");
+    }
+    haltUnhandledException(frame);
 }
 
 fn doubleFaultInterrupt(frame: *InterruptFrame) void {
@@ -334,13 +344,8 @@ fn timerInterrupt(_: *InterruptFrame) void {
     }
 }
 
-fn i225Interrupt(_: *InterruptFrame) void {
-    const virtio_net_hw = @import("../drivers/virtio_net_hw.zig");
-    if (virtio_net_hw.isolationDomain() != null) {
-        virtio_net_hw.handleInterrupt();
-    } else {
-        intel_i225_hw.handleInterrupt();
-    }
+fn networkInterrupt(_: *InterruptFrame) void {
+    network_hw.handleInterrupt();
     event_wake.raise(.network);
 }
 
@@ -624,10 +629,6 @@ test "immutable broker vectors acknowledge once and wake only BSP user work" {
     Fixture.hooks = 0;
     Fixture.invalid_write = false;
     try withTestHandlers({}, Fixture.run);
-}
-
-fn spuriousInterrupt(_: *InterruptFrame) void {
-    timer.handleSpuriousInterrupt();
 }
 
 fn interruptVector(regs: *const Registers) usize {

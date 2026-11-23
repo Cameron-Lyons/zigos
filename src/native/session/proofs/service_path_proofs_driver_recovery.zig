@@ -175,7 +175,6 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expect(recovery.runtime_activation_generation > initial_activation.activation_generation);
     try std.testing.expectEqual(recovered_driver.dma_domain_id, recovery.runtime_dma_domain_id);
     try std.testing.expect(recovery.runtime_exclusive_claim);
-    try std.testing.expect(!recovery.userspace_brokered_data_plane);
     try std.testing.expectEqual(@as(usize, 1), booted_runtime.deactivation_count);
     try std.testing.expectEqual(@as(usize, 1), booted_runtime.activation_count);
     try std.testing.expectEqual(@as(usize, 1), booted_runtime.rehost_count);
@@ -261,7 +260,6 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expect(hot_swap.runtime_activation_generation > recovery.runtime_activation_generation);
     try std.testing.expectEqual(swapped_driver.dma_domain_id, hot_swap.runtime_dma_domain_id);
     try std.testing.expect(hot_swap.runtime_exclusive_claim);
-    try std.testing.expect(!hot_swap.userspace_brokered_data_plane);
     try std.testing.expectEqual(next_authority.id, swapped_driver.authority_capability_id);
     try std.testing.expect(swapped_driver.authority_capability_id != recovered_authority_id);
     try std.testing.expect(swapped_driver.signerMatches("zigos-storage-driver-v2"));
@@ -370,7 +368,6 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expectEqual(swapped_graphics.dma_domain_id, graphics_hot_swap.next_dma_domain_id);
     try std.testing.expectEqual(swapped_graphics.dma_domain_id, graphics_hot_swap.runtime_dma_domain_id);
     try std.testing.expect(graphics_hot_swap.runtime_exclusive_claim);
-    try std.testing.expect(!graphics_hot_swap.userspace_brokered_data_plane);
     try std.testing.expectEqual(graphics_authority.id, swapped_graphics.authority_capability_id);
     try std.testing.expect(swapped_graphics.signerMatches("zigos-graphics-driver-v2"));
     try std.testing.expect(runtime.hasCapability(swapped_graphics.owner_task_id, graphics_authority.id));

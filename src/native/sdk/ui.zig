@@ -5,7 +5,6 @@ pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_RENDER_BYTES: usize = 4096;
 pub const MAX_A11Y_NODES: usize = 128;
 pub const MAX_A11Y_ISSUES: usize = 32;
-pub const COMPACT_REVIEW_UI_METADATA = true;
 pub const NODE_SIZE_CEILING_BYTES: usize = 128;
 pub const ACCESSIBILITY_REPORT_SIZE_CEILING_BYTES: usize = 776;
 const AUDIT_STATE_SIZE_CEILING_BYTES: usize = 1_296;

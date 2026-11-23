@@ -2,8 +2,6 @@ const std = @import("std");
 const device_broker = @import("../kernel_api/device_broker.zig");
 const cooperative = @import("../task/cooperative_worker.zig");
 
-pub const MAPS_MMIO_INTO_OWNER_TASKS = true;
-pub const SEALS_KERNEL_RUNTIME_IO_AFTER_CLAIM = true;
 pub const MAX_CLAIMS: usize = device_broker.MAX_DEVICES;
 pub const CLAIM_RECORD_SIZE_CEILING_BYTES: usize = 24;
 pub const HANDOFF_SIZE_CEILING_BYTES: usize = 128;
@@ -81,11 +79,6 @@ pub fn release(device_id: u64) bool {
 
 pub fn claimed(device_id: u64) bool {
     return findClaim(device_id) != null;
-}
-
-pub fn ownerTaskId(device_id: u64) ?u64 {
-    const record = findClaim(device_id) orelse return null;
-    return record.owner_task_id;
 }
 
 pub fn allowsKernelRuntimeIo(device_id: u64) bool {
@@ -172,7 +165,6 @@ test "dataplane handoff seals kernel I/O after owner claim" {
     try std.testing.expect(allowsKernelRuntimeIo(device_id));
     try claim(device_id, 41, 1);
     try std.testing.expect(claimed(device_id));
-    try std.testing.expectEqual(@as(?u64, 41), ownerTaskId(device_id));
     try std.testing.expect(!allowsKernelRuntimeIo(device_id));
 
     const lease = try beginOwnedSubmit(device_id, 41, 1);

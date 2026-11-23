@@ -1,5 +1,5 @@
 const std = @import("std");
-const frames = @import("frame_allocator");
+const frames = @import("host_benchmarks").frame_allocator;
 
 const managed_bytes = 64 * 1024 * 1024 * 1024;
 const page_size = 4096;

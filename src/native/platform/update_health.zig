@@ -3,7 +3,7 @@ const compositor_session = @import("compositor_session.zig");
 const event_ledger = @import("event_ledger.zig");
 const immutable_base = @import("immutable_base.zig");
 const capability = @import("../kernel_api/capability.zig");
-const contract = @import("../session/contract.zig");
+const service_catalog = @import("../session/service_catalog.zig");
 const native_util = @import("../core/util.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
@@ -276,7 +276,7 @@ fn bootWitnessObjectId() u64 {
 
 fn registerHealthyService(
     supervisor: *supervisor_mod.Supervisor,
-    class: contract.ServiceClass,
+    class: service_catalog.ServiceClass,
     owner: principal.PrincipalId,
 ) !u64 {
     const service = try supervisor.register(class, owner);

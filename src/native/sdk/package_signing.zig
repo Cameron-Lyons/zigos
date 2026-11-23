@@ -16,7 +16,7 @@ pub const SignedPackage = struct {
     lint: manifest_linter.Report,
 
     pub fn verify(self: *const SignedPackage) bool {
-        return signing.verifyWithDefaultRegistry(self.bundle.signature, &self.digest);
+        return signing.verify(self.bundle.signature, &self.digest);
     }
 };
 
@@ -32,17 +32,12 @@ pub fn sign(bundle: manifest.BundleManifest, flow: SigningFlow) !SignedPackage {
 
     var signed_bundle = bundle;
     const package_digest = digest(signed_bundle);
-    signed_bundle.signature = try signing.signWithDefaultRegistry(flow.profile, flow.identity, &package_digest);
+    signed_bundle.signature = try signing.signWithProfile(flow.identity, &package_digest, flow.profile);
     return .{
         .bundle = signed_bundle,
         .digest = package_digest,
         .lint = lint_report,
     };
-}
-
-pub fn verifySignedBundle(bundle: manifest.BundleManifest) bool {
-    const package_digest = digest(bundle);
-    return signing.verifyWithDefaultRegistry(bundle.signature, &package_digest);
 }
 
 test "package signing flow lints signs and verifies installable manifests" {
@@ -54,5 +49,4 @@ test "package signing flow lints signs and verifies installable manifests" {
     try std.testing.expect(!signed.lint.hasErrors());
     try std.testing.expect(signed.bundle.signature.isComplete());
     try std.testing.expect(signed.verify());
-    try std.testing.expect(verifySignedBundle(signed.bundle));
 }

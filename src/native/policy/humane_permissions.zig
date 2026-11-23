@@ -9,18 +9,11 @@ const units = @import("../core/units.zig");
 const workspace = @import("../storage/workspace.zig");
 
 pub const RenderError = error{NoSpaceLeft};
-const GRANT_SCOPE_RENDER_BUFFER_BYTES: usize = 320;
 const PERMISSION_RECEIPT_BUFFER_BYTES: usize = 512;
 const SHARE_SHEET_RENDER_BUFFER_BYTES: usize = 360;
 const BACKGROUND_ACTIVITY_BUFFER_BYTES: usize = 360;
 const REVOCATION_RECEIPT_BUFFER_BYTES: usize = 240;
 const BLOCKED_EXPLANATION_BUFFER_BYTES: usize = 300;
-
-pub const GrantScope = struct {
-    resource: []const u8 = "",
-    local_only: bool = false,
-    expires_at_ticks: ?u64 = null,
-};
 
 pub const PermissionReceipt = struct {
     task_id: u64 = 0,
@@ -52,26 +45,6 @@ pub fn renderRequestScopeToBuffer(
     try appendDataLeaving(buffer, &used, request);
     try appendText(buffer, &used, "; revoke: ");
     try appendText(buffer, &used, revocationHint(request.kind));
-    return buffer[0..used];
-}
-
-pub fn renderGrantScopeToBuffer(
-    buffer: []u8,
-    request: manifest.PermissionRequest,
-    grant: GrantScope,
-    now_ticks: u64,
-) RenderError![]const u8 {
-    const local_only = request.local_only or grant.local_only;
-    var used: usize = 0;
-    try appendFmt(buffer, &used, "Grant: {s} for {s}; scope: {s}; rights: ", .{
-        permissionLabel(request.kind),
-        if (grant.resource.len != 0) grant.resource else request.resource,
-        scopeSummaryLabel(request.kind, local_only),
-    });
-    try appendRights(buffer, &used, request.rights);
-    try appendText(buffer, &used, "; expiry: ");
-    try appendExpiry(buffer, &used, grant.expires_at_ticks, now_ticks);
-    try appendFmt(buffer, &used, "; revoke: {s}", .{revocationHint(request.kind)});
     return buffer[0..used];
 }
 
@@ -112,21 +85,6 @@ pub fn renderPermissionReceiptToBuffer(
     try appendDataLeaving(buffer, &used, receipt.request);
     try appendFmt(buffer, &used, "; revoke: {s}", .{revocationHint(receipt.request.kind)});
     return buffer[0..used];
-}
-
-pub fn renderBlockedExplanationToBuffer(
-    buffer: []u8,
-    display_name: []const u8,
-    request: manifest.PermissionRequest,
-    explanation: denial_explanation.Explanation,
-) RenderError![]const u8 {
-    return denial_explanation.renderUserHelpToBuffer(
-        buffer,
-        display_name,
-        request.kind,
-        request.resource,
-        explanation,
-    );
 }
 
 pub fn renderShareSheetToBuffer(
@@ -504,31 +462,6 @@ test "humane permission rendering handles maximum unsigned values" {
     try std.testing.expectEqual(@as(u8, 0xa5), undersized_backing[expected.len - 1]);
 }
 
-test "humane grant scopes explain scope expiry and revocation" {
-    const request = manifest.PermissionRequest{
-        .kind = .network_egress,
-        .resource = "relay.zigos.dev",
-        .rights = .{ .network_policy = .{ .network_remote = true } },
-        .required = false,
-        .max_lease_ticks = 80,
-        .egress_intent = .{
-            .kind = .call_service,
-            .service = "relay.zigos.dev",
-        },
-    };
-    const grant = GrantScope{
-        .resource = "relay.zigos.dev",
-        .expires_at_ticks = 120,
-    };
-    var buffer: [GRANT_SCOPE_RENDER_BUFFER_BYTES]u8 = undefined;
-    const rendered = try renderGrantScopeToBuffer(&buffer, request, grant, 100);
-
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "named data route only") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "remote network") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "20 ticks left") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "turn off the data route grant") != null);
-}
-
 test "humane permission receipts include grant reason duration egress and revocation" {
     const request = manifest.PermissionRequest{
         .kind = .network_egress,
@@ -613,7 +546,7 @@ test "humane blocked explanations say what happened next" {
     };
     const explanation = denial_explanation.forPermissionDecision(.camera, abi.DenialReason.policy_denied);
     var buffer: [BLOCKED_EXPLANATION_BUFFER_BYTES]u8 = undefined;
-    const rendered = try renderBlockedExplanationToBuffer(&buffer, "Camera Notes", request, explanation);
+    const rendered = try denial_explanation.renderUserHelpToBuffer(&buffer, "Camera Notes", request.kind, request.resource, explanation);
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Blocked: Camera Notes") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "not granted") != null);

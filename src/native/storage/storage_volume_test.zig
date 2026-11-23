@@ -19,29 +19,15 @@ const DELTA_PAYLOAD_BUFFER_BYTES: usize = 32;
 const root_fixed_checksum_offset = volume_layout.root_magic.len + 2 + 8 + 4 + 4 + 8 * 4 + 2 + 2 + 8 + 2;
 
 fn rootChecksumOffset(root: volume_root_slot.RootState) usize {
-    return root_fixed_checksum_offset + @as(usize, root.workspace_summary_count) * (8 + 4 + 8);
+    return root_fixed_checksum_offset + @as(usize, root.workspace_summary_count) * (8 + 4 + 2 + 8 + 8);
 }
 
-// The prior root format uses the same framing but FNV checksums for both the
-// root and its log records. Build a real prior-format fixture, not just an
-// invalid current root with a changed version field.
+// Roots are rejected on their version field before any checksum or log byte
+// is read, so a prior-format root is a current root with an older version.
 fn writePriorRoot(image: []u8, sector_index: u32, root: volume_root_slot.RootState) !void {
     try volume_root_slot.writeImageRoot(image, sector_index, root);
     const sector = image[@as(usize, sector_index) * volume_layout.sector_size ..][0..volume_layout.sector_size];
-    std.mem.writeInt(u16, sector[volume_layout.root_magic.len..][0..2], 5, .little);
-    const checksum_offset = rootChecksumOffset(root);
-    const fnv = @import("../core/util.zig").fnv1a64;
-    std.mem.writeInt(u64, sector[checksum_offset..][0..8], fnv(sector[0..checksum_offset]), .little);
-
-    const log = image[volume_layout.data_start_byte + root.data_offset ..][0..root.log_bytes];
-    var offset: usize = 0;
-    while (offset < log.len) {
-        const length = std.mem.readInt(u32, log[offset + volume_layout.log_record_payload_len_offset ..][0..4], .little);
-        const payload = log[offset + volume_log.recordHeaderLen() ..][0..length];
-        std.mem.writeInt(u64, log[offset + volume_layout.log_record_checksum_offset ..][0..8], fnv(payload), .little);
-        offset += volume_log.recordHeaderLen() + length;
-    }
-    try std.testing.expectEqual(log.len, offset);
+    std.mem.writeInt(u16, sector[volume_layout.root_magic.len..][0..2], volume_layout.root_format_version - 1, .little);
 }
 
 test "prior volume roots are rejected before changing live storage" {
@@ -74,50 +60,28 @@ test "prior volume roots are rejected before changing live storage" {
     try std.testing.expectEqualSlices(u8, before, image);
 }
 
-fn expectPriorRootSaveRejected(backend: bool, valid_peer: bool, prior_sector: u32) !void {
+fn expectPriorRootSaveRejected(backend: bool, prior_sector: u32) !void {
     var fixture = try SuspendedVolumeFixture.init();
     defer fixture.deinit();
     WriteBackBackend.attach(fixture.volume, fixture.visible, fixture.durable);
     _ = try fixture.version("previous-format disk data");
     _ = try fixture.volume.saveToImage(fixture.visible, fixture.store, fixture.directory);
-    var prior = (try volume_root_slot.findLatestImageRoot(fixture.visible)).?.root;
-    if (valid_peer) {
-        var current = prior;
-        current.generation = 2;
-        try volume_root_slot.writeImageRoot(fixture.visible, 1 - prior_sector, current);
-        // Keep the supported peer's XXH64 log separate from the prior FNV log.
-        prior.data_offset = volume_layout.alternate_data_region_offset;
-        @memcpy(fixture.visible[volume_layout.data_start_byte + prior.data_offset ..][0..prior.log_bytes], fixture.visible[volume_layout.data_start_byte..][0..prior.log_bytes]);
-    } else {
-        @memset(fixture.visible[@as(usize, 1 - prior_sector) * volume_layout.sector_size ..][0..volume_layout.sector_size], 0);
-    }
+    const prior = (try volume_root_slot.findLatestImageRoot(fixture.visible)).?.root;
+    @memset(fixture.visible[@as(usize, 1 - prior_sector) * volume_layout.sector_size ..][0..volume_layout.sector_size], 0);
     try writePriorRoot(fixture.visible, prior_sector, prior);
     @memcpy(fixture.durable, fixture.visible);
     const before = try std.testing.allocator.dupe(u8, fixture.visible);
     defer std.testing.allocator.free(before);
-    if (valid_peer) {
-        // The supported peer and its separate log are fully loadable.
-        try std.testing.expectEqual(@as(u64, 2), try fixture.volume.loadFromImage(fixture.visible, fixture.store, fixture.directory));
-    }
     const live = try fixture.version("live draft after unsupported load");
     const revision = fixture.store.dirtyRevision();
     const workspace_revision = fixture.directory.dirtyRevision();
     WriteBackBackend.beginAttempt(0);
 
-    if (!valid_peer) {
-        if (backend) {
-            try std.testing.expect(!fixture.volume.loadFromVolume(fixture.store, fixture.directory));
-        } else {
-            try std.testing.expectError(error.CorruptImage, fixture.volume.loadFromImage(fixture.visible, fixture.store, fixture.directory));
-        }
-    } else {
-        // A current root can be parsed; its presence never authorizes replacing
-        // an unsupported peer, regardless of which sector is examined first.
-        try std.testing.expectEqual(@as(u64, 2), (try volume_root_slot.readImageRoot(fixture.visible, 1 - prior_sector)).root.generation);
-    }
     if (backend) {
+        try std.testing.expect(!fixture.volume.loadFromVolume(fixture.store, fixture.directory));
         try std.testing.expectError(error.UnsupportedVersion, fixture.volume.saveToVolume(fixture.store, fixture.directory));
     } else {
+        try std.testing.expectError(error.CorruptImage, fixture.volume.loadFromImage(fixture.visible, fixture.store, fixture.directory));
         try std.testing.expectError(error.UnsupportedVersion, fixture.volume.saveToImage(fixture.visible, fixture.store, fixture.directory));
     }
     try std.testing.expectEqualSlices(u8, before, fixture.visible);
@@ -131,17 +95,52 @@ fn expectPriorRootSaveRejected(backend: bool, valid_peer: bool, prior_sector: u3
     try std.testing.expect(!fixture.volume.operationBusy());
 }
 
+// A current root beside an unsupported one means the odd sector is damaged:
+// the save compacts and overwrites it instead of refusing the whole volume.
+fn expectUnsupportedPeerCompacted(backend: bool, prior_sector: u32) !void {
+    var fixture = try SuspendedVolumeFixture.init();
+    defer fixture.deinit();
+    WriteBackBackend.attach(fixture.volume, fixture.visible, fixture.durable);
+    _ = try fixture.version("previous-format disk data");
+    _ = try fixture.volume.saveToImage(fixture.visible, fixture.store, fixture.directory);
+    var prior = (try volume_root_slot.findLatestImageRoot(fixture.visible)).?.root;
+    var current = prior;
+    current.generation = 2;
+    try volume_root_slot.writeImageRoot(fixture.visible, 1 - prior_sector, current);
+    prior.data_offset = volume_layout.alternate_data_region_offset;
+    @memcpy(fixture.visible[volume_layout.data_start_byte + prior.data_offset ..][0..prior.log_bytes], fixture.visible[volume_layout.data_start_byte..][0..prior.log_bytes]);
+    try writePriorRoot(fixture.visible, prior_sector, prior);
+    @memcpy(fixture.durable, fixture.visible);
+    try std.testing.expectEqual(@as(u64, 2), try fixture.volume.loadFromImage(fixture.visible, fixture.store, fixture.directory));
+
+    const live = try fixture.version("live draft beside an unsupported root");
+    const saved = if (backend)
+        try fixture.volume.saveToVolume(fixture.store, fixture.directory)
+    else
+        try fixture.volume.saveToImage(fixture.visible, fixture.store, fixture.directory);
+    try std.testing.expectEqual(@as(u64, 3), saved.generation);
+    try std.testing.expect(saved.snapshot_current);
+    const rewritten = try volume_root_slot.readImageRoot(fixture.visible, prior_sector);
+    try std.testing.expectEqual(@as(u64, 3), rewritten.root.generation);
+    try std.testing.expectEqual(@as(u64, 3), rewritten.root.compacted_generation);
+
+    fixture.store.reset();
+    fixture.directory.reset();
+    try std.testing.expectEqual(@as(u64, 3), try fixture.volume.loadFromImage(fixture.visible, fixture.store, fixture.directory));
+    try std.testing.expectEqual(live.version_id, fixture.store.latestVersion(0xB900).?.id);
+}
+
 test "storage format image save preserves prior root and log after unsupported load" {
-    for (0..volume_layout.root_sector_count) |sector| try expectPriorRootSaveRejected(false, false, @intCast(sector));
+    for (0..volume_layout.root_sector_count) |sector| try expectPriorRootSaveRejected(false, @intCast(sector));
 }
 
 test "storage format backend save preserves prior root and log after unsupported load" {
-    for (0..volume_layout.root_sector_count) |sector| try expectPriorRootSaveRejected(true, false, @intCast(sector));
+    for (0..volume_layout.root_sector_count) |sector| try expectPriorRootSaveRejected(true, @intCast(sector));
 }
 
-test "storage format saves reject unsupported roots even with a valid peer in either sector" {
+test "storage format saves compact over an unsupported root beside a current peer in either sector" {
     for ([_]bool{ false, true }) |backend| {
-        for (0..volume_layout.root_sector_count) |sector| try expectPriorRootSaveRejected(backend, true, @intCast(sector));
+        for (0..volume_layout.root_sector_count) |sector| try expectUnsupportedPeerCompacted(backend, @intCast(sector));
     }
 }
 
@@ -379,6 +378,9 @@ fn expectSuspendedCheckpointMutation(phase: SuspendedVolumeDevice.Phase, existin
             root.root.next_version_id += 4;
             try volume_root_slot.writeImageRoot(visible, root.sector_index, root.root);
             try volume_root_slot.writeImageRoot(durable, root.sector_index, root.root);
+            // The rewrite stands in for another writer; reattaching drops the
+            // root this Volume cached so the save reads the advanced one.
+            _ = volume.attachBackend(SuspendedVolumeDevice.backend());
         }
     }
     const captured = try putSuspendedVersion(store, directory, ws_id, "captured");
@@ -888,6 +890,8 @@ const WriteBackBackend = struct {
     var flush_count: usize = 0;
     var fail_on_flush: usize = 0;
     var written_bytes: usize = 0;
+    var reads: usize = 0;
+    var failing_reads: usize = 0;
 
     fn attach(volume: *Volume, visible_image: []u8, durable_image: []u8) void {
         visible = visible_image;
@@ -908,6 +912,8 @@ const WriteBackBackend = struct {
         flush_count = 0;
         fail_on_flush = failing_flush;
         written_bytes = 0;
+        reads = 0;
+        failing_reads = 0;
     }
 
     fn powerLoss() void {
@@ -918,6 +924,11 @@ const WriteBackBackend = struct {
         const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
         const end = start + buffer_len;
         if (end > visible.len) return false;
+        if (failing_reads != 0) {
+            failing_reads -= 1;
+            return false;
+        }
+        reads += 1;
         @memcpy(buffer_ptr[0..buffer_len], visible[start..end]);
         return true;
     }
@@ -926,7 +937,7 @@ const WriteBackBackend = struct {
         const start = @as(usize, @intCast(start_lba)) * storage_volume.sector_size;
         const end = start + buffer_len;
         if (end > visible.len) return false;
-        record(if (start_lba < storage_volume.header_sectors) .root_write else .data_write);
+        record(if (start_lba < storage_volume.root_sector_count) .root_write else .data_write);
         written_bytes += buffer_len;
         @memcpy(visible[start..end], buffer_ptr[0..buffer_len]);
         return true;
@@ -1009,7 +1020,7 @@ fn expectBarrierFailurePreservesDirtyState(failing_flush: usize, object_serial: 
     try std.testing.expectEqual(failing_flush, WriteBackBackend.flush_count);
     try std.testing.expect(std.mem.allEqual(
         u8,
-        durable[0 .. storage_volume.header_sectors * storage_volume.sector_size],
+        durable[0 .. storage_volume.root_sector_count * storage_volume.sector_size],
         0,
     ));
 
@@ -1061,9 +1072,131 @@ test "storage backend barrier failures preserve dirty state and withhold the new
     try expectBarrierFailurePreservesDirtyState(2, 0xB403);
 }
 
+fn expectLatestDurableVersions(durable: []const u8, serials: []const u64, generation: u64) !void {
+    const allocator = std.testing.allocator;
+    const reboot = try allocator.create(Volume);
+    defer allocator.destroy(reboot);
+    reboot.* = Volume.init();
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    try std.testing.expectEqual(generation, try reboot.loadFromImage(durable, &store, &workspaces));
+    for (serials) |serial| try std.testing.expect(store.latestVersion(serial) != null);
+}
+
+test "storage backend saves reuse the committed root and log tail without device reads" {
+    const allocator = std.testing.allocator;
+    const visible = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(visible);
+    const durable = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(durable);
+    const volume = try allocator.create(Volume);
+    volume.* = Volume.init();
+    defer allocator.destroy(volume);
+    WriteBackBackend.attach(volume, visible, durable);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const serials = [_]u64{ 0xB501, 0xB502, 0xB503 };
+    try putBarrierTestVersion(&store, &workspaces, serials[0]);
+    _ = try volume.saveToVolume(&store, &workspaces);
+    try std.testing.expect(try storage_volume.testing.latestImageLogBytes(durable) % storage_volume.sector_size != 0);
+    for (serials[1..], 2..) |serial, generation| {
+        try putBarrierTestVersion(&store, &workspaces, serial);
+        WriteBackBackend.beginAttempt(0);
+        const saved = try volume.saveToVolume(&store, &workspaces);
+        try std.testing.expectEqual(@as(u64, generation), saved.generation);
+        try std.testing.expect(saved.snapshot_current);
+        // The append reuses the cached root and the committed head of its
+        // first sector: no reads, one whole-sector log transfer, one root.
+        try std.testing.expectEqual(@as(usize, 0), WriteBackBackend.reads);
+        try std.testing.expectEqual(@as(?usize, 1), WriteBackBackend.firstFlushIndex());
+        try expectOrderedBarrierTrace();
+    }
+    try expectLatestDurableVersions(durable, &serials, serials.len);
+}
+
+test "storage backend saves reread roots after another volume writes the device" {
+    const allocator = std.testing.allocator;
+    const visible = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(visible);
+    const durable = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(durable);
+    const volume = try allocator.create(Volume);
+    volume.* = Volume.init();
+    defer allocator.destroy(volume);
+    const other = try allocator.create(Volume);
+    other.* = Volume.init();
+    defer allocator.destroy(other);
+    WriteBackBackend.attach(volume, visible, durable);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    try putBarrierTestVersion(&store, &workspaces, 0xB511);
+    try std.testing.expectEqual(@as(u64, 1), (try volume.saveToVolume(&store, &workspaces)).generation);
+
+    try std.testing.expect(other.adoptAttachedBackendFrom(volume));
+    var other_store = object_store.Store.init();
+    var other_workspaces = workspace.Directory.init();
+    try std.testing.expect(other.loadFromVolume(&other_store, &other_workspaces));
+    try putBarrierTestVersion(&other_store, &other_workspaces, 0xB512);
+    try std.testing.expectEqual(@as(u64, 2), (try other.saveToVolume(&other_store, &other_workspaces)).generation);
+
+    // Readopting the unchanged backend keeps the cache, but the other
+    // Volume's writes moved the device epoch past it.
+    try std.testing.expect(volume.adoptAttachedBackendFrom(other));
+    try putBarrierTestVersion(&store, &workspaces, 0xB513);
+    WriteBackBackend.beginAttempt(0);
+    try std.testing.expectEqual(@as(u64, 3), (try volume.saveToVolume(&store, &workspaces)).generation);
+    try std.testing.expect(WriteBackBackend.reads != 0);
+    try expectLatestDurableVersions(durable, &.{ 0xB511, 0xB513 }, 3);
+}
+
+test "storage backend saves trust no stale root after a failed reread" {
+    const allocator = std.testing.allocator;
+    const visible = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(visible);
+    const durable = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(durable);
+    const volume = try allocator.create(Volume);
+    volume.* = Volume.init();
+    defer allocator.destroy(volume);
+    const other = try allocator.create(Volume);
+    other.* = Volume.init();
+    defer allocator.destroy(other);
+    WriteBackBackend.attach(volume, visible, durable);
+
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    try putBarrierTestVersion(&store, &workspaces, 0xB521);
+    try std.testing.expectEqual(@as(u64, 1), (try volume.saveToVolume(&store, &workspaces)).generation);
+
+    try std.testing.expect(other.adoptAttachedBackendFrom(volume));
+    var other_store = object_store.Store.init();
+    var other_workspaces = workspace.Directory.init();
+    try std.testing.expect(other.loadFromVolume(&other_store, &other_workspaces));
+    try putBarrierTestVersion(&other_store, &other_workspaces, 0xB522);
+    try std.testing.expectEqual(@as(u64, 2), (try other.saveToVolume(&other_store, &other_workspaces)).generation);
+    const other_root = (try volume_root_slot.findLatestImageRoot(durable)).?;
+
+    // The first reread fails like a checkpoint attempt that the service
+    // retries at once. The retry must not fall back on the generation 1 root
+    // and overwrite the other Volume's newer root and log.
+    try std.testing.expect(volume.adoptAttachedBackendFrom(other));
+    try putBarrierTestVersion(&store, &workspaces, 0xB523);
+    WriteBackBackend.beginAttempt(0);
+    WriteBackBackend.failing_reads = 1;
+    try std.testing.expectError(error.DeviceReadFailed, volume.saveToVolume(&store, &workspaces));
+    WriteBackBackend.beginAttempt(0);
+    try std.testing.expectEqual(@as(u64, 3), (try volume.saveToVolume(&store, &workspaces)).generation);
+    try std.testing.expect(WriteBackBackend.reads != 0);
+    const latest = (try volume_root_slot.findLatestImageRoot(durable)).?;
+    try std.testing.expect(latest.sector_index != other_root.sector_index);
+    try expectLatestDurableVersions(durable, &.{ 0xB521, 0xB523 }, 3);
+}
+
 const LogRecordStats = struct {
-    counts: [9]usize = @as([9]usize, @splat(0)),
-    bytes: [9]usize = @as([9]usize, @splat(0)),
+    counts: [10]usize = @as([10]usize, @splat(0)),
+    bytes: [10]usize = @as([10]usize, @splat(0)),
 };
 
 fn latestLogRecordStats(image: []const u8) !LogRecordStats {
@@ -1254,27 +1387,6 @@ test "storage delta deduplicates new shared chunks between distinct blobs in one
     try std.testing.expectEqualSlices(u8, &payload, try loaded_store.versionPayloadInto(loaded_store.version(first.version_id).?, &output));
 }
 
-test "storage volume exposes the first supported product capacity envelope" {
-    const envelope = storage_volume.productCapacityEnvelope();
-
-    try std.testing.expectEqual(storage_volume.image_bytes, envelope.volume_image_bytes);
-    try std.testing.expectEqual(storage_volume.required_device_sectors, envelope.required_device_sectors);
-    try std.testing.expectEqual(object_store.MAX_PAYLOAD_BYTES, envelope.max_object_payload_bytes);
-    try std.testing.expectEqual(object_store.MAX_OBJECTS, envelope.max_object_records);
-    try std.testing.expectEqual(object_store.MAX_VERSIONS, envelope.max_version_records);
-    try std.testing.expectEqual(object_store.MAX_BLOBS, envelope.max_blob_records);
-    try std.testing.expectEqual(object_store.MAX_BLOB_CHUNKS, envelope.max_blob_chunks_per_payload);
-    try std.testing.expectEqual(object_store.MAX_CHUNKS, envelope.max_chunk_records);
-    try std.testing.expectEqual(object_store.MAX_CHUNK_BYTES, envelope.max_chunk_bytes);
-    try std.testing.expectEqual(workspace.MAX_WORKSPACES, envelope.max_workspaces);
-    try std.testing.expectEqual(workspace.MAX_WORKSPACE_ENTRIES, envelope.max_workspace_entries_per_workspace);
-    try std.testing.expectEqual(workspace.MAX_SNAPSHOTS, envelope.max_snapshots);
-
-    var store = object_store.Store.init();
-    var workspaces = workspace.Directory.init();
-    try storage_volume.ensureWithinProductCapacityEnvelope(&store, &workspaces);
-}
-
 test "single chunk blobs fill their quota and survive a volume round trip" {
     const allocator = std.testing.allocator;
     const store = try allocator.create(object_store.Store);
@@ -1443,59 +1555,7 @@ test "storage volume rejects replayed identifiers beyond root watermarks" {
     try std.testing.expectError(error.CorruptImage, volume.loadFromImage(image, &loaded_store, &loaded_workspaces));
 }
 
-test "storage quota policy rejects writes above the first supported envelope" {
-    const policy = storage_volume.productQuotaPolicy();
-
-    try std.testing.expectEqual(storage_volume.OverLimitWriteBehavior.reject_without_partial_persistence, policy.over_limit_write_behavior);
-    try std.testing.expect(policy.persistence_error == error.NoSpaceLeft);
-    try std.testing.expect(policy.retry_requires_freeing_space);
-    try std.testing.expectEqual(storage_volume.productCapacityEnvelope().max_object_records, policy.envelope.max_object_records);
-
-    const payload_rejection = storage_volume.quotaRejectionForUsage(.{
-        .object_payload_bytes = object_store.MAX_PAYLOAD_BYTES + 1,
-    }).?;
-    try std.testing.expectEqual(storage_volume.QuotaLimit.object_payload_bytes, payload_rejection.limit);
-    try std.testing.expectEqual(object_store.MAX_PAYLOAD_BYTES + 1, payload_rejection.used);
-    try std.testing.expectEqual(object_store.MAX_PAYLOAD_BYTES, payload_rejection.allowed);
-    try std.testing.expectEqualStrings("storage.quota.object_payload_bytes", payload_rejection.userVisibleCode());
-
-    const object_rejection = storage_volume.quotaRejectionForUsage(.{
-        .object_records = object_store.MAX_OBJECTS + 1,
-    }).?;
-    try std.testing.expectEqual(storage_volume.QuotaLimit.object_records, object_rejection.limit);
-    try std.testing.expectEqualStrings("storage.quota.object_records", object_rejection.userVisibleCode());
-
-    const workspace_rejection = storage_volume.quotaRejectionForUsage(.{
-        .max_workspace_entries = workspace.MAX_WORKSPACE_ENTRIES + 1,
-    }).?;
-    try std.testing.expectEqual(storage_volume.QuotaLimit.workspace_entries, workspace_rejection.limit);
-    try std.testing.expectEqualStrings("storage.quota.workspace_entries", workspace_rejection.userVisibleCode());
-
-    var store = object_store.Store.init();
-    var workspaces = workspace.Directory.init();
-    try std.testing.expect(storage_volume.quotaRejectionForCurrentState(&store, &workspaces) == null);
-
-    const signer = signing.SignerIdentity{
-        .label = "zigos-storage-key",
-        .seed = signing.seedFromByte(0x78),
-    };
-    const payload = "quota-observed-payload";
-    _ = try store.putVersion(.{
-        .preferred_object_id = object_store.ids.object(904),
-        .object_type = .document,
-        .payload = payload,
-        .metadata = try object_store.signMetadata(signer, "quota", "text/plain", .document, payload, 16),
-    });
-    const usage = storage_volume.productCapacityUsage(&store, &workspaces);
-    try std.testing.expectEqual(payload.len, store.maxBlobPayloadBytes());
-    try std.testing.expectEqual(payload.len, usage.object_payload_bytes);
-    try storage_volume.ensureWithinProductCapacityEnvelope(&store, &workspaces);
-}
-
 test "storage volume separates generic and target nvme attachments" {
-    try std.testing.expect(!@hasField(Volume, "attached_ata_device"));
-    try std.testing.expect(!@hasDecl(Volume, "attachAtaBootstrapDevice"));
-    try std.testing.expect(!@hasDecl(storage_volume, "attachAtaBootstrapDevice"));
     try std.testing.expect(std.meta.stringToEnum(storage_volume.AttachedBackendKind, "ata_bootstrap_broker") == null);
 
     const BackendFns = struct {
@@ -1628,7 +1688,6 @@ test "storage volume image reloads the latest persisted state across slot genera
     try std.testing.expectEqual(@as(usize, 2), loaded_store.blobCount());
     try std.testing.expectEqual(second.version_id, loaded_store.latestVersion(900).?.id);
     try std.testing.expectEqual(second.version_id, loaded_store.latestInsertedVersionConst().?.id);
-    try std.testing.expectEqual("hello again".len, loaded_store.maxBlobPayloadBytes());
     var document_results: [2]object_store.ObjectQueryResult = undefined;
     const loaded_documents = loaded_store.queryObjects(.{ .object_type = .document }, &document_results);
     try std.testing.expectEqual(@as(usize, 1), loaded_documents.len);
@@ -1638,7 +1697,7 @@ test "storage volume image reloads the latest persisted state across slot genera
     const loaded_first = loaded_store.version(first.version_id).?;
     const loaded_second = loaded_store.version(second.version_id).?;
     try std.testing.expect(loaded_first.metadata.signature.signer.ptr == loaded_second.metadata.signature.signer.ptr);
-    try std.testing.expectEqual(@as(usize, 1 + signer.label.len), storage_volume.testing.signerTextBytes());
+    try std.testing.expectEqual(@as(u8, 1), loaded_store.signers.count);
     const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "notes").?;
     try std.testing.expectEqual(second.version_id, (try loaded_workspaces.resolve(loaded_notes.id, "documents/notes.md")).version_id);
 }
@@ -1740,8 +1799,21 @@ test "storage volume persists workspace snapshot roots through entry mutations" 
     var loaded_workspaces = workspace.Directory.init();
     _ = try loadFromImage(image, &loaded_store, &loaded_workspaces);
 
+    // Reusing the volume for another load must not disturb signer text that
+    // the first replayed store and directory already own.
+    const reloaded_store = try std.testing.allocator.create(object_store.Store);
+    defer std.testing.allocator.destroy(reloaded_store);
+    reloaded_store.* = object_store.Store.init();
+    defer reloaded_store.reset();
+    const reloaded_workspaces = try std.testing.allocator.create(workspace.Directory);
+    defer std.testing.allocator.destroy(reloaded_workspaces);
+    reloaded_workspaces.* = workspace.Directory.init();
+    _ = try loadFromImage(image, reloaded_store, reloaded_workspaces);
+
     const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 9 }, "snapshot-notes").?;
     const loaded_snapshot = loaded_workspaces.findSnapshotByLabel(loaded_notes.id, "baseline").?;
+    try std.testing.expectEqualStrings(signer.label, loaded_snapshot.signerSlice());
+    try std.testing.expectEqualStrings(signer.label, loaded_store.latestVersion(930).?.metadata.signature.signer);
     try std.testing.expectEqual(second.version_id, (try loaded_workspaces.resolve(loaded_notes.id, "documents/notes.md")).version_id);
 
     _ = try loaded_workspaces.restore(loaded_notes.id, loaded_snapshot.id, 24);
@@ -2034,7 +2106,7 @@ test "storage volume falls back when a partial-sector corruption hits only the n
     try std.testing.expectEqual(first.version_id, loaded_store.latestVersion(907).?.id);
     try std.testing.expectEqualStrings("sector-safe-v1", try loaded_store.versionPayload(loaded_store.latestVersion(907).?));
     try std.testing.expectEqualStrings(signer.label, loaded_store.latestVersion(907).?.metadata.signature.signer);
-    try std.testing.expectEqual(@as(usize, 1 + signer.label.len), storage_volume.testing.signerTextBytes());
+    try std.testing.expectEqual(@as(u8, 1), loaded_store.signers.count);
 }
 
 test "storage volume gates long-running replay by compacting before record and segment limits" {
@@ -2083,7 +2155,7 @@ test "storage volume persists a mutated workspace alongside an untouched one acr
     const allocator = std.testing.allocator;
     const volume = try allocator.create(storage_volume.Volume);
     defer allocator.destroy(volume);
-    _ = volume.reset();
+    volume.* = storage_volume.Volume.init();
     var store = object_store.Store.init();
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
@@ -2124,7 +2196,7 @@ test "storage volume persists a mutated workspace alongside an untouched one acr
     var loaded_workspaces = workspace.Directory.init();
     const loaded_volume = try allocator.create(storage_volume.Volume);
     defer allocator.destroy(loaded_volume);
-    _ = loaded_volume.reset();
+    loaded_volume.* = storage_volume.Volume.init();
     _ = try loaded_volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
     const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "notes").?;
     const loaded_journal = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "journal").?;
@@ -2132,4 +2204,256 @@ test "storage volume persists a mutated workspace alongside an untouched one acr
     try std.testing.expectEqual(first.version_id, (try loaded_workspaces.resolve(loaded_journal.id, "documents/journal.md")).version_id);
     const loaded_grant = loaded_workspaces.findShareGrant(loaded_journal.id, shared_principal) orelse return error.ShareGrantNotPersisted;
     try std.testing.expect(loaded_grant.can_write);
+}
+
+const DeltaFixture = struct {
+    image: []u8,
+    volume: *Volume,
+    store: *object_store.Store,
+    workspaces: *workspace.Directory,
+    workspace_id: ids.WorkspaceId,
+
+    fn init(label: []const u8) !DeltaFixture {
+        const allocator = std.testing.allocator;
+        const image = try allocator.alloc(u8, image_bytes);
+        errdefer allocator.free(image);
+        @memset(image, 0);
+        const volume = try allocator.create(Volume);
+        errdefer allocator.destroy(volume);
+        volume.* = Volume.init();
+        const store = try allocator.create(object_store.Store);
+        errdefer allocator.destroy(store);
+        store.* = object_store.Store.init();
+        const workspaces = try allocator.create(workspace.Directory);
+        errdefer allocator.destroy(workspaces);
+        workspaces.* = workspace.Directory.init();
+        const workspace_id = (try workspaces.create(.{ .owner = .{ .kind = .user, .serial = 77 }, .label = label })).id;
+        return .{ .image = image, .volume = volume, .store = store, .workspaces = workspaces, .workspace_id = workspace_id };
+    }
+
+    fn deinit(self: *DeltaFixture) void {
+        const allocator = std.testing.allocator;
+        self.workspaces.reset();
+        self.store.reset();
+        allocator.free(self.image);
+        allocator.destroy(self.volume);
+        allocator.destroy(self.store);
+        allocator.destroy(self.workspaces);
+    }
+
+    fn save(self: *DeltaFixture) !u64 {
+        return (try self.volume.saveToImage(self.image, self.store, self.workspaces)).generation;
+    }
+
+    fn entry(index: usize, version: u64) !workspace.Entry {
+        var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "sync/records/{d:0>4}/a-long-replicated-record-path-that-fills-most-of-the-entry", .{index});
+        return workspace.Entry.init(path, ids.object(1000 + index), ids.version(version), .document);
+    }
+
+    fn commitEntry(workspaces: *workspace.Directory, workspace_id: ids.WorkspaceId, index: usize, version: u64) !void {
+        const target = try entry(index, version);
+        try workspaces.beginTransaction(workspace_id);
+        try workspaces.stagePut(workspace_id, target.pathSlice(), target.object_id, target.version_id, .document);
+        _ = try workspaces.commit(workspace_id, version);
+    }
+
+    // Reloads into fresh tables and checks the replayed workspace hashes like
+    // the resident one, returning the loaded generation.
+    fn expectReload(self: *DeltaFixture) !u64 {
+        const allocator = std.testing.allocator;
+        const loaded_store = try allocator.create(object_store.Store);
+        defer allocator.destroy(loaded_store);
+        loaded_store.* = object_store.Store.init();
+        defer loaded_store.reset();
+        const loaded_workspaces = try allocator.create(workspace.Directory);
+        defer allocator.destroy(loaded_workspaces);
+        loaded_workspaces.* = workspace.Directory.init();
+        defer loaded_workspaces.reset();
+        const generation = try self.volume.loadFromImage(self.image, loaded_store, loaded_workspaces);
+        try std.testing.expectEqual(
+            volume_hashing.workspaceStateHash(self.workspaces.findConst(self.workspace_id).?),
+            volume_hashing.workspaceStateHash(loaded_workspaces.findConst(self.workspace_id).?),
+        );
+        return generation;
+    }
+};
+
+// Returns the last record of `kind`, header included, in the newest root's log.
+fn latestLogRecord(image: []u8, kind: volume_log.RecordKind) ![]u8 {
+    const root = (try volume_root_slot.findLatestImageRoot(image)).?.root;
+    const log = image[volume_layout.data_start_byte + root.data_offset ..][0..root.log_bytes];
+    var found: ?[]u8 = null;
+    var offset: usize = 0;
+    while (offset < log.len) {
+        const record_len = volume_log.recordHeaderLen() + std.mem.readInt(u32, log[offset + 1 ..][0..4], .little);
+        if (log[offset] == @backingInt(kind)) found = log[offset..][0..record_len];
+        offset += record_len;
+    }
+    return found orelse error.MissingLogRecord;
+}
+
+fn resealLogRecord(record: []u8) void {
+    const checksum = volume_hashing.checksumBytes(record[volume_log.recordHeaderLen()..]);
+    std.mem.writeInt(u64, record[volume_layout.log_record_checksum_offset..][0..8], checksum, .little);
+}
+
+test "storage workspace deltas append only new mutations and replay to the committed state" {
+    var fixture = try DeltaFixture.init("delta-notes");
+    defer fixture.deinit();
+    const workspaces = fixture.workspaces;
+    const workspace_id = fixture.workspace_id;
+    try workspaces.beginTransaction(workspace_id);
+    for (0..24) |index| {
+        const seeded = try DeltaFixture.entry(index, 1);
+        try workspaces.stagePut(workspace_id, seeded.pathSlice(), seeded.object_id, seeded.version_id, .document);
+    }
+    _ = try workspaces.commit(workspace_id, 1);
+    try std.testing.expectEqual(@as(u64, 1), try fixture.save());
+
+    const replaced = try DeltaFixture.entry(3, 9);
+    const deleted = try DeltaFixture.entry(7, 1);
+    try workspaces.beginTransaction(workspace_id);
+    try workspaces.stagePut(workspace_id, replaced.pathSlice(), replaced.object_id, replaced.version_id, .document);
+    try workspaces.stageDelete(workspace_id, deleted.pathSlice());
+    _ = try workspaces.commit(workspace_id, 2);
+    try std.testing.expectEqual(@as(u64, 2), try fixture.save());
+    const collaborator = principal.PrincipalId{ .kind = .user, .serial = 78 };
+    try workspaces.share(workspace_id, .{ .principal_id = collaborator, .can_read = true });
+    try std.testing.expectEqual(@as(u64, 3), try fixture.save());
+
+    const stats = try latestLogRecordStats(fixture.image);
+    try std.testing.expectEqual(@as(usize, 0), stats.counts[@backingInt(volume_log.RecordKind.workspace_state)]);
+    try std.testing.expectEqual(@as(usize, 2), stats.counts[@backingInt(volume_log.RecordKind.workspace_delta)]);
+    // Two mutations, one deletion and one grant, not 24 entries and their log.
+    try std.testing.expect(stats.bytes[@backingInt(volume_log.RecordKind.workspace_delta)] < 1024);
+    try std.testing.expectEqual(@as(u64, 3), try fixture.expectReload());
+
+    // A delta applies only to its exact base, and its reconstructed state must
+    // hash like the committed summary: either fault rejects the newest root.
+    const committed = try std.testing.allocator.dupe(u8, fixture.image);
+    defer std.testing.allocator.free(committed);
+    const payload_offset = volume_log.recordHeaderLen();
+    const base_generation_offset = payload_offset + 8;
+    const first_grant_flags_offset = payload_offset + 8 + 4 + 2 + 4 + 2 + 2 + 1 + 8;
+    for ([_]usize{ base_generation_offset, first_grant_flags_offset }) |offset| {
+        @memcpy(fixture.image, committed);
+        const share_delta = try latestLogRecord(fixture.image, .workspace_delta);
+        share_delta[offset] ^= 0x02;
+        resealLogRecord(share_delta);
+        var loaded_store = object_store.Store.init();
+        var loaded_workspaces = workspace.Directory.init();
+        try std.testing.expectEqual(@as(u64, 2), try fixture.volume.loadFromImage(fixture.image, &loaded_store, &loaded_workspaces));
+        try std.testing.expect(loaded_workspaces.findShareGrant(workspace_id, collaborator) == null);
+        try std.testing.expectEqual(replaced.version_id, (try loaded_workspaces.resolve(workspace_id, replaced.pathSlice())).version_id);
+        try std.testing.expectError(error.EntryNotFound, loaded_workspaces.resolve(workspace_id, deleted.pathSlice()));
+    }
+}
+
+test "storage workspace log compaction falls back to a full workspace record" {
+    var fixture = try DeltaFixture.init("compacting-notes");
+    defer fixture.deinit();
+    const workspaces = fixture.workspaces;
+    const workspace_id = fixture.workspace_id;
+    var targets: [8]workspace.Entry = undefined;
+    for (&targets, 0..) |*target, index| target.* = try DeltaFixture.entry(index, 1);
+    _ = try workspaces.replaceEntries(workspace_id, &targets, 1);
+    _ = try fixture.save();
+
+    // Enough commits between saves to compact the in-memory mutation log,
+    // which rewrites the persisted prefix a delta would extend.
+    for (0..workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) |round| {
+        targets[round % targets.len].version_id = ids.version(2 + round);
+        _ = try workspaces.replaceEntries(workspace_id, &targets, 2 + round);
+    }
+    try std.testing.expect(workspaces.findConst(workspace_id).?.counts.entry_mutation_count < workspace.MAX_WORKSPACE_ENTRY_MUTATIONS);
+    _ = try fixture.save();
+    const stats = try latestLogRecordStats(fixture.image);
+    try std.testing.expectEqual(@as(usize, 1), stats.counts[@backingInt(volume_log.RecordKind.workspace_state)]);
+    try std.testing.expectEqual(@as(usize, 0), stats.counts[@backingInt(volume_log.RecordKind.workspace_delta)]);
+    _ = try fixture.expectReload();
+
+    targets[0].version_id = ids.version(1000);
+    _ = try workspaces.replaceEntries(workspace_id, &targets, 1000);
+    _ = try fixture.save();
+    try std.testing.expectEqual(@as(usize, 1), (try latestLogRecordStats(fixture.image)).counts[@backingInt(volume_log.RecordKind.workspace_delta)]);
+    _ = try fixture.expectReload();
+}
+
+test "storage workspace deltas keep frequent directory replacements from forcing compactions" {
+    var fixture = try DeltaFixture.init("system-sync");
+    defer fixture.deinit();
+    var targets: [80]workspace.Entry = undefined;
+    for (&targets, 0..) |*target, index| target.* = try DeltaFixture.entry(index, 1);
+    _ = try fixture.workspaces.replaceEntries(fixture.workspace_id, &targets, 1);
+    _ = try fixture.save();
+
+    // Whole-workspace records of this directory and its log run 16 to 22 KiB,
+    // compacting roughly every 15 frames. Deltas leave the 64-segment replay
+    // bound as the only compaction trigger.
+    var compactions: usize = 0;
+    var compacted = try storage_volume.testing.latestImageCompactedGeneration(fixture.image);
+    for (0..100) |frame| {
+        targets[(frame * 7) % targets.len].version_id = ids.version(2 + frame);
+        _ = try fixture.workspaces.replaceEntries(fixture.workspace_id, &targets, 2 + frame);
+        _ = try fixture.save();
+        const latest = try storage_volume.testing.latestImageCompactedGeneration(fixture.image);
+        if (latest != compacted) compactions += 1;
+        compacted = latest;
+    }
+    try std.testing.expect(compactions <= 2);
+    try std.testing.expectEqual(@as(u64, 101), try fixture.expectReload());
+}
+
+test "storage workspace deltas take a whole record once the persisted prefix differs" {
+    const workspace_state = @backingInt(volume_log.RecordKind.workspace_state);
+    const workspace_delta = @backingInt(volume_log.RecordKind.workspace_delta);
+    // Another writer loads the same root and commits a different change, so
+    // its summary's generation and mutation count fit the live record while
+    // its logged mutations do not.
+    {
+        var fixture = try DeltaFixture.init("diverged-notes");
+        defer fixture.deinit();
+        try DeltaFixture.commitEntry(fixture.workspaces, fixture.workspace_id, 0, 1);
+        try std.testing.expectEqual(@as(u64, 1), try fixture.save());
+
+        const allocator = std.testing.allocator;
+        const other_volume = try allocator.create(Volume);
+        defer allocator.destroy(other_volume);
+        other_volume.* = Volume.init();
+        const other_store = try allocator.create(object_store.Store);
+        defer allocator.destroy(other_store);
+        other_store.* = object_store.Store.init();
+        defer other_store.reset();
+        const other_workspaces = try allocator.create(workspace.Directory);
+        defer allocator.destroy(other_workspaces);
+        other_workspaces.* = workspace.Directory.init();
+        defer other_workspaces.reset();
+        try std.testing.expectEqual(@as(u64, 1), try other_volume.loadFromImage(fixture.image, other_store, other_workspaces));
+        try DeltaFixture.commitEntry(other_workspaces, fixture.workspace_id, 0, 50);
+        try std.testing.expectEqual(@as(u64, 2), (try other_volume.saveToImage(fixture.image, other_store, other_workspaces)).generation);
+
+        try DeltaFixture.commitEntry(fixture.workspaces, fixture.workspace_id, 1, 60);
+        try DeltaFixture.commitEntry(fixture.workspaces, fixture.workspace_id, 2, 61);
+        try std.testing.expectEqual(@as(u64, 3), try fixture.save());
+        const stats = try latestLogRecordStats(fixture.image);
+        try std.testing.expectEqual(@as(usize, 1), stats.counts[workspace_state]);
+        try std.testing.expectEqual(@as(usize, 1), stats.counts[workspace_delta]);
+        try std.testing.expectEqual(@as(u64, 3), try fixture.expectReload());
+    }
+    // A record edited behind the Directory API keeps its counts but not the
+    // owner the persisted prefix was fingerprinted with.
+    {
+        var fixture = try DeltaFixture.init("reowned-notes");
+        defer fixture.deinit();
+        try DeltaFixture.commitEntry(fixture.workspaces, fixture.workspace_id, 0, 1);
+        try std.testing.expectEqual(@as(u64, 1), try fixture.save());
+        fixture.workspaces.find(fixture.workspace_id).?.owner = .{ .kind = .user, .serial = 79 };
+        try DeltaFixture.commitEntry(fixture.workspaces, fixture.workspace_id, 1, 2);
+        try std.testing.expectEqual(@as(u64, 2), try fixture.save());
+        const stats = try latestLogRecordStats(fixture.image);
+        try std.testing.expectEqual(@as(usize, 1), stats.counts[workspace_state]);
+        try std.testing.expectEqual(@as(usize, 0), stats.counts[workspace_delta]);
+        try std.testing.expectEqual(@as(u64, 2), try fixture.expectReload());
+    }
 }

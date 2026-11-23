@@ -12,14 +12,10 @@ pub const Region = struct {
     }
 };
 
+/// NVMe registers and doorbells, followed by the page holding MSI-X entry 0.
 pub const nvme = Region{
     .base = virtual_layout.device_memory.base,
-    .bytes = 0x2000,
-};
-
-pub const pci_ecam = Region{
-    .base = virtual_layout.device_memory.base + 0x1000_0000,
-    .bytes = PAGE_BYTES,
+    .bytes = 0x3000,
 };
 
 pub const framebuffer = Region{
@@ -27,14 +23,27 @@ pub const framebuffer = Region{
     .bytes = 64 * 1024 * 1024,
 };
 
+/// One persistent 1 MiB slot per discovered PCI bus.
+pub const pci_ecam = Region{
+    .base = virtual_layout.device_memory.base + 0x0800_0000,
+    .bytes = 64 * 1024 * 1024,
+};
+
+/// Configuration page for buses beyond the persistent bus budget.
+pub const pci_ecam_scratch = Region{
+    .base = virtual_layout.device_memory.base + 0x1000_0000,
+    .bytes = PAGE_BYTES,
+};
+
 pub const intel_i225 = Region{
     .base = virtual_layout.device_memory.base + 0x1100_0000,
     .bytes = 0x1_0000,
 };
 
+/// The xHCI register aperture through the last extended capability body.
 pub const xhci = Region{
     .base = virtual_layout.device_memory.base + 0x1200_0000,
-    .bytes = PAGE_BYTES,
+    .bytes = 0x41000,
 };
 
 pub const tpm_crb = Region{
@@ -66,6 +75,7 @@ pub const all = [_]Region{
     nvme,
     framebuffer,
     pci_ecam,
+    pci_ecam_scratch,
     intel_i225,
     xhci,
     tpm_crb,
@@ -101,9 +111,12 @@ comptime {
 
 test "kernel MMIO windows are page aligned bounded and disjoint" {
     try std.testing.expect(validLayout(&all));
-    try std.testing.expectEqual(virtual_layout.device_memory.base + 0x1000_1000, pci_ecam.endExclusive().?);
+    try std.testing.expect(framebuffer.endExclusive().? <= pci_ecam.base);
+    try std.testing.expectEqual(virtual_layout.device_memory.base + 0x0C00_0000, pci_ecam.endExclusive().?);
+    try std.testing.expectEqual(virtual_layout.device_memory.base + 0x1000_1000, pci_ecam_scratch.endExclusive().?);
     try std.testing.expectEqual(virtual_layout.device_memory.base + 0x1101_0000, intel_i225.endExclusive().?);
-    try std.testing.expect(pci_ecam.endExclusive().? <= intel_i225.base);
+    try std.testing.expect(pci_ecam_scratch.endExclusive().? <= intel_i225.base);
+    try std.testing.expect(xhci.endExclusive().? <= tpm_crb.base);
     try std.testing.expect(intel_i225.endExclusive().? <= xhci.base);
     try std.testing.expect(xhci.endExclusive().? <= acpi_root.base);
 }

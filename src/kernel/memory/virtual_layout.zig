@@ -4,8 +4,6 @@ const kernel_address = @import("../../arch/kernel_address.zig");
 
 pub const PAGE_BYTES: usize = 4096;
 pub const PHYSICAL_WINDOW_CAPACITY_BYTES = kernel_address.direct_map_capacity;
-pub const USES_RUNTIME_2M_PAGES = true;
-pub const DIRECT_MAP_USES_1G_PAGES = true;
 
 pub const Region = struct {
     base: usize,

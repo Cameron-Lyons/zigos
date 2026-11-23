@@ -4,11 +4,9 @@ const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const component_port = @import("../kernel_api/component_port.zig");
-const contract = @import("contract.zig");
 const device_inventory = @import("../drivers/device_inventory.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const principal = @import("../core/principal.zig");
-const service_contract = @import("service_contracts.zig");
 const service_catalog = @import("service_catalog.zig");
 const units = @import("../core/units.zig");
 const native_util = @import("../core/util.zig");
@@ -43,7 +41,7 @@ pub const LaunchServiceRequest = struct {
     schedule_task: *userspace_scheduler.Scheduler,
     owner: principal.PrincipalId,
     service_id: u64,
-    entry: service_contract.ServiceContract,
+    entry: service_catalog.ServiceContract,
 };
 
 pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding {
@@ -229,7 +227,7 @@ pub fn launchDriverTask(
     now_ticks: u64,
 ) Error!abi.TaskDescriptor {
     if (controller_task_id == 0) {
-        const task = try userspace_launch.launchRegisteredDirect(
+        const task = try userspace_launch.launchFromKernel(
             catalog,
             kernel_port.kernel.runtime,
             bundle_id,
@@ -270,7 +268,7 @@ fn driverComponentLabel(device_class: driver_service.DeviceClass) []const u8 {
     };
 }
 
-pub fn serviceBudget(class: contract.ServiceClass) task_runtime.ResourceBudget {
+pub fn serviceBudget(class: service_catalog.ServiceClass) task_runtime.ResourceBudget {
     return (service_catalog.bootstrapLaunchForClass(class) orelse
         native_util.impossibleByInvariant("service budget is only requested for bootstrap service classes")).budget;
 }
@@ -296,7 +294,7 @@ fn driverResourceBudget(cpu_time_ticks: u64, memory_bytes: usize, shared_memory_
 }
 
 pub fn contractsReady(service_directory: *const service_registry.Service) bool {
-    for (service_contract.ordered_service_contracts) |entry| {
+    for (service_catalog.ordered_service_contracts) |entry| {
         _ = service_directory.connect(entry.interface_id) catch return false;
     }
     return true;
@@ -338,7 +336,7 @@ test "contractsReady requires every ordered service contract" {
 
     try std.testing.expect(!contractsReady(&registry));
 
-    for (service_contract.ordered_service_contracts, 0..) |entry, index| {
+    for (service_catalog.ordered_service_contracts, 0..) |entry, index| {
         try registry.register(
             10 + @as(u64, @intCast(index)),
             30 + @as(u64, @intCast(index)),
@@ -400,8 +398,8 @@ test "service boot connects at runtime time before contract ordinals without wea
     try task_runtime.grantCapabilityToTask(controller, controller_authority.id);
 
     const now_ticks = 3;
-    for ([_]contract.ServiceClass{ .service_registry, .compositor_ui_session }) |class| {
-        const entry = service_contract.contractForClass(class).?;
+    for ([_]service_catalog.ServiceClass{ .service_registry, .compositor_ui_session }) |class| {
+        const entry = service_catalog.serviceContractForClass(class).?;
         try std.testing.expect(entry.boot_tick > now_ticks);
         const service = try fixture.supervisor.register(class, .{ .kind = .service, .serial = 100 + @backingInt(class) });
         const binding = try launchContractServiceAt(.{

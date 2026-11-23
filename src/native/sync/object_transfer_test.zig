@@ -182,7 +182,7 @@ test "object transfer retries failed writes and barriers without allocating anot
         try f.stage("durable remote edit");
         if (fault == 0) f.disk.fail_writes = true else f.disk.fail_flush_from = f.disk.flushes + fault;
         for (0..3) |_| {
-            const expected = if (fault == 0) error.CorruptImage else error.DurabilityBarrierFailed;
+            const expected = if (fault == 0) error.DeviceWriteFailed else error.DurabilityBarrierFailed;
             try std.testing.expectError(expected, f.commit());
             try std.testing.expectEqual(@as(usize, 2), f.disk.service.versionCount());
             try std.testing.expectEqual(@as(u64, 0), f.receiver.transfer.?.checkpoint_generation);

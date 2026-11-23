@@ -19,10 +19,8 @@ const X2APIC_TIMER_DIVIDE_BY_16: u64 = 0x3;
 
 pub const TICKS_PER_SECOND: u64 = units.TIMER_FREQUENCY_HZ;
 pub const MILLISECONDS_PER_TICK: u64 = 1000 / TICKS_PER_SECOND;
-pub const NANOSECONDS_PER_TICK: u64 = 1_000_000_000 / TICKS_PER_SECOND;
 pub const INTERRUPT_VECTOR: u8 = 0x40;
-pub const SPURIOUS_VECTOR: u8 = 0xFF;
-pub const TICKLESS_TSC_DEADLINE = true;
+pub const SPURIOUS_VECTOR = x2apic.SPURIOUS_VECTOR;
 
 pub const Mode = enum {
     tsc_deadline,
@@ -325,39 +323,10 @@ pub fn handleInterrupt() void {
     Hardware.acknowledge();
 }
 
-pub fn handleSpuriousInterrupt() void {}
-
 pub fn getTicks() u64 {
     // A single aligned cache snapshot needs no IRQ masking. All writers are
     // this CPU, inside the state/register transaction's interrupt guard.
     return @atomicLoad(u64, &currentState().ticks, .monotonic);
-}
-
-pub fn millisecondsToTicksCeil(milliseconds: u64) u64 {
-    return units.millisecondsToTimerTicksCeil(milliseconds);
-}
-
-pub fn ticksToMilliseconds(tick_count: u64) u64 {
-    return tick_count * MILLISECONDS_PER_TICK;
-}
-
-pub fn sleepCurrentTicks(ticks_to_wait: u64) void {
-    if (ticks_to_wait == 0) return;
-    synchronize();
-    const start_ticks = getTicks();
-    while (true) {
-        synchronize();
-        if (getTicks() -% start_ticks >= ticks_to_wait) return;
-        armSchedulerTick();
-        x86.hlt();
-    }
-}
-
-pub fn sleep(milliseconds: u32) void {
-    if (milliseconds == 0) return;
-
-    const ticks_to_wait = millisecondsToTicksCeil(milliseconds);
-    sleepCurrentTicks(ticks_to_wait);
 }
 
 // This register bank exists only in hosted tests. The public timer wrappers

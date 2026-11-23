@@ -7,17 +7,12 @@ const humane_permissions = @import("humane_permissions.zig");
 const manifest = @import("manifest.zig");
 const manifest_fixtures = @import("manifest_fixtures.zig");
 const native_util = @import("../core/util.zig");
+const policy_object = @import("policy_object.zig");
 const principal = @import("../core/principal.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
 
 pub const MAX_PERMISSION_DECISIONS: usize = 16;
-pub const COMPACT_ACTIVATION_SUMMARY_METADATA = true;
-pub const GRANT_RECEIPT_TASK_INDEX_RELOOKUPS: u8 = 0;
-pub const REVOCATION_TASK_INDEX_RELOOKUPS: u8 = 0;
-pub const AUTHORIZATION_TASK_INDEX_LOOKUPS: u8 = 1;
-pub const MANIFEST_PERMISSION_TASK_INDEX_RELOOKUPS: u8 = 0;
-pub const ZERO_CAPABILITY_ID_IS_NONE = capability.ZERO_CAPABILITY_ID_RESERVED;
 pub const PERMISSION_DECISION_SIZE_CEILING_BYTES: usize = 48;
 pub const ACTIVATION_SUMMARY_SIZE_CEILING_BYTES: usize = 776;
 const PERMISSION_RECEIPT_BUFFER_BYTES: usize = 512;
@@ -34,6 +29,19 @@ pub const ServiceTargets = struct {
     compositor_service_id: u64,
     policy_service_id: u64,
     service_registry_id: u64,
+};
+
+// Signed device, workspace and organization policy that bounds every grant.
+// A user-owned task supplies its own user subject.
+pub const PolicyScope = struct {
+    directory: *const policy_object.Directory,
+    subjects: policy_object.SubjectSet = .{},
+
+    fn subjectsFor(self: PolicyScope, task: *const task_runtime.TaskRecord) policy_object.SubjectSet {
+        var subjects = self.subjects;
+        if (task.owner.kind == .user) subjects.user_id = task.owner.serial;
+        return subjects;
+    }
 };
 
 pub const UserGrant = struct {
@@ -120,6 +128,7 @@ pub const PolicyMediator = struct {
     capability_table: *capability.CapabilityTable,
     runtime: *task_runtime.Runtime,
     service_targets: ServiceTargets,
+    policies: PolicyScope,
     policy_generation: u32 = 1,
     ledger: ?*event_ledger.Ledger = null,
 
@@ -128,12 +137,14 @@ pub const PolicyMediator = struct {
         capability_table: *capability.CapabilityTable,
         runtime: *task_runtime.Runtime,
         service_targets: ServiceTargets,
+        policies: PolicyScope,
     ) PolicyMediator {
         return .{
             .policy_authority = policy_authority,
             .capability_table = capability_table,
             .runtime = runtime,
             .service_targets = service_targets,
+            .policies = policies,
         };
     }
 
@@ -182,6 +193,11 @@ pub const PolicyMediator = struct {
         grants: []const UserGrant,
         now_ticks: u64,
     ) Decision {
+        // A user grant cannot widen what signed policy denies for this kind.
+        const subjects = self.policies.subjectsFor(task);
+        if (!self.policies.directory.permissionKindDecision(subjects, request.kind).allowed) {
+            return self.denialDecision(task, request, .policy_denied);
+        }
         const matched_grant = self.matchGrant(request, grants, now_ticks) orelse {
             return self.denialDecision(task, request, .policy_denied);
         };
@@ -205,6 +221,14 @@ pub const PolicyMediator = struct {
             return self.denialDecision(task, request, .capability_expired);
         }
         if (finiteLeaseRequired(request.kind) and lease_end == std.math.maxInt(u64)) {
+            return self.denialDecision(task, request, .policy_denied);
+        }
+        if (!self.policies.directory.permissionUseDecision(subjects, .{
+            .kind = request.kind,
+            .sensitivity = request.sensitivity,
+            .retention_days = request.retention_days,
+            .lease_ticks = if (lease_end == std.math.maxInt(u64)) 0 else lease_end - now_ticks,
+        }).allowed) {
             return self.denialDecision(task, request, .policy_denied);
         }
 
@@ -628,7 +652,6 @@ fn createMediationTestTask(
 }
 
 test "policy activation summary keeps bounded counters compact" {
-    try std.testing.expect(ZERO_CAPABILITY_ID_IS_NONE);
     try std.testing.expectEqual(u64, @FieldType(PermissionDecision, "capability_id"));
     try std.testing.expect(@sizeOf(PermissionDecision) <= PERMISSION_DECISION_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(@as(?u64, null), emptyDecision().capabilityId());
@@ -653,6 +676,7 @@ test "policy mediation denies zero-authority requests without user grants" {
             .policy_service_id = 13,
             .service_registry_id = 14,
         },
+        .{ .directory = &policy_object.unattached },
     );
     var ledger = event_ledger.Ledger.init();
     mediator.attachLedger(&ledger);
@@ -698,6 +722,7 @@ test "policy mediation grants local-only object and network capabilities" {
             .policy_service_id = 23,
             .service_registry_id = 24,
         },
+        .{ .directory = &policy_object.unattached },
     );
     var ledger = event_ledger.Ledger.init();
     mediator.attachLedger(&ledger);
@@ -784,6 +809,7 @@ test "policy mediation rolls back minted capability when task attachment fails" 
             .policy_service_id = 23,
             .service_registry_id = 24,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     try std.testing.expectError(error.CapabilityTableFull, mediator.authorizeRequest(task.id, .{
@@ -823,6 +849,7 @@ test "policy mediation suspends tasks when required background permission is den
             .policy_service_id = 33,
             .service_registry_id = 34,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const requests = [_]manifest.PermissionRequest{
@@ -880,6 +907,7 @@ test "policy mediation reports expired grants" {
             .policy_service_id = 43,
             .service_registry_id = 44,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const decision = try mediator.authorizeRequest(task.id, .{
@@ -909,6 +937,7 @@ test "policy mediation ignores expired allow grants when a later valid grant mat
             .policy_service_id = 43,
             .service_registry_id = 44,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const decision = try mediator.authorizeRequest(task.id, .{
@@ -941,6 +970,7 @@ test "policy mediation validates manifests before granting capabilities" {
             .policy_service_id = 53,
             .service_registry_id = 54,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const background_tasks = [_]manifest.BackgroundTaskDecl{
@@ -990,6 +1020,7 @@ test "policy mediation rolls back activation grants when a required permission f
             .policy_service_id = 53,
             .service_registry_id = 54,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const requests = [_]manifest.PermissionRequest{
@@ -1064,6 +1095,7 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
             .policy_service_id = 63,
             .service_registry_id = 64,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const bundle = manifest_fixtures.captureBundle();
@@ -1127,6 +1159,7 @@ test "policy mediation maps location contacts screen capture and notification ca
             .policy_service_id = 90,
             .service_registry_id = 91,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const requests = [_]manifest.PermissionRequest{
@@ -1210,6 +1243,7 @@ test "policy mediation seals sensory grants against transitive delegation" {
             .policy_service_id = 90,
             .service_registry_id = 91,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const requests = [_]manifest.PermissionRequest{
@@ -1261,6 +1295,7 @@ test "policy mediation requires finite leases for sensory grants" {
             .policy_service_id = 90,
             .service_registry_id = 91,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const camera_request = manifest.PermissionRequest{
@@ -1282,6 +1317,79 @@ test "policy mediation requires finite leases for sensory grants" {
     }, 10);
     try std.testing.expect(bounded.allowed);
     try std.testing.expectEqual(@as(u64, 30), bounded.expires_at_ticks);
+    try std.testing.expectEqual(@as(usize, 1), task.capability_count);
+}
+
+test "policy mediation applies signed organization policy before user grants" {
+    var capability_table = capability.CapabilityTable.init();
+    var runtime = task_runtime.Runtime.init();
+    const task = try createMediationTestTask(&runtime, 45, true);
+    var policies = policy_object.Directory.init();
+    const signer = @import("../core/signing.zig").SignerIdentity{
+        .label = "mediation-org-policy",
+        .seed = @splat(0x46),
+    };
+    const org_policy = try policies.create(.{
+        .scope = .organization,
+        .subject_id = 450,
+        .issuer = .{ .kind = .policy_authority, .serial = 450 },
+        .label = "no-camera-short-mic",
+        .camera_allowed = false,
+        .microphone_allowed = true,
+        .max_permission_lease_ticks = 20,
+    }, signer);
+    var mediator = PolicyMediator.init(
+        .{ .kind = .policy_authority, .serial = 46 },
+        &capability_table,
+        &runtime,
+        .{
+            .network_service_id = 92,
+            .compositor_service_id = 93,
+            .policy_service_id = 94,
+            .service_registry_id = 95,
+        },
+        .{ .directory = &policies, .subjects = .{ .organization_id = 450 } },
+    );
+
+    const camera = try mediator.authorizeRequest(task.id, .{
+        .kind = .camera,
+        .resource = "camera.front",
+        .rights = .{ .device = .{ .device_use = true } },
+        .local_only = true,
+        .target_id = 4_500,
+    }, &.{
+        .{ .kind = .camera, .resource = "camera.front", .local_only = true, .expires_at_ticks = 20 },
+    }, 10);
+    try std.testing.expect(!camera.allowed);
+    try std.testing.expectEqual(abi.DenialReason.policy_denied, camera.reason);
+
+    const mic_request = manifest.PermissionRequest{
+        .kind = .mic,
+        .resource = "mic.default",
+        .rights = .{ .device = .{ .device_use = true } },
+        .local_only = true,
+        .target_id = 4_501,
+        .sensitivity = .private_user_data,
+    };
+    const long_mic = try mediator.authorizeRequest(task.id, mic_request, &.{
+        .{ .kind = .mic, .resource = "mic.default", .local_only = true, .expires_at_ticks = 50 },
+    }, 10);
+    try std.testing.expect(!long_mic.allowed);
+    try std.testing.expectEqual(abi.DenialReason.policy_denied, long_mic.reason);
+    try std.testing.expectEqual(@as(usize, 0), task.capability_count);
+
+    const short_mic = try mediator.authorizeRequest(task.id, mic_request, &.{
+        .{ .kind = .mic, .resource = "mic.default", .local_only = true, .expires_at_ticks = 25 },
+    }, 10);
+    try std.testing.expect(short_mic.allowed);
+    try std.testing.expectEqual(@as(usize, 1), task.capability_count);
+
+    // Widening the signed lease cap in memory makes the policy fail closed.
+    org_policy.max_permission_lease_ticks = 100;
+    const widened = try mediator.authorizeRequest(task.id, mic_request, &.{
+        .{ .kind = .mic, .resource = "mic.default", .local_only = true, .expires_at_ticks = 50 },
+    }, 11);
+    try std.testing.expect(!widened.allowed);
     try std.testing.expectEqual(@as(usize, 1), task.capability_count);
 }
 
@@ -1309,6 +1417,7 @@ test "policy mediation denies clipboard and screen capture without explicit gran
             .policy_service_id = 90,
             .service_registry_id = 91,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const requests = [_]manifest.PermissionRequest{

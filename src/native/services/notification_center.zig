@@ -5,11 +5,6 @@ const copyText = native_util.copyText;
 
 pub const MAX_NOTIFICATIONS: usize = 32;
 pub const MAX_DETAIL_BYTES: usize = 96;
-pub const BOUNDED_NOTIFICATION_SCAN = true;
-pub const DIRECT_NOTIFICATION_LOOKUP = true;
-pub const ORDERED_NOTIFICATION_IDS = true;
-pub const RECLAIMS_SUPPRESSED_NOTIFICATIONS = true;
-pub const COMPACT_NOTIFICATION_METADATA = true;
 pub const ATTENTION_DECISION_SIZE_CEILING_BYTES: usize = 4;
 pub const ATTENTION_COUNTS_SIZE_CEILING_BYTES: usize = 2;
 pub const ATTENTION_POST_RESULT_SIZE_CEILING_BYTES: usize = 16;
@@ -460,7 +455,6 @@ pub fn isInterruptive(urgency: Urgency) bool {
 }
 
 test "notification center keeps structured objects task links expiry and suppression" {
-    try std.testing.expect(COMPACT_NOTIFICATION_METADATA);
     try std.testing.expectEqual(u8, @FieldType(AttentionDecision, "active_visible"));
     try std.testing.expectEqual(u8, @FieldType(AttentionDecision, "active_interruptions"));
     try std.testing.expectEqual(u8, @FieldType(AttentionCounts, "active_visible"));

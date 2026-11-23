@@ -107,10 +107,6 @@ pub const Layout = struct {
         return row;
     }
 
-    pub fn vertical(self: Layout, caret: Caret, column: usize, down: bool, count: usize) Caret {
-        return self.moveVertical(caret, column, down, count).caret;
-    }
-
     // A null column starts a vertical sequence at the caret's visual column.
     // Locate once and resume the same iterator for downward movement. Upward
     // movement restarts row traversal using the already-classified iterator.
@@ -258,8 +254,8 @@ test "text layout distinguishes wrap affinity and avoids a phantom row before ne
     try std.testing.expectEqual(@as(usize, 0), layout.locate(.{ .offset = 5, .upstream = true }).index);
     try std.testing.expectEqual(@as(usize, 1), layout.locate(.{ .offset = 5 }).index);
     try std.testing.expectEqual(@as(usize, 5), layout.locate(.{ .offset = 10 }).column);
-    try std.testing.expectEqual(Caret{ .offset = 13 }, layout.vertical(.{ .offset = 10 }, 5, true, 1));
-    try std.testing.expectEqual(Caret{ .offset = 10 }, layout.vertical(.{ .offset = 13 }, 5, false, 1));
+    try std.testing.expectEqual(Caret{ .offset = 13 }, layout.moveVertical(.{ .offset = 10 }, 5, true, 1).caret);
+    try std.testing.expectEqual(Caret{ .offset = 10 }, layout.moveVertical(.{ .offset = 13 }, 5, false, 1).caret);
 }
 
 test "vertical movement matches independent row lookup across graphemes wrap affinity and page limits" {

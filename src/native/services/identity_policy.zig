@@ -99,7 +99,7 @@ test "identity policy authenticates owner root and every encoded byte before att
         if (Record.decode(&changed)) |forged| {
             var directory = policy.Directory.init();
             if (forged.attach(&directory, owner, root)) |_| return error.AcceptedForgedPolicy else |_| {}
-            try std.testing.expectEqual(@as(usize, 0), directory.policies.countInUse());
+            try std.testing.expectEqual(@as(usize, 0), directory.count());
         } else |_| {}
     }
     for (0..encoded.len) |length| {
@@ -113,7 +113,7 @@ test "identity policy authenticates owner root and every encoded byte before att
     var directory = policy.Directory.init();
     try decoded.attach(&directory, owner, root);
     try std.testing.expectError(error.PolicyAlreadyAttached, decoded.attach(&directory, owner, root));
-    try std.testing.expectEqual(@as(usize, 1), directory.policies.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), directory.count());
     try std.testing.expect(directory.verify(1));
     const subjects = policy.SubjectSet{ .user_id = owner.serial };
     try std.testing.expect(directory.sessionLifetimeDecision(subjects, 100).allowed);

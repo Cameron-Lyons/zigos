@@ -1,6 +1,5 @@
 const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
-const manifest = @import("../policy/manifest.zig");
 const package_service = @import("../services/package_service.zig");
 const task_runtime = @import("task_runtime.zig");
 const userspace_boot_registry = @import("userspace_boot_registry.zig");
@@ -13,7 +12,6 @@ else
     };
 
 pub const Error = userspace_boot_registry.Error || userspace_loader.Error || package_service.Error || error{SchedulerUnavailable};
-pub const REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL: u8 = 0;
 
 pub const SINGLE_KERNEL_CONTRACT_LAUNCH = true;
 
@@ -47,16 +45,6 @@ pub fn launchFromKernel(
     );
 }
 
-pub fn launchRegisteredDirect(
-    catalog: *userspace_loader.Catalog,
-    runtime_ptr: *task_runtime.Runtime,
-    bundle_id: []const u8,
-    request: userspace_loader.LaunchRequest,
-    schedule_task: anytype,
-) Error!*task_runtime.TaskRecord {
-    return launchFromKernel(catalog, runtime_ptr, bundle_id, request, schedule_task);
-}
-
 pub fn launchRegisteredKernel(
     catalog: *userspace_loader.Catalog,
     authority: userspace_loader.KernelLaunchAuthority,
@@ -73,17 +61,6 @@ pub fn launchRegisteredKernel(
         schedule_task,
         "launch-kernel",
     );
-}
-
-pub fn launchDirectBundle(
-    catalog: *userspace_loader.Catalog,
-    runtime_ptr: *task_runtime.Runtime,
-    bundle: manifest.BundleManifest,
-    request: userspace_loader.LaunchRequest,
-    schedule_task: anytype,
-) Error!*task_runtime.TaskRecord {
-    try ensureRegisteredBundle(catalog, bundle.bundle_id, "register-direct");
-    return launchDirectImage(catalog, runtime_ptr, bundle.bundle_id, request, schedule_task, "launch-direct");
 }
 
 fn launchDirectImage(
@@ -104,17 +81,6 @@ fn launchDirectImage(
     errdefer _ = runtime_ptr.terminateTask(task_id, 0) catch false;
     if (!scheduleTask(schedule_task, task_id) or task.state == .terminated) return error.SchedulerUnavailable;
     return task;
-}
-
-pub fn launchKernelBundle(
-    catalog: *userspace_loader.Catalog,
-    authority: userspace_loader.KernelLaunchAuthority,
-    bundle: manifest.BundleManifest,
-    request: userspace_loader.LaunchRequest,
-    schedule_task: anytype,
-) Error!abi.TaskDescriptor {
-    try ensureRegisteredBundle(catalog, bundle.bundle_id, "register-kernel");
-    return launchKernelImage(catalog, authority, bundle.bundle_id, request, schedule_task, "launch-kernel");
 }
 
 fn launchKernelImage(
@@ -240,7 +206,7 @@ test "scheduler rejection retires a newly created userspace task and address spa
         }
     };
     var scheduler = RejectingScheduler{ .runtime = &runtime };
-    try std.testing.expectError(error.SchedulerUnavailable, launchRegisteredDirect(&catalog, &runtime, "app.notes", .{
+    try std.testing.expectError(error.SchedulerUnavailable, launchFromKernel(&catalog, &runtime, "app.notes", .{
         .owner = .{ .kind = .app, .serial = 71 },
         .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 256 * 1024, .endpoint_slots = 2, .shared_memory_bytes = 0 },
         .ui_surface_id = 71,
@@ -264,7 +230,7 @@ test "task reclamation launch rollback preserves capacity across scheduler rejec
     defer runtime.reset();
     var previous_task_id: u64 = 0;
     for (0..task_runtime.MAX_TASKS * 3) |index| {
-        try std.testing.expectError(error.SchedulerUnavailable, launchRegisteredDirect(&catalog, &runtime, "app.notes", .{
+        try std.testing.expectError(error.SchedulerUnavailable, launchFromKernel(&catalog, &runtime, "app.notes", .{
             .owner = .{ .kind = .app, .serial = @intCast(index + 1) },
             .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 256 * 1024, .endpoint_slots = 2, .shared_memory_bytes = 0 },
         }, &scheduler));
@@ -308,7 +274,7 @@ test "task reclamation launch scheduling callback retains exact record while it 
         var runtime = task_runtime.Runtime.init();
         defer runtime.reset();
         var scheduler = ReentrantScheduler{ .runtime = &runtime, .accept = accept };
-        try std.testing.expectError(error.SchedulerUnavailable, launchRegisteredDirect(&catalog, &runtime, "app.notes", .{
+        try std.testing.expectError(error.SchedulerUnavailable, launchFromKernel(&catalog, &runtime, "app.notes", .{
             .owner = .{ .kind = .app, .serial = 1 },
             .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 256 * 1024, .endpoint_slots = 2, .shared_memory_bytes = 0 },
         }, &scheduler));

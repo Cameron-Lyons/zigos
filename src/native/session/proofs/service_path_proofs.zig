@@ -17,7 +17,6 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
     session_manager.boot();
 
     const runtime = session_manager.testing.runtimePtr();
-    const runtime_service = session_manager.testing.runtimeServicePtr();
     const capability_table = session_manager.system().capabilityTablePtr();
     const supervisor = session_manager.testing.supervisorPtr();
     const service_directory = session_manager.testing.serviceDirectoryPtr();
@@ -72,17 +71,14 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
         capability_table,
         supervisor.findByClass(.sync_replication).?,
         sync_task,
-        network_service_task,
         storage,
         session_task.id,
         session_authority_id,
     );
     try compositor_path.proveBootedCompositorServicePath(
-        kernel_port,
         runtime,
         capability_table,
         storage,
-        runtime_service,
         supervisor.findByClass(.compositor_ui_session).?,
         compositor_task,
         session_manager.testing.compositorSessionPtr(),
@@ -102,4 +98,27 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
         session_task.id,
         session_authority_id,
     );
+}
+
+test "booted userspace service paths prove sync driver isolation and resource accounting" {
+    try bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting();
+}
+
+test "booted userspace service paths prove process isolation visible-entitlement gates" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+
+    session_manager.boot();
+
+    try syscalls.proveBootedProcessIsolationVisibleEntitlementGates(
+        session_manager.testing.runtimePtr(),
+        session_manager.system().capabilityTablePtr(),
+        session_manager.testing.findTask("sync-service").?,
+        session_manager.testing.findTask("workspace-storage").?,
+        session_manager.testing.findTask("compositor-session").?,
+    );
+}
+
+test "booted driver hot-swap and crash recovery rebind live brokered device authority" {
+    try driver_recovery.proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority();
 }
