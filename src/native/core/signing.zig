@@ -296,18 +296,10 @@ pub fn publicIdentity(identity: SignerIdentity) !PublicIdentity {
     };
 }
 
-pub fn sign(identity: SignerIdentity, message: []const u8) !manifest.Signature {
-    return signWithProfile(identity, message, .ed25519);
-}
-
 // Local software signing. Release-eligible signing goes through an
 // ExternalReleaseProvider registered in a SignatureProviderRegistry.
-pub fn signWithDefaultRegistry(
-    profile: SignatureProfile,
-    identity: SignerIdentity,
-    message: []const u8,
-) !manifest.Signature {
-    return signWithProfile(identity, message, profile);
+pub fn sign(identity: SignerIdentity, message: []const u8) !manifest.Signature {
+    return signWithProfile(identity, message, .ed25519);
 }
 
 pub fn signWithProfile(identity: SignerIdentity, message: []const u8, profile: SignatureProfile) !manifest.Signature {
@@ -328,10 +320,6 @@ pub fn signWithProfile(identity: SignerIdentity, message: []const u8, profile: S
 }
 
 pub fn verify(signature: manifest.Signature, message: []const u8) bool {
-    return verifySignature(signature, message);
-}
-
-pub fn verifyWithDefaultRegistry(signature: manifest.Signature, message: []const u8) bool {
     return verifySignature(signature, message);
 }
 

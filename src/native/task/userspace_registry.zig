@@ -455,9 +455,8 @@ fn indexInCatalog(
     if (spec_index >= specs.len) {
         native_util.impossibleByInvariant("boot bundle id index points outside registry specs");
     }
-    if (!std.mem.eql(u8, specs[spec_index].bundleId(), bundle_id)) {
-        native_util.impossibleByInvariant("boot bundle id index points at the wrong registry spec");
-    }
+    // A spec under the same hashed key with another bundle id is a collision.
+    if (!std.mem.eql(u8, specs[spec_index].bundleId(), bundle_id)) return null;
     return spec_index;
 }
 
@@ -586,7 +585,7 @@ fn buildBundleIndex(
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(capacity);
     for (specs, 0..) |spec, spec_index| {
-        id_index.insert(capacity, &index, bundleIndexKey(spec.bundleId()), spec_index, "boot bundle id index covers userspace registry");
+        id_index.insertAbsent(capacity, &index, bundleIndexKey(spec.bundleId()), spec_index, "boot bundle id index covers userspace registry");
     }
     return index;
 }

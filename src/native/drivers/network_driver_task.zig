@@ -1,12 +1,8 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/memory/memory.zig")
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 pub const ReceiveStatus = enum(u8) {
     empty = 0,
     frame = 1,
@@ -91,43 +87,19 @@ const PeerLinkDirectoryState = struct {
         if (!link.device.eql(device)) native_util.impossibleByInvariant("peer device index points at the wrong link");
         return link.mac;
     }
-
-    fn initializeAllocated(self: *PeerLinkDirectoryState) void {
-        @memset(std.mem.asBytes(self), 0);
-    }
 };
 
-const heap_backed_peer_link_directory = builtin.target.os.tag == .freestanding;
-const PeerLinkDirectoryBacking = if (heap_backed_peer_link_directory) ?*PeerLinkDirectoryState else PeerLinkDirectoryState;
-
 pub const PeerLinkDirectory = struct {
-    backing: PeerLinkDirectoryBacking = if (heap_backed_peer_link_directory) null else .{},
-
-    fn ensureBacking(self: *PeerLinkDirectory) error{NoSpaceLeft}!void {
-        if (comptime heap_backed_peer_link_directory) {
-            if (self.backing != null) return;
-            const allocation = kernel_memory.kmalloc(@sizeOf(PeerLinkDirectoryState)) orelse return error.NoSpaceLeft;
-            const backing: *PeerLinkDirectoryState = @ptrCast(@alignCast(allocation));
-            backing.initializeAllocated();
-            self.backing = backing;
-        }
-    }
-
-    fn state(self: *PeerLinkDirectory) *PeerLinkDirectoryState {
-        if (comptime heap_backed_peer_link_directory) return self.backing orelse unreachable;
-        return &self.backing;
-    }
+    backing: table_backing.Lazy(PeerLinkDirectoryState, null) = .{},
 
     fn stateConst(self: *const PeerLinkDirectory) ?*const PeerLinkDirectoryState {
-        if (comptime heap_backed_peer_link_directory) return self.backing;
-        return &self.backing;
+        return self.backing.get();
     }
 
     pub fn bind(self: *PeerLinkDirectory, device: principal.PrincipalId, mac: [6]u8) PeerLinkError!void {
         if (device.kind != .device or device.serial == 0) return error.InvalidPeerDevice;
         if (!validUnicastMac(mac)) return error.InvalidPeerAddress;
-        try self.ensureBacking();
-        try self.state().bindValidated(device, mac);
+        try (try self.backing.ensure()).bindValidated(device, mac);
     }
 
     pub fn resolve(self: *const PeerLinkDirectory, device: principal.PrincipalId) ?[6]u8 {
@@ -141,15 +113,7 @@ pub const PeerLinkDirectory = struct {
     }
 
     pub fn reset(self: *PeerLinkDirectory) void {
-        if (comptime heap_backed_peer_link_directory) {
-            if (self.backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
-                self.backing = null;
-            }
-        } else {
-            self.backing = .{};
-        }
+        self.backing.release();
     }
 
     pub fn deinit(self: *PeerLinkDirectory) void {
@@ -191,7 +155,6 @@ pub const EgressBroker = *const fn (request: EgressRequest) EgressDecision;
 pub const MAX_NATIVE_FRAME_BYTES: usize = 256;
 pub const MAX_RECEIVE_FRAME_BYTES: usize = 1500;
 pub const RECEIVE_QUEUE_CAPACITY: usize = 32;
-pub const RECEIVE_QUEUE_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 pub const RECEIVE_RESULT_SIZE_CEILING_BYTES: usize = 4;
 pub const QUEUED_RECEIVE_FRAME_SIZE_CEILING_BYTES: usize = 1_502;
 pub const RECEIVE_PREFIX_BYTES: usize = 4;
@@ -221,14 +184,9 @@ const QueuedReceiveFrame = struct {
     bytes: [MAX_RECEIVE_FRAME_BYTES]u8 = @as([MAX_RECEIVE_FRAME_BYTES]u8, @splat(0)),
 };
 const ReceiveQueue = [RECEIVE_QUEUE_CAPACITY]QueuedReceiveFrame;
-const heap_backed_receive_queue = builtin.target.os.tag == .freestanding;
-const ReceiveQueueBacking = if (heap_backed_receive_queue) ?*ReceiveQueue else ReceiveQueue;
 comptime {
     if (@sizeOf(QueuedReceiveFrame) > QUEUED_RECEIVE_FRAME_SIZE_CEILING_BYTES) {
         @compileError("network driver receive queue frame exceeds its compact layout ceiling");
-    }
-    if (heap_backed_receive_queue and @sizeOf(ReceiveQueueBacking) > RECEIVE_QUEUE_HANDLE_SIZE_CEILING_BYTES) {
-        @compileError("heap-backed network receive queue exceeds its handle size ceiling");
     }
 }
 
@@ -238,7 +196,7 @@ comptime {
 // queue persist until reset: consumer frames that arrive while it has no
 // session stay queued (tail-dropped when full) until it drains them.
 var receive_prefix: ?[RECEIVE_PREFIX_BYTES]u8 = null;
-var receive_queue: ReceiveQueueBacking = if (heap_backed_receive_queue) null else @as(ReceiveQueue, @splat(.{}));
+var receive_queue: table_backing.Lazy(ReceiveQueue, null) = .{};
 var receive_queue_head: u8 = 0;
 var receive_queue_count: u8 = 0;
 
@@ -334,20 +292,11 @@ pub fn clearEgressCapability() void {
 }
 
 fn receiveQueue() ?*ReceiveQueue {
-    if (comptime heap_backed_receive_queue) return receive_queue;
-    return &receive_queue;
+    return receive_queue.get();
 }
 
 fn ensureReceiveQueue() ?*ReceiveQueue {
-    if (receiveQueue()) |queue| return queue;
-    if (comptime heap_backed_receive_queue) {
-        const allocation = kernel_memory.kmalloc(@sizeOf(ReceiveQueue)) orelse return null;
-        const queue: *ReceiveQueue = @ptrCast(@alignCast(allocation));
-        @memset(std.mem.asBytes(queue), 0);
-        receive_queue = queue;
-        return queue;
-    }
-    return &receive_queue;
+    return receive_queue.ensure() catch null;
 }
 
 fn clearReceiveQueue() void {
@@ -357,15 +306,7 @@ fn clearReceiveQueue() void {
 
 fn releaseReceiveQueue() void {
     clearReceiveQueue();
-    if (comptime heap_backed_receive_queue) {
-        if (receive_queue) |queue| {
-            @memset(std.mem.asBytes(queue), 0);
-            kernel_memory.kfree(@ptrCast(queue));
-            receive_queue = null;
-        }
-    } else {
-        for (&receive_queue) |*frame| frame.length = 0;
-    }
+    receive_queue.release();
 }
 
 pub fn activeDriverTransmitCount() usize {
@@ -791,7 +732,7 @@ test "receive without a registered consumer drains hardware without queuing" {
     try std.testing.expectEqual(frames.len, ReceiveHarness.empty_output_drains);
     try std.testing.expect(!hasQueuedFrame());
     try std.testing.expect(!networkWorkPending());
-    if (heap_backed_receive_queue) try std.testing.expect(receiveQueue() == null);
+    try std.testing.expect(receiveQueue() == null);
 }
 
 test "deferred receive service drains hardware when the software queue is full" {

@@ -279,7 +279,7 @@ pub const Channel = struct {
 
     fn validateRelease(self: *const Channel, release: Release) Error!void {
         if (!release.bundle.signature.isComplete()) return error.StoreReleaseUnsigned;
-        if (!signing.verifyWithDefaultRegistry(release.bundle.signature, &package_service.digestBundle(release.bundle))) {
+        if (!signing.verify(release.bundle.signature, &package_service.digestBundle(release.bundle))) {
             return error.StoreReleaseSignatureInvalid;
         }
         if (!self.releaseSignedByTrustedPublisher(release.bundle)) return error.StoreReleasePublisherUntrusted;
@@ -492,8 +492,7 @@ fn versionNewerThan(release: Release, current_major: u16, current_minor: u16) bo
 }
 
 fn signStoreTestBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
-    return signing.signWithDefaultRegistry(
-        .ed25519,
+    return signing.sign(
         identity,
         &package_service.digestBundle(bundle),
     );

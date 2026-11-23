@@ -10,7 +10,6 @@ const operation_metadata = @import("kernel_api/operation_metadata.zig");
 const sync_service = @import("sync/sync_service.zig");
 const sync_service_test = @import("sync/sync_service_test.zig");
 const sync_transport = @import("sync/sync_transport.zig");
-const table_backing = @import("core/table_backing.zig");
 const transient_sync_service = @import("sync/transient_service.zig");
 const xhci_driver_task = @import("drivers/xhci_driver_task.zig");
 
@@ -39,7 +38,6 @@ pub const sync_private_overlay = .{
 
 pub const native_2026 = .{
     .interrupt_driven_idle = event_wake.INTERRUPT_DRIVEN_IDLE and event_wake.WAKES_RUNTIME_OWNER,
-    .unified_table_backing = table_backing.HEAP_BACKS_ON_ALL_TARGETS and table_backing.UNIFIED_ALLOCATOR,
     .ring_default_ipc = ipc_ring.DATA_PLANE_USES_SEALED_RINGS and endpoint.PREFERS_SEALED_RING_DATAPLANE and endpoint.AUTO_ATTACHES_DATA_RINGS and endpoint.RINGS_ONLY_DATAPLANE,
     .userspace_xhci_dataplane = xhci_driver_task.USERSPACE_XHCI_DATAPLANE and
         xhci_driver_task.KERNEL_LATCHES_ONLY and

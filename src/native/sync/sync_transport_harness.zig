@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const transport_crypto = @import("../core/transport_crypto.zig");
 const capability = @import("../kernel_api/capability.zig");
@@ -11,10 +10,7 @@ const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const network_policy = @import("network_policy.zig");
 const sync_state = @import("sync_state_support.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/memory/memory.zig")
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 pub const MAX_PACKET_BYTES: usize = 256;
 pub const MAX_RELAY_PACKETS: usize = 16;
@@ -22,18 +18,8 @@ pub const TelemetryCount = u32;
 pub const ENCRYPTED_PACKET_SIZE_CEILING_BYTES: usize = 352;
 pub const SIGNED_ENCRYPTED_FRAME_SIZE_CEILING_BYTES: usize = 504;
 pub const RELAY_PACKET_SLOT_SIZE_CEILING_BYTES: usize = 368;
-pub const HOST_RELAY_SIZE_CEILING_BYTES: usize = 6_816;
-pub const FREESTANDING_RELAY_SIZE_CEILING_BYTES: usize = 16;
-pub const RELAY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
-    FREESTANDING_RELAY_SIZE_CEILING_BYTES
-else
-    HOST_RELAY_SIZE_CEILING_BYTES;
-pub const HOST_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 6_912;
-pub const FREESTANDING_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 112;
-pub const BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
-    FREESTANDING_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES
-else
-    HOST_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES;
+pub const RELAY_SIZE_CEILING_BYTES: usize = 16;
+pub const BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 112;
 pub const TRANSPORT_SESSION_SIZE_CEILING_BYTES: usize = 320;
 pub const HARNESS_SIZE_CEILING_BYTES: usize = 24;
 
@@ -119,18 +105,8 @@ const RelayQueueState = struct {
     packets: RelayPacketArena = RelayPacketArena.init(),
     session_index: RelaySessionIndex = RelaySessionIndex.init(),
 
-    fn initializeAllocated(self: *RelayQueueState) void {
-        @memset(std.mem.asBytes(self), 0);
+    fn initializeZeroed(self: *RelayQueueState) void {
         self.next_packet_id = 1;
-        const no_packet_index = indexed_arena.reusableNoIndex(MAX_RELAY_PACKETS);
-        @memset(self.packets.free_next[0..], no_packet_index);
-        self.packets.free_head = no_packet_index;
-
-        const SessionIndex = @FieldType(RelayQueueState, "session_index");
-        const CompactIndex = @FieldType(SessionIndex, "free_bucket_head");
-        const no_session_bucket: CompactIndex = @intCast(@max(self.session_index.links.len, self.session_index.buckets.len));
-        for (&self.session_index.links) |*link| link.bucket = no_session_bucket;
-        self.session_index.free_bucket_head = no_session_bucket;
     }
 
     fn pendingPacketId(self: *const RelayQueueState) Error!u64 {
@@ -139,11 +115,8 @@ const RelayQueueState = struct {
     }
 };
 
-const heap_backed_relay_queue = builtin.target.os.tag == .freestanding;
-const RelayQueueBacking = if (heap_backed_relay_queue) ?*RelayQueueState else RelayQueueState;
-
 pub const Relay = struct {
-    queue: RelayQueueBacking = if (heap_backed_relay_queue) null else .{},
+    queue: table_backing.Lazy(RelayQueueState, RelayQueueState.initializeZeroed) = .{},
     accepted_packets: TelemetryCount = 0,
     delivered_packets: TelemetryCount = 0,
 
@@ -215,37 +188,19 @@ pub const Relay = struct {
     }
 
     fn ensureQueue(self: *Relay) error{NoSpaceLeft}!*RelayQueueState {
-        if (comptime heap_backed_relay_queue) {
-            if (self.queue) |queue| return queue;
-            const allocation = kernel_memory.kmalloc(@sizeOf(RelayQueueState)) orelse return error.NoSpaceLeft;
-            const queue: *RelayQueueState = @ptrCast(@alignCast(allocation));
-            queue.initializeAllocated();
-            self.queue = queue;
-            return queue;
-        }
-        return &self.queue;
+        return self.queue.ensure();
     }
 
     fn queueState(self: *Relay) ?*RelayQueueState {
-        if (comptime heap_backed_relay_queue) return self.queue;
-        return &self.queue;
+        return self.queue.get();
     }
 
     fn queueStateConst(self: *const Relay) ?*const RelayQueueState {
-        if (comptime heap_backed_relay_queue) return self.queue;
-        return &self.queue;
+        return self.queue.get();
     }
 
     pub fn deinit(self: *Relay) void {
-        if (comptime heap_backed_relay_queue) {
-            if (self.queue) |queue| {
-                @memset(std.mem.asBytes(queue), 0);
-                kernel_memory.kfree(@ptrCast(queue));
-                self.queue = null;
-            }
-        } else {
-            self.queue = .{};
-        }
+        self.queue.release();
         self.accepted_packets = 0;
         self.delivered_packets = 0;
     }

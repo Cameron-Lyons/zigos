@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
 const ids = @import("../core/ids.zig");
@@ -15,10 +14,7 @@ const volume_root_slot = @import("volume/root_slot.zig");
 const workspace = @import("workspace.zig");
 const manifest = @import("../policy/manifest.zig");
 const dataplane_handoff = @import("../drivers/dataplane_handoff.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/memory/memory.zig")
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 pub const sector_size = volume_layout.sector_size;
 pub const root_sector_count = volume_layout.root_sector_count;
@@ -32,8 +28,6 @@ pub const replay_gate_segments = volume_layout.max_log_segments;
 pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
 pub const IO_LOG_WORKSPACE_BYTES = DATA_REGION_BYTES;
 pub const USES_CHECKPOINT_ONLY_COLD_LOAD = volume_layout.USES_CHECKPOINT_ONLY_COLD_LOAD;
-const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
-const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
 
 const data_start_byte = volume_layout.data_start_byte;
 const data_region_bytes = DATA_REGION_BYTES;
@@ -63,7 +57,7 @@ pub const Backend = volume_backend.Backend;
 pub const AttachedBackendKind = volume_backend.AttachedBackendKind;
 
 pub const Volume = struct {
-    io_log_buffer: IoLogWorkspace = if (heap_backed_io_workspace) null else undefined,
+    io_log_buffer: table_backing.Lazy([IO_LOG_WORKSPACE_BYTES]u8, null) = .{},
     sector_buffer: [sector_size]u8 = @as([sector_size]u8, @splat(0)),
     operation_active: bool = false,
     attached_backend_present: bool = false,
@@ -111,24 +105,11 @@ pub const Volume = struct {
     }
 
     fn ioLogWorkspace(self: *Volume) Error![]u8 {
-        if (comptime heap_backed_io_workspace) {
-            if (self.io_log_buffer) |buffer| return buffer[0..IO_LOG_WORKSPACE_BYTES];
-            const allocation = kernel_memory.kmalloc(IO_LOG_WORKSPACE_BYTES) orelse return error.NoSpaceLeft;
-            const buffer: [*]u8 = @ptrCast(allocation);
-            self.io_log_buffer = buffer;
-            return buffer[0..IO_LOG_WORKSPACE_BYTES];
-        }
-        return self.io_log_buffer[0..];
+        return try self.io_log_buffer.ensure();
     }
 
     fn releaseIoLogWorkspace(self: *Volume) void {
-        if (comptime heap_backed_io_workspace) {
-            if (self.io_log_buffer) |buffer| {
-                @memset(buffer[0..IO_LOG_WORKSPACE_BYTES], 0);
-                kernel_memory.kfree(@ptrCast(buffer));
-                self.io_log_buffer = null;
-            }
-        }
+        self.io_log_buffer.release();
     }
 
     pub fn attachBackend(self: *Volume, backend: Backend) bool {
@@ -242,7 +223,7 @@ pub const Volume = struct {
 };
 
 comptime {
-    if (heap_backed_io_workspace and @sizeOf(Volume) > 16 * 1024) {
+    if (@sizeOf(Volume) > 16 * 1024) {
         @compileError("heap-backed storage volumes exceed their compact resident layout");
     }
 }
@@ -1530,11 +1511,6 @@ fn readShareGrant(reader: *CursorReader) Error!workspace.ShareGrant {
 
 test "storage volume bounds its log io workspace to one durable data region" {
     try std.testing.expectEqual(DATA_REGION_BYTES, IO_LOG_WORKSPACE_BYTES);
-    if (heap_backed_io_workspace) {
-        try std.testing.expect(@sizeOf(@FieldType(Volume, "io_log_buffer")) <= @sizeOf(usize));
-    } else {
-        try std.testing.expectEqual(IO_LOG_WORKSPACE_BYTES, @sizeOf(@FieldType(Volume, "io_log_buffer")));
-    }
 }
 
 test "append workspace exhaustion falls back to checkpoint compaction" {
@@ -1746,6 +1722,13 @@ test "storage replay requires exactly one leading checkpoint" {
     ));
 }
 
+fn ensureTestWorkspaceBackings(record: *workspace.WorkspaceRecord) !void {
+    try record.path_index.ensureEntryBacking();
+    try record.mutation_log.ensureBacking();
+    try record.share_table.ensureBacking();
+    try record.recoverable_deletes.ensureBacking();
+}
+
 test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     const allocator = std.testing.allocator;
     const workspaces = try allocator.create(workspace.Directory);
@@ -1756,6 +1739,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
         .owner = .{ .kind = .user, .serial = 41 },
         .label = "live-workspace",
     });
+    try ensureTestWorkspaceBackings(live);
     live.counts.entry_count = 2;
     live.path_index.entries()[0] = try workspace.Entry.init("documents/keep.md", ids.object(1), ids.version(1), .document);
     live.path_index.entries()[1] = try workspace.Entry.init("documents/retired.md", ids.object(2), ids.version(2), .document);
@@ -1782,6 +1766,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
         .owner = live.owner,
         .label = "replacement-workspace",
     });
+    try ensureTestWorkspaceBackings(replacement);
     replacement.generation = 7;
     replacement.counts.entry_count = 1;
     replacement.path_index.entries()[0] = try workspace.Entry.init("documents/current.md", ids.object(4), ids.version(4), .document);

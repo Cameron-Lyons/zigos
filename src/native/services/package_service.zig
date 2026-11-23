@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const event_ledger = @import("../platform/event_ledger.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -15,11 +14,7 @@ const model = @import("package_service_model.zig");
 const service_authority = @import("service_authority.zig");
 const signing = @import("../core/signing.zig");
 const units = @import("../core/units.zig");
-const root = @import("root");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 pub const MAX_COMPONENTS_PER_BUNDLE = model.MAX_COMPONENTS_PER_BUNDLE;
 pub const MAX_ASSETS_PER_BUNDLE = model.MAX_ASSETS_PER_BUNDLE;
@@ -89,18 +84,16 @@ pub const RemoveRequest = struct {
 const BundleSlot = model.BundleSlot;
 const BUNDLE_INDEX_CAPACITY: usize = model.MAX_INSTALLED_BUNDLES * 2;
 pub const BundleArena = indexed_arena.IndexedArenaWithKey(u64, BundleSlot, model.MAX_INSTALLED_BUNDLES, BUNDLE_INDEX_CAPACITY, bundleSlotKey);
-const heap_backed_bundle_arena = builtin.target.os.tag == .freestanding;
-const BundleArenaBacking = if (heap_backed_bundle_arena) ?*BundleArena else BundleArena;
 const zeroBundle = model.zeroBundle;
 
 pub const Service = struct {
     service_id: u64 = 0,
     owner: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
-    slots: BundleArenaBacking = if (heap_backed_bundle_arena) null else BundleArena.init(),
+    slots: table_backing.Lazy(BundleArena, null) = .{},
     trust_store: principal.Keyring = principal.Keyring.init(),
 
     comptime {
-        if (heap_backed_bundle_arena and @sizeOf(@This()) > units.kibibytes(16)) {
+        if (@sizeOf(@This()) > units.kibibytes(16)) {
             @compileError("heap-backed package services exceed their compact resident layout");
         }
     }
@@ -110,14 +103,8 @@ pub const Service = struct {
     }
 
     pub fn initializeAllocated(self: *Service) void {
-        self.service_id = 0;
+        @memset(std.mem.asBytes(self), 0);
         self.owner = .{ .kind = .service, .serial = 0 };
-        if (comptime heap_backed_bundle_arena) {
-            self.slots = null;
-        } else {
-            self.slots.initializeAllocated();
-        }
-        self.trust_store.initializeAllocated();
     }
 
     pub fn reset(self: *Service) void {
@@ -126,35 +113,19 @@ pub const Service = struct {
     }
 
     pub fn deinit(self: *Service) void {
-        if (comptime heap_backed_bundle_arena) {
-            if (self.slots) |slots| {
-                @memset(std.mem.asBytes(slots), 0);
-                kernel_memory.kfree(@ptrCast(slots));
-                self.slots = null;
-            }
-        }
+        self.slots.release();
     }
 
     fn bundleArena(self: *Service) ?*BundleArena {
-        if (comptime heap_backed_bundle_arena) return self.slots;
-        return &self.slots;
+        return self.slots.get();
     }
 
     fn bundleArenaConst(self: *const Service) ?*const BundleArena {
-        if (comptime heap_backed_bundle_arena) return self.slots;
-        return &self.slots;
+        return self.slots.get();
     }
 
     fn ensureBundleArena(self: *Service) error{NoSpaceLeft}!*BundleArena {
-        if (self.bundleArena()) |slots| return slots;
-        if (comptime heap_backed_bundle_arena) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(BundleArena)) orelse return error.NoSpaceLeft;
-            const slots: *BundleArena = @ptrCast(@alignCast(allocation));
-            initializeBundleArena(slots);
-            self.slots = slots;
-            return slots;
-        }
-        return &self.slots;
+        return self.slots.ensure();
     }
 
     pub fn bind(self: *Service, service_id: u64, owner: principal.PrincipalId) void {
@@ -198,7 +169,7 @@ pub const Service = struct {
         try manifest.validateApplicationPackaging(request.bundle);
         try bundle_ops.validateInstallStorageShape(request.bundle);
         const digest = bundle_digest.digestBundle(request.bundle);
-        if (!signing.verifyWithDefaultRegistry(request.bundle.signature, &digest)) {
+        if (!signing.verify(request.bundle.signature, &digest)) {
             return error.InvalidManifestSignature;
         }
         try requireTrustedSigner(&self.trust_store, request.bundle.publisher, request.bundle.signature);
@@ -377,13 +348,6 @@ pub const Service = struct {
         return &slot.bundle;
     }
 };
-
-fn initializeBundleArena(slots: *BundleArena) void {
-    @memset(std.mem.asBytes(slots), 0);
-    const free_no_index = indexed_arena.reusableNoIndex(model.MAX_INSTALLED_BUNDLES);
-    @memset(slots.free_next[0..], free_no_index);
-    slots.free_head = free_no_index;
-}
 
 fn recordOffboard(
     ledger: ?*event_ledger.Ledger,
@@ -824,8 +788,7 @@ fn mintPackageServiceAuthority(
 }
 
 fn signTestReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) !manifest.Signature {
-    return signing.signWithDefaultRegistry(
-        .ed25519,
+    return signing.sign(
         identity,
         &digestBundle(bundle),
     );
@@ -2272,8 +2235,9 @@ test "package service indexes rebuild after persisted slots are loaded" {
     bundle.signature = try signTestReleaseBundle(signer_identity, bundle);
     try trustTestPublisher(&service, signer_identity, "Example Software");
 
-    service.slots.slots[3].in_use = true;
-    try bundle_ops.installNew(&service.slots.slots[3].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x11));
+    const slots = try service.ensureBundleArena();
+    slots.slots[3].in_use = true;
+    try bundle_ops.installNew(&slots.slots[3].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x11));
     service.rebuildIndexes();
 
     const launch_plan = try service.buildLaunchPlan("app.notes");
@@ -2340,9 +2304,9 @@ test "package bundle ops reject semantically invalid manifests before storage" {
 
     try std.testing.expectError(
         error.DuplicatePermissionRequest,
-        bundle_ops.installNew(&service.slots.slots[0].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x66)),
+        bundle_ops.installNew(&(try service.ensureBundleArena()).slots[0].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x66)),
     );
-    try std.testing.expectEqual(@as(u8, 0), service.slots.slots[0].bundle.revisionCount());
+    try std.testing.expectEqual(@as(u8, 0), service.bundleArena().?.slots[0].bundle.revisionCount());
 }
 
 test "package revisions pool permission text and preserve rollback values" {

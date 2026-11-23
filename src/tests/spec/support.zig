@@ -18,8 +18,7 @@ pub fn signer(label: []const u8, fill: u8) signing.SignerIdentity {
 }
 
 pub fn signReleaseBundle(bundle: manifest.BundleManifest, identity: signing.SignerIdentity) !manifest.Signature {
-    return signing.signWithDefaultRegistry(
-        .ed25519,
+    return signing.sign(
         identity,
         &package_service.digestBundle(bundle),
     );

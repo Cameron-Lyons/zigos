@@ -614,8 +614,7 @@ fn signedNotesDailyBundle(version_minor: u16) !manifest.BundleManifest {
     bundle.version_minor = version_minor;
     bundle.assets = if (version_minor == 0) &notes_daily_v1_manifest_assets else &notes_daily_v2_manifest_assets;
     bundle.supply_chain = notesDailySupplyChain(version_minor);
-    bundle.signature = try signing.signWithDefaultRegistry(
-        .ed25519,
+    bundle.signature = try signing.sign(
         notes_daily_bundle_signer,
         &package_service.digestBundle(bundle),
     );

@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const xhci = @import("../../kernel/drivers/xhci.zig");
 const abi = @import("../core/abi.zig");
@@ -9,7 +8,7 @@ const compositor_session = @import("compositor_session.zig");
 const trusted_identity = @import("trusted_identity_entry.zig");
 const trusted_auth = @import("trusted_auth_entry.zig");
 const task_runtime = @import("../task/task_runtime.zig");
-const root = @import("root");
+const table_backing = @import("../core/table_backing.zig");
 const timer = @import("../../kernel/timer/timer.zig");
 
 pub const MAX_KEYBOARDS: usize = 4;
@@ -19,8 +18,6 @@ pub const MAX_EVENTS_PER_INBOX: usize = 16;
 pub const DEFAULT_REPORT_BUDGET: usize = 16;
 pub const REPEAT_DELAY_TICKS: u64 = 400 / timer.MILLISECONDS_PER_TICK;
 pub const REPEAT_INTERVAL_TICKS: u64 = 40 / timer.MILLISECONDS_PER_TICK;
-pub const HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING = true;
-pub const EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 
 const NO_EVENT_INDEX: u8 = std.math.maxInt(u8);
 const NO_INBOX_INDEX: u8 = std.math.maxInt(u8);
@@ -95,12 +92,6 @@ const EventSlot = struct {
 };
 
 const EventSlotArray = [MAX_QUEUED_EVENTS]EventSlot;
-const heap_backed_event_slots = builtin.target.os.tag == .freestanding and HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING;
-const EventSlotBacking = if (heap_backed_event_slots) ?*EventSlotArray else EventSlotArray;
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
-else
-    struct {};
 
 const Inbox = struct {
     in_use: bool = false,
@@ -140,7 +131,7 @@ pub const Router = struct {
     active_inbox_tail: u8 = NO_INBOX_INDEX,
     wake_head: u8 = NO_INBOX_INDEX,
     wake_tail: u8 = NO_INBOX_INDEX,
-    event_slots: EventSlotBacking = if (heap_backed_event_slots) null else @as([MAX_QUEUED_EVENTS]EventSlot, @splat(.{})),
+    event_slots: table_backing.Lazy(EventSlotArray, null) = .{},
     free_event_head: u8 = NO_EVENT_INDEX,
     event_pool_initialized: bool = false,
     queued_event_count: u8 = 0,
@@ -163,44 +154,27 @@ pub const Router = struct {
 
     comptime {
         if (@sizeOf(?Repeat) > 64) @compileError("keyboard repeat exceeds its bounded single-key state");
-        if (heap_backed_event_slots and @sizeOf(EventSlotBacking) > EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES) {
-            @compileError("heap-backed input event slots exceed their handle size ceiling");
-        }
     }
 
     fn eventSlots(self: *Router) ?*EventSlotArray {
-        if (comptime heap_backed_event_slots) return self.event_slots;
-        return &self.event_slots;
+        return self.event_slots.get();
     }
 
     fn ensureEventSlots(self: *Router) ?*EventSlotArray {
         if (self.eventSlots()) |slots| return slots;
-        if (comptime heap_backed_event_slots) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(EventSlotArray)) orelse return null;
-            const slots: *EventSlotArray = @ptrCast(@alignCast(allocation));
-            initializeEventSlots(slots);
-            self.free_event_head = 0;
-            self.queued_event_count = 0;
-            self.event_pool_initialized = true;
-            self.event_slots = slots;
-            return slots;
-        }
-        return &self.event_slots;
+        const slots = self.event_slots.ensure() catch return null;
+        initializeEventSlots(slots);
+        self.free_event_head = 0;
+        self.queued_event_count = 0;
+        self.event_pool_initialized = true;
+        return slots;
     }
 
     pub fn deinit(self: *Router) void {
         self.clearTrustedEntry();
         self.routing_epoch +|= 1;
         self.dropAllInboxes();
-        if (comptime heap_backed_event_slots) {
-            if (self.event_slots) |slots| {
-                @memset(std.mem.asBytes(slots), 0);
-                kernel_memory.kfree(@ptrCast(slots));
-                self.event_slots = null;
-            }
-        } else {
-            self.event_slots = @as([MAX_QUEUED_EVENTS]EventSlot, @splat(.{}));
-        }
+        self.event_slots.release();
         self.free_event_head = NO_EVENT_INDEX;
         self.event_pool_initialized = false;
         self.queued_event_count = 0;

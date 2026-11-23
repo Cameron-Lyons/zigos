@@ -599,7 +599,7 @@ test "offset chunk cursors retain whole-manifest corruption checks" {
     const version = store.version(result.version_id).?;
     const blob = store.versionBlob(version).?;
     const first_chunk_slot = store.blobChunkSlotIndex(blob, 0).?;
-    store.chunkSlotAt(first_chunk_slot).chunk.payload[0] ^= 1;
+    store.chunkSlotAt(first_chunk_slot).chunk.payload.?[0] ^= 1;
     // Seeking to the second page or EOF must verify even the skipped prefix.
     try std.testing.expectError(error.CorruptBlob, store.versionChunkCursorAt(version, MAX_CHUNK_BYTES));
     try std.testing.expectError(error.CorruptBlob, store.versionChunkCursorAt(version, bytes.len));
@@ -667,12 +667,12 @@ test "object store verifies blob backend corruption before serving payloads" {
 
     const blob = &store.blobSlotAtConst(version_record.blob_slot_index).blob;
     const chunk_slot_index = store.blobChunkSlotIndex(blob, 0).?;
-    store.chunkSlotAt(chunk_slot_index).chunk.payload[0] ^= 0xFF;
+    store.chunkSlotAt(chunk_slot_index).chunk.payload.?[0] ^= 0xFF;
     try std.testing.expectError(error.CorruptBlob, store.versionPayload(version_record));
     try std.testing.expectError(error.CorruptBlob, store.putBlob(result.blob_address, "checked"));
     try std.testing.expectEqual(@as(u16, 1), blob.refCount());
 
-    store.chunkSlotAt(chunk_slot_index).chunk.payload[0] ^= 0xFF;
+    store.chunkSlotAt(chunk_slot_index).chunk.payload.?[0] ^= 0xFF;
     store.blobSlotAt(version_record.blob_slot_index).blob.chunk_slot_indexes[0] = std.math.maxInt(BlobChunkSlotIndex);
     try std.testing.expectError(error.CorruptBlob, store.versionPayload(version_record));
 }

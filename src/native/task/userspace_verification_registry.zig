@@ -95,9 +95,8 @@ pub fn indexForRole(bundle_id: []const u8) ?usize {
     if (spec_index >= verification_boot_image_specs.len) {
         native_util.impossibleByInvariant("verification boot bundle id index points outside registry specs");
     }
-    if (!std.mem.eql(u8, verification_boot_image_specs[spec_index].bundleId(), bundle_id)) {
-        native_util.impossibleByInvariant("verification boot bundle id index points at the wrong registry spec");
-    }
+    // A spec under the same hashed key with another bundle id is a collision.
+    if (!std.mem.eql(u8, verification_boot_image_specs[spec_index].bundleId(), bundle_id)) return null;
     return spec_index;
 }
 
@@ -109,7 +108,7 @@ fn buildBundleIndex() id_index.Table(BUNDLE_INDEX_CAPACITY) {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(BUNDLE_INDEX_CAPACITY);
     for (verification_boot_image_specs, 0..) |spec, spec_index| {
-        id_index.insert(BUNDLE_INDEX_CAPACITY, &index, production_registry.bundleIndexKey(spec.bundleId()), spec_index, "verification boot bundle id index covers userspace registry");
+        id_index.insertAbsent(BUNDLE_INDEX_CAPACITY, &index, production_registry.bundleIndexKey(spec.bundleId()), spec_index, "verification boot bundle id index covers userspace registry");
     }
     return index;
 }

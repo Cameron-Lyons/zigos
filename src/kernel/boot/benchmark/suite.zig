@@ -1004,8 +1004,7 @@ fn trustBenchmarkPackagePublisher(service_ref: *package_service.Service) void {
 
 fn signedPackageBundle(template: manifest.BundleManifest) manifest.BundleManifest {
     var bundle = template;
-    bundle.signature = signing.signWithDefaultRegistry(
-        .ed25519,
+    bundle.signature = signing.sign(
         package_signer_identity,
         &package_service.digestBundle(bundle),
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);

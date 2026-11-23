@@ -205,13 +205,8 @@ pub const Catalog = struct {
         return Catalog{};
     }
 
-    pub fn initializeAllocated(self: *Catalog) void {
-        @memset(std.mem.asBytes(self), 0);
-        self.images.free_head = indexed_arena.reusableNoIndex(MAX_IMAGES);
-    }
-
     pub fn reset(self: *Catalog) void {
-        self.initializeAllocated();
+        @memset(std.mem.asBytes(self), 0);
     }
 
     pub fn register(self: *Catalog, request: ImageRegisterRequest) Error!*const ImageRecord {
@@ -337,6 +332,8 @@ pub const Catalog = struct {
             if (!imageMatchesRequest(existing, request, embedded, origin)) return error.ImageConflict;
             return existing;
         }
+        // Another bundle id already holds this hashed key.
+        if (self.bundle_index.contains(bundleIndexKey(request.bundle.bundle_id))) return error.ImageConflict;
 
         const executable_image = embedded orelse return error.EmbeddedArtifactRequired;
         const image_id = self.nextReservableImageId() orelse return error.ImageTableFull;
@@ -365,7 +362,7 @@ pub const Catalog = struct {
         const slot_index = self.images.reserveIndex(image.id) orelse return error.ImageTableFull;
         const slot = &self.images.slots[slot_index];
         slot.image = image;
-        self.bundle_index.insert(bundleIndexKey(slot.image.bundleIdSlice()), slot_index);
+        self.bundle_index.insertAbsent(bundleIndexKey(slot.image.bundleIdSlice()), slot_index);
         return &slot.image;
     }
 
@@ -714,9 +711,9 @@ fn signedTestBundle(bundle_id: []const u8, display_name: []const u8) !manifest.B
     return bundle;
 }
 
-test "allocated userspace catalog initialization preserves empty catalog invariants" {
+test "a zero-filled userspace catalog is empty" {
     var catalog: Catalog = undefined;
-    catalog.initializeAllocated();
+    @memset(std.mem.asBytes(&catalog), 0);
 
     try std.testing.expectEqual(@as(usize, 0), catalog.imageCount());
     const bundle = try signedTestBundle("app.allocated-catalog", "Allocated Catalog");
@@ -734,6 +731,33 @@ test "allocated userspace catalog initialization preserves empty catalog invaria
     try std.testing.expectEqual(@as(u64, 1), image.id);
     try std.testing.expectEqual(image.id, catalog.findById(image.id).?.id);
     try std.testing.expectEqualStrings(bundle.bundle_id, catalog.findByBundleId(bundle.bundle_id).?.bundleIdSlice());
+}
+
+test "a bundle-key hash collision is a lookup miss and a registration conflict" {
+    var catalog = Catalog.init();
+    const first = try signedTestBundle("app.collision-first", "Collision First");
+    const second = try signedTestBundle("app.collision-second", "Collision Second");
+    const image_bytes = makeSyntheticElf64ForTest(0x4000_5000, 2, 2);
+    const image = try catalog.registerEmbeddedArtifact(.{
+        .bundle = first,
+        .component_class = .app_component,
+        .initial_component = .{ .label = "main", .entry = "app.main" },
+        .elf_file = embedded_file.File.fromBytes(&image_bytes),
+    });
+    // Model a collision: the second bundle's key resolves to the first image.
+    const slot_index = catalog.bundle_index.lookup(bundleIndexKey(first.bundle_id)).?;
+    catalog.bundle_index.remove(bundleIndexKey(first.bundle_id));
+    catalog.bundle_index.insert(bundleIndexKey(second.bundle_id), slot_index);
+
+    try std.testing.expect(catalog.findByBundleId(second.bundle_id) == null);
+    try std.testing.expectError(error.ImageConflict, catalog.registerEmbeddedArtifact(.{
+        .bundle = second,
+        .component_class = .app_component,
+        .initial_component = .{ .label = "main", .entry = "app.main" },
+        .elf_file = embedded_file.File.fromBytes(&image_bytes),
+    }));
+    try std.testing.expectEqual(@as(usize, 1), catalog.imageCount());
+    try std.testing.expectEqual(image.id, catalog.findById(image.id).?.id);
 }
 
 test "userspace image launch records bundle provenance and isolated process state" {

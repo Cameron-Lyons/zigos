@@ -40,6 +40,7 @@ const peer_quote = @import("../services/peer_attestation_worker.zig");
 const network_driver = @import("../drivers/network_driver_task.zig");
 const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
+const table_backing = @import("../core/table_backing.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service_mod = @import("../task/task_runtime_service.zig");
 const userspace_flags = @import("../task/userspace_flags.zig");
@@ -1588,11 +1589,11 @@ test "session reset execution preflight preserves owned services until durable t
         };
 
         fn rejected(self: *@This(), manager: *SessionManager, expected: anyerror) !void {
-            const before = try std.testing.allocator.dupe(u8, std.mem.asBytes(manager));
+            const before = try table_backing.deepBytes(std.testing.allocator, manager);
             defer std.testing.allocator.free(before);
             const channels_before = transport.global;
             try std.testing.expectError(expected, manager.requireResetExecutionQuiescent());
-            try std.testing.expectEqualSlices(u8, before, std.mem.asBytes(manager));
+            try table_backing.expectDeepBytes(before, manager);
             try std.testing.expectEqualSlices(u8, std.mem.asBytes(&channels_before), std.mem.asBytes(&transport.global));
             try std.testing.expectEqual(@as(usize, 0), self.quiesced);
         }

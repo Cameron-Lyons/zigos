@@ -1,9 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    @import("../memory/memory.zig")
-else
-    struct {};
+const table_backing = @import("../../native/core/table_backing.zig");
 const spin = @import("../utils/spin.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
@@ -99,7 +96,6 @@ pub const PCIDevice = struct {
 
 const PCI_DEVICE_SIZE_CEILING_BYTES: usize = 20;
 const PCI_INVENTORY_SIZE_CEILING_BYTES: usize = 5_120;
-const PCI_INVENTORY_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 
 pub const MemoryBarWidth = enum {
     bits32,
@@ -199,10 +195,7 @@ pub const PCI_VENDOR_INTEL: u16 = 0x8086;
 pub const PCI_DEVICE_INTEL_I225_LM: u16 = 0x15F2;
 
 const PciInventory = [PCI_INVENTORY_CAPACITY]PCIDevice;
-const heap_backed_pci_inventory = builtin.target.os.tag == .freestanding;
-const PciInventoryBacking = if (heap_backed_pci_inventory) ?*PciInventory else PciInventory;
-
-var boot_inventory: PciInventoryBacking = if (heap_backed_pci_inventory) null else undefined;
+var boot_inventory: table_backing.Lazy(PciInventory, null) = .{};
 var boot_inventory_count: usize = 0;
 var boot_inventory_initialized = false;
 var boot_inventory_valid = false;
@@ -221,9 +214,6 @@ comptime {
     }
     if (@sizeOf(PciInventory) > PCI_INVENTORY_SIZE_CEILING_BYTES) {
         @compileError("cached PCI inventory exceeds its compact size ceiling");
-    }
-    if (heap_backed_pci_inventory and @sizeOf(PciInventoryBacking) > PCI_INVENTORY_HANDLE_SIZE_CEILING_BYTES) {
-        @compileError("heap-backed PCI inventory exceeds its handle size ceiling");
     }
 }
 
@@ -471,29 +461,15 @@ fn isPciBridge(device_info: PCIDevice) bool {
 }
 
 fn bootInventory() ?*PciInventory {
-    if (comptime heap_backed_pci_inventory) return boot_inventory;
-    return &boot_inventory;
+    return boot_inventory.get();
 }
 
 fn ensureBootInventory() ?*PciInventory {
-    if (bootInventory()) |inventory| return inventory;
-    if (comptime heap_backed_pci_inventory) {
-        const allocation = kernel_memory.kmalloc(@sizeOf(PciInventory)) orelse return null;
-        const inventory: *PciInventory = @ptrCast(@alignCast(allocation));
-        boot_inventory = inventory;
-        return inventory;
-    }
-    return &boot_inventory;
+    return boot_inventory.ensure() catch null;
 }
 
 fn releaseBootInventory() void {
-    if (comptime heap_backed_pci_inventory) {
-        if (boot_inventory) |inventory| {
-            @memset(std.mem.asBytes(inventory), 0);
-            kernel_memory.kfree(@ptrCast(inventory));
-            boot_inventory = null;
-        }
-    }
+    boot_inventory.release();
 }
 
 fn appendBootDevice(inventory: *PciInventory, device_info: PCIDevice) bool {

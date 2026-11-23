@@ -946,7 +946,7 @@ fn packageActiveRevisionMutationGate() bool {
     var port = package_service.PackagePort.init(&service, &capabilities);
 
     var v1 = @import("../policy/manifest_fixtures.zig").notesBundle();
-    v1.signature = signing.signWithDefaultRegistry(.ed25519, signer_identity, &package_service.digestBundle(v1)) catch return false;
+    v1.signature = signing.sign(signer_identity, &package_service.digestBundle(v1)) catch return false;
     const installed = port.install(authority, .{
         .bundle = v1,
         .source_identity = "store:zigos",
@@ -957,7 +957,7 @@ fn packageActiveRevisionMutationGate() bool {
     const stale_rollback = package_service.rollbackRequestForActive(service.find("app.notes") orelse return false);
     var v2 = v1;
     v2.version_minor = 1;
-    v2.signature = signing.signWithDefaultRegistry(.ed25519, signer_identity, &package_service.digestBundle(v2)) catch return false;
+    v2.signature = signing.sign(signer_identity, &package_service.digestBundle(v2)) catch return false;
     const updated = port.install(authority, .{
         .bundle = v2,
         .source_identity = "store:zigos",
@@ -3475,7 +3475,7 @@ fn packageOffboardingEvidence() PackageOffboardingEvidence {
     package_service.testingTrustPublisher(&service, signer_identity, "zigos.dev") catch return evidence;
 
     var bundle = @import("../policy/manifest_fixtures.zig").notesBundle();
-    bundle.signature = signing.signWithDefaultRegistry(.ed25519, signer_identity, &package_service.digestBundle(bundle)) catch return evidence;
+    bundle.signature = signing.sign(signer_identity, &package_service.digestBundle(bundle)) catch return evidence;
     const installed = service.install(.{
         .bundle = bundle,
         .source_identity = "store:zigos",

@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const binary_cursor = @import("binary_cursor");
 const crypto_hash = @import("../../core/crypto_hash.zig");
@@ -7,10 +6,7 @@ const indexed_arena = @import("../../core/indexed_arena.zig");
 const manifest = @import("../../policy/manifest.zig");
 const native_util = @import("../../core/util.zig");
 const signing = @import("../../core/signing.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    @import("../../../kernel/memory/memory.zig")
-else
-    struct {};
+const table_backing = @import("../../core/table_backing.zig");
 
 pub const MAX_OBJECTS: usize = 192;
 pub const MAX_VERSIONS: usize = 768;
@@ -58,17 +54,15 @@ pub const BLOB_RECORD_SIZE_CEILING_BYTES: usize = 92;
 pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 92;
 pub const OBJECT_SLOT_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_SLOT_SIZE_CEILING_BYTES: usize = 288;
-pub const CHUNK_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 48 else 4_130;
+pub const CHUNK_RECORD_SIZE_CEILING_BYTES: usize = 48;
 pub const CHUNK_SLOT_SIZE_CEILING_BYTES: usize = CHUNK_RECORD_SIZE_CEILING_BYTES;
-pub const STORE_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 388_112 else 3_000_592;
+pub const STORE_SIZE_CEILING_BYTES: usize = 388_112;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
 const CHUNK_INDEX_CAPACITY: usize = MAX_CHUNKS * 2;
-const BLOB_PAGE_SIZE: usize = 64;
-const CHUNK_PAGE_SIZE: usize = 32;
-const heap_backed_chunk_payloads = builtin.target.os.tag == .freestanding;
-const ChunkPayload = if (heap_backed_chunk_payloads) ?[*]u8 else [MAX_CHUNK_BYTES]u8;
+// Chunk payloads are heap allocated at their exact length on every target.
+const ChunkPayload = ?[*]u8;
 
 comptime {
     if (MAX_METADATA_LABEL_BYTES > std.math.maxInt(u8) or
@@ -113,8 +107,6 @@ pub const StoreConfig = struct {
         if (config.version_index_capacity < config.max_versions) @compileError("version index capacity must cover version slots");
         if (config.blob_index_capacity < config.max_blobs) @compileError("blob index capacity must cover blob slabs");
         if (config.chunk_index_capacity < config.max_chunks) @compileError("chunk index capacity must cover chunk slots");
-        if (config.max_blobs % BLOB_PAGE_SIZE != 0) @compileError("blob slab capacity must be a whole number of pages");
-        if (config.max_chunks % CHUNK_PAGE_SIZE != 0) @compileError("chunk slab capacity must be a whole number of pages");
     }
 };
 
@@ -403,43 +395,29 @@ pub const ChunkRecord = struct {
         if (payload_len > MAX_CHUNK_BYTES) {
             native_util.impossibleByInvariant("object store chunk payload length fits its backing");
         }
-        if (comptime heap_backed_chunk_payloads) {
-            if (payload_len == 0) return "";
-            const payload = self.payload orelse
-                native_util.impossibleByInvariant("live object store chunks retain payload backing");
-            return payload[0..payload_len];
-        }
-        return self.payload[0..payload_len];
+        if (payload_len == 0) return "";
+        const payload = self.payload orelse
+            native_util.impossibleByInvariant("live object store chunks retain payload backing");
+        return payload[0..payload_len];
     }
 
     fn writePayload(self: *ChunkRecord, bytes: []const u8) Error!void {
         if (bytes.len > MAX_CHUNK_BYTES) return error.PayloadTooLarge;
-        if (comptime heap_backed_chunk_payloads) {
-            if (self.payload != null) {
-                native_util.impossibleByInvariant("object store chunk payload backing is assigned once");
-            }
-            if (bytes.len != 0) {
-                const allocation = kernel_memory.kmalloc(bytes.len) orelse return error.NoSpaceLeft;
-                const payload: [*]u8 = @ptrCast(allocation);
-                @memcpy(payload[0..bytes.len], bytes);
-                self.payload = payload;
-            }
-        } else {
-            @memcpy(self.payload[0..bytes.len], bytes);
-            @memset(self.payload[bytes.len..], 0);
+        if (self.payload != null) {
+            native_util.impossibleByInvariant("object store chunk payload backing is assigned once");
+        }
+        if (bytes.len != 0) {
+            const payload = table_backing.allocBytes(bytes.len) orelse return error.NoSpaceLeft;
+            @memcpy(payload, bytes);
+            self.payload = payload.ptr;
         }
         self.state.payload_len = @intCast(bytes.len);
     }
 
     fn releasePayload(self: *ChunkRecord) void {
-        if (comptime heap_backed_chunk_payloads) {
-            if (self.payload) |payload| {
-                @memset(payload[0..self.payloadLen()], 0);
-                kernel_memory.kfree(@ptrCast(payload));
-                self.payload = null;
-            }
-        } else {
-            @memset(&self.payload, 0);
+        if (self.payload) |payload| {
+            table_backing.freeBytes(payload[0..self.payloadLen()]);
+            self.payload = null;
         }
         self.state.payload_len = 0;
     }
@@ -599,7 +577,7 @@ pub const ChunkSlot = struct {
     chunk: ChunkRecord = .{
         .address = crypto_hash.zero_digest,
         .state = .{},
-        .payload = if (heap_backed_chunk_payloads) null else @as([MAX_CHUNK_BYTES]u8, @splat(0)),
+        .payload = null,
     },
 
     pub inline fn arenaInUse(self: *const ChunkSlot) bool {
@@ -715,13 +693,11 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         const STORE_VERSION_INDEX_CAPACITY = config.version_index_capacity;
         const STORE_BLOB_INDEX_CAPACITY = config.blob_index_capacity;
         const STORE_CHUNK_INDEX_CAPACITY = config.chunk_index_capacity;
-        const STORE_BLOB_PAGE_COUNT = config.max_blobs / BLOB_PAGE_SIZE;
-        const STORE_CHUNK_PAGE_COUNT = config.max_chunks / CHUNK_PAGE_SIZE;
         const ObjectArena = indexed_arena.IndexedArenaWithKeyOptions(ids.ObjectId, ObjectSlot, MAX_STORE_OBJECTS, STORE_OBJECT_INDEX_CAPACITY, objectSlotId, .{ .track_dirty = true, .store_keys = false });
         const ObjectTypeIndex = ObjectTypeIndexWith(MAX_STORE_OBJECTS);
         const VersionArena = indexed_arena.IndexedArenaWithKeyOptions(ids.VersionId, VersionSlot, MAX_STORE_VERSIONS, STORE_VERSION_INDEX_CAPACITY, versionSlotId, .{ .track_dirty = true, .store_keys = false });
-        const BlobArena = indexed_arena.PagedIndexedArenaWithOptions(BlobSlot, BLOB_PAGE_SIZE, STORE_BLOB_PAGE_COUNT, STORE_BLOB_INDEX_CAPACITY, blobSlotIndexId, .{ .track_generations = false, .store_keys = false });
-        const ChunkArena = indexed_arena.PagedIndexedArenaWithOptions(ChunkSlot, CHUNK_PAGE_SIZE, STORE_CHUNK_PAGE_COUNT, STORE_CHUNK_INDEX_CAPACITY, chunkSlotIndexId, .{ .track_generations = false, .store_keys = false });
+        const BlobArena = indexed_arena.IndexedArenaWithKeyOptions(u64, BlobSlot, MAX_STORE_BLOBS, STORE_BLOB_INDEX_CAPACITY, blobSlotIndexId, .{ .store_keys = false });
+        const ChunkArena = indexed_arena.IndexedArenaWithKeyOptions(u64, ChunkSlot, MAX_STORE_CHUNKS, STORE_CHUNK_INDEX_CAPACITY, chunkSlotIndexId, .{ .store_keys = false });
 
         pub const VersionChunkCursor = struct {
             store: *const Self,
@@ -1834,5 +1810,6 @@ test "store reset scrubs live records before retaining arena capacity" {
     try std.testing.expect(object_slot.object.id.isZero());
     try std.testing.expectEqual(@as(u8, 0), version_slot.version.metadata.label_len);
     try std.testing.expectEqual(@as(u16, 0), blob_slot.blob.refCount());
-    try std.testing.expectEqualSlices(u8, &(@as([6]u8, @splat(0))), chunk_slot.chunk.payload[0..6]);
+    try std.testing.expect(chunk_slot.chunk.payload == null);
+    try std.testing.expectEqual(@as(usize, 0), chunk_slot.chunk.payloadLen());
 }

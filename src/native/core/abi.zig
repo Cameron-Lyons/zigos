@@ -481,10 +481,6 @@ pub fn taskFlagsResourceClass(flags: u16) u8 {
     return @intCast((flags & TASK_RESOURCE_CLASS_MASK) >> TASK_RESOURCE_CLASS_SHIFT);
 }
 
-pub fn serviceFlagsHas(flags: u16, mask: u16) bool {
-    return (flags & mask) != 0;
-}
-
 pub fn isCanonicalSurfacePresentation(presentation: *const SurfacePresentation) bool {
     return presentation.surface_id != 0 and presentation.revision != 0;
 }
@@ -542,7 +538,6 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expectEqual(@as(usize, 104), @sizeOf(SharedMemoryCreateResponse));
     try std.testing.expect(taskFlagsHas(TASK_FLAG_LOCAL_ONLY, TASK_FLAG_LOCAL_ONLY));
     try std.testing.expectEqual(@as(u8, 3), taskFlagsResourceClass(@as(u16, 3) << TASK_RESOURCE_CLASS_SHIFT));
-    try std.testing.expect(serviceFlagsHas(SERVICE_CONNECTION_FLAG_USERSPACE_OWNER, SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
     const packet = inputPacket(InputByte.text, 'a');
     try std.testing.expectEqual(InputByte.text, packet[0]);
     try std.testing.expectEqual(@as(u8, 'a'), packet[1]);

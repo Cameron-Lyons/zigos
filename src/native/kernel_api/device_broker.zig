@@ -1,22 +1,14 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const userspace_layout = @import("../core/userspace_layout.zig");
-const root = @import("root");
-
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 pub const MAX_DEVICES: usize = 4;
 pub const MAX_DEVICE_MMIO_WINDOWS: usize = 4;
 pub const MAX_DMA_WINDOWS: usize = 8;
 pub const MAX_DMA_PROGRAMS: usize = MAX_DEVICES * 2;
-pub const HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING = true;
 pub const DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES: usize = 3_408;
-pub const DMA_PROGRAM_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 
 comptime {
     if (userspace_layout.DEVICE_MMIO_SLOT_COUNT < MAX_DEVICES) {
@@ -203,14 +195,13 @@ const DmaProgramSlot = struct {
     fault_count: u64 = 0,
 };
 
+const ControllerSlotArena = indexed_arena.IndexedArena(ControllerSlot, MAX_DEVICES, MAX_DEVICES * 2, controllerSlotKey);
+
+// Controller slots plus a FIFO of unpublished slots, the oldest of which is
+// reclaimed when the table is full. Reserving or removing a slot also clears
+// its MMIO window set.
 const ControllerArena = struct {
-    slots: [MAX_DEVICES]ControllerSlot = @as([MAX_DEVICES]ControllerSlot, @splat(ControllerSlot{})),
-    primary_index: indexed_arena.UniqueIndex(MAX_DEVICES * 2) = indexed_arena.UniqueIndex(MAX_DEVICES * 2).init(),
-    slot_keys: [MAX_DEVICES]u64 = @as([MAX_DEVICES]u64, @splat(0)),
-    free_next: [MAX_DEVICES]?ControllerIndex = @as([MAX_DEVICES]?ControllerIndex, @splat(null)),
-    free_head: ?ControllerIndex = null,
-    next_unclaimed_index: ControllerCount = 0,
-    used_count: ControllerCount = 0,
+    arena: ControllerSlotArena = .{},
     unpublished_next: [MAX_DEVICES]?ControllerIndex = @as([MAX_DEVICES]?ControllerIndex, @splat(null)),
     unpublished_prev: [MAX_DEVICES]?ControllerIndex = @as([MAX_DEVICES]?ControllerIndex, @splat(null)),
     unpublished_queued: [MAX_DEVICES]bool = @as([MAX_DEVICES]bool, @splat(false)),
@@ -218,85 +209,44 @@ const ControllerArena = struct {
     unpublished_tail: ?ControllerIndex = null,
     unpublished_count: ControllerCount = 0,
 
-    pub fn init() ControllerArena {
-        return .{};
-    }
-
     pub fn reset(self: *ControllerArena) void {
-        for (&self.slots) |*slot| {
-            resetControllerSlot(slot);
-        }
-        self.primary_index.reset();
-        self.slot_keys = @as([MAX_DEVICES]u64, @splat(0));
-        self.free_next = @as([MAX_DEVICES]?ControllerIndex, @splat(null));
-        self.free_head = null;
-        self.next_unclaimed_index = 0;
-        self.used_count = 0;
-        self.unpublished_next = @as([MAX_DEVICES]?ControllerIndex, @splat(null));
-        self.unpublished_prev = @as([MAX_DEVICES]?ControllerIndex, @splat(null));
-        self.unpublished_queued = @as([MAX_DEVICES]bool, @splat(false));
-        self.unpublished_head = null;
-        self.unpublished_tail = null;
-        self.unpublished_count = 0;
+        self.* = .{};
     }
 
     pub fn reserve(self: *ControllerArena, key: u64) ?*ControllerSlot {
-        const slot_index = self.reserveIndex(key) orelse return null;
-        return &self.slots[slot_index];
+        return &self.arena.slots[self.reserveIndex(key) orelse return null];
     }
 
     pub fn reserveIndex(self: *ControllerArena, key: u64) ?usize {
-        if (key == 0 or self.primary_index.lookup(key) != null) return null;
-        const slot_index = self.popFreeIndex() orelse return null;
-        self.claimSlot(key, slot_index);
+        const slot_index = self.arena.reserveIndex(key) orelse return null;
+        clearMmioSet(slot_index);
         return slot_index;
     }
 
     pub fn reserveAtIndex(self: *ControllerArena, key: u64, slot_index: usize) ?*ControllerSlot {
-        const reserved_index = self.reserveIndexAt(key, slot_index) orelse return null;
-        return &self.slots[reserved_index];
+        return &self.arena.slots[self.reserveIndexAt(key, slot_index) orelse return null];
     }
 
     pub fn reserveIndexAt(self: *ControllerArena, key: u64, slot_index: usize) ?usize {
-        if (key == 0 or slot_index >= MAX_DEVICES or self.primary_index.lookup(key) != null) return null;
-        if (!self.claimFreeIndex(slot_index)) return null;
-        self.claimSlot(key, slot_index);
-        return slot_index;
+        const reserved_index = self.arena.reserveIndexAt(key, slot_index) orelse return null;
+        clearMmioSet(reserved_index);
+        return reserved_index;
     }
 
     pub fn slotIndexOf(self: *const ControllerArena, key: u64) ?usize {
-        if (key == 0) return null;
-        const slot_index = self.primary_index.lookup(key) orelse return null;
-        if (slot_index >= MAX_DEVICES) native_util.impossibleByInvariant("controller arena index points outside slots");
-        const slot = &self.slots[slot_index];
-        if (!slot.in_use) native_util.impossibleByInvariant("controller arena index points at a free slot");
-        if (self.slot_keys[slot_index] != key) native_util.impossibleByInvariant("controller arena index points at the wrong key");
-        return slot_index;
-    }
-
-    pub fn get(self: *ControllerArena, key: u64) ?*ControllerSlot {
-        const slot_index = self.slotIndexOf(key) orelse return null;
-        return &self.slots[slot_index];
+        return self.arena.slotIndexOf(key);
     }
 
     pub fn removeIndex(self: *ControllerArena, slot_index: usize) bool {
-        if (slot_index >= MAX_DEVICES) return false;
-        const slot = &self.slots[slot_index];
-        if (!slot.in_use) return false;
-        const key = self.slot_keys[slot_index];
-        if (key != 0) self.primary_index.remove(key);
+        if (slot_index >= MAX_DEVICES or !self.arena.slots[slot_index].in_use) return false;
         self.detachUnpublishedIndex(slot_index);
         clearMmioSet(slot_index);
-        resetControllerSlot(slot);
-        self.slot_keys[slot_index] = 0;
-        self.used_count -= 1;
-        self.pushFreeIndex(slot_index);
-        return true;
+        return self.arena.removeIndex(slot_index);
     }
 
     pub fn markUnpublished(self: *ControllerArena, slot_index: usize) void {
         if (slot_index >= MAX_DEVICES) native_util.impossibleByInvariant("controller unpublished slot outside table");
-        const slot = &self.slots[slot_index];
+        const slot = &self.arena.slots[slot_index];
         if (!slot.in_use) native_util.impossibleByInvariant("controller unpublished queue points at a free slot");
         if (slot.published) native_util.impossibleByInvariant("controller unpublished queue points at a published slot");
         if (self.unpublished_queued[slot_index]) return;
@@ -321,77 +271,18 @@ const ControllerArena = struct {
     pub fn reclaimUnpublishedIndex(self: *ControllerArena) ?usize {
         while (self.unpublished_head) |slot_index| {
             self.detachUnpublishedIndex(slot_index);
-            const slot = &self.slots[slot_index];
+            const slot = &self.arena.slots[slot_index];
             if (slot.in_use and !slot.published) return @intCast(slot_index);
         }
         return null;
     }
 
     pub fn countInUse(self: *const ControllerArena) usize {
-        return self.used_count;
+        return self.arena.countInUse();
     }
 
     pub fn unpublishedCount(self: *const ControllerArena) usize {
         return self.unpublished_count;
-    }
-
-    fn claimSlot(self: *ControllerArena, key: u64, slot_index: usize) void {
-        resetControllerSlot(&self.slots[slot_index]);
-        clearMmioSet(slot_index);
-        self.slots[slot_index].in_use = true;
-        self.slot_keys[slot_index] = key;
-        self.primary_index.insert(key, slot_index);
-        self.used_count += 1;
-    }
-
-    fn popFreeIndex(self: *ControllerArena) ?usize {
-        if (self.free_head) |slot_index| {
-            self.free_head = self.free_next[slot_index];
-            self.free_next[slot_index] = null;
-            return @intCast(slot_index);
-        }
-
-        if (self.next_unclaimed_index >= MAX_DEVICES) return null;
-        const slot_index: usize = self.next_unclaimed_index;
-        self.next_unclaimed_index += 1;
-        return slot_index;
-    }
-
-    fn pushFreeIndex(self: *ControllerArena, slot_index: usize) void {
-        self.free_next[slot_index] = self.free_head;
-        self.free_head = @intCast(slot_index);
-    }
-
-    fn claimFreeIndex(self: *ControllerArena, slot_index: usize) bool {
-        if (slot_index >= MAX_DEVICES or self.slots[slot_index].in_use) return false;
-        if (slot_index >= self.next_unclaimed_index) {
-            while (self.next_unclaimed_index < slot_index) : (self.next_unclaimed_index += 1) {
-                self.pushFreeIndex(self.next_unclaimed_index);
-            }
-            self.next_unclaimed_index = @intCast(slot_index + 1);
-            return true;
-        }
-        return self.unlinkFreeIndex(slot_index);
-    }
-
-    fn unlinkFreeIndex(self: *ControllerArena, slot_index: usize) bool {
-        var previous: ?ControllerIndex = null;
-        var current = self.free_head;
-        while (current) |current_index| {
-            const next = self.free_next[current_index];
-            if (current_index == slot_index) {
-                if (previous) |previous_index| {
-                    self.free_next[previous_index] = next;
-                } else {
-                    self.free_head = next;
-                }
-                self.free_next[current_index] = null;
-                return true;
-            }
-            previous = current_index;
-            current = next;
-        }
-        return false;
     }
 
     fn detachUnpublishedIndex(self: *ControllerArena, slot_index: usize) void {
@@ -415,10 +306,10 @@ const ControllerArena = struct {
     }
 };
 
-const freestanding_controller_arena_budget_bytes: usize = 512;
+const controller_arena_budget_bytes: usize = 512;
 comptime {
-    if (builtin.target.os.tag == .freestanding and @sizeOf(ControllerArena) > freestanding_controller_arena_budget_bytes) {
-        @compileError("freestanding controller arena exceeds its static memory budget");
+    if (@sizeOf(ControllerArena) > controller_arena_budget_bytes) {
+        @compileError("controller arena exceeds its static memory budget");
     }
 }
 
@@ -431,31 +322,14 @@ const MmioBacking = struct {
     slots: [MAX_DEVICES]MmioWindowSet = @as([MAX_DEVICES]MmioWindowSet, @splat(.{})),
 };
 
-const heap_backed_mmio_windows = builtin.target.os.tag == .freestanding;
-const MmioBackingStorage = if (heap_backed_mmio_windows) ?*MmioBacking else MmioBacking;
-var mmio_windows: MmioBackingStorage = if (heap_backed_mmio_windows) null else .{};
+var mmio_windows: table_backing.Lazy(MmioBacking, null) = .{};
 
 const DmaProgramArena = indexed_arena.IndexedArenaWithKey(u64, DmaProgramSlot, MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS * 2, dmaProgramSlotId);
 const DmaProgramDeviceIndex = indexed_arena.MultimapIndex(MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS * 2);
-const heap_backed_dma_programs = builtin.target.os.tag == .freestanding and HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING;
 
 pub const DmaProgramBacking = struct {
     programs: DmaProgramArena = DmaProgramArena.init(),
     device_index: DmaProgramDeviceIndex = DmaProgramDeviceIndex.init(),
-
-    fn init() DmaProgramBacking {
-        return .{};
-    }
-
-    fn initializeAllocated(self: *DmaProgramBacking) void {
-        initializeDmaProgramArena(&self.programs);
-        initializeDmaProgramDeviceIndex(&self.device_index);
-    }
-
-    fn reset(self: *DmaProgramBacking) void {
-        self.programs.reset();
-        self.device_index.reset();
-    }
 
     comptime {
         if (@sizeOf(@This()) > DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES) {
@@ -464,83 +338,24 @@ pub const DmaProgramBacking = struct {
     }
 };
 
-const DmaProgramBackingStorage = if (heap_backed_dma_programs) ?*DmaProgramBacking else DmaProgramBacking;
-
-pub const dma_program_indexing = .{
-    .uses_controller_arena = @hasDecl(ControllerArena, "reserveIndex"),
-    .uses_controller_free_list = @hasField(ControllerArena, "free_head"),
-    .uses_unpublished_controller_queue = @hasField(ControllerArena, "unpublished_head"),
-    .tracks_controller_used_count = @hasField(ControllerArena, "used_count"),
-    .uses_arena = @hasDecl(DmaProgramArena, "reserve"),
-    .uses_device_index = @hasDecl(DmaProgramDeviceIndex, "append"),
-};
-
-pub const dma_program_backing_layout = .{
-    .heap_backs_state_on_freestanding = HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING,
-    .freestanding_handle_size_bytes = @sizeOf(?*DmaProgramBacking),
-    .backing_size_bytes = @sizeOf(DmaProgramBacking),
-    .freestanding_resident_savings_bytes = @sizeOf(DmaProgramBacking) - @sizeOf(?*DmaProgramBacking),
-};
-
-var controllers: ControllerArena = ControllerArena.init();
-var dma_program_backing: DmaProgramBackingStorage = if (heap_backed_dma_programs) null else DmaProgramBacking.init();
+var controllers: ControllerArena = .{};
+var dma_program_backing: table_backing.Lazy(DmaProgramBacking, null) = .{};
 var next_broker_generation: u64 = 1;
 var next_dma_program_id: u64 = 1;
 var next_dma_program_generation: u64 = 1;
 
-fn initializeDmaProgramArena(arena: *DmaProgramArena) void {
-    @memset(std.mem.asBytes(arena), 0);
-    const FreeIndex = @FieldType(DmaProgramArena, "free_head");
-    const no_free_index: FreeIndex = @intCast(MAX_DMA_PROGRAMS);
-    @memset(arena.free_next[0..], no_free_index);
-    arena.free_head = no_free_index;
-}
-
-fn initializeDmaProgramDeviceIndex(index: *DmaProgramDeviceIndex) void {
-    @memset(std.mem.asBytes(index), 0);
-    const CompactIndex = @FieldType(DmaProgramDeviceIndex, "free_bucket_head");
-    const no_index: CompactIndex = @intCast(MAX_DMA_PROGRAMS);
-    for (&index.buckets) |*bucket| {
-        bucket.head = no_index;
-        bucket.tail = no_index;
-    }
-    for (&index.links) |*link| {
-        link.next = no_index;
-        link.previous = no_index;
-        link.bucket = no_index;
-    }
-    index.free_bucket_head = no_index;
-}
-
 fn dmaProgramState() ?*DmaProgramBacking {
-    if (comptime heap_backed_dma_programs) return dma_program_backing;
-    return &dma_program_backing;
+    return dma_program_backing.get();
 }
 
 fn ensureDmaProgramState() Error!*DmaProgramBacking {
-    if (dmaProgramState()) |backing| return backing;
-    if (comptime heap_backed_dma_programs) {
-        const allocation = kernel_memory.kmalloc(@sizeOf(DmaProgramBacking)) orelse return error.OutOfMemory;
-        const backing: *DmaProgramBacking = @ptrCast(@alignCast(allocation));
-        backing.initializeAllocated();
-        dma_program_backing = backing;
-        return backing;
-    }
-    return &dma_program_backing;
+    return dma_program_backing.ensure() catch error.OutOfMemory;
 }
 
 pub fn reset() void {
     controllers.reset();
-    resetMmioWindows();
-    if (comptime heap_backed_dma_programs) {
-        if (dma_program_backing) |backing| {
-            @memset(std.mem.asBytes(backing), 0);
-            kernel_memory.kfree(@ptrCast(backing));
-            dma_program_backing = null;
-        }
-    } else {
-        dma_program_backing.reset();
-    }
+    mmio_windows.release();
+    dma_program_backing.release();
 }
 
 pub fn publishPciController(device_id: u64) bool {
@@ -552,7 +367,7 @@ pub fn publishPciControllerChecked(device_id: u64) Error!void {
     if (device_id == 0) return error.InvalidDevice;
     const generation = try pendingBrokerGeneration();
     if (findControllerSlotIndex(device_id)) |slot_index| {
-        const slot = &controllers.slots[slot_index];
+        const slot = &controllers.arena.slots[slot_index];
         controllers.markPublished(slot_index);
         slot.published = true;
         slot.broker_generation = generation;
@@ -568,7 +383,7 @@ pub fn publishPciControllerChecked(device_id: u64) Error!void {
 
 pub fn revokePciController(device_id: u64) bool {
     const slot_index = findControllerSlotIndex(device_id) orelse return false;
-    const slot = &controllers.slots[slot_index];
+    const slot = &controllers.arena.slots[slot_index];
     if (!slot.published) return false;
     slot.published = false;
     controllers.markUnpublished(slot_index);
@@ -829,12 +644,12 @@ fn findController(device_id: u64) ?*ControllerSlot {
 
 fn findControllerSlot(device_id: u64) ?*ControllerSlot {
     const slot_index = findControllerSlotIndex(device_id) orelse return null;
-    return &controllers.slots[slot_index];
+    return &controllers.arena.slots[slot_index];
 }
 
 fn findControllerSlotIndex(device_id: u64) ?usize {
     const slot_index = controllers.slotIndexOf(controllerKey(device_id)) orelse return null;
-    const slot = &controllers.slots[slot_index];
+    const slot = &controllers.arena.slots[slot_index];
     if (slot.device_id != device_id) return null;
     return slot_index;
 }
@@ -945,11 +760,8 @@ fn nextMonotonicId(id: u64) u64 {
     return if (id == std.math.maxInt(u64)) 0 else id + 1;
 }
 
-fn resetControllerSlot(slot: *ControllerSlot) void {
-    slot.in_use = false;
-    slot.published = false;
-    slot.device_id = 0;
-    slot.broker_generation = 0;
+fn controllerSlotKey(slot: *const ControllerSlot) u64 {
+    return if (slot.device_id == 0) 0 else controllerKey(slot.device_id);
 }
 
 fn zeroMmioWindow() MmioWindow {
@@ -961,20 +773,11 @@ fn zeroMmioWindow() MmioWindow {
 }
 
 fn mmioState() ?*MmioBacking {
-    if (comptime heap_backed_mmio_windows) return mmio_windows;
-    return &mmio_windows;
+    return mmio_windows.get();
 }
 
 fn ensureMmioState() Error!*MmioBacking {
-    if (mmioState()) |backing| return backing;
-    if (comptime heap_backed_mmio_windows) {
-        const allocation = kernel_memory.kmalloc(@sizeOf(MmioBacking)) orelse return error.OutOfMemory;
-        const backing: *MmioBacking = @ptrCast(@alignCast(allocation));
-        backing.* = .{};
-        mmio_windows = backing;
-        return backing;
-    }
-    return &mmio_windows;
+    return mmio_windows.ensure() catch error.OutOfMemory;
 }
 
 fn mmioSet(slot_index: usize) MmioWindowSet {
@@ -993,18 +796,6 @@ fn clearMmioSet(slot_index: usize) void {
     const backing = mmioState() orelse return;
     if (slot_index >= MAX_DEVICES) return;
     backing.slots[slot_index] = .{};
-}
-
-fn resetMmioWindows() void {
-    if (comptime heap_backed_mmio_windows) {
-        if (mmio_windows) |backing| {
-            backing.* = .{};
-            kernel_memory.kfree(@ptrCast(backing));
-            mmio_windows = null;
-        }
-    } else {
-        mmio_windows = .{};
-    }
 }
 
 fn dmaProgramSlotId(slot: *const DmaProgramSlot) u64 {
@@ -1293,16 +1084,9 @@ test "device broker exhausts authority epochs without reusing stale generations"
     }
 }
 
-test "DMA program state uses on-demand freestanding backing" {
-    try std.testing.expect(HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING);
-    try std.testing.expect(dma_program_backing_layout.heap_backs_state_on_freestanding);
-    try std.testing.expectEqual(@as(usize, 8), dma_program_backing_layout.freestanding_handle_size_bytes);
+test "DMA program state keeps its compact layout" {
     try std.testing.expectEqual(DmaWindowCount, @FieldType(DmaProgramSlot, "window_count"));
-    try std.testing.expectEqual(DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES, dma_program_backing_layout.backing_size_bytes);
-    try std.testing.expectEqual(
-        dma_program_backing_layout.backing_size_bytes - dma_program_backing_layout.freestanding_handle_size_bytes,
-        dma_program_backing_layout.freestanding_resident_savings_bytes,
-    );
+    try std.testing.expectEqual(DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES, @sizeOf(DmaProgramBacking));
 }
 
 test "device broker reset never reuses stale authority epochs" {

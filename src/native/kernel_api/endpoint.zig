@@ -60,7 +60,6 @@ pub const Routing = struct {
     peer_endpoint_id: ids.EndpointId,
 };
 
-pub const HEAP_BACKS_QUEUES_ON_ALL_TARGETS = table_backing.HEAP_BACKS_ON_ALL_TARGETS;
 pub const PREFERS_SEALED_RING_DATAPLANE = ipc_ring.DATA_PLANE_USES_SEALED_RINGS;
 pub const AUTO_ATTACHES_DATA_RINGS = true;
 pub const RINGS_ONLY_DATAPLANE = true;
@@ -164,15 +163,6 @@ pub const Table = struct {
 
     pub fn initializeAllocated(self: *Table) void {
         @memset(std.mem.asBytes(self), 0);
-        const no_endpoint_index = indexed_arena.reusableNoIndex(MAX_ENDPOINTS);
-        @memset(self.arena.free_next[0..], no_endpoint_index);
-        self.arena.free_head = no_endpoint_index;
-
-        const OwnerIndex = @FieldType(Table, "owner_index");
-        const CompactIndex = @FieldType(OwnerIndex, "free_bucket_head");
-        const no_owner_bucket: CompactIndex = @intCast(@max(self.owner_index.links.len, self.owner_index.buckets.len));
-        for (&self.owner_index.links) |*link| link.bucket = no_owner_bucket;
-        self.owner_index.free_bucket_head = no_owner_bucket;
     }
 
     pub fn reset(self: *Table) void {
@@ -570,7 +560,6 @@ fn hashLabel(label: []const u8) u64 {
 test "endpoint queues use capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 128), ipc_ring.SLOT_BYTES);
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(Endpoint, "queue_len")));
-    try std.testing.expect(HEAP_BACKS_QUEUES_ON_ALL_TARGETS);
     try std.testing.expect(AUTO_ATTACHES_DATA_RINGS);
     try std.testing.expect(@sizeOf(Endpoint) <= ENDPOINT_RESIDENT_SIZE_CEILING_BYTES);
     try std.testing.expect(@sizeOf(EndpointSlot) <= ENDPOINT_RESIDENT_SIZE_CEILING_BYTES + 8);

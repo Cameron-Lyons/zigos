@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const transport_crypto = @import("../core/transport_crypto.zig");
 const attestation_service = @import("../platform/attestation_service.zig");
@@ -15,10 +14,7 @@ const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const tpm_quote = @import("../platform/tpm2_quote.zig");
 const sync_state = @import("sync_state_support.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/memory/memory.zig")
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 pub const harness = @import("sync_transport_harness.zig");
 
@@ -54,12 +50,7 @@ pub const NativePayloadLength = u8;
 pub const ObjectSharePayloadLength = u16;
 pub const CAPTURED_PACKET_SIZE_CEILING_BYTES: usize = 272;
 pub const PACKET_CAPTURE_SIZE_CEILING_BYTES: usize = 4_808;
-pub const HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 16_240;
-pub const FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 128;
-pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
-    FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES
-else
-    HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES;
+pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 104;
 pub const NATIVE_DELIVERY_SIZE_CEILING_BYTES: usize = 520;
 pub const OBJECT_SHARE_ENVELOPE_SIZE_CEILING_BYTES: usize = 288;
 const NativeFrameWriter = binary_cursor.Writer(Error, error.PacketTooLarge);
@@ -194,11 +185,7 @@ pub const PacketCapture = struct {
         return self.packets.getConst(packetIdBefore(self.next_packet_id));
     }
 
-    fn initializeAllocated(self: *PacketCapture) void {
-        @memset(std.mem.asBytes(self), 0);
-        const no_packet_index = indexed_arena.reusableNoIndex(MAX_CAPTURED_PACKETS);
-        @memset(self.packets.free_next[0..], no_packet_index);
-        self.packets.free_head = no_packet_index;
+    fn initializeZeroed(self: *PacketCapture) void {
         self.next_packet_id = 1;
     }
 
@@ -209,40 +196,19 @@ pub const PacketCapture = struct {
     }
 };
 
-const heap_backed_packet_capture = builtin.target.os.tag == .freestanding;
-const PacketCaptureBacking = if (heap_backed_packet_capture) ?*PacketCapture else PacketCapture;
-
 pub const TransportPacketCapture = struct {
-    backing: PacketCaptureBacking = if (heap_backed_packet_capture) null else .{},
-
-    fn ensureBacking(self: *TransportPacketCapture) error{NoSpaceLeft}!void {
-        if (comptime heap_backed_packet_capture) {
-            if (self.backing != null) return;
-            const allocation = kernel_memory.kmalloc(@sizeOf(PacketCapture)) orelse return error.NoSpaceLeft;
-            const backing: *PacketCapture = @ptrCast(@alignCast(allocation));
-            backing.initializeAllocated();
-            self.backing = backing;
-        }
-    }
-
-    fn state(self: *TransportPacketCapture) *PacketCapture {
-        if (comptime heap_backed_packet_capture) return self.backing orelse unreachable;
-        return &self.backing;
-    }
+    backing: table_backing.Lazy(PacketCapture, PacketCapture.initializeZeroed) = .{},
 
     fn stateConst(self: *const TransportPacketCapture) ?*const PacketCapture {
-        if (comptime heap_backed_packet_capture) return self.backing;
-        return &self.backing;
+        return self.backing.get();
     }
 
     pub fn ensureCapacity(self: *TransportPacketCapture) Error!void {
-        try self.ensureBacking();
-        try self.state().ensureCapacity();
+        try (try self.backing.ensure()).ensureCapacity();
     }
 
     pub fn record(self: *TransportPacketCapture, frame: []const u8) Error!void {
-        try self.ensureBacking();
-        try self.state().record(frame);
+        try (try self.backing.ensure()).record(frame);
     }
 
     pub fn capturedCount(self: *const TransportPacketCapture) usize {
@@ -271,24 +237,13 @@ pub const TransportPacketCapture = struct {
     }
 
     pub fn reset(self: *TransportPacketCapture) void {
-        if (comptime heap_backed_packet_capture) {
-            if (self.backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
-                self.backing = null;
-            }
-        } else {
-            self.backing = .{};
-        }
+        self.backing.release();
     }
 
     pub fn deinit(self: *TransportPacketCapture) void {
         self.reset();
     }
 };
-
-const heap_backed_endpoint_table = builtin.target.os.tag == .freestanding;
-const EndpointTableBacking = if (heap_backed_endpoint_table) ?*endpoint.Table else endpoint.Table;
 
 fn packetIdAfter(packet_id: u64) u64 {
     const next = packet_id +% 1;
@@ -355,7 +310,7 @@ pub const ObjectShareEnvelope = struct {
 
 pub const NativeTransportService = struct {
     harness: Harness = Harness.init(),
-    endpoints: EndpointTableBacking = if (heap_backed_endpoint_table) null else endpoint.Table.init(),
+    endpoints: table_backing.Lazy(endpoint.Table, null) = .{},
     capture: TransportPacketCapture = .{},
     peer_links: network_driver_task.PeerLinkDirectory = .{},
     opened_connections: TelemetryCount = 0,
@@ -382,33 +337,16 @@ pub const NativeTransportService = struct {
     }
 
     fn ensureEndpointTable(self: *NativeTransportService) error{NoSpaceLeft}!*endpoint.Table {
-        if (comptime heap_backed_endpoint_table) {
-            if (self.endpoints) |table| return table;
-            const allocation = kernel_memory.kmalloc(@sizeOf(endpoint.Table)) orelse return error.NoSpaceLeft;
-            const table: *endpoint.Table = @ptrCast(@alignCast(allocation));
-            table.initializeAllocated();
-            self.endpoints = table;
-            return table;
-        }
-        return &self.endpoints;
+        return self.endpoints.ensure();
     }
 
     fn endpointTable(self: *NativeTransportService) error{EndpointNotFound}!*endpoint.Table {
-        if (comptime heap_backed_endpoint_table) return self.endpoints orelse error.EndpointNotFound;
-        return &self.endpoints;
+        return self.endpoints.get() orelse error.EndpointNotFound;
     }
 
     fn releaseEndpointTable(self: *NativeTransportService) void {
-        if (comptime heap_backed_endpoint_table) {
-            if (self.endpoints) |table| {
-                table.deinit();
-                @memset(std.mem.asBytes(table), 0);
-                kernel_memory.kfree(@ptrCast(table));
-                self.endpoints = null;
-            }
-        } else {
-            self.endpoints.deinit();
-        }
+        if (self.endpoints.get()) |table| table.deinit();
+        self.endpoints.release();
     }
 
     comptime {

@@ -16,7 +16,7 @@ const component_port = @import("../kernel_api/component_port.zig");
 const input_router = @import("../platform/input_router.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const units = @import("../core/units.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding) @import("../../kernel/memory/memory.zig") else struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 pub const DocumentAccess = struct {
     owner: principal.PrincipalId,
@@ -120,10 +120,14 @@ const State = struct {
     cancelled: bool = false,
     upstream_guard: ?*const operation_guard.Guard = null,
     grants: [MAX_ACTIVE_GRANTS]?Grant = @splat(null),
+
+    fn initialize(self: *State) void {
+        self.* = .{};
+    }
 };
 
 pub const Launch = struct {
-    backing: ?*State = null,
+    backing: table_backing.Lazy(State, State.initialize) = .{},
     token: u64 = 0,
 
     pub fn init() Launch {
@@ -131,18 +135,11 @@ pub const Launch = struct {
     }
 
     pub fn view(self: *Launch) ?*document_view.View {
-        return if (self.backing) |s| &s.display else null;
+        return if (self.backing.get()) |s| &s.display else null;
     }
 
     pub fn ensureView(self: *Launch) !*document_view.View {
-        if (self.backing) |s| return &s.display;
-        const s: *State = if (builtin.target.os.tag == .freestanding) blk: {
-            const allocation = kernel_memory.kmalloc(@sizeOf(State)) orelse return error.NoSpaceLeft;
-            break :blk @ptrCast(@alignCast(allocation));
-        } else try std.heap.page_allocator.create(State);
-        s.* = .{};
-        self.backing = s;
-        return &s.display;
+        return &(try self.backing.ensure()).display;
     }
 
     fn advance(self: *Launch, s: *State) !void {
@@ -156,7 +153,7 @@ pub const Launch = struct {
     // and a fresh hardware report. Merely invoking this native method is not an
     // approval or application grant.
     pub fn request(self: *Launch, manager: anytype, access: DocumentAccess, kind: document_view.Kind, now: u64) !void {
-        const s = self.backing orelse return error.DocumentViewUnavailable;
+        const s = self.backing.get() orelse return error.DocumentViewUnavailable;
         const decision = s.display.take() orelse return error.FreshDocumentInputRequired;
         if (decision.action != .request or decision.action.request != kind or s.display.phase != .requested) return error.FreshDocumentInputRequired;
         try requireDecision(s, decision);
@@ -208,7 +205,7 @@ pub const Launch = struct {
 
     fn jobReady(context: *anyopaque, now: u64) bool {
         const self: *Launch = @ptrCast(@alignCast(context));
-        const s = self.backing orelse return false;
+        const s = self.backing.get() orelse return false;
         return s.job_requested and !s.job_active and !s.cancelled and now >= s.last_ticks and now < s.deadline;
     }
 
@@ -224,7 +221,7 @@ pub const Launch = struct {
 
     fn jobRun(context: *anyopaque, signer: object_signer.Signer, guard: *const operation_guard.Guard) void {
         const self: *Launch = @ptrCast(@alignCast(context));
-        const s = self.backing orelse return;
+        const s = self.backing.get() orelse return;
         if (!s.job_requested or s.cancelled or s.job_active) return;
         s.job_active = true;
         s.awaiting_terminal = true;
@@ -251,7 +248,7 @@ pub const Launch = struct {
 
     fn jobCancel(context: *anyopaque, now: u64) void {
         const self: *Launch = @ptrCast(@alignCast(context));
-        const s = self.backing orelse return;
+        const s = self.backing.get() orelse return;
         s.cancelled = true;
         s.job_requested = false;
         s.display.phase = .disabled;
@@ -271,7 +268,7 @@ pub const Launch = struct {
     }
 
     fn cancelTransaction(self: *Launch, manager: anytype, now: u64) void {
-        const s = self.backing orelse return;
+        const s = self.backing.get() orelse return;
         s.cancelled = true;
         s.job_requested = false;
         s.display.phase = .disabled;
@@ -282,7 +279,7 @@ pub const Launch = struct {
     }
 
     fn retirePrepared(self: *Launch, manager: anytype, now: u64) void {
-        const s = self.backing orelse return;
+        const s = self.backing.get() orelse return;
         if (s.prepared) |prepared| manager.cancelPreparedOwnedDocument(prepared, now) catch {};
         s.prepared = null;
         s.creation = .{};
@@ -293,7 +290,7 @@ pub const Launch = struct {
     }
 
     fn reap(self: *Launch, manager: anytype, access: ?DocumentAccess, now: u64) void {
-        const s = self.backing orelse return;
+        const s = self.backing.get() orelse return;
         const same_session = if (access) |live| if (s.access) |old| sameAccess(live, old) else false else false;
         for (&s.grants) |*slot| {
             const granted = slot.* orelse continue;
@@ -304,7 +301,7 @@ pub const Launch = struct {
     }
 
     pub fn service(self: *Launch, manager: anytype, access: ?DocumentAccess, now: u64) bool {
-        const s = self.backing orelse return false;
+        const s = self.backing.get() orelse return false;
         const changed = self.serviceStep(manager, access, now);
         const display_changed = s.reported_revision != s.display.revision;
         s.reported_revision = s.display.revision;
@@ -312,7 +309,7 @@ pub const Launch = struct {
     }
 
     fn serviceStep(self: *Launch, manager: anytype, access: ?DocumentAccess, now: u64) bool {
-        const s = self.backing orelse return false;
+        const s = self.backing.get() orelse return false;
         self.reap(manager, access, now);
         if (self.token == std.math.maxInt(u64) or s.display.revision == std.math.maxInt(u64)) {
             const changed = s.display.phase != .disabled or s.display.pending != null or s.job_requested;
@@ -443,7 +440,7 @@ pub const Launch = struct {
     }
 
     fn activate(self: *Launch, manager: anytype, access: DocumentAccess, now: u64) !void {
-        const s = self.backing.?;
+        const s = self.backing.get().?;
         _ = std.math.add(u64, self.token, 1) catch return error.LaunchTokenExhausted;
         if (s.display.revision == std.math.maxInt(u64)) return error.LaunchRevisionExhausted;
         try requireContinuity(s);
@@ -468,7 +465,7 @@ pub const Launch = struct {
     }
 
     fn fail(self: *Launch, manager: anytype, now: u64) void {
-        const s = self.backing orelse return;
+        const s = self.backing.get() orelse return;
         if (manager.ownedDocumentJobBusy()) {
             self.cancelTransaction(manager, now);
             return;
@@ -480,7 +477,7 @@ pub const Launch = struct {
     }
 
     pub fn ready(self: *const Launch, now: u64) bool {
-        const s = self.backing orelse return false;
+        const s = self.backing.get() orelse return false;
         if (s.reported_revision != s.display.revision) return true;
         if (s.cancelled and s.prepared != null and !s.job_active) return true;
         if (s.display.pending != null) return true;
@@ -491,7 +488,7 @@ pub const Launch = struct {
     }
 
     pub fn nextWake(self: *const Launch) ?u64 {
-        const s = self.backing orelse return null;
+        const s = self.backing.get() orelse return null;
         var wake: ?u64 = if (s.prepared != null and !s.cancelled) s.deadline else null;
         for (s.grants) |slot| if (slot) |granted| {
             const expiry = std.math.add(u64, granted.share.expires_at_ticks, 1) catch granted.share.expires_at_ticks;
@@ -501,12 +498,9 @@ pub const Launch = struct {
     }
 
     pub fn deinit(self: *Launch, manager: anytype, now: u64) error{DocumentOperationBusy}!void {
-        if (manager.ownedDocumentJobBusy() or (if (self.backing) |s| s.job_active else false)) return error.DocumentOperationBusy;
+        if (manager.ownedDocumentJobBusy() or (if (self.backing.get()) |s| s.job_active else false)) return error.DocumentOperationBusy;
         self.cancel(manager, now);
-        const s = self.backing orelse return;
-        @memset(std.mem.asBytes(s), 0);
-        if (builtin.target.os.tag == .freestanding) kernel_memory.kfree(@ptrCast(s)) else std.heap.page_allocator.destroy(s);
-        self.backing = null;
+        self.backing.release();
     }
 };
 
@@ -784,7 +778,7 @@ const LaunchTest = if (builtin.is_test) struct {
         try std.testing.expect(screen.allow_selected);
     }
     fn openReviewDocument(self: *@This()) !struct { grant: Grant, binding: @import("../task/userspace_bootstrap_mailbox.zig").DocumentBinding } {
-        const s = self.launch.backing.?;
+        const s = self.launch.backing.get().?;
         const prepared = s.prepared.?;
         const granted = try self.grantApprovedDocument(prepared.task_id, s.workspace_id, s.selected.object_id.raw(), s.selected.pathSlice(), self.access.expires_at_ticks, self.now);
         const kernel = self.kernelPort().?;
@@ -833,7 +827,7 @@ test "owned Notes browsing and exact approval leave prepared measured task witho
     try std.testing.expect(!f.launch.service(f, f.access, f.now));
     try std.testing.expectEqual(active_before, runtime.countTasksInState(.active));
     try f.beginOpen();
-    const prepared = f.launch.backing.?.prepared.?;
+    const prepared = f.launch.backing.get().?.prepared.?;
     const task = runtime.findConst(prepared.task_id).?;
     try std.testing.expect(task.hasLoadedExecutable());
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
@@ -893,7 +887,7 @@ test "owned Notes picker rejects ambiguous rendered paths and reviews supported 
     const grants_before = f.capabilityTablePtr().activeCount();
     try f.beginOpen();
     const screen = f.launch.view().?;
-    const prepared = f.launch.backing.?.prepared.?;
+    const prepared = f.launch.backing.get().?.prepared.?;
     var sequence: u64 = 1;
     var seen: [supported.len]bool = @splat(false);
     var visible: usize = 0;
@@ -991,10 +985,10 @@ test "owned Notes approved creation retains its actual worker backing through in
     try worker.start(&paused, Paused.run);
     try worker.step();
     try std.testing.expectEqual(Paused.cooperative.Worker.State.suspended, worker.state);
-    const backing = f.launch.backing.?;
+    const backing = f.launch.backing.get().?;
     const path = backing.selected;
     try std.testing.expectError(error.DocumentOperationBusy, f.launch.deinit(f, f.now));
-    try std.testing.expect(f.launch.backing.? == backing and !backing.cancelled);
+    try std.testing.expect(f.launch.backing.get().? == backing and !backing.cancelled);
     f.epoch += 1;
     try std.testing.expect(f.launch.service(f, f.access, f.now));
     try std.testing.expect(worker.cancel_requested and backing.cancelled);
@@ -1020,7 +1014,7 @@ test "owned Notes review rejects epoch focus expiry and selected version changes
         const grants_before = f.capabilityTablePtr().activeCount();
         try f.beginOpen();
         try f.reviewFirst();
-        const prepared = f.launch.backing.?.prepared.?;
+        const prepared = f.launch.backing.get().?.prepared.?;
         const screen = f.launch.view().?;
         screen.presented(80, 30, true);
         f.report(4);
@@ -1031,7 +1025,7 @@ test "owned Notes review rejects epoch focus expiry and selected version changes
             .focus_round_trip => f.compositorSessionPtr().focus_epoch += 2,
             .expiry => f.now = f.access.expires_at_ticks,
             .version => {
-                const selected = f.launch.backing.?.selected;
+                const selected = f.launch.backing.get().?.selected;
                 const result = try f.storageServicePtr().putVersion(.{ .preferred_object_id = selected.object_id, .parent_version_id = selected.version_id, .object_type = .document, .payload = "changed", .metadata = try f.access.signer.signMetadata(selected.pathSlice(), "changed", f.now) });
                 try f.storageServicePtr().beginTransaction(f.workspace_id);
                 try f.storageServicePtr().stagePut(f.workspace_id, selected.pathSlice(), result.object_id, result.version_id, .document);
@@ -1042,7 +1036,7 @@ test "owned Notes review rejects epoch focus expiry and selected version changes
         try std.testing.expectEqual(grants_before, f.capabilityTablePtr().activeCount());
         try std.testing.expectEqual(active_before, f.runtimePtr().countTasksInState(.active));
         try std.testing.expect(f.runtimePtr().findConst(prepared.task_id).?.state == .terminated);
-        try std.testing.expect(f.launch.backing.?.prepared == null);
+        try std.testing.expect(f.launch.backing.get().?.prepared == null);
     }
 }
 
@@ -1082,7 +1076,7 @@ test "owned Notes terminal signing failure retires prepared task and publishes i
     f.report(3);
     try std.testing.expect(screen.handle(.{ .kind = .activate }, 3));
     try std.testing.expect(f.launch.service(f, f.access, f.now));
-    const prepared = f.launch.backing.?.prepared.?;
+    const prepared = f.launch.backing.get().?.prepared.?;
     var paused = Paused{ .fixture = f };
     paused.guard = .{ .context = &paused, .check_fn = Paused.check };
     f.signing.service.attachHardwareProvider(.{ .context = &paused, .operations = &.{ .seal = @import("../../tests/fixtures/secret_provider.zig").provider().operations.?.seal, .open = Paused.open } });
@@ -1100,7 +1094,7 @@ test "owned Notes terminal signing failure retires prepared task and publishes i
     try std.testing.expect(f.launch.service(f, f.access, f.now));
     try std.testing.expectEqual(active_before, f.runtimePtr().countTasksInState(.active));
     try std.testing.expect(f.runtimePtr().findConst(prepared.task_id).?.state == .terminated);
-    try std.testing.expect(f.launch.backing.?.prepared == null);
+    try std.testing.expect(f.launch.backing.get().?.prepared == null);
     try std.testing.expectEqual(versions_before, f.storageServicePtr().versionCount());
     try std.testing.expect(!f.launch.ready(f.now));
     try std.testing.expect(!f.launch.service(f, f.access, f.now));
@@ -1113,7 +1107,7 @@ test "owned Notes exhausted token and view revision retire selection once and pr
         defer f.destroy();
         try f.beginOpen();
         try f.reviewFirst();
-        const s = f.launch.backing.?;
+        const s = f.launch.backing.get().?;
         const granted = (try f.openReviewDocument()).grant;
         const screen = f.launch.view().?;
         screen.presented(80, 30, true);
@@ -1191,7 +1185,7 @@ test "owned Notes new selection during an actual suspended editor save preserves
     try std.testing.expect(f.launch.service(f, f.access, f.now));
     try std.testing.expect(!worker.cancel_requested);
     try std.testing.expect(f.ownedDocumentGrantLive(granted, f.now));
-    try std.testing.expect(f.launch.backing.?.prepared == null);
+    try std.testing.expect(f.launch.backing.get().?.prepared == null);
     try std.testing.expectEqual(active_before, f.runtimePtr().countTasksInState(.active));
     try worker.step();
     try std.testing.expectEqual(Paused.cooperative.Worker.State.complete, worker.state);

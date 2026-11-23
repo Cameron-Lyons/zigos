@@ -4,15 +4,14 @@ const package_service = @import("../services/package_service.zig");
 const signing = @import("../core/signing.zig");
 
 pub fn signBundle(bundle: manifest.BundleManifest) !manifest.Signature {
-    return signing.signWithDefaultRegistry(
-        .ed25519,
+    return signing.sign(
         try identityForPublisher(bundle.publisher),
         &package_service.digestBundle(bundle),
     );
 }
 
 pub fn verifyBundle(bundle: manifest.BundleManifest) bool {
-    return signing.verifyWithDefaultRegistry(bundle.signature, &package_service.digestBundle(bundle));
+    return signing.verify(bundle.signature, &package_service.digestBundle(bundle));
 }
 
 pub fn identityForPublisher(publisher: []const u8) error{UnknownPublisherIdentity}!signing.SignerIdentity {

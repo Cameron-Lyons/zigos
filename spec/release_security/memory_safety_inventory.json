@@ -775,13 +775,12 @@
     {
       "path": "src/native/session/document_sessions.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "session-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "the first open allocates a fixed four-channel pool, initializes every optional server before publication, and retains stable channel addresses until teardown; each channel owns a bounded path copy and a sealed-key signing lease whose session-owned authority remains stable until channel teardown, validates existing task-scoped read/write and storage-service signing authority before endpoint creation, unwinds unpublished endpoints and grants on failure, and scrubs uploads and lease metadata when closed; session dispatch visits at most four slots and handles at most two frames or replies",
+        "the first open allocates a fixed four-channel pool through table_backing.Lazy, which heap-backs it on every target, zero-fills it on allocation and scrubs it on release, initializes every optional server before publication, and retains stable channel addresses until teardown; each channel owns a bounded path copy and a sealed-key signing lease whose session-owned authority remains stable until channel teardown, validates existing task-scoped read/write and storage-service signing authority before endpoint creation, unwinds unpublished endpoints and grants on failure, and scrubs uploads and lease metadata when closed; session dispatch visits at most four slots and handles at most two frames or replies",
         "A suspended Server pins its channel and exact task incarnations until terminal return. Close cancels and retires endpoints while retaining in-flight buffers; dispatch refuses reentry and busy readiness does not spin. Pool teardown preflights every channel and refuses active operations before any mutation or free. Trusted manager reset preflights document quiescence, and identity-owner retirement releases launcher, clipboard and document signer references before owner destruction.",
         "Authenticated-owner service filters the bounded four-channel pool by exact authority pointer, sealed-key lease and fingerprint. Stable lock revocation closes all matching channels, including idle ones, while running channels retain borrowed buffers until terminal return. No transport frame can select another signer or authorize pool service."
       ],
@@ -794,13 +793,12 @@
     {
       "path": "src/native/session/document_launcher.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "session-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "the first offer allocates at most 1 KiB at a stable address, checks allocation alignment, initializes state before publication, and unwinds endpoint grants and allocation if mailbox binding fails; one pending offer retains a bounded copy of its path and a lease bound to the session-owned signing authority, rechecks task-scoped authority and object/version identity before activation, consumes decisions once, and erases pending lease metadata on cancellation, completion, or teardown; no signing seed or raw key enters an offer or channel; generational endpoint handles authenticate both sender task and endpoint, unexpected transferred grants are revoked, and dispatch handles at most one frame or retained reply"
+        "the first offer allocates at most 1 KiB at a stable address through table_backing.Lazy, which heap-backs it on every target, zero-fills it on allocation and scrubs it on release, initializes state before publication, and unwinds endpoint grants and allocation if mailbox binding fails; one pending offer retains a bounded copy of its path and a lease bound to the session-owned signing authority, rechecks task-scoped authority and object/version identity before activation, consumes decisions once, and erases pending lease metadata on cancellation, completion, or teardown; no signing seed or raw key enters an offer or channel; generational endpoint handles authenticate both sender task and endpoint, unexpected transferred grants are revoked, and dispatch handles at most one frame or retained reply"
       ],
       "tests": [
         "zig build host-tests",
@@ -2003,7 +2001,7 @@
       "owner": "native-core-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "Index tables use bounded fixed capacities, zero-key empty sentinels, compact slot indices, and full-width ID hashing. Backward-shift deletion preserves wrapped probe paths without tombstones or a second stack table. Multimap bucket identities remain stable until their final member is removed; endpoint counts use checked live owner buckets. Exhaustive collision orders and randomized reference-model churn cover lookup and removal."
+        "Index tables use bounded fixed capacities, zero-key empty sentinels, compact slot indices, and full-width ID hashing. Arenas, free lists and multimap links store index + 1, so all-zero storage is a valid empty value and needs no sentinel initialization; generational arenas retire a slot permanently at generation exhaustion, and a caller that keeps payloads through resetRetainingPayloads scrubs every kept payload it does not reclaim. Backward-shift deletion preserves wrapped probe paths without tombstones or a second stack table. Multimap bucket identities remain stable until their final member is removed; endpoint counts use checked live owner buckets. Exhaustive collision orders and randomized reference-model churn cover lookup and removal."
       ],
       "tests": [
         "zig build host-tests"
@@ -2012,12 +2010,13 @@
     {
       "path": "src/native/core/table_backing.zig",
       "categories": [
-        "pointer-cast"
+        "pointer-cast",
+        "allocator-owned-buffer"
       ],
       "owner": "native-core-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "heap-backed tables allocate one typed object or an explicitly sized byte slice, zero it before publication, and scrub it before free; byte slices retain their original allocation length, zero-length slices allocate nothing, and peer connections cap receive allocation at the object payload ceiling before local admission; connection retirement detaches protocol pointers before freeing state; host tests use the page allocator with the same initialize-and-scrub contract"
+        "heap-backed tables allocate one typed object or an explicitly sized byte slice, zero it before publication, and scrub it before free; byte slices retain their original allocation length, zero-length slices allocate nothing, and peer connections cap receive allocation at the object payload ceiling before local admission; connection retirement detaches protocol pointers before freeing state; Lazy is one pointer wide with null as its empty value, so it may live in zero-filled storage, and it allocates its table on first use on every target, so host tests exercise the same lazily allocated path through the page allocator"
       ],
       "tests": [
         "zig build host-tests"
@@ -2056,13 +2055,12 @@
       "path": "src/native/platform/event_ledger.zig",
       "categories": [
         "extern-abi",
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "diagnostics-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "persistent ledger records export redacted text; freestanding ledgers allocate their bounded event arena and indexes before the first append or persisted-state load, publish backing only after complete initialization, leave sequence state unchanged on allocation failure, and scrub and release backing during session teardown and early-ledger migration"
+        "persistent ledger records export redacted text; ledgers allocate their bounded event arena and indexes through table_backing.Lazy, which heap-backs them on every target, zero-fills them on allocation and scrubs them on release, before the first append or persisted-state load, publish backing only after complete initialization, leave sequence state unchanged on allocation failure, and scrub and release backing during session teardown and early-ledger migration"
       ],
       "tests": [
         "zig build host-tests",
@@ -2074,13 +2072,12 @@
     {
       "path": "src/native/platform/compositor_session.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "ux-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "the first freestanding window, permission-review item, and surface presentation independently allocate and explicitly initialize bounded window, review, and surface state; empty lookups remain allocation-free, allocation failure publishes no window, item, or surface, snapshot restore preallocates every required backing before replacing live state, closing the final window scrubs and releases its state, surface retirement clears its bounded text snapshot, and session reset scrubs and releases all complete allocations; eight optional 528-byte text snapshots add 4,288 bytes to the lazy arena and snapshot budget with a 224-byte freestanding session including one live authentication-view pointer; the native input owner retains this sanitized view until router/compositor detachment, reset preserves it, snapshot capture excludes it, and rendering gives active authentication exclusive priority over task content",
+        "the first window, permission-review item, and surface presentation independently allocate bounded window, review, and surface state through table_backing.Lazy on every target, whose zero-filled arenas, orders and indexes are valid empty values; empty lookups remain allocation-free, allocation failure publishes no window, item, or surface, snapshot restore preallocates every required backing before replacing live state, closing the final window scrubs and releases its state, surface retirement clears its bounded text snapshot, and session reset scrubs and releases all complete allocations; eight optional 528-byte text snapshots add 4,288 bytes to the lazy arena and snapshot budget with a 216-byte session on every target including one live authentication-view pointer; hashed task-bundle key collisions are lookup misses and review conflicts rather than overwrites; the native input owner retains this sanitized view until router/compositor detachment, reset preserves it, snapshot capture excludes it, and rendering gives active authentication exclusive priority over task content",
         "Revision ordering and same-revision conflict checks are per authorized surface. The display driver accepts a lower revision when switching surfaces and updates its active record only after backend success; tests cover surface switches, stale/conflicting/duplicate submissions, and backend failure preserving prior state."
       ],
       "tests": [
@@ -2093,13 +2090,12 @@
     {
       "path": "src/native/platform/input_router.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "ux-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "the first freestanding routed event allocates exactly one fixed-capacity event-slot array, initializes its complete reusable free list before publishing the pointer, drops the event before publishing a slot or incrementing queue counts when allocation fails, retains direct indexed access while live, and session reset scrubs and releases the complete allocation; exclusive trusted input borrows a stable native Entry until detachment, clears task queues and gesture epochs on each authentication boundary, drains old hardware reports before a fresh release, preserves per-keyboard held-key suppression, and erases temporary decoded reports; teardown revokes the authenticator before dropping the compositor view pointer; one optional repeat record is capped at 64 bytes, requires a live source epoch and unchanged document focus, uses checked deadlines and existing bounded event queues, never synthesizes authorization or activation commands, and is cancelled before a suspended or revoked task can renew input authority",
+        "the first routed event allocates exactly one fixed-capacity event-slot array through table_backing.Lazy, which heap-backs it on every target, zero-fills it on allocation and scrubs it on release, initializes its complete reusable free list before publishing the pointer, drops the event before publishing a slot or incrementing queue counts when allocation fails, retains direct indexed access while live, and session reset scrubs and releases the complete allocation; exclusive trusted input borrows a stable native Entry until detachment, clears task queues and gesture epochs on each authentication boundary, drains old hardware reports before a fresh release, preserves per-keyboard held-key suppression, and erases temporary decoded reports; teardown revokes the authenticator before dropping the compositor view pointer; one optional repeat record is capped at 64 bytes, requires a live source epoch and unchanged document focus, uses checked deadlines and existing bounded event queues, never synthesizes authorization or activation commands, and is cancelled before a suspended or revoked task can renew input authority",
         "Native New/Open shortcuts and document decisions originate only from decoded fresh physical reports. UI revision changes drain queued app input and require a released neutral report; held/replayed keys, synthetic Entry.handle calls, app inboxes and modal task switching cannot approve a document. Lock and hardware source continuity loss cancel the native interaction."
       ],
       "tests": [
@@ -2140,13 +2136,12 @@
     {
       "path": "src/native/services/package_service.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "package-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "the first freestanding package install allocates one fixed-capacity bundle arena after request, signature, trust, and policy validation; allocation failure is reported before reserving or publishing a bundle; all lookups tolerate the unallocated empty state; and session reset scrubs and releases the complete arena before replacing its owner"
+        "the first package install allocates one zero-filled fixed-capacity bundle arena through table_backing.Lazy on every target after request, signature, trust, and policy validation; allocation failure is reported before reserving or publishing a bundle; all lookups tolerate the unallocated empty state; and session reset scrubs and releases the complete arena before replacing its owner"
       ],
       "tests": [
         "zig build host-tests",
@@ -2250,7 +2245,7 @@
       "owner": "task-runtime-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "the first freestanding task creation or non-empty snapshot restore allocates one full-capacity cold-record slab and address-space arena before publishing task or restored state; every live task binds only to bounded cold and address-space slots, allocation failure is reported before state publication, empty restore and runtime reset scrub and release both complete allocations, and hosted tests retain inline storage; the exclusive task retirement sink is notified exactly once after marking a task terminated and before clearing its borrowed capability list, and its test recorder receives only its exact fixture type",
+        "the first task creation or non-empty snapshot restore allocates one zero-filled full-capacity cold-record slab and address-space arena through table_backing.Lazy on every target before publishing task or restored state; every live task binds only to bounded cold and address-space slots, allocation failure is reported before state publication, snapshot restore scrubs every kept task and address-space payload it does not reclaim, empty restore and runtime reset scrub and release both complete allocations, and hosted tests exercise the same heap path and compare those tables in failure-atomicity checks; the exclusive task retirement sink is notified exactly once after marking a task terminated and before clearing its borrowed capability list, and its test recorder receives only its exact fixture type",
         "Execution leases retain exactly one ordinary generational task borrow per CPU and bind task/process/address-space identity to an issuer-authenticated nonwrapping ticket. Only BSP metadata APIs reserve, request stop and collect; owner CPUs use Coordinator atomics. Logical termination removes active indexes and requests stop while retaining cold resources and address-space metadata. Collection requires exact returned acknowledgement, keeps the collecting slot and borrow through synchronous reentrant callbacks, then releases them once. Rehost, address-space replacement, snapshot restore, reset, index rebuild and sink unbinding reject outstanding ownership. Checkpoint writes omit logically dead execution metadata without changing retained live state; ordinary task pressure cannot reclaim pinned records.",
         "One optional 24-byte execution-stop sink is bound exclusively by the BSP and compare-unbound only without leases or lifecycle callbacks; reset and restore preserve its ownership. STOP publishes before synchronous remote notification. The existing lifecycle flag protects sink context and execution identity against nested notification, reserve, collect, cancel, termination, suspension or wholesale replacement. CPU0, unstarted and returned executions do not notify. The callback only prompts and never grants execution acknowledgement or resource collection.",
         "Durable collection authenticates the exact retained generational borrow before acquiring an exact-ticket completed channel. The channel remains collecting through deferred resource/address-space callbacks, unpin and Coordinator finish; an error aborts back to the same completion without resetting sequence. No matching transport preserves synchronous collection. Reset and snapshot restore reject pending, claimed, completed or collecting issuer channels before mutation, as well as ordinary borrows and lifecycle callbacks."
@@ -2349,7 +2344,7 @@
       "review_state": "release-reviewed",
       "mitigations": [
         "Coalesced wakes preserve queued deadlines. Required accelerator waits remain queued without admission retries when reservation fails or policy denies an online engine; eligibility recomputes the actual class-supported plan, allows ready work to pass, and resumes on policy, telemetry or request changes. Multiple supported engine preferences wait without pinning to an unavailable preferred-engine claim. Invalid requirements reject before mutation; bounded regression fixtures exercise failure, idle, alternative-engine recovery and sustained-load fairness without adding slot metadata.",
-        "the first freestanding accelerator claim allocates one bounded claim arena and task index after validating the task and duplicate key, allocation failure leaves claim and queue state unchanged, all linked indices remain capacity-bounded, and scheduler reset or teardown scrubs and releases complete backing",
+        "the first accelerator claim allocates one zero-filled bounded claim arena and task index through table_backing.Lazy on every target after validating the task and duplicate key, allocation failure leaves claim and queue state unchanged, all linked indices remain capacity-bounded, and scheduler reset or teardown scrubs and releases complete backing",
         "Aging deadlines use the same canonical timer frequency as the hardware timer, separately from budget-accounting charges. Absolute deadlines saturate, actual two-tick quantum slack bounds requeue aging, and freestanding registration samples synchronized current time. Isolated benchmarks explicitly register in their synthetic clock domain. Host load regressions advance by actual quanta and cover coalesced wakes, initial and repeated lower-class service, and foreground urgency against an expired backlog without adding scheduler state.",
         "A Runtime lease is reserved before ready-queue unlink and retained through final TaskRecord/Slot/accounting use and synchronous collection. Exact issuer/CPU/epoch comparisons guard completion; unstarted preparation may cancel, but started dispatch requires returned acknowledgement. Active dispatch identity remains set through callbacks and pending mapping collection, preventing recursive dispatch and slot reclamation. Another Scheduler bound to the same Runtime cannot execute a leased task, and occupied-CPU admission preserves complete ready queues, budgets and accounting. Foreign readers reject before cold-note or priority mutation; actual production dispatch remains BSP-owned.",
         "Native binding claims address-space retirement and stop notification sinks together with rollback before any execution lease. Compare-unbind preflights both exact owners and all leases before mutation. The bound stop callback validates issuer identity and uses bounded asynchronous remote transport; admitted-target transport failure fails closed. Shared policy and scheduler mutation remain BSP-owned.",
@@ -2382,13 +2377,12 @@
     {
       "path": "src/native/task/task_runtime_service.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "task-runtime-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "the first freestanding runtime checkpoint allocates exactly one full-capacity Snapshot, zero-initializes it, writes every published header and live record before setting the checkpoint-valid flag, reports allocation failure to callers, and session reset scrubs the complete snapshot before freeing it"
+        "the first runtime checkpoint allocates exactly one full-capacity Snapshot through table_backing.Lazy, which heap-backs it on every target, zero-fills it on allocation and scrubs it on release, writes every published header and live record before setting the checkpoint-valid flag, reports allocation failure to callers, and session reset scrubs the complete snapshot before freeing it"
       ],
       "tests": [
         "zig build host-tests",
@@ -2409,7 +2403,7 @@
       "owner": "task-runtime-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "executor maps only inspected image segments and bootstrap mailbox addresses; document opening validates live task ownership and send/receive authority, materializes the inspected address space while no task is executing, and publishes one binding before the first dispatch; resumed publication preserves that binding and subsequent opening attempts are rejected; x86-64 yield/resume snapshots use a compile-time-checked complete general-register frame, every userspace transition returns through the typed kernel address-space switch, and each explicitly provisioned CPU trap stack reserves 36 KiB usable space with a checked 4 KiB lower guard while reporting a painted high-water mark; the first freestanding address-space materialization allocates one fixed-capacity mapping arena before reserving a slot, allocation failure leaves no published mapping, and executor reset destroys every nested address space before scrubbing and releasing the arena",
+        "executor maps only inspected image segments and bootstrap mailbox addresses; document opening validates live task ownership and send/receive authority, materializes the inspected address space while no task is executing, and publishes one binding before the first dispatch; resumed publication preserves that binding and subsequent opening attempts are rejected; x86-64 yield/resume snapshots use a compile-time-checked complete general-register frame, every userspace transition returns through the typed kernel address-space switch, and each explicitly provisioned CPU trap stack reserves 36 KiB usable space with a checked 4 KiB lower guard while reporting a painted high-water mark; the first address-space materialization allocates one zero-filled fixed-capacity mapping arena through table_backing.Lazy on every target before reserving a slot, allocation failure leaves no published mapping, and executor reset destroys every nested address space before scrubbing and releasing the arena",
         "Syscall copies require a nonzero matching active caller, live mapping state, exact generational mapping handle and owned address space. Shared copies additionally require the exact current CPU registration, BSP runtime ownership and interrupts disabled; the bound Table authenticates task, current mapping token and logical byte span before an exact shared-RAM demand registration and actual borrowed leaf/direct-alias preparation. Generic private-copy permissions remain unchanged. Each checked high alias is consumed immediately without callbacks or yields. Task termination has no wire result copy; retired active mappings remain pinned until kernel handoff. Shared mapping lifetime hooks pair registration with exact demand-region retirement before logical reuse. Host tests reject missing/foreign registration, IRQ-enabled or nonowner access, grouped-peer alias access, stale handles, padding and changed demand authority. The isolated guest invokes actual freestanding dispatcher copy and response helpers and endpoint send/receive handlers through a claimed Executor bound to two real Runtime tasks and a stable Kernel. Complete backing, queue and capability snapshots survive rejected output admission; a valid cross-page receive consumes the original queued bytes once and retargets the moved grant. Failed transfer after dequeue disposes the undelivered move. Shared revocation rejects fresh writes and stale send requests, and teardown restores exact frame accounting after Runtime resource retirement while Kernel callbacks remain bound. This remains a CPL0 direct-handler proof; native syscall opcode/trap admission requires separate evidence.",
         "Every user entry, including a direct unregistered dispatch and the first dispatch after idle, arms the scheduler timer and begins a fresh two-tick quantum after materialization. Timer handoff remains bounded without a priority callback and preserves earlier priority preemption. Each materialized mapping owns one lazy 903-byte xstate allocation with a 64-byte-aligned 832-byte baseline image and separately saved PKRU. Allocation rollback, retirement and reset securely erase and release it; an active retired mapping remains pinned through assembly handoff. User state is captured before compiler-generated code, kernel continuations and nested interrupts use full standard XSAVE images, and assembly restores the correct owner before returning.",
         "The shared yield handler treats both full-width incoming registers as untrusted: counter overflow and unknown or oversized dispositions request ordinary task fault handoff before changing counters or resume state. The typed public assembly stub zero-extends its u32 arguments. Host regressions invoke the production-specialized handler body, and shared FRED capture preserves high bits for validation. Unexpected owned-state #NM uses normal registered exception containment.",
@@ -2441,13 +2435,12 @@
     {
       "path": "src/native/session/native_store_mount.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "storage-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "the freestanding session allocates one full-capacity storage checkpoint state before binding production storage and allocates bounded export-package and sync-resident backing only when verification first requests each one; every allocation is initialized before publication, allocation failure aborts the requesting boot path, and reset releases nested state before scrubbing and freeing every owning allocation"
+        "the session allocates one full-capacity storage checkpoint state through table_backing.Lazy on every target before binding production storage and allocates bounded export-package and sync-resident backing only when verification first requests each one; every allocation is initialized before publication, allocation failure aborts the requesting boot path, and reset releases nested state before scrubbing and freeing every owning allocation"
       ],
       "tests": [
         "zig build host-tests",
@@ -2460,13 +2453,12 @@
     {
       "path": "src/native/session/service_graph_builder.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "session-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "service-graph startup allocates exactly one full package service before constructing the environment; initialization zeros the allocation and restores the service identity plus principal-key arena and multimap sentinels before publication while leaving bundle storage deferred; allocation failure aborts startup, hot paths retain a direct service pointer, and session reset releases nested bundle ownership before scrubbing and freeing the service"
+        "service-graph startup allocates exactly one full package service before constructing the environment; table_backing.Lazy zero-fills the allocation on every target and initialization restores the service identity before publication; the zero-filled principal-key arena and multimap need no sentinels and bundle storage stays deferred; allocation failure aborts startup, hot paths retain a direct service pointer, and session reset releases nested bundle ownership before scrubbing and freeing the service"
       ],
       "tests": [
         "zig build host-tests",
@@ -2478,13 +2470,12 @@
     {
       "path": "src/native/session/supervisor.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "diagnostics-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "normal registration, health, contract, and driver-attachment state remains authoritative in live records without retained duplicates; the first freestanding crash or restart transition allocates one fixed 2048-byte ring, zeros it before publication, and drops only the diagnostic when allocation fails while preserving the service transition; every ring access is cursor-bounded, and session reset scrubs and frees the complete allocation"
+        "normal registration, health, contract, and driver-attachment state remains authoritative in live records without retained duplicates; the first crash or restart transition allocates one fixed 2048-byte ring through table_backing.Lazy, which heap-backs it on every target, zero-fills it on allocation and scrubs it on release, and drops only the diagnostic when allocation fails while preserving the service transition; every ring access is cursor-bounded, and session reset scrubs and frees the complete allocation"
       ],
       "tests": [
         "zig build host-tests",
@@ -2496,13 +2487,12 @@
     {
       "path": "src/native/session/session_manager_contexts.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "session-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "service-graph startup allocates exactly one full-capacity capability table, userspace catalog, userspace scheduler, and task runtime before environment or bootstrap-state construction; initialization zeros each allocation and restores capability indexes and generation state, userspace image arena and id state, scheduler arena and queue state, and task arena, owner index, label index, id sequence, and lifecycle generation before publication; allocation failure aborts startup, hot paths retain direct pointers, and session reset deinitializes nested scheduler and runtime ownership before scrubbing and releasing all four allocations"
+        "service-graph startup allocates exactly one full-capacity capability table, userspace catalog, userspace scheduler, and task runtime before environment or bootstrap-state construction; table_backing.Lazy zero-fills each allocation on every target; the capability table and task runtime initialize their identity and generation state before publication, while the zero-filled userspace catalog, scheduler and their arenas and indexes are valid empty values; allocation failure aborts startup, hot paths retain direct pointers, and session reset deinitializes nested scheduler and runtime ownership before scrubbing and releasing all four allocations"
       ],
       "tests": [
         "zig build host-tests",
@@ -2534,26 +2524,7 @@
       "owner": "session-proof-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "verification boot allocates one bounded fixture block before runtime-negative proofs, initializes every embedded arena in place before publication, reuses the primary runtime after sequential proofs, and teardown resets nested ownership before scrubbing and releasing the complete block"
-      ],
-      "tests": [
-        "zig build host-tests",
-        "zig build spec-tests",
-        "zig build kernel",
-        "zig build prod-readiness",
-        "zig build zigos-native-smoke-test"
-      ]
-    },
-    {
-      "path": "src/native/session/transient_state.zig",
-      "categories": [
-        "pointer-cast",
-        "allocator-owned-buffer"
-      ],
-      "owner": "session-proof-owner",
-      "review_state": "release-reviewed",
-      "mitigations": [
-        "each freestanding proof-state scope allocates exactly the compile-time state size, returns the aligned pointer only to its exclusive scoped owner for in-place initialization before service publication, reports allocation failure without publishing external state, and scrubs the complete allocation before freeing it; host tests retain ordinary value storage"
+        "verification boot allocates one bounded fixture block before runtime-negative proofs, zero-fills it through table_backing.Lazy, where every embedded arena is a valid empty value, and initializes the embedded runtimes and capability table before publication, reuses the primary runtime after sequential proofs, and teardown resets nested ownership before scrubbing and releasing the complete block"
       ],
       "tests": [
         "zig build host-tests",
@@ -2701,13 +2672,12 @@
     {
       "path": "src/native/kernel_api/device_broker.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "kernel-device-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "the first DMA isolation program allocates one fixed-capacity arena and device index before publishing a program; allocation failure publishes no state, all lookups remain bounded by the eight-program capacity, and reset scrubs and releases the complete backing"
+        "the first DMA isolation program allocates one zero-filled fixed-capacity arena and device index through table_backing.Lazy on every target before publishing a program; allocation failure publishes no state, all lookups remain bounded by the eight-program capacity, and reset scrubs and releases the complete backing"
       ],
       "tests": [
         "zig build host-tests",
@@ -2774,7 +2744,7 @@
       "owner": "kernel-api-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "The first freestanding object creation initializes one bounded table backing before reserving a generational handle. Production physical storage comes only from owned general-frame runs, with checked count, alignment and complete direct-alias bounds. Every rounded page, including padding, is zeroed before publication; Allocation or direct-alias failure releases only the unpublished run; mapping registration failure rolls back its unpublished mapping while preserving the existing owned object. Arithmetic physical cursors are confined to hosted metadata fixtures.",
+        "The first object creation allocates and initializes one bounded table backing through table_backing.Lazy on every target before reserving a generational handle. Production physical storage comes only from owned general-frame runs, with checked count, alignment and complete direct-alias bounds. Every rounded page, including padding, is zeroed before publication; Allocation or direct-alias failure releases only the unpublished run; mapping registration failure rolls back its unpublished mapping while preserving the existing owned object. Arithmetic physical cursors are confined to hosted metadata fixtures.",
         "Unmap and revocation unregister exact demand regions and retire borrowed CPU leaves before erasing or freeing backing. Sealing freezes membership while registered rings remain writable aliases to the same RAM. Revocation hides the public object ID but retains its original generational slot and frames while any accelerator remains attached; only exact completed target release removes the last pin and securely erases the full run. Pinned retirement shares the existing 24-object capacity and the 128-byte object ceiling. tryDeinit rejects all attachments before mutation, and session reset checks quiescence before dropping owners.",
         "TaskCopySpan admission walks only the bounded published task index, authenticates the current object generation and exact registered lifetime token, and returns the original logical span and real physical base only after complete bounds checks. Registration reentry, wrong task/token, padding, cross-object spans, overflow and hidden revoked pins reject without publishing caller output. Unmap, lifetime retirement and stale generation reuse remove copy authority; sealing retains existing writable ring authority. The value neither pins frames nor survives mutation: production callers keep BSP/IF=0 ownership through immediate registration, actual page-walk and copy checks.",
         "Hosted tests inject real dirty frame storage and cover zeroed padding, nonoverlap, deterministic reuse, allocation/direct-access/registration rollback, callback-before-release ordering, reciprocal ring writes, sealed multi-target cleanup, full pinned capacity, stale IDs and atomic teardown rejection. Copy-authority regressions cover unpublished registration reentry, logical bounds, unmap, lifetime retirement, stale reuse, revoked DMA pins, full task-index capacity and mapping-edge relocation. The isolated guest uses the production Table and pager to verify actual owned backing, cached borrowed leaves, separate private COW snapshots, checked cross-page supervisor copies, forged-leaf rejection and complete frame reclamation. It also calls actual freestanding Executor/dispatcher copy helpers at CPL0; native user fault/syscall trap entry, endpoint dispatch and hardware DMA quiescence remain separate evidence.",
@@ -2918,13 +2888,12 @@
     {
       "path": "src/native/storage/storage_volume.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "storage-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "the freestanding durable-volume log workspace is one fixed-size kernel-heap allocation created before the first backend read or save, every slice remains bounded by the durable data-region capacity, allocation failure is reported through the storage error path, and volume reset scrubs the complete workspace before freeing it",
+        "the durable-volume log workspace is one fixed-size table_backing.Lazy heap allocation on every target, created before the first backend read or save, every slice remains bounded by the durable data-region capacity, allocation failure is reported through the storage error path, and volume reset scrubs the complete workspace before freeing it",
         "Blob replay fully decodes and validates every consumed local chunk reference before hashing its live prefix; persistent chunk-slot index arrays retain canonical zero tails. An exclusive operation guard retains replay/checkpoint scratch and backend attachment across suspension; reset, clear, rebind and adopt refuse busy before scrub/free. Frozen serialized metadata and exact monotonic revision acknowledgment preserve edits across waits, including externally cleared dirty lists. Loads reject destination mutation and read failure before replay and preflight complete framing/checksums before destructive candidate replay. Root-v6 seed-zero XXH64 checksums detect corruption separately from content authentication; unsupported roots reject save before any image or attached-backend writes, including after failed load and beside a valid peer root."
       ],
       "tests": [
@@ -2938,13 +2907,12 @@
     {
       "path": "src/native/storage/object_store/store.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "storage-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "freestanding chunk pointers originate only from bounded kernel-heap allocations sized to validated immutable payloads of at most 4096 bytes; live backing is never copied, length bounds precede slicing, reset and failed blob publication zero each new allocation before freeing it; publication uses 16-bit chunk indexes bounded by the 640-slot pool and failed writes leave existing chunks and object/version state intact",
+        "chunk pointers originate only from exact-length table_backing heap allocations on every target, sized to validated immutable payloads of at most 4096 bytes; live backing is never copied, length bounds precede slicing, reset and failed blob publication zero each new allocation before freeing it; publication uses 16-bit chunk indexes bounded by the 640-slot pool and failed writes leave existing chunks and object/version state intact",
         "Public Merkle and manifest helpers reject oversized reference counts and payload lengths before accessing bounded scratch. Local chunk-reference and Merkle scratch arrays initialize every consumed entry before use and expose only live prefixes; no uninitialized tail or padding enters a hash, stored record or response. Replay retains zeroed persistent chunk-slot index tails, and secure erasure remains required for owned payloads. Positioned version cursors bound the requested byte offset by the immutable payload length and validate the complete manifest before choosing the containing 4096-byte page. EOF produces no chunks; page and byte indices remain bounded, and callers retain only per-call borrowed chunks. Tests compare every offset with prefix traversal and reject malformed skipped-prefix manifests even at EOF."
       ],
       "tests": [
@@ -2958,14 +2926,13 @@
     {
       "path": "src/native/storage/workspace/directory.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "storage-owner",
       "review_state": "release-reviewed",
       "mitigations": [
         "Staging rejects zero entry identifiers and revival overflow without mutation; commit preflights deletions and allocations before deletion-first publication, reuses staged log records in place, and preserves complete generation batches for replay. Restore publishes one prepared target copy; generation advancement and import stop before the reserved snapshot sentinel.",
-        "each live freestanding workspace exclusively owns one fixed-capacity mutation-log allocation; create and replay establish backing before access, every index remains bounded by the 192-entry product limit, allocation rollback removes the reserved slot, and directory reset zeroes the full backing before freeing it"
+        "each live workspace exclusively owns fixed-capacity table_backing.Lazy heap allocations for its entries, mutation log, share table and recoverable deletes on every target; create and replay establish backing before access, every index remains bounded by the 192-entry product limit, allocation rollback removes the reserved slot, and directory reset zeroes the full backing before freeing it"
       ],
       "tests": [
         "zig build host-tests",
@@ -2992,12 +2959,12 @@
     {
       "path": "src/native/drivers/network_driver_task.zig",
       "categories": [
-        "pointer-cast"
+        "allocator-owned-buffer"
       ],
       "owner": "network-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "pointer casts are confined to kernel heap backing for the peer-link directory and receive queue, both zeroed on allocation and release; a fixed-capacity peer-link directory accepts only stable one-to-one device-to-unicast-MAC bindings; deferred receive service has a fixed poll budget, validates every device result before advancing ownership, queues only frames carrying the registered consumer prefix in a 32-slot FIFO ring, drains all other and overflow frames through a zero-length buffer while continuing hardware progress, and wakes only the recorded network-task owner. The active device exports an optional deadline independently from ready work. Native session idle scheduling retains this deadline while transmit service is not yet due; at expiry the unchanged bounded receive-service gate runs the watchdog. Clearing the device binding removes the deadline."
+        "the peer-link directory and receive queue are table_backing.Lazy heap tables on every target, zero-filled on allocation and scrubbed on release; a fixed-capacity peer-link directory accepts only stable one-to-one device-to-unicast-MAC bindings; deferred receive service has a fixed poll budget, validates every device result before advancing ownership, queues only frames carrying the registered consumer prefix in a 32-slot FIFO ring, drains all other and overflow frames through a zero-length buffer while continuing hardware progress, and wakes only the recorded network-task owner. The active device exports an optional deadline independently from ready work. Native session idle scheduling retains this deadline while transmit service is not yet due; at expiry the unchanged bounded receive-service gate runs the watchdog. Clearing the device binding removes the deadline."
       ],
       "tests": [
         "zig build host-tests",
@@ -3007,12 +2974,12 @@
     {
       "path": "src/native/sync/sync_transport.zig",
       "categories": [
-        "pointer-cast"
+        "allocator-owned-buffer"
       ],
       "owner": "sync-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "test external-attestation provider callback casts are confined to local fixture adapters; production-attested sync sessions pin request-bound verifier metadata digests before endpoint delivery or active-driver transmit; active-driver delivery resolves the target device through the bounded peer-link directory and reports a failed network delivery without transmitting when no route is bound; ABI v4 bounds every frame and payload before access, authenticates the whole wire header with HMAC-SHA256 and verifies XChaCha20-Poly1305 before returning plaintext; structural inspection is diagnostic only and decryption errors erase bounded output"
+        "the packet capture and endpoint table are table_backing.Lazy heap tables on every target, zero-filled on allocation and scrubbed on release; production-attested sync sessions pin request-bound verifier metadata digests before endpoint delivery or active-driver transmit; active-driver delivery resolves the target device through the bounded peer-link directory and reports a failed network delivery without transmitting when no route is bound; ABI v4 bounds every frame and payload before access, authenticates the whole wire header with HMAC-SHA256 and verifies XChaCha20-Poly1305 before returning plaintext; structural inspection is diagnostic only and decryption errors erase bounded output"
       ],
       "tests": [
         "zig build host-tests",
@@ -3022,13 +2989,12 @@
     {
       "path": "src/native/sync/transient_service.zig",
       "categories": [
-        "pointer-cast",
         "allocator-owned-buffer"
       ],
       "owner": "sync-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "each freestanding proof allocates exactly one aligned sync service before initialization, allocation or initialization failure publishes no pointer and releases the allocation, callers retain ownership through one scoped instance, and teardown scrubs the complete service before freeing it"
+        "each proof allocates exactly one sync service through table_backing.Lazy, which heap-backs it on every target, zero-fills it on allocation and scrubs it on release, before initialization; allocation or initialization failure publishes no service and releases the allocation, callers retain ownership through one scoped instance, and teardown scrubs the complete service before freeing it"
       ],
       "tests": [
         "zig build host-tests",
@@ -3041,12 +3007,12 @@
     {
       "path": "src/native/sync/sync_transport_harness.zig",
       "categories": [
-        "pointer-cast"
+        "allocator-owned-buffer"
       ],
       "owner": "sync-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "freestanding relay queue backing comes from aligned kernel allocation; explicit initialization restores packet-arena and session-index sentinels; XChaCha20-Poly1305 packet encryption uses fresh random keys and nonces; device kinds are implicit after device-pair validation; decrypt rejects invalid metadata before bounded access and erases failed output; session deinitialization erases traffic keys; teardown scrubs and frees the bounded queue"
+        "relay queue backing is a table_backing.Lazy heap allocation on every target whose zero-filled packet arena and session index are valid empty values; XChaCha20-Poly1305 packet encryption uses fresh random keys and nonces; device kinds are implicit after device-pair validation; decrypt rejects invalid metadata before bounded access and erases failed output; session deinitialization erases traffic keys; teardown scrubs and frees the bounded queue"
       ],
       "tests": [
         "zig build host-tests",

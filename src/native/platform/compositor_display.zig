@@ -362,7 +362,7 @@ test "compositor display framebuffer renders windows switching recovery and perm
     const app_task = try makeAppTask(&runtime);
     var session = compositor_session.Session.init();
 
-    const document_window = try session.openDocumentView(app_task, 1_200, "trip/brief.md");
+    const document_window_id = (try session.openDocumentView(app_task, 1_200, "trip/brief.md")).id;
     var storage: [DEFAULT_STORAGE_BYTES]u8 = undefined;
     var display = try Framebuffer.init(&storage, DEFAULT_WIDTH, DEFAULT_HEIGHT);
     try display.renderSession(&session);
@@ -419,7 +419,7 @@ test "compositor display framebuffer renders windows switching recovery and perm
     try expectDisplayContains(&display, "permission_decision kind=object_access resource=ws:trip decision=allow");
     try expectDisplayContains(&display, "permission_decision kind=network_egress resource=net:trip decision=deny");
 
-    const task_window = try session.openTaskView(app_task, "Coordinate Trip");
+    const task_window_id = (try session.openTaskView(app_task, "Coordinate Trip")).id;
     try display.renderSession(&session);
     try expectDisplayContains(&display, "active_type=full_screen_task_view");
     try expectDisplayContains(&display, "title=Coordinate Trip");
@@ -445,8 +445,8 @@ test "compositor display framebuffer renders windows switching recovery and perm
     try expectDisplayContains(&display, "type=full_screen_task_view");
     try expectDisplayContains(&display, "permission_scope object=ws:trip network=none local=yes lease=400");
     try expectDisplayContains(&display, "permission_scope object=none network=net:trip local=no lease=80");
-    try std.testing.expectEqual(document_window.id, session.windowAtOrder(0).?.id);
-    try std.testing.expectEqual(task_window.id, session.active_window_id);
+    try std.testing.expectEqual(document_window_id, session.windowAtOrder(0).?.id);
+    try std.testing.expectEqual(task_window_id, session.active_window_id);
 }
 
 test "compositor display presentation proof requires visible rendered content" {

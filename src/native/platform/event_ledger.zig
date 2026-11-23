@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
@@ -16,13 +15,8 @@ const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const workspace = @import("../storage/workspace.zig");
 const kinds = @import("event_kinds.zig");
-const root = @import("root");
+const table_backing = @import("../core/table_backing.zig");
 const copyText = native_util.copyText;
-
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
-else
-    struct {};
 
 pub const MAX_EVENTS: usize = 64;
 pub const MAX_DETAIL_BYTES: usize = 512;
@@ -291,7 +285,6 @@ const SubjectEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MA
 const TaskEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MAX_EVENTS * 2);
 const EventOrderIndex = indexed_arena.MultimapIndex(MAX_EVENTS, 1, 2);
 const EVENT_ORDER_KEY: u64 = 1;
-const heap_backed_event_ledger = builtin.target.os.tag == .freestanding;
 
 pub const EventBacking = struct {
     events: EventArena = EventArena.init(),
@@ -306,37 +299,13 @@ pub const EventBacking = struct {
         }
     }
 
-    fn init() EventBacking {
-        return .{};
-    }
-
-    fn initializeAllocated(self: *EventBacking) void {
-        @memset(std.mem.asBytes(self), 0);
-        self.events.free_head = indexed_arena.reusableNoIndex(MAX_EVENTS);
-        initializeEventIndex(&self.kind_index);
-        initializeEventIndex(&self.subject_index);
-        initializeEventIndex(&self.task_index);
-        initializeEventIndex(&self.event_order_index);
-    }
-
     fn resetIndexes(self: *EventBacking) void {
-        initializeEventIndex(&self.kind_index);
-        initializeEventIndex(&self.subject_index);
-        initializeEventIndex(&self.task_index);
-        initializeEventIndex(&self.event_order_index);
+        self.kind_index.reset();
+        self.subject_index.reset();
+        self.task_index.reset();
+        self.event_order_index.reset();
     }
 };
-
-fn initializeEventIndex(index: anytype) void {
-    const Index = @TypeOf(index.*);
-    const CompactIndex = @FieldType(Index, "free_bucket_head");
-    const compact_no_index: CompactIndex = @intCast(@max(index.links.len, index.buckets.len));
-    @memset(std.mem.asBytes(index), 0);
-    for (&index.links) |*link| link.bucket = compact_no_index;
-    index.free_bucket_head = compact_no_index;
-}
-
-const EventBackingStorage = if (heap_backed_event_ledger) ?*EventBacking else EventBacking;
 
 const QueryIndex = enum {
     kind,
@@ -356,7 +325,7 @@ pub const Ledger = struct {
     header_version_id: u64 = 0,
     next_sequence: u64 = 1,
     oldest_retained_sequence: u64 = 0,
-    event_backing: EventBackingStorage = if (heap_backed_event_ledger) null else EventBacking.init(),
+    event_backing: table_backing.Lazy(EventBacking, null) = .{},
     persistence_batch_depth: PersistenceBatchDepth = 0,
     pending_persist_first_sequence: u64 = 0,
     pending_persist_count: PendingPersistenceCount = 0,
@@ -367,19 +336,13 @@ pub const Ledger = struct {
     }
 
     comptime {
-        if (heap_backed_event_ledger and @sizeOf(@This()) != LEDGER_RESIDENT_SIZE_BYTES) {
+        if (@sizeOf(@This()) != LEDGER_RESIDENT_SIZE_BYTES) {
             @compileError("heap-backed event ledger no longer matches its compact resident layout");
         }
     }
 
     pub fn deinit(self: *Ledger) void {
-        if (comptime heap_backed_event_ledger) {
-            if (self.event_backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
-                self.event_backing = null;
-            }
-        }
+        self.event_backing.release();
     }
 
     pub fn reset(self: *Ledger) void {
@@ -388,36 +351,22 @@ pub const Ledger = struct {
     }
 
     pub fn resetRetainingBacking(self: *Ledger) void {
-        if (comptime heap_backed_event_ledger) {
-            while (self.evictOldestEvent()) {}
-            const retained_backing = self.event_backing;
-            self.* = Ledger.init();
-            self.event_backing = retained_backing;
-            return;
-        }
+        while (self.evictOldestEvent()) {}
+        const retained_backing = self.event_backing;
         self.* = Ledger.init();
+        self.event_backing = retained_backing;
     }
 
     fn eventBacking(self: *Ledger) ?*EventBacking {
-        if (comptime heap_backed_event_ledger) return self.event_backing;
-        return &self.event_backing;
+        return self.event_backing.get();
     }
 
     fn backingConst(self: *const Ledger) ?*const EventBacking {
-        if (comptime heap_backed_event_ledger) return self.event_backing;
-        return &self.event_backing;
+        return self.event_backing.get();
     }
 
     fn ensureBacking(self: *Ledger) error{NoSpaceLeft}!*EventBacking {
-        if (self.eventBacking()) |backing| return backing;
-        if (comptime heap_backed_event_ledger) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(EventBacking)) orelse return error.NoSpaceLeft;
-            const backing: *EventBacking = @ptrCast(@alignCast(allocation));
-            backing.initializeAllocated();
-            self.event_backing = backing;
-            return backing;
-        }
-        return &self.event_backing;
+        return self.event_backing.ensure();
     }
 
     pub fn initPersistent(

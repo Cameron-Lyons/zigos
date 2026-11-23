@@ -2021,7 +2021,7 @@ test "storage volume persists a mutated workspace alongside an untouched one acr
     const allocator = std.testing.allocator;
     const volume = try allocator.create(storage_volume.Volume);
     defer allocator.destroy(volume);
-    _ = volume.reset();
+    volume.* = storage_volume.Volume.init();
     var store = object_store.Store.init();
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
@@ -2062,7 +2062,7 @@ test "storage volume persists a mutated workspace alongside an untouched one acr
     var loaded_workspaces = workspace.Directory.init();
     const loaded_volume = try allocator.create(storage_volume.Volume);
     defer allocator.destroy(loaded_volume);
-    _ = loaded_volume.reset();
+    loaded_volume.* = storage_volume.Volume.init();
     _ = try loaded_volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
     const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "notes").?;
     const loaded_journal = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "journal").?;

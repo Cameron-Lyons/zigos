@@ -5,11 +5,14 @@ const ids = @import("ids.zig");
 const native_util = @import("util.zig");
 
 pub const no_index = std.math.maxInt(usize);
-pub const RIGHT_SIZES_DIRTY_ID_INDEXES = true;
 // The final metadata value permanently retires a physical slot. It is never
 // issued as a handle generation, including after reset or index rebuilding.
 pub const EXHAUSTED_HANDLE_GENERATION: u32 = std.math.maxInt(u32);
 pub const MAX_HANDLE_GENERATION: u32 = EXHAUSTED_HANDLE_GENERATION - 1;
+
+// Every container in this file treats all-zero bytes as its empty value, so
+// zero-filled heap storage needs no initialization. Free lists and multimap
+// links therefore store `index + 1`, with zero meaning no index.
 
 fn sparseIndexCapacity(comptime entry_capacity: usize) usize {
     const minimum_capacity = entry_capacity + (entry_capacity + 3) / 4;
@@ -33,8 +36,12 @@ pub fn reusableNoIndex(comptime capacity: usize) ReusableIndex(capacity) {
     return @intCast(capacity);
 }
 
-inline fn publicReusableIndex(comptime capacity: usize, index: ReusableIndex(capacity)) ?usize {
-    return if (index == reusableNoIndex(capacity)) null else @intCast(index);
+inline fn encodeLink(comptime capacity: usize, index: usize) ReusableIndex(capacity) {
+    return @intCast(index + 1);
+}
+
+inline fn decodeLink(link: anytype) ?usize {
+    return if (link == 0) null else @as(usize, @intCast(link)) - 1;
 }
 
 pub fn nonZeroKey(key: u64) u64 {
@@ -48,10 +55,10 @@ inline fn popReusableIndex(
     free_next: *[capacity]ReusableIndex(capacity),
     next_unclaimed_index: *ReusableIndex(capacity),
 ) ?usize {
-    if (publicReusableIndex(capacity, free_head.*)) |slot_index| {
+    if (decodeLink(free_head.*)) |slot_index| {
         if (slot_index >= claimed_count) return null;
         free_head.* = free_next.*[slot_index];
-        free_next.*[slot_index] = reusableNoIndex(capacity);
+        free_next.*[slot_index] = 0;
         return slot_index;
     }
 
@@ -68,7 +75,7 @@ inline fn pushReusableIndex(
 ) void {
     if (slot_index >= capacity) native_util.impossibleByInvariant("reusable index fits its arena capacity");
     free_next.*[slot_index] = free_head.*;
-    free_head.* = @intCast(slot_index);
+    free_head.* = encodeLink(capacity, slot_index);
 }
 
 inline fn unlinkReusableIndex(
@@ -80,7 +87,7 @@ inline fn unlinkReusableIndex(
 ) bool {
     if (slot_index >= claimed_count) return false;
     var previous: ?usize = null;
-    var current = publicReusableIndex(capacity, free_head.*);
+    var current = decodeLink(free_head.*);
     while (current) |current_index| {
         if (current_index >= claimed_count) return false;
         const next = free_next.*[current_index];
@@ -90,11 +97,11 @@ inline fn unlinkReusableIndex(
             } else {
                 free_head.* = next;
             }
-            free_next.*[current_index] = reusableNoIndex(capacity);
+            free_next.*[current_index] = 0;
             return true;
         }
         previous = current_index;
-        current = publicReusableIndex(capacity, next);
+        current = decodeLink(next);
     }
     return false;
 }
@@ -171,42 +178,39 @@ pub fn MultimapIndex(
         const BucketIndex = UniqueIndex(index_capacity);
         const compact_capacity = @max(link_capacity, bucket_capacity);
         const CompactIndex = ReusableIndex(compact_capacity);
-        const compact_no_index = reusableNoIndex(compact_capacity);
 
+        // Links and bucket references store `index + 1`; zero is no index.
         const Bucket = struct {
             key: u64 = 0,
-            head: CompactIndex = compact_no_index,
-            tail: CompactIndex = compact_no_index,
+            head: CompactIndex = 0,
+            tail: CompactIndex = 0,
             count: CompactIndex = 0,
             in_use: bool = false,
         };
 
         const Link = struct {
-            next: CompactIndex = compact_no_index,
-            previous: CompactIndex = compact_no_index,
-            bucket: CompactIndex = compact_no_index,
+            next: CompactIndex = 0,
+            previous: CompactIndex = 0,
+            bucket: CompactIndex = 0,
         };
 
         bucket_index: BucketIndex = BucketIndex.init(),
         buckets: [bucket_capacity]Bucket = @as([bucket_capacity]Bucket, @splat(Bucket{})),
         links: [link_capacity]Link = @as([link_capacity]Link, @splat(Link{})),
-        free_bucket_head: CompactIndex = compact_no_index,
+        free_bucket_head: CompactIndex = 0,
         next_unclaimed_bucket: CompactIndex = 0,
 
         pub fn init() Self {
             return .{};
         }
 
+        /// Turns uninitialized storage into an empty index.
         pub fn initializeAllocated(self: *Self) void {
-            self.bucket_index.reset();
-            for (&self.buckets) |*bucket| bucket.* = .{};
-            for (&self.links) |*link| link.* = .{};
-            self.free_bucket_head = compact_no_index;
-            self.next_unclaimed_bucket = 0;
+            @memset(std.mem.asBytes(self), 0);
         }
 
         pub fn reset(self: *Self) void {
-            self.initializeAllocated();
+            @memset(std.mem.asBytes(self), 0);
         }
 
         pub fn count(self: *const Self, key: u64) usize {
@@ -244,41 +248,40 @@ pub fn MultimapIndex(
 
         pub fn bucketIndexForSlot(self: *const Self, slot_index: usize) ?usize {
             if (slot_index >= link_capacity) return null;
-            const bucket_index = self.links[slot_index].bucket;
-            if (bucket_index == compact_no_index) return null;
+            const bucket_index = decodeLink(self.links[slot_index].bucket) orelse return null;
             if (bucket_index >= bucket_capacity) native_util.impossibleByInvariant("multimap link points outside buckets");
             const entry = &self.buckets[bucket_index];
             if (!entry.in_use or entry.count == 0 or entry.key == 0) native_util.impossibleByInvariant("multimap link belongs to a live bucket");
-            return @intCast(bucket_index);
+            return bucket_index;
         }
 
         pub fn append(self: *Self, key: u64, slot_index: usize) bool {
             if (key == 0 or slot_index >= link_capacity) return false;
             const link = &self.links[slot_index];
-            if (link.bucket != compact_no_index) return false;
+            if (link.bucket != 0) return false;
 
             const bucket_slot_index = self.findOrCreateBucketIndex(key) orelse return false;
-            const entry = &self.buckets[@intCast(bucket_slot_index)];
-            const compact_slot_index: CompactIndex = @intCast(slot_index);
+            const entry = &self.buckets[bucket_slot_index];
+            const bucket_link = encodeLink(compact_capacity, bucket_slot_index);
+            const slot_link = encodeLink(compact_capacity, slot_index);
             link.* = .{
                 .previous = entry.tail,
-                .bucket = bucket_slot_index,
+                .bucket = bucket_link,
             };
-            if (entry.tail == compact_no_index) {
-                if (entry.head != compact_no_index or entry.count != 0) {
-                    native_util.impossibleByInvariant("empty multimap bucket has no links");
-                }
-                entry.head = compact_slot_index;
-            } else {
-                const tail_index: usize = @intCast(entry.tail);
+            if (decodeLink(entry.tail)) |tail_index| {
                 if (tail_index >= link_capacity) native_util.impossibleByInvariant("multimap tail points outside links");
                 const tail_link = &self.links[tail_index];
-                if (tail_link.bucket != bucket_slot_index or tail_link.next != compact_no_index) {
+                if (tail_link.bucket != bucket_link or tail_link.next != 0) {
                     native_util.impossibleByInvariant("multimap tail link belongs to the bucket tail");
                 }
-                tail_link.next = compact_slot_index;
+                tail_link.next = slot_link;
+            } else {
+                if (entry.head != 0 or entry.count != 0) {
+                    native_util.impossibleByInvariant("empty multimap bucket has no links");
+                }
+                entry.head = slot_link;
             }
-            entry.tail = compact_slot_index;
+            entry.tail = slot_link;
             entry.count += 1;
             return true;
         }
@@ -289,48 +292,46 @@ pub fn MultimapIndex(
             if (bucket_slot_index >= bucket_capacity) native_util.impossibleByInvariant("multimap bucket index points outside buckets");
             const entry = &self.buckets[bucket_slot_index];
             if (!entry.in_use or entry.key != key) native_util.impossibleByInvariant("multimap bucket index points at the wrong bucket");
-            const compact_bucket_slot_index: CompactIndex = @intCast(bucket_slot_index);
-            const compact_slot_index: CompactIndex = @intCast(slot_index);
+            const bucket_link = encodeLink(compact_capacity, bucket_slot_index);
+            const slot_link = encodeLink(compact_capacity, slot_index);
             const link = &self.links[slot_index];
-            if (link.bucket != compact_bucket_slot_index) return false;
+            if (link.bucket != bucket_link) return false;
             if (entry.count == 0) native_util.impossibleByInvariant("live multimap bucket contains at least one link");
 
-            if (link.previous == compact_no_index) {
-                if (entry.head != compact_slot_index) native_util.impossibleByInvariant("multimap head link belongs to the bucket head");
-                entry.head = link.next;
-            } else {
-                const previous_index: usize = @intCast(link.previous);
+            if (decodeLink(link.previous)) |previous_index| {
                 if (previous_index >= link_capacity) native_util.impossibleByInvariant("multimap previous link points outside links");
                 const previous_link = &self.links[previous_index];
-                if (previous_link.bucket != compact_bucket_slot_index or previous_link.next != compact_slot_index) {
+                if (previous_link.bucket != bucket_link or previous_link.next != slot_link) {
                     native_util.impossibleByInvariant("multimap previous link points at its successor");
                 }
                 previous_link.next = link.next;
+            } else {
+                if (entry.head != slot_link) native_util.impossibleByInvariant("multimap head link belongs to the bucket head");
+                entry.head = link.next;
             }
 
-            if (link.next == compact_no_index) {
-                if (entry.tail != compact_slot_index) native_util.impossibleByInvariant("multimap tail link belongs to the bucket tail");
-                entry.tail = link.previous;
-            } else {
-                const next_index: usize = @intCast(link.next);
+            if (decodeLink(link.next)) |next_index| {
                 if (next_index >= link_capacity) native_util.impossibleByInvariant("multimap next link points outside links");
                 const next_link = &self.links[next_index];
-                if (next_link.bucket != compact_bucket_slot_index or next_link.previous != compact_slot_index) {
+                if (next_link.bucket != bucket_link or next_link.previous != slot_link) {
                     native_util.impossibleByInvariant("multimap next link points at its predecessor");
                 }
                 next_link.previous = link.previous;
+            } else {
+                if (entry.tail != slot_link) native_util.impossibleByInvariant("multimap tail link belongs to the bucket tail");
+                entry.tail = link.previous;
             }
 
             link.* = .{};
             entry.count -= 1;
             if (entry.count == 0) {
-                if (entry.head != compact_no_index or entry.tail != compact_no_index) {
+                if (entry.head != 0 or entry.tail != 0) {
                     native_util.impossibleByInvariant("empty multimap bucket has no links");
                 }
                 const bucket_key = entry.key;
                 entry.* = .{};
                 self.bucket_index.remove(bucket_key);
-                self.pushFreeBucket(compact_bucket_slot_index);
+                self.pushFreeBucket(bucket_slot_index);
             }
             return true;
         }
@@ -340,52 +341,43 @@ pub fn MultimapIndex(
             return &self.buckets[bucket_index];
         }
 
-        fn findOrCreateBucketIndex(self: *Self, key: u64) ?CompactIndex {
-            if (self.bucket_index.lookup(key)) |bucket_slot_index| {
-                if (bucket_slot_index >= bucket_capacity) native_util.impossibleByInvariant("multimap bucket index points outside buckets");
-                const slot = &self.buckets[bucket_slot_index];
-                if (!slot.in_use or slot.key != key) native_util.impossibleByInvariant("multimap bucket index points at the wrong bucket");
-                return @intCast(bucket_slot_index);
-            }
+        fn findOrCreateBucketIndex(self: *Self, key: u64) ?usize {
+            if (self.bucketIndexForKey(key)) |bucket_slot_index| return bucket_slot_index;
             const bucket_slot_index = self.popFreeBucket() orelse return null;
-            const slot = &self.buckets[@intCast(bucket_slot_index)];
-            slot.* = .{
+            self.buckets[bucket_slot_index] = .{
                 .key = key,
                 .in_use = true,
             };
-            self.bucket_index.insertAbsent(key, @intCast(bucket_slot_index));
+            self.bucket_index.insertAbsent(key, bucket_slot_index);
             return bucket_slot_index;
         }
 
-        fn popFreeBucket(self: *Self) ?CompactIndex {
-            if (self.free_bucket_head != compact_no_index) {
-                const bucket_slot_index = self.free_bucket_head;
-                const bucket_index: usize = @intCast(bucket_slot_index);
+        fn popFreeBucket(self: *Self) ?usize {
+            if (decodeLink(self.free_bucket_head)) |bucket_index| {
                 if (bucket_index >= bucket_capacity) native_util.impossibleByInvariant("multimap free bucket index points outside buckets");
                 const free_bucket = &self.buckets[bucket_index];
                 if (free_bucket.in_use) native_util.impossibleByInvariant("multimap free bucket list points at a live bucket");
                 self.free_bucket_head = free_bucket.head;
-                free_bucket.head = compact_no_index;
-                return bucket_slot_index;
+                free_bucket.head = 0;
+                return bucket_index;
             }
 
-            if (@as(usize, @intCast(self.next_unclaimed_bucket)) >= bucket_capacity) return null;
-            const bucket_slot_index = self.next_unclaimed_bucket;
+            const bucket_index: usize = @intCast(self.next_unclaimed_bucket);
+            if (bucket_index >= bucket_capacity) return null;
             self.next_unclaimed_bucket += 1;
-            return bucket_slot_index;
+            return bucket_index;
         }
 
-        fn pushFreeBucket(self: *Self, bucket_slot_index: CompactIndex) void {
-            const bucket_index: usize = @intCast(bucket_slot_index);
+        fn pushFreeBucket(self: *Self, bucket_index: usize) void {
             if (bucket_index >= bucket_capacity) native_util.impossibleByInvariant("multimap recycled bucket index points outside buckets");
             const free_bucket = &self.buckets[bucket_index];
             if (free_bucket.in_use) native_util.impossibleByInvariant("multimap cannot recycle a live bucket");
             free_bucket.head = self.free_bucket_head;
-            self.free_bucket_head = bucket_slot_index;
+            self.free_bucket_head = encodeLink(compact_capacity, bucket_index);
         }
 
-        inline fn publicIndex(index: CompactIndex) usize {
-            return if (index == compact_no_index) no_index else @intCast(index);
+        inline fn publicIndex(link: CompactIndex) usize {
+            return decodeLink(link) orelse no_index;
         }
     };
 }
@@ -395,6 +387,9 @@ pub const Options = struct {
     /// When false, callers must initialize the payload key before removing or
     /// rebuilding a live slot so the primary index can be updated safely.
     store_keys: bool = true,
+    /// Issue generational handles per slot. A slot whose generation reaches
+    /// EXHAUSTED_HANDLE_GENERATION is retired permanently.
+    track_generations: bool = false,
 };
 
 pub fn IndexedArena(
@@ -436,9 +431,13 @@ pub fn IndexedArenaWithKeyOptions(
 ) type {
     if (capacity == 0) @compileError("indexed arena requires at least one slot");
     if (index_capacity < capacity) @compileError("indexed arena primary index capacity must cover slots");
+    if (options.track_generations and capacity > @as(usize, std.math.maxInt(u32)) + 1) {
+        @compileError("indexed arena slot indexes must fit in a handle");
+    }
     const dirty_capacity = if (options.track_dirty) capacity else 0;
     const dirty_index_capacity = if (options.track_dirty) sparseIndexCapacity(capacity) else 0;
     const key_capacity = if (options.store_keys) capacity else 0;
+    const generation_capacity = if (options.track_generations) capacity else 0;
     const DirtyIdIndex = if (options.track_dirty) UniqueIndex(dirty_index_capacity) else struct {};
     const custom_membership = @hasDecl(Slot, "arenaInUse") or @hasDecl(Slot, "setArenaInUse");
     if (custom_membership and (!@hasDecl(Slot, "arenaInUse") or !@hasDecl(Slot, "setArenaInUse"))) {
@@ -452,7 +451,8 @@ pub fn IndexedArenaWithKeyOptions(
         const Self = @This();
         const FreeIndex = ReusableIndex(capacity);
         const Count = ReusableIndex(capacity);
-        const free_no_index = reusableNoIndex(capacity);
+        pub const Handle = GenerationalHandle("ArenaHandle");
+        pub const slot_capacity = capacity;
         pub const dirty_id_index_capacity = dirty_index_capacity;
 
         inline fn slotInUse(slot: *const Slot) bool {
@@ -471,8 +471,9 @@ pub fn IndexedArenaWithKeyOptions(
         slots: [capacity]Slot = @as([capacity]Slot, @splat(Slot{})),
         primary_index: UniqueIndex(index_capacity) = UniqueIndex(index_capacity).init(),
         slot_keys: [key_capacity]Key = @as([key_capacity]Key, @splat(ids.zero(Key))),
-        free_next: [capacity]FreeIndex = @as([capacity]FreeIndex, @splat(free_no_index)),
-        free_head: FreeIndex = free_no_index,
+        slot_generations: [generation_capacity]u32 = @as([generation_capacity]u32, @splat(0)),
+        free_next: [capacity]FreeIndex = @as([capacity]FreeIndex, @splat(0)),
+        free_head: FreeIndex = 0,
         next_unclaimed_index: Count = 0,
         used_count: Count = 0,
         dirty_count: Count = 0,
@@ -483,32 +484,39 @@ pub fn IndexedArenaWithKeyOptions(
             return .{};
         }
 
+        /// Turns uninitialized storage into an empty arena.
         pub fn initializeAllocated(self: *Self) void {
-            for (&self.slots) |*slot| slot.* = Slot{};
-            self.primary_index.reset();
-            if (comptime options.store_keys) @memset(&self.slot_keys, ids.zero(Key));
-            @memset(&self.free_next, free_no_index);
-            self.free_head = free_no_index;
-            self.next_unclaimed_index = 0;
-            self.used_count = 0;
-            self.dirty_count = 0;
-            if (comptime options.track_dirty) {
-                @memset(&self.dirty_ids, ids.zero(Key));
-                self.dirty_id_index.reset();
-            }
+            @memset(std.mem.asBytes(self), 0);
         }
 
+        /// Scrubs the claimed prefix; slots beyond it are already clean.
         pub fn reset(self: *Self) void {
             const claimed_count = self.claimedCount();
+            for (self.slots[0..claimed_count]) |*slot| slot.* = Slot{};
+            self.resetMetadata(claimed_count);
+        }
+
+        /// Clears membership but keeps payloads for a caller that restores in
+        /// place. That caller scrubs every kept payload it does not reclaim,
+        /// since a later `reset` only reaches the newly claimed prefix.
+        pub fn resetRetainingPayloads(self: *Self) void {
+            const claimed_count = self.claimedCount();
+            for (self.slots[0..claimed_count]) |*slot| setSlotInUse(slot, false);
+            self.resetMetadata(claimed_count);
+        }
+
+        fn resetMetadata(self: *Self, claimed_count: usize) void {
             const dirty_count = self.dirty_count;
             if (dirty_count > dirty_capacity) {
                 native_util.impossibleByInvariant("indexed arena dirty count fits its storage");
             }
-            for (self.slots[0..claimed_count]) |*slot| slot.* = Slot{};
+            if (comptime options.track_generations) {
+                for (self.slot_generations[0..claimed_count]) |*generation| generation.* = nextSlotGeneration(generation.*);
+            }
             self.primary_index.reset();
             if (comptime options.store_keys) @memset(self.slot_keys[0..claimed_count], ids.zero(Key));
-            @memset(self.free_next[0..claimed_count], free_no_index);
-            self.free_head = free_no_index;
+            @memset(self.free_next[0..claimed_count], 0);
+            self.free_head = 0;
             self.next_unclaimed_index = 0;
             self.used_count = 0;
             self.dirty_count = 0;
@@ -518,34 +526,8 @@ pub fn IndexedArenaWithKeyOptions(
             }
         }
 
-        pub fn resetRetainingPayloads(self: *Self) void {
-            const claimed_count = self.claimedCount();
-            const dirty_count = self.dirty_count;
-            if (dirty_count > dirty_capacity) {
-                native_util.impossibleByInvariant("indexed arena dirty count fits its storage");
-            }
-            for (self.slots[0..claimed_count]) |*slot| {
-                setSlotInUse(slot, false);
-            }
-            self.primary_index.reset();
-            if (comptime options.store_keys) @memset(self.slot_keys[0..claimed_count], ids.zero(Key));
-            @memset(self.free_next[0..claimed_count], free_no_index);
-            self.free_head = free_no_index;
-            self.next_unclaimed_index = 0;
-            self.used_count = 0;
-            self.dirty_count = 0;
-            @memset(self.dirty_ids[0..dirty_count], ids.zero(Key));
-            if (comptime options.track_dirty) self.dirty_id_index.reset();
-        }
-
         pub fn reserve(self: *Self, key: Key) ?*Slot {
             const slot_index = self.reserveIndex(key) orelse return null;
-            return &self.slots[slot_index];
-        }
-
-        /// The caller must overwrite the entire returned slot before reading it.
-        pub fn reserveForOverwrite(self: *Self, key: Key) ?*Slot {
-            const slot_index = self.reserveIndexForOverwrite(key) orelse return null;
             return &self.slots[slot_index];
         }
 
@@ -602,55 +584,40 @@ pub fn IndexedArenaWithKeyOptions(
 
         pub fn reserveIndexAt(self: *Self, key: Key, slot_index: usize) ?usize {
             const raw_key = ids.raw(key);
-            if (raw_key == 0 or slot_index >= capacity) return null;
+            if (raw_key == 0) return null;
             if (self.primary_index.lookup(raw_key) != null) return null;
-            if (slotInUse(&self.slots[slot_index])) return null;
             if (!self.claimFreeIndex(slot_index)) return null;
 
             self.claimSlot(key, raw_key, slot_index, true);
             return slot_index;
         }
 
-        /// Rekeys a live slot without clearing its payload. The caller must
-        /// overwrite the entire returned slot before reading it.
-        pub fn replaceAtIndexForOverwrite(self: *Self, key: Key, slot_index: usize) ?*Slot {
-            const raw_key = ids.raw(key);
-            if (raw_key == 0 or slot_index >= capacity) return null;
-            const slot = &self.slots[slot_index];
-            if (!slotInUse(slot)) return null;
-            if (self.primary_index.lookup(raw_key)) |existing_index| {
-                if (existing_index != slot_index) return null;
-            }
-
-            const previous_key = if (comptime options.store_keys) self.slot_keys[slot_index] else keyOf(slot);
-            const previous_raw_key = ids.raw(previous_key);
-            if (comptime !options.store_keys) {
-                if (previous_raw_key == 0) native_util.impossibleByInvariant("indexed arena live slot requires a payload key before replacement");
-                const indexed_slot = self.primary_index.lookup(previous_raw_key) orelse native_util.impossibleByInvariant("indexed arena live payload key must exist in its primary index");
-                if (indexed_slot != slot_index) native_util.impossibleByInvariant("indexed arena live payload key must identify its slot");
-            }
-            if (previous_raw_key != raw_key) {
-                if (previous_raw_key != 0) {
-                    self.primary_index.remove(previous_raw_key);
-                    self.noteDirty(previous_key);
-                }
-                if (comptime options.store_keys) self.slot_keys[slot_index] = key;
-                self.primary_index.insertAbsent(raw_key, slot_index);
-            }
-            self.noteDirty(key);
-            return slot;
-        }
-
         pub fn insertIndexAt(self: *Self, key: Key, slot_index: usize, value: Slot) ?usize {
             const raw_key = ids.raw(key);
-            if (raw_key == 0 or slot_index >= capacity) return null;
+            if (raw_key == 0) return null;
             if (self.primary_index.lookup(raw_key) != null) return null;
-            if (slotInUse(&self.slots[slot_index])) return null;
             if (!self.claimFreeIndex(slot_index)) return null;
 
             self.slots[slot_index] = value;
             self.claimSlotMetadata(key, raw_key, slot_index, true);
             return slot_index;
+        }
+
+        pub fn canReserveIndex(self: *const Self, slot_index: usize) bool {
+            if (slot_index >= capacity or slotInUse(&self.slots[slot_index])) return false;
+            if (comptime options.track_generations) return self.slot_generations[slot_index] != EXHAUSTED_HANDLE_GENERATION;
+            return true;
+        }
+
+        // Snapshot callers can reject an exhausted destination before resetting
+        // membership or retiring any currently live authority.
+        pub fn canReserveIndexAfterReset(self: *const Self, slot_index: usize) bool {
+            if (slot_index >= capacity) return false;
+            if (comptime options.track_generations) {
+                const generation = self.slot_generations[slot_index];
+                return (if (slot_index < self.claimedCount()) nextSlotGeneration(generation) else generation) != EXHAUSTED_HANDLE_GENERATION;
+            }
+            return true;
         }
 
         fn claimSlot(self: *Self, key: Key, raw_key: u64, slot_index: usize, mark_dirty: bool) void {
@@ -660,6 +627,9 @@ pub fn IndexedArenaWithKeyOptions(
 
         fn claimSlotMetadata(self: *Self, key: Key, raw_key: u64, slot_index: usize, mark_dirty: bool) void {
             setSlotInUse(&self.slots[slot_index], true);
+            if (comptime options.track_generations) {
+                if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
+            }
             if (comptime options.store_keys) self.slot_keys[slot_index] = key;
             self.primary_index.insertAbsent(raw_key, slot_index);
             self.used_count += 1;
@@ -672,18 +642,18 @@ pub fn IndexedArenaWithKeyOptions(
             comptime excludes: anytype,
         ) ?usize {
             const claimed_count = self.claimedCount();
-            var next_index = publicReusableIndex(capacity, self.free_head);
+            var next_index = decodeLink(self.free_head);
             var attempts: usize = 0;
             while (next_index) |slot_index| : (attempts += 1) {
                 if (slot_index >= claimed_count or attempts >= claimed_count) return null;
-                next_index = publicReusableIndex(capacity, self.free_next[slot_index]);
-                if (excludes(context, slot_index)) continue;
+                next_index = decodeLink(self.free_next[slot_index]);
+                if (self.isRetired(slot_index) or excludes(context, slot_index)) continue;
                 return slot_index;
             }
 
             var slot_index = claimed_count;
             while (slot_index < capacity) : (slot_index += 1) {
-                if (excludes(context, slot_index)) continue;
+                if (self.isRetired(slot_index) or excludes(context, slot_index)) continue;
                 return slot_index;
             }
             return null;
@@ -701,6 +671,58 @@ pub fn IndexedArenaWithKeyOptions(
 
         pub fn slotIndexOf(self: *const Self, key: Key) ?usize {
             return self.findIndex(key);
+        }
+
+        pub fn slotAt(self: *Self, slot_index: usize) *Slot {
+            if (slot_index >= capacity) native_util.impossibleByInvariant("indexed arena slot index points outside slots");
+            return &self.slots[slot_index];
+        }
+
+        pub fn slotAtConst(self: *const Self, slot_index: usize) *const Slot {
+            if (slot_index >= capacity) native_util.impossibleByInvariant("indexed arena slot index points outside slots");
+            return &self.slots[slot_index];
+        }
+
+        pub fn reserveHandle(self: *Self, key: Key) ?Handle {
+            requireGenerations();
+            const slot_index = self.reserveIndex(key) orelse return null;
+            return self.handleForIndex(slot_index);
+        }
+
+        pub fn getByHandle(self: *Self, handle: Handle) ?*Slot {
+            const slot_index = handle.slotIndex();
+            if (!self.handleMatches(slot_index, handle)) return null;
+            return &self.slots[slot_index];
+        }
+
+        pub fn getConstByHandle(self: *const Self, handle: Handle) ?*const Slot {
+            const slot_index = handle.slotIndex();
+            if (!self.handleMatches(slot_index, handle)) return null;
+            return &self.slots[slot_index];
+        }
+
+        pub fn handleForIndex(self: *const Self, slot_index: usize) ?Handle {
+            requireGenerations();
+            if (slot_index >= capacity or !slotInUse(&self.slots[slot_index])) return null;
+            if (self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION) return null;
+            return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
+        }
+
+        /// The caller must already own a currently claimed slot. Optimized
+        /// builds avoid rereading its payload membership flag.
+        pub inline fn handleForClaimedIndex(self: *const Self, slot_index: usize) Handle {
+            requireGenerations();
+            if (builtin.mode == .debug) {
+                std.debug.assert(slot_index < capacity);
+                std.debug.assert(slotInUse(&self.slots[slot_index]));
+            }
+            return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
+        }
+
+        pub fn removeHandle(self: *Self, handle: Handle) bool {
+            const slot_index = handle.slotIndex();
+            if (!self.handleMatches(slot_index, handle)) return false;
+            return self.removeIndex(slot_index);
         }
 
         pub fn remove(self: *Self, key: Key) bool {
@@ -726,16 +748,24 @@ pub fn IndexedArenaWithKeyOptions(
             }
             slot.* = Slot{};
             if (comptime options.store_keys) self.slot_keys[slot_index] = ids.zero(Key);
+            if (comptime options.track_generations) {
+                self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
+            }
             self.used_count -= 1;
             self.pushFreeIndex(slot_index);
             return true;
         }
 
-        pub fn rebuildPrimaryIndex(self: *Self) void {
+        pub fn rebuildPrimaryIndex(self: *Self) (if (options.track_generations) error{HandleGenerationExhausted}!void else void) {
+            if (comptime options.track_generations) {
+                for (&self.slots, &self.slot_generations) |*slot, *generation| {
+                    if (slotInUse(slot) and generation.* == EXHAUSTED_HANDLE_GENERATION) return error.HandleGenerationExhausted;
+                }
+            }
             self.primary_index.reset();
             if (comptime options.store_keys) @memset(&self.slot_keys, ids.zero(Key));
-            @memset(&self.free_next, free_no_index);
-            self.free_head = free_no_index;
+            @memset(&self.free_next, 0);
+            self.free_head = 0;
             self.next_unclaimed_index = @intCast(capacity);
             self.used_count = 0;
 
@@ -749,6 +779,9 @@ pub fn IndexedArenaWithKeyOptions(
                     if (raw_key != 0) {
                         if (comptime options.store_keys) self.slot_keys[slot_index] = key;
                         self.primary_index.insertAbsent(raw_key, slot_index);
+                    }
+                    if (comptime options.track_generations) {
+                        if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
                     }
                     self.used_count += 1;
                 }
@@ -821,19 +854,6 @@ pub fn IndexedArenaWithKeyOptions(
             return null;
         }
 
-        pub fn rebuildUniqueIndex(
-            self: *const Self,
-            secondary_index: anytype,
-            comptime secondaryKeyOf: anytype,
-        ) void {
-            secondary_index.reset();
-            for (self.slots, 0..) |slot, slot_index| {
-                if (!slotInUse(&slot)) continue;
-                const key = secondaryKeyOf(&slot);
-                if (key != 0) secondary_index.insert(key, slot_index);
-            }
-        }
-
         pub fn markDirty(self: *Self, key: Key) void {
             if (!options.track_dirty) @compileError("this arena does not track dirty ids; instantiate it with DirtyTrackedIndexedArenaWithKey");
             const raw_key = ids.raw(key);
@@ -885,8 +905,8 @@ pub fn IndexedArenaWithKeyOptions(
 
         fn scanForKey(self: *const Self, key: Key) ?usize {
             const raw_key = ids.raw(key);
-            for (self.slots[0..self.claimedCount()], 0..) |slot, slot_index| {
-                if (slotInUse(&slot) and ids.raw(keyOf(&slot)) == raw_key) return slot_index;
+            for (self.slots[0..self.claimedCount()], 0..) |*slot, slot_index| {
+                if (slotInUse(slot) and ids.raw(keyOf(slot)) == raw_key) return slot_index;
             }
             return null;
         }
@@ -898,16 +918,34 @@ pub fn IndexedArenaWithKeyOptions(
             return @intCast(self.next_unclaimed_index);
         }
 
+        inline fn requireGenerations() void {
+            if (comptime !options.track_generations) @compileError("this indexed arena does not track generational handles");
+        }
+
+        inline fn isRetired(self: *const Self, slot_index: usize) bool {
+            if (comptime !options.track_generations) return false;
+            return self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION;
+        }
+
+        fn handleMatches(self: *const Self, slot_index: usize, handle: Handle) bool {
+            requireGenerations();
+            if (handle.isZero() or slot_index >= capacity or handle.generation() > MAX_HANDLE_GENERATION) return false;
+            return slotInUse(&self.slots[slot_index]) and self.slot_generations[slot_index] == handle.generation();
+        }
+
         inline fn popFreeIndex(self: *Self) ?usize {
-            return popReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index);
+            while (popReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index)) |slot_index| {
+                if (!self.isRetired(slot_index)) return slot_index;
+            }
+            return null;
         }
 
         inline fn pushFreeIndex(self: *Self, slot_index: usize) void {
-            pushReusableIndex(capacity, &self.free_head, &self.free_next, slot_index);
+            if (!self.isRetired(slot_index)) pushReusableIndex(capacity, &self.free_head, &self.free_next, slot_index);
         }
 
         inline fn claimFreeIndex(self: *Self, slot_index: usize) bool {
-            if (slot_index >= capacity or slotInUse(&self.slots[slot_index])) return false;
+            if (!self.canReserveIndex(slot_index)) return false;
             return claimReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index, slot_index);
         }
     };
@@ -981,14 +1019,13 @@ pub fn GenerationalArena(
         const Self = @This();
         const FreeIndex = ReusableIndex(capacity);
         const Count = ReusableIndex(capacity);
-        const free_no_index = reusableNoIndex(capacity);
         pub const Handle = GenerationalHandle(display_name);
         pub const slot_capacity = capacity;
 
         slots: [capacity]Slot = @as([capacity]Slot, @splat(Slot{})),
         slot_generations: [capacity]u32 = @as([capacity]u32, @splat(0)),
-        free_next: [capacity]FreeIndex = @as([capacity]FreeIndex, @splat(free_no_index)),
-        free_head: FreeIndex = free_no_index,
+        free_next: [capacity]FreeIndex = @as([capacity]FreeIndex, @splat(0)),
+        free_head: FreeIndex = 0,
         next_unclaimed_index: Count = 0,
         used_count: Count = 0,
 
@@ -998,13 +1035,12 @@ pub fn GenerationalArena(
 
         pub fn reset(self: *Self) void {
             const claimed_count = self.claimedCount();
-            var slot_index: usize = 0;
-            while (slot_index < claimed_count) : (slot_index += 1) {
-                self.slots[slot_index] = Slot{};
-                self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
-                self.free_next[slot_index] = free_no_index;
+            for (self.slots[0..claimed_count], self.slot_generations[0..claimed_count]) |*slot, *generation| {
+                slot.* = Slot{};
+                generation.* = nextSlotGeneration(generation.*);
             }
-            self.free_head = free_no_index;
+            @memset(self.free_next[0..claimed_count], 0);
+            self.free_head = 0;
             self.next_unclaimed_index = 0;
             self.used_count = 0;
         }
@@ -1059,14 +1095,12 @@ pub fn GenerationalArena(
 
         /// The caller must overwrite the entire returned slot before reading it.
         pub fn reserveHandleAtForOverwrite(self: *Self, slot_index: usize) ?Handle {
-            if (!self.canReserveIndex(slot_index)) return null;
             if (!self.claimFreeIndex(slot_index)) return null;
             self.claimSlotForOverwrite(slot_index);
             return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
         }
 
         pub fn reserveIndexAt(self: *Self, slot_index: usize) ?usize {
-            if (!self.canReserveIndex(slot_index)) return null;
             if (!self.claimFreeIndex(slot_index)) return null;
             self.claimSlot(slot_index);
             return slot_index;
@@ -1078,11 +1112,11 @@ pub fn GenerationalArena(
             comptime excludes: anytype,
         ) ?usize {
             const claimed_count = self.claimedCount();
-            var next_index = publicReusableIndex(capacity, self.free_head);
+            var next_index = decodeLink(self.free_head);
             var attempts: usize = 0;
             while (next_index) |slot_index| : (attempts += 1) {
                 if (slot_index >= claimed_count or attempts >= claimed_count) return null;
-                next_index = publicReusableIndex(capacity, self.free_next[slot_index]);
+                next_index = decodeLink(self.free_next[slot_index]);
                 if (self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION or excludes(context, slot_index)) continue;
                 return slot_index;
             }
@@ -1203,430 +1237,9 @@ inline fn nextSlotGeneration(current: u32) u32 {
     return current +| 1;
 }
 
-pub fn PagedIndexedArena(
-    comptime Slot: type,
-    comptime page_size: usize,
-    comptime page_count: usize,
-    comptime index_capacity: usize,
-    comptime keyOf: anytype,
-) type {
-    return PagedIndexedArenaWithKeyOptions(u64, Slot, page_size, page_count, index_capacity, keyOf, .{});
-}
-
-pub fn PagedIndexedArenaWithoutHandles(
-    comptime Slot: type,
-    comptime page_size: usize,
-    comptime page_count: usize,
-    comptime index_capacity: usize,
-    comptime keyOf: anytype,
-) type {
-    return PagedIndexedArenaWithKeyOptions(u64, Slot, page_size, page_count, index_capacity, keyOf, .{ .track_generations = false });
-}
-
-pub fn PagedIndexedArenaWithKey(
-    comptime Key: type,
-    comptime Slot: type,
-    comptime page_size: usize,
-    comptime page_count: usize,
-    comptime index_capacity: usize,
-    comptime keyOf: anytype,
-) type {
-    return PagedIndexedArenaWithKeyOptions(Key, Slot, page_size, page_count, index_capacity, keyOf, .{});
-}
-
-pub const PagedOptions = struct {
-    track_generations: bool = true,
-    /// When false, callers must initialize the payload key before removing or
-    /// rebuilding a live slot so the primary index can be updated safely.
-    store_keys: bool = true,
-};
-
-pub fn PagedIndexedArenaWithOptions(
-    comptime Slot: type,
-    comptime page_size: usize,
-    comptime page_count: usize,
-    comptime index_capacity: usize,
-    comptime keyOf: anytype,
-    comptime options: PagedOptions,
-) type {
-    return PagedIndexedArenaWithKeyOptions(u64, Slot, page_size, page_count, index_capacity, keyOf, options);
-}
-
-pub fn PagedIndexedArenaWithKeyOptions(
-    comptime Key: type,
-    comptime Slot: type,
-    comptime page_size: usize,
-    comptime page_count: usize,
-    comptime index_capacity: usize,
-    comptime keyOf: anytype,
-    comptime options: PagedOptions,
-) type {
-    if (page_size == 0) @compileError("paged indexed arena requires at least one slot per page");
-    if (page_count == 0) @compileError("paged indexed arena requires at least one page");
-    const capacity = page_size * page_count;
-    const generation_capacity = if (options.track_generations) capacity else 0;
-    const key_capacity = if (options.store_keys) capacity else 0;
-    if (index_capacity < capacity) @compileError("paged indexed arena primary index capacity must cover all slab slots");
-    const custom_membership = @hasDecl(Slot, "arenaInUse") or @hasDecl(Slot, "setArenaInUse");
-    if (custom_membership and (!@hasDecl(Slot, "arenaInUse") or !@hasDecl(Slot, "setArenaInUse"))) {
-        @compileError("paged indexed arena custom slot membership requires arenaInUse and setArenaInUse");
-    }
-    if (!custom_membership and !@hasField(Slot, "in_use")) {
-        @compileError("paged indexed arena slots require an in_use field or custom membership accessors");
-    }
-
-    return struct {
-        const Self = @This();
-        const FreeIndex = ReusableIndex(capacity);
-        const Count = ReusableIndex(capacity);
-        const free_no_index = reusableNoIndex(capacity);
-        pub const Handle = GenerationalHandle("PagedArenaHandle");
-        pub const slot_capacity = capacity;
-        pub const slots_per_page = page_size;
-        pub const slab_page_count = page_count;
-
-        inline fn slotInUse(slot: *const Slot) bool {
-            if (comptime custom_membership) return slot.arenaInUse();
-            return slot.in_use;
-        }
-
-        inline fn setSlotInUse(slot: *Slot, in_use: bool) void {
-            if (comptime custom_membership) {
-                slot.setArenaInUse(in_use);
-            } else {
-                slot.in_use = in_use;
-            }
-        }
-
-        const Page = struct {
-            slots: [page_size]Slot = @as([page_size]Slot, @splat(Slot{})),
-        };
-
-        pages: [page_count]Page = @as([page_count]Page, @splat(Page{})),
-        primary_index: UniqueIndex(index_capacity) = UniqueIndex(index_capacity).init(),
-        slot_keys: [key_capacity]Key = @as([key_capacity]Key, @splat(ids.zero(Key))),
-        slot_generations: [generation_capacity]u32 = @as([generation_capacity]u32, @splat(0)),
-        free_next: [capacity]FreeIndex = @as([capacity]FreeIndex, @splat(free_no_index)),
-        free_head: FreeIndex = free_no_index,
-        next_unclaimed_index: Count = 0,
-        used_count: Count = 0,
-
-        pub fn init() Self {
-            return .{};
-        }
-
-        pub fn reset(self: *Self) void {
-            const claimed_count = self.claimedCount();
-            var slot_index: usize = 0;
-            while (slot_index < capacity) : (slot_index += 1) {
-                self.slotAt(slot_index).* = Slot{};
-                if (comptime options.store_keys) self.slot_keys[slot_index] = ids.zero(Key);
-                if (comptime options.track_generations) {
-                    if (slot_index < claimed_count) {
-                        self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
-                    }
-                }
-                self.free_next[slot_index] = free_no_index;
-            }
-            self.primary_index.reset();
-            self.free_head = free_no_index;
-            self.next_unclaimed_index = 0;
-            self.used_count = 0;
-        }
-
-        pub fn resetRetainingPayloads(self: *Self) void {
-            const claimed_count = self.claimedCount();
-            var slot_index: usize = 0;
-            while (slot_index < claimed_count) : (slot_index += 1) {
-                setSlotInUse(self.slotAt(slot_index), false);
-                if (comptime options.store_keys) self.slot_keys[slot_index] = ids.zero(Key);
-                if (comptime options.track_generations) {
-                    self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
-                }
-                self.free_next[slot_index] = free_no_index;
-            }
-            self.primary_index.reset();
-            self.free_head = free_no_index;
-            self.next_unclaimed_index = 0;
-            self.used_count = 0;
-        }
-
-        pub fn reserve(self: *Self, key: Key) ?*Slot {
-            const slot_index = self.reserveIndex(key) orelse return null;
-            return self.slotAt(slot_index);
-        }
-
-        pub fn reserveIndex(self: *Self, key: Key) ?usize {
-            return self.reserveIndexInternal(key, null);
-        }
-
-        pub fn reserveAtIndex(self: *Self, key: Key, slot_index: usize) ?*Slot {
-            const claimed_index = self.reserveIndexAt(key, slot_index) orelse return null;
-            return self.slotAt(claimed_index);
-        }
-
-        pub fn canReserveIndex(self: *const Self, slot_index: usize) bool {
-            if (slot_index >= capacity or slotInUse(self.slotAtConst(slot_index))) return false;
-            if (comptime options.track_generations) return self.slot_generations[slot_index] != EXHAUSTED_HANDLE_GENERATION;
-            return true;
-        }
-
-        // Snapshot callers can reject an exhausted destination before resetting
-        // membership or retiring any currently live authority.
-        pub fn canReserveIndexAfterReset(self: *const Self, slot_index: usize) bool {
-            if (slot_index >= capacity) return false;
-            if (comptime options.track_generations) {
-                const generation = self.slot_generations[slot_index];
-                return (if (slot_index < self.claimedCount()) nextSlotGeneration(generation) else generation) != EXHAUSTED_HANDLE_GENERATION;
-            }
-            return true;
-        }
-
-        pub fn reserveIndexAt(self: *Self, key: Key, slot_index: usize) ?usize {
-            return self.reserveIndexInternal(key, slot_index);
-        }
-
-        pub fn reserveHandle(self: *Self, key: Key) ?Handle {
-            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
-            const slot_index = self.reserveIndex(key) orelse return null;
-            return self.handleForIndex(slot_index);
-        }
-
-        pub fn get(self: *Self, key: Key) ?*Slot {
-            const slot_index = self.findIndex(key) orelse return null;
-            return self.slotAt(slot_index);
-        }
-
-        pub fn getConst(self: *const Self, key: Key) ?*const Slot {
-            const slot_index = self.findIndex(key) orelse return null;
-            return self.slotAtConst(slot_index);
-        }
-
-        pub fn getByHandle(self: *Self, handle: Handle) ?*Slot {
-            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
-            const slot_index = handle.slotIndex();
-            if (!self.handleMatches(slot_index, handle)) return null;
-            return self.slotAt(slot_index);
-        }
-
-        pub fn getConstByHandle(self: *const Self, handle: Handle) ?*const Slot {
-            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
-            const slot_index = handle.slotIndex();
-            if (!self.handleMatches(slot_index, handle)) return null;
-            return self.slotAtConst(slot_index);
-        }
-
-        pub fn slotIndexOf(self: *const Self, key: Key) ?usize {
-            return self.findIndex(key);
-        }
-
-        pub fn handleForIndex(self: *const Self, slot_index: usize) ?Handle {
-            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
-            if (slot_index >= capacity) return null;
-            const slot = self.slotAtConst(slot_index);
-            if (!slotInUse(slot)) return null;
-            if (self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION) return null;
-            return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
-        }
-
-        /// The caller must already own a currently claimed slot. Optimized
-        /// builds avoid rereading its payload membership flag.
-        pub inline fn handleForClaimedIndex(self: *const Self, slot_index: usize) Handle {
-            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
-            if (builtin.mode == .debug) {
-                std.debug.assert(slot_index < capacity);
-                std.debug.assert(slotInUse(self.slotAtConst(slot_index)));
-            }
-            return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
-        }
-
-        pub fn slotAt(self: *Self, slot_index: usize) *Slot {
-            if (slot_index >= capacity) native_util.impossibleByInvariant("paged indexed arena slot index points outside slabs");
-            return &self.pages[slot_index / page_size].slots[slot_index % page_size];
-        }
-
-        pub fn slotAtConst(self: *const Self, slot_index: usize) *const Slot {
-            if (slot_index >= capacity) native_util.impossibleByInvariant("paged indexed arena slot index points outside slabs");
-            return &self.pages[slot_index / page_size].slots[slot_index % page_size];
-        }
-
-        pub fn remove(self: *Self, key: Key) bool {
-            const slot_index = self.findIndex(key) orelse return false;
-            return self.removeIndex(slot_index);
-        }
-
-        pub fn removeHandle(self: *Self, handle: Handle) bool {
-            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
-            const slot_index = handle.slotIndex();
-            if (!self.handleMatches(slot_index, handle)) return false;
-            return self.removeIndex(slot_index);
-        }
-
-        pub fn removeIndex(self: *Self, slot_index: usize) bool {
-            if (slot_index >= capacity) return false;
-            const slot = self.slotAt(slot_index);
-            if (!slotInUse(slot)) return false;
-
-            const key = if (comptime options.store_keys) self.slot_keys[slot_index] else keyOf(slot);
-            const raw_key = ids.raw(key);
-            if (comptime !options.store_keys) {
-                if (raw_key == 0) native_util.impossibleByInvariant("paged indexed arena live slot requires a payload key before removal");
-            }
-            if (raw_key != 0) {
-                self.primary_index.remove(raw_key);
-            }
-            slot.* = Slot{};
-            if (comptime options.store_keys) self.slot_keys[slot_index] = ids.zero(Key);
-            if (comptime options.track_generations) {
-                self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
-            }
-            self.used_count -= 1;
-            self.pushFreeIndex(slot_index);
-            return true;
-        }
-
-        pub fn rebuildPrimaryIndex(self: *Self) (if (options.track_generations) error{HandleGenerationExhausted}!void else void) {
-            if (comptime options.track_generations) {
-                for (0..capacity) |index| {
-                    if (slotInUse(self.slotAtConst(index)) and self.slot_generations[index] == EXHAUSTED_HANDLE_GENERATION)
-                        return error.HandleGenerationExhausted;
-                }
-            }
-            self.primary_index.reset();
-            if (comptime options.store_keys) self.slot_keys = @as([capacity]Key, @splat(ids.zero(Key)));
-            self.free_next = @as([capacity]FreeIndex, @splat(free_no_index));
-            self.free_head = free_no_index;
-            self.next_unclaimed_index = @intCast(capacity);
-            self.used_count = 0;
-
-            var slot_index: usize = 0;
-            while (slot_index < capacity) : (slot_index += 1) {
-                const slot = self.slotAt(slot_index);
-                if (slotInUse(slot)) {
-                    const key = keyOf(slot);
-                    const raw_key = ids.raw(key);
-                    if (comptime !options.store_keys) {
-                        if (raw_key == 0) native_util.impossibleByInvariant("paged indexed arena live slot requires a payload key before index rebuild");
-                    }
-                    if (raw_key != 0) {
-                        if (comptime options.store_keys) self.slot_keys[slot_index] = key;
-                        self.primary_index.insertAbsent(raw_key, slot_index);
-                    }
-                    if (comptime options.track_generations) {
-                        if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
-                    }
-                    self.used_count += 1;
-                }
-            }
-
-            slot_index = capacity;
-            while (slot_index > 0) {
-                slot_index -= 1;
-                if (!slotInUse(self.slotAtConst(slot_index))) self.pushFreeIndex(slot_index);
-            }
-        }
-
-        pub fn countInUse(self: *const Self) usize {
-            return @intCast(self.used_count);
-        }
-
-        fn reserveIndexInternal(self: *Self, key: Key, requested_slot_index: ?usize) ?usize {
-            const raw_key = ids.raw(key);
-            if (raw_key == 0) return null;
-            if (self.primary_index.lookup(raw_key) != null) return null;
-
-            const slot_index = if (requested_slot_index) |explicit_index| blk: {
-                if (!self.canReserveIndex(explicit_index)) return null;
-                if (!self.claimFreeIndex(explicit_index)) return null;
-                break :blk explicit_index;
-            } else self.popFreeIndex() orelse return null;
-
-            const slot = self.slotAt(slot_index);
-            slot.* = Slot{};
-            setSlotInUse(slot, true);
-            if (comptime options.track_generations) {
-                if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
-            }
-            if (comptime options.store_keys) self.slot_keys[slot_index] = key;
-            self.primary_index.insertAbsent(raw_key, slot_index);
-            self.used_count += 1;
-            return slot_index;
-        }
-
-        fn findIndex(self: *const Self, key: Key) ?usize {
-            const raw_key = ids.raw(key);
-            if (raw_key == 0) return null;
-            if (self.primary_index.lookup(raw_key)) |slot_index| {
-                if (slot_index >= capacity) native_util.impossibleByInvariant("paged indexed arena primary index points outside slabs");
-                const slot = self.slotAtConst(slot_index);
-                if (!slotInUse(slot)) native_util.impossibleByInvariant("paged indexed arena primary index points at a free slot");
-                if (comptime options.store_keys) {
-                    if (ids.raw(self.slot_keys[slot_index]) != raw_key) native_util.impossibleByInvariant("paged indexed arena primary index points at the wrong key");
-                }
-                const payload_key = keyOf(slot);
-                const raw_payload_key = ids.raw(payload_key);
-                if (raw_payload_key != 0 and raw_payload_key != raw_key) native_util.impossibleByInvariant("paged indexed arena slot payload key diverged from its primary index");
-                return slot_index;
-            }
-            if (debugScanFallbackEnabled() and self.scanForKey(key) != null) {
-                native_util.impossibleByInvariant("paged indexed arena primary index missed a live slot");
-            }
-            return null;
-        }
-
-        fn scanForKey(self: *const Self, key: Key) ?usize {
-            const raw_key = ids.raw(key);
-            const claimed_count = self.claimedCount();
-            var slot_index: usize = 0;
-            while (slot_index < claimed_count) : (slot_index += 1) {
-                const slot = self.slotAtConst(slot_index);
-                if (slotInUse(slot) and ids.raw(keyOf(slot)) == raw_key) return slot_index;
-            }
-            return null;
-        }
-
-        pub inline fn claimedCount(self: *const Self) usize {
-            if (self.next_unclaimed_index > capacity) {
-                native_util.impossibleByInvariant("paged indexed arena claimed prefix fits its slots");
-            }
-            return @intCast(self.next_unclaimed_index);
-        }
-
-        fn handleMatches(self: *const Self, slot_index: usize, handle: Handle) bool {
-            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
-            if (handle.isZero() or slot_index >= capacity or handle.generation() > MAX_HANDLE_GENERATION) return false;
-            const slot = self.slotAtConst(slot_index);
-            return slotInUse(slot) and self.slot_generations[slot_index] == handle.generation();
-        }
-
-        inline fn popFreeIndex(self: *Self) ?usize {
-            while (popReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index)) |slot_index| {
-                if (comptime options.track_generations) {
-                    if (self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION) continue;
-                }
-                return slot_index;
-            }
-            return null;
-        }
-
-        inline fn pushFreeIndex(self: *Self, slot_index: usize) void {
-            if (comptime options.track_generations) {
-                if (self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION) return;
-            }
-            pushReusableIndex(capacity, &self.free_head, &self.free_next, slot_index);
-        }
-
-        inline fn claimFreeIndex(self: *Self, slot_index: usize) bool {
-            if (!self.canReserveIndex(slot_index)) return false;
-            return claimReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index, slot_index);
-        }
-    };
-}
-
 fn debugScanFallbackEnabled() bool {
     return builtin.mode == .debug;
 }
-
 const TestRecord = struct {
     id: u64 = 0,
     owner: u64 = 0,
@@ -1671,18 +1284,18 @@ test "arena free lists select the narrowest lossless reusable index" {
 test "arena cursors and counts select the narrowest lossless capacity type" {
     const Indexed = IndexedArena(TestSlot, 8, 16, testSlotId);
     const Dirty = DirtyTrackedIndexedArenaWithKey(u64, TestSlot, 8, 16, testSlotId);
-    const Generational = GenerationalArena("CompactMetadataHandle", TestSlot, 8);
-    const Paged = PagedIndexedArena(TestSlot, 4, 2, 16, testSlotId);
+    const Handles = GenerationalArena("CompactMetadataHandle", TestSlot, 8);
+    const Generational = IndexedArenaWithKeyOptions(u64, TestSlot, 8, 16, testSlotId, .{ .track_generations = true });
     const Wide = IndexedArena(TestSlot, 256, 512, testSlotId);
 
     try std.testing.expect(@FieldType(Indexed, "next_unclaimed_index") == u8);
     try std.testing.expect(@FieldType(Indexed, "used_count") == u8);
     try std.testing.expect(@FieldType(Dirty, "dirty_count") == u8);
     try std.testing.expectEqual(@as(usize, 16), Dirty.dirty_id_index_capacity);
+    try std.testing.expect(@FieldType(Handles, "next_unclaimed_index") == u8);
+    try std.testing.expect(@FieldType(Handles, "used_count") == u8);
     try std.testing.expect(@FieldType(Generational, "next_unclaimed_index") == u8);
     try std.testing.expect(@FieldType(Generational, "used_count") == u8);
-    try std.testing.expect(@FieldType(Paged, "next_unclaimed_index") == u8);
-    try std.testing.expect(@FieldType(Paged, "used_count") == u8);
     try std.testing.expect(@FieldType(Wide, "next_unclaimed_index") == u16);
     try std.testing.expect(@FieldType(Wide, "used_count") == u16);
 }
@@ -1703,28 +1316,8 @@ test "compact arena counts retain the full byte-width capacity" {
     try std.testing.expectEqual(@as(?usize, null), arena.reserveIndex(256));
 }
 
-test "paged arenas support slot-owned membership bits" {
-    const Arena = PagedIndexedArena(PackedMembershipTestSlot, 2, 2, 8, packedMembershipTestSlotId);
-    var arena = Arena.init();
-
-    const first_index = arena.reserveIndex(7).?;
-    const first = arena.slotAt(first_index);
-    try std.testing.expect(first.arenaInUse());
-    first.record.id = 7;
-    try std.testing.expect(arena.getConst(7) == first);
-
-    try std.testing.expect(arena.removeIndex(first_index));
-    try std.testing.expect(!first.arenaInUse());
-    try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
-
-    const second_index = arena.reserveIndex(8).?;
-    try std.testing.expectEqual(first_index, second_index);
-    arena.resetRetainingPayloads();
-    try std.testing.expect(!arena.slotAtConst(second_index).arenaInUse());
-}
-
-test "paged arenas can elide unused generations" {
-    const Arena = PagedIndexedArenaWithoutHandles(TestSlot, 2, 2, 8, testSlotId);
+test "indexed arenas elide generations unless they issue handles" {
+    const Arena = IndexedArena(TestSlot, 4, 8, testSlotId);
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(Arena, "slot_generations")));
 
     var arena = Arena.init();
@@ -1738,8 +1331,8 @@ test "paged arenas can elide unused generations" {
     arena.reset();
 }
 
-test "paged arenas can derive keys from live slots" {
-    const Arena = PagedIndexedArenaWithOptions(TestSlot, 2, 2, 8, testSlotId, .{ .store_keys = false });
+test "generational indexed arenas can derive keys from live slots" {
+    const Arena = IndexedArenaWithKeyOptions(u64, TestSlot, 4, 8, testSlotId, .{ .store_keys = false, .track_generations = true });
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(Arena, "slot_keys")));
 
     var arena = Arena.init();
@@ -1799,10 +1392,6 @@ fn testSlotId(slot: *const TestSlot) u64 {
 
 fn packedMembershipTestSlotId(slot: *const PackedMembershipTestSlot) u64 {
     return slot.record.id;
-}
-
-fn testSlotOwner(slot: *const TestSlot) u64 {
-    return slot.record.owner;
 }
 
 fn testSlotMatchesOwner(owner: u64, slot: *const TestSlot) bool {
@@ -1875,7 +1464,7 @@ test "indexed arenas initialize and reset allocated storage in place" {
     arena.reset();
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
     try std.testing.expectEqual(@as(usize, 0), arena.claimedCount());
-    try std.testing.expectEqual(reusableNoIndex(4), arena.free_head);
+    try std.testing.expectEqual(@as(u8, 0), arena.free_head);
     try std.testing.expectEqual(@as(?usize, null), arena.primary_index.lookup(41));
     try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
     try std.testing.expectEqualStrings("", arena.slots[0].record.label);
@@ -2005,28 +1594,20 @@ test "indexed arena inserts complete values at explicit free indexes" {
     try std.testing.expectEqualStrings("reused", arena.get(42).?.record.label);
 }
 
-test "indexed arena supports explicit whole-slot overwrite and rekey" {
+test "indexed arena supports explicit whole-slot overwrite reservations" {
     const Arena = IndexedArena(TestSlot, 2, 4, testSlotId);
     var arena = Arena.init();
 
-    const first = arena.reserveForOverwrite(41).?;
-    first.* = .{
+    const first_index = arena.reserveIndexForOverwrite(41).?;
+    arena.slots[first_index] = .{
         .in_use = true,
         .record = .{ .id = 41, .owner = 7, .label = "first" },
     };
-    const first_index = arena.slotIndexOf(41).?;
-
-    const replacement = arena.replaceAtIndexForOverwrite(42, first_index).?;
-    replacement.* = .{
-        .in_use = true,
-        .record = .{ .id = 42, .owner = 8, .label = "replacement" },
-    };
 
     try std.testing.expectEqual(@as(usize, 1), arena.countInUse());
-    try std.testing.expect(arena.get(41) == null);
-    try std.testing.expectEqual(first_index, arena.slotIndexOf(42).?);
-    try std.testing.expectEqualStrings("replacement", arena.get(42).?.record.label);
-    try std.testing.expectEqual(@as(?*TestSlot, null), arena.reserveForOverwrite(42));
+    try std.testing.expectEqual(first_index, arena.slotIndexOf(41).?);
+    try std.testing.expectEqualStrings("first", arena.get(41).?.record.label);
+    try std.testing.expectEqual(@as(?usize, null), arena.reserveIndexForOverwrite(41));
 }
 
 test "indexed arenas can derive keys from live slots" {
@@ -2034,27 +1615,20 @@ test "indexed arenas can derive keys from live slots" {
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(Arena, "slot_keys")));
 
     var arena = Arena.init();
-    const first = arena.reserveForOverwrite(41).?;
-    first.* = .{
+    const first_index = arena.reserveIndexForOverwrite(41).?;
+    arena.slots[first_index] = .{
         .in_use = true,
         .record = .{ .id = 41, .owner = 7, .label = "first" },
     };
-    const first_index = arena.slotIndexOf(41).?;
     arena.clearDirty();
 
-    const replacement = arena.replaceAtIndexForOverwrite(42, first_index).?;
-    replacement.* = .{
-        .in_use = true,
-        .record = .{ .id = 42, .owner = 8, .label = "replacement" },
-    };
-    try std.testing.expectEqualSlices(u64, &.{ 41, 42 }, arena.dirtyIds());
     arena.rebuildPrimaryIndex();
-    try std.testing.expect(arena.get(41) == null);
-    try std.testing.expectEqualStrings("replacement", arena.get(42).?.record.label);
+    try std.testing.expectEqualStrings("first", arena.get(41).?.record.label);
+    try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
 
-    arena.clearDirty();
     try std.testing.expect(arena.removeIndex(first_index));
-    try std.testing.expectEqualSlices(u64, &.{42}, arena.dirtyIds());
+    try std.testing.expectEqualSlices(u64, &.{41}, arena.dirtyIds());
+    try std.testing.expect(arena.get(41) == null);
 }
 
 test "indexed arena can reset membership while retaining unreachable payloads" {
@@ -2071,7 +1645,7 @@ test "indexed arena can reset membership while retaining unreachable payloads" {
     arena.resetRetainingPayloads();
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
     try std.testing.expectEqual(@as(usize, 0), arena.claimedCount());
-    try std.testing.expectEqual(reusableNoIndex(4), arena.free_head);
+    try std.testing.expectEqual(@as(u8, 0), arena.free_head);
     try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
     try std.testing.expectEqual(@as(u64, 0), arena.dirty_ids[0]);
     try std.testing.expectEqual(@as(u64, 0), arena.dirty_ids[1]);
@@ -2100,7 +1674,8 @@ test "indexed arena supports secondary indexes" {
     arena.slots[alpha_index].record = .{ .id = 1, .owner = 91, .label = "alpha" };
     const beta_index = arena.reserveIndex(2).?;
     arena.slots[beta_index].record = .{ .id = 2, .owner = 92, .label = "beta" };
-    arena.rebuildUniqueIndex(&owner_index, testSlotOwner);
+    owner_index.insert(91, alpha_index);
+    owner_index.insert(92, beta_index);
 
     try std.testing.expectEqualStrings(
         "beta",
@@ -2427,8 +2002,8 @@ test "generational arena replaces live handles in place" {
     try std.testing.expect(arena.replaceHandle(original) == null);
 }
 
-test "paged indexed arena uses slab pages and invalidates stale handles" {
-    const Arena = PagedIndexedArena(TestSlot, 2, 2, 8, testSlotId);
+test "generational indexed arena invalidates stale handles" {
+    const Arena = IndexedArenaWithKeyOptions(u64, TestSlot, 4, 8, testSlotId, .{ .track_generations = true });
     var arena = Arena.init();
 
     const first_index = arena.reserveIndex(11).?;
@@ -2455,15 +2030,15 @@ test "paged indexed arena uses slab pages and invalidates stale handles" {
     try std.testing.expectEqualStrings("reused", arena.get(13).?.record.label);
 }
 
-test "paged indexed arena generations advance without using zero" {
+test "arena generations advance without using zero" {
     try std.testing.expectEqual(@as(u32, 1), nextSlotGeneration(0));
     try std.testing.expectEqual(@as(u32, 2), nextSlotGeneration(1));
     try std.testing.expectEqual(EXHAUSTED_HANDLE_GENERATION, nextSlotGeneration(MAX_HANDLE_GENERATION));
     try std.testing.expectEqual(EXHAUSTED_HANDLE_GENERATION, nextSlotGeneration(EXHAUSTED_HANDLE_GENERATION));
 }
 
-test "paged indexed arena exhaustion survives reset and explicit slot selection" {
-    const Arena = PagedIndexedArena(TestSlot, 2, 2, 8, testSlotId);
+test "generational indexed arena exhaustion survives reset and explicit slot selection" {
+    const Arena = IndexedArenaWithKeyOptions(u64, TestSlot, 4, 8, testSlotId, .{ .track_generations = true });
     var arena = Arena.init();
     arena.slot_generations[0] = MAX_HANDLE_GENERATION;
     const last = arena.reserveHandle(1).?;
@@ -2487,8 +2062,8 @@ test "paged indexed arena exhaustion survives reset and explicit slot selection"
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
 }
 
-test "paged indexed arena exhaustion cannot be undone by rebuilding an index" {
-    const Arena = PagedIndexedArena(TestSlot, 2, 2, 8, testSlotId);
+test "generational indexed arena exhaustion cannot be undone by rebuilding an index" {
+    const Arena = IndexedArenaWithKeyOptions(u64, TestSlot, 4, 8, testSlotId, .{ .track_generations = true });
     var arena = Arena.init();
     arena.slot_generations[0] = MAX_HANDLE_GENERATION;
     const last = arena.reserveHandle(1).?;
@@ -2508,8 +2083,8 @@ test "paged indexed arena exhaustion cannot be undone by rebuilding an index" {
     try std.testing.expect(arena.getByHandle(healthy) != null);
 }
 
-test "paged indexed arena full reset clears payloads and invalidates handles" {
-    const Arena = PagedIndexedArena(TestSlot, 2, 2, 8, testSlotId);
+test "generational indexed arena full reset clears payloads and invalidates handles" {
+    const Arena = IndexedArenaWithKeyOptions(u64, TestSlot, 4, 8, testSlotId, .{ .track_generations = true });
     var arena = Arena.init();
 
     const stale_handle = arena.reserveHandle(41).?;
@@ -2524,8 +2099,8 @@ test "paged indexed arena full reset clears payloads and invalidates handles" {
     try std.testing.expectEqualStrings("", arena.getByHandle(replacement_handle).?.record.label);
 }
 
-test "paged indexed arena can reset membership while retaining unreachable payloads" {
-    const Arena = PagedIndexedArena(TestSlot, 2, 4, 16, testSlotId);
+test "generational indexed arena can reset membership while retaining unreachable payloads" {
+    const Arena = IndexedArenaWithKeyOptions(u64, TestSlot, 8, 16, testSlotId, .{ .track_generations = true });
     var arena = Arena.init();
 
     const high_slot_index: usize = 5;
@@ -2536,7 +2111,7 @@ test "paged indexed arena can reset membership while retaining unreachable paylo
     arena.resetRetainingPayloads();
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
     try std.testing.expectEqual(@as(usize, 0), arena.claimedCount());
-    try std.testing.expectEqual(reusableNoIndex(8), arena.free_head);
+    try std.testing.expectEqual(@as(u8, 0), arena.free_head);
     try std.testing.expect(arena.get(51) == null);
     try std.testing.expectEqual(@as(?*TestSlot, null), arena.getByHandle(stale_high_handle));
     try std.testing.expect(!arena.slotAt(high_slot_index).in_use);
@@ -2548,7 +2123,7 @@ test "paged indexed arena can reset membership while retaining unreachable paylo
     arena.resetRetainingPayloads();
     try std.testing.expectEqual(parked_high_generation, arena.slot_generations[high_slot_index]);
     try std.testing.expectEqual(@as(usize, 0), arena.claimedCount());
-    try std.testing.expectEqual(reusableNoIndex(8), arena.free_head);
+    try std.testing.expectEqual(@as(u8, 0), arena.free_head);
     try std.testing.expectEqual(@as(usize, 0), arena.reserveIndex(53).?);
 
     const replacement = arena.reserveAtIndex(54, high_slot_index).?;
@@ -2559,4 +2134,46 @@ test "paged indexed arena can reset membership while retaining unreachable paylo
     try std.testing.expect(!replacement_handle.eql(stale_high_handle));
     try std.testing.expectEqual(@as(?*TestSlot, null), arena.getByHandle(stale_high_handle));
     try std.testing.expectEqualStrings("replacement", arena.get(54).?.record.label);
+}
+
+test "zero-filled containers are valid empty values" {
+    const Arena = IndexedArenaWithKeyOptions(u64, TestSlot, 4, 8, testSlotId, .{ .track_dirty = true, .track_generations = true });
+    const Index = MultimapIndex(4, 4, 8);
+    const Handles = GenerationalArena("ZeroFilledHandle", TestSlot, 4);
+    var arena: Arena = undefined;
+    var index: Index = undefined;
+    var handles: Handles = undefined;
+    @memset(std.mem.asBytes(&arena), 0);
+    @memset(std.mem.asBytes(&index), 0);
+    @memset(std.mem.asBytes(&handles), 0);
+
+    for (0..3) |round| {
+        const key: u64 = 41 + round;
+        const handle = arena.reserveHandle(key).?;
+        arena.getByHandle(handle).?.record.id = key;
+        const second_index = arena.reserveIndex(key + 10).?;
+        arena.slots[second_index].record.id = key + 10;
+        try std.testing.expect(arena.removeHandle(handle));
+        try std.testing.expectEqual(handle.slotIndex(), arena.reserveIndex(key + 20).?);
+        try std.testing.expect(arena.getByHandle(handle) == null);
+        arena.reset();
+
+        try std.testing.expect(index.append(key, 1));
+        try std.testing.expect(index.append(key, 3));
+        try std.testing.expect(index.append(key + 1, 0));
+        try std.testing.expectEqual(@as(usize, 1), index.head(key));
+        try std.testing.expectEqual(@as(usize, 3), index.next(1));
+        try std.testing.expect(index.remove(key, 1));
+        try std.testing.expect(index.remove(key, 3));
+        try std.testing.expectEqual(no_index, index.head(key));
+        try std.testing.expect(index.append(key + 2, 2));
+        try std.testing.expectEqual(@as(usize, 1), index.count(key + 1));
+        index.reset();
+
+        const first_handle = handles.reserveHandle().?;
+        try std.testing.expect(handles.removeHandle(first_handle));
+        const reused_handle = handles.reserveHandle().?;
+        try std.testing.expectEqual(first_handle.slotIndex(), reused_handle.slotIndex());
+        try std.testing.expect(!first_handle.eql(reused_handle));
+    }
 }

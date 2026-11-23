@@ -2,10 +2,8 @@ const std = @import("std");
 const xhci = @import("../../kernel/drivers/xhci.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const permission_review_service = @import("../policy/permission_review_service.zig");
-const transient_state = @import("transient_state.zig");
+const table_backing = @import("../core/table_backing.zig");
 
-pub const HEAP_BACKED_ON_FREESTANDING = transient_state.HEAP_BACKED_ON_FREESTANDING;
-pub const HANDLE_SIZE_CEILING_BYTES = transient_state.HANDLE_SIZE_CEILING_BYTES;
 pub const STATE_SIZE_CEILING_BYTES: usize = @sizeOf(permission_review_service.ModeledInputSource) +
     compositor_session.CHECKPOINT_STORE_SIZE_CEILING_BYTES;
 
@@ -25,30 +23,26 @@ pub const State = struct {
     }
 };
 
-const Storage = transient_state.ScopedState(State);
-
 pub const Instance = struct {
-    storage: Storage = .{},
+    storage: table_backing.Lazy(State, null) = .{},
 
     pub fn initInto(self: *Instance) (xhci.Error || error{NoSpaceLeft})!void {
-        const state = try self.storage.begin();
-        errdefer self.storage.deinit();
+        self.storage.release();
+        const state = try self.storage.ensure();
+        errdefer self.storage.release();
         try state.initializeAllocated();
     }
 
     pub fn deinit(self: *Instance) void {
-        self.storage.deinit();
+        self.storage.release();
     }
 
     pub fn ptr(self: *Instance) *State {
-        return self.storage.ptr();
+        return self.storage.get().?;
     }
 };
 
-pub const FREESTANDING_HANDLE_SIZE_BYTES = transient_state.freestandingHandleSize(State);
-
-test "host production evidence state retains initialized value storage" {
-    try std.testing.expectEqual(@sizeOf(State), @sizeOf(Instance));
+test "production evidence state initializes its heap storage" {
     try std.testing.expectEqual(STATE_SIZE_CEILING_BYTES, @sizeOf(State));
 
     var instance: Instance = .{};

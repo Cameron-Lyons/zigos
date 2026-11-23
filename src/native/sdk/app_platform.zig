@@ -61,10 +61,10 @@ pub fn signedBundle(
     profile: signing.SignatureProfile,
 ) !manifest.BundleManifest {
     var bundle = package.bundle;
-    bundle.signature = try signing.signWithDefaultRegistry(
-        profile,
+    bundle.signature = try signing.signWithProfile(
         package.signer,
         &package_service.digestBundle(bundle),
+        profile,
     );
     return bundle;
 }
@@ -81,7 +81,7 @@ test "app platform compiles IDL validates manifest declarations and signs packag
     try std.testing.expect(std.mem.indexOf(u8, compiled.generatedSlice(), "OperationDescriptor") != null);
 
     const signed = try signedBundle(package, .ed25519);
-    try std.testing.expect(signing.verifyWithDefaultRegistry(
+    try std.testing.expect(signing.verify(
         signed.signature,
         &package_service.digestBundle(signed),
     ));

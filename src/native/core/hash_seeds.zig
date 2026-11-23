@@ -8,7 +8,6 @@ pub const principal_key_fingerprint: u64 = 0x5A47_5052_494E_4349;
 pub const network_policy_request_key: u64 = 0x5A47_4E45_5450_4F4C;
 pub const sync_state_record_key: u64 = 0x5A47_5359_4E43_5354;
 pub const sync_relay_session_key: u64 = 0x5A47_5245_4C41_59;
-pub const document_index_key: u64 = 0x5A47_494E_4458;
 pub const sync_document_operation_key: u64 = 0x5A47_5344_4F50_4944;
 pub const sync_document_clock_key: u64 = 0x5A47_5344_434C_4F43;
 pub const shared_memory_label_key: u64 = 0x5A47_5348_4D45_4D00;

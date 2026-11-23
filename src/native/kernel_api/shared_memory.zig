@@ -14,7 +14,8 @@ const paging = if (builtin.target.os.tag == .freestanding)
 else
     struct {};
 
-const heap_backed_table = builtin.target.os.tag == .freestanding;
+// Host builds model physical frames; the kernel owns real ones.
+const native_physical_frames = builtin.target.os.tag == .freestanding;
 
 pub const MAX_SHARED_MEMORY_OBJECTS: usize = 24;
 pub const MAX_MAPPINGS_PER_OBJECT: usize = 8;
@@ -375,7 +376,7 @@ fn VirtualWindow(comptime base: u64, comptime end_exclusive: u64, comptime capac
 pub const FreestandingMmu = struct {
     // This cursor describes hosted metadata fixtures only; never physical RAM.
     next_physical_frame: u64 = 1,
-    hosted_physical_backing: if (heap_backed_table) void else ?HostedPhysicalBacking = if (heap_backed_table) {} else null,
+    hosted_physical_backing: if (native_physical_frames) void else ?HostedPhysicalBacking = if (native_physical_frames) {} else null,
     // Group address spaces share one page table, so task windows are unique
     // across every task. A task run becomes reusable when its mapping is
     // removed, after its demand registration is gone.
@@ -393,7 +394,7 @@ pub const FreestandingMmu = struct {
 
     pub fn allocatePhysicalFrames(self: *FreestandingMmu, count: usize) Error!u64 {
         if (count == 0) return error.SizeZero;
-        if (comptime heap_backed_table) return allocateZeroedFrames(NativePhysicalBacking{}, count);
+        if (comptime native_physical_frames) return allocateZeroedFrames(NativePhysicalBacking{}, count);
         if (self.hosted_physical_backing) |backend| {
             return allocateZeroedFrames(HostedBackingAdapter{ .backend = backend }, count);
         }
@@ -408,7 +409,7 @@ pub const FreestandingMmu = struct {
     }
 
     fn releasePhysicalFrames(self: *FreestandingMmu, base: u64, count: usize) void {
-        if (comptime heap_backed_table) {
+        if (comptime native_physical_frames) {
             eraseAndReleaseFrames(NativePhysicalBacking{}, base, count);
             return;
         }
@@ -418,7 +419,7 @@ pub const FreestandingMmu = struct {
     }
 
     fn usesHostedPhysicalModel(self: *const FreestandingMmu) bool {
-        if (comptime heap_backed_table) return false;
+        if (comptime native_physical_frames) return false;
         return self.hosted_physical_backing == null;
     }
 
@@ -631,38 +632,15 @@ const TableBacking = struct {
     object_owner_index: ObjectOwnerIndex = ObjectOwnerIndex.init(),
     mapping_index: MappingIndex = MappingIndex.init(),
 
-    fn init() TableBacking {
-        return .{};
-    }
-
-    fn initializeAllocated(self: *TableBacking) void {
-        @memset(std.mem.asBytes(self), 0);
+    fn initializeZeroed(self: *TableBacking) void {
         self.mmu.next_physical_frame = 1;
         self.mmu.task_window.next_page = 1;
         self.mmu.accelerator_window.next_page = 1;
-        self.mmu.mappings.free_head = indexed_arena.reusableNoIndex(MMU_MAPPING_CAPACITY);
-        self.arena.free_head = indexed_arena.reusableNoIndex(MAX_SHARED_MEMORY_OBJECTS);
-        initializeObjectOwnerIndex(&self.object_owner_index);
-        initializeMappingIndex(&self.mapping_index);
-    }
-
-    fn initializeObjectOwnerIndex(index: *ObjectOwnerIndex) void {
-        for (&index.buckets) |*bucket| bucket.* = .{};
-        for (&index.links) |*link| link.* = .{};
-        index.free_bucket_head = indexed_arena.reusableNoIndex(MAX_SHARED_MEMORY_OBJECTS);
-    }
-
-    fn initializeMappingIndex(index: *MappingIndex) void {
-        for (&index.buckets) |*bucket| bucket.* = .{};
-        for (&index.links) |*link| link.* = .{};
-        index.free_bucket_head = indexed_arena.reusableNoIndex(MAPPING_EDGE_CAPACITY);
     }
 };
 
-const TableBackingStorage = if (heap_backed_table) ?*TableBacking else TableBacking;
-
 pub const Table = struct {
-    backing: TableBackingStorage = if (heap_backed_table) null else TableBacking.init(),
+    backing: table_backing.Lazy(TableBacking, TableBacking.initializeZeroed) = .{},
     mapping_lifetime: ?MappingLifetime = null,
     uses_default_lifetime: bool = true,
 
@@ -675,9 +653,10 @@ pub const Table = struct {
     }
 
     pub fn initWithHostedPhysicalBacking(backend: HostedPhysicalBacking, lifetime: ?MappingLifetime) Table {
-        if (comptime heap_backed_table) @compileError("hosted physical fixtures cannot replace production frame ownership");
+        if (comptime native_physical_frames) @compileError("hosted physical fixtures cannot replace production frame ownership");
         var table = Table.init();
-        table.backing.mmu.hosted_physical_backing = backend;
+        const backing = table.ensureBacking() catch @panic("hosted shared-memory fixture allocation failed");
+        backing.mmu.hosted_physical_backing = backend;
         if (lifetime) |registered| {
             table.mapping_lifetime = registered;
             table.uses_default_lifetime = false;
@@ -686,9 +665,7 @@ pub const Table = struct {
     }
 
     comptime {
-        if (heap_backed_table and @sizeOf(@This()) > 64) {
-            @compileError("heap-backed shared-memory tables exceed their compact resident layout");
-        }
+        if (@sizeOf(@This()) > 64) @compileError("shared-memory tables exceed their compact resident layout");
     }
 
     pub fn hasAcceleratorAttachments(self: *const Table) bool {
@@ -714,14 +691,7 @@ pub const Table = struct {
                     native_util.impossibleByInvariantError("shared-memory table teardown revokes each live object", err);
             }
         }
-        if (comptime heap_backed_table) {
-            if (self.backing) |backing| {
-                table_backing.free(TableBacking, backing);
-                self.backing = null;
-            }
-        } else {
-            self.backing = TableBacking.init();
-        }
+        self.backing.release();
         self.mapping_lifetime = null;
         self.uses_default_lifetime = true;
     }
@@ -735,7 +705,7 @@ pub const Table = struct {
         if (self.uses_default_lifetime) {
             // Hosted metadata tables have no hardware owner unless explicitly
             // supplied. A production mapping always needs its paired backend.
-            if (comptime !heap_backed_table) {
+            if (comptime !native_physical_frames) {
                 if (comptime !builtin.is_test) return 0;
                 if (!DefaultLifetimeTesting.registered_host_backend) return 0;
             }
@@ -779,24 +749,15 @@ pub const Table = struct {
     }
 
     fn backingPtr(self: *Table) ?*TableBacking {
-        if (comptime heap_backed_table) return self.backing;
-        return &self.backing;
+        return self.backing.get();
     }
 
     fn backingConst(self: *const Table) ?*const TableBacking {
-        if (comptime heap_backed_table) return self.backing;
-        return &self.backing;
+        return self.backing.get();
     }
 
     fn ensureBacking(self: *Table) error{OutOfMemory}!*TableBacking {
-        if (self.backingPtr()) |backing| return backing;
-        if (comptime heap_backed_table) {
-            const backing = table_backing.alloc(TableBacking) orelse return error.OutOfMemory;
-            backing.initializeAllocated();
-            self.backing = backing;
-            return backing;
-        }
-        return &self.backing;
+        return self.backing.ensure() catch error.OutOfMemory;
     }
 
     fn mmuForTests(self: *Table) *FreestandingMmu {
@@ -1589,7 +1550,8 @@ test "shared memory objects keep bounded mapping counts compact" {
 
 test "allocated shared memory backing initializes every arena and index" {
     var backing: TableBacking = undefined;
-    backing.initializeAllocated();
+    @memset(std.mem.asBytes(&backing), 0);
+    backing.initializeZeroed();
 
     try std.testing.expectEqual(@as(u64, 1), backing.mmu.next_physical_frame);
     try std.testing.expectEqual(@as(usize, 0), backing.arena.countInUse());

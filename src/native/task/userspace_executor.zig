@@ -709,12 +709,13 @@ fn mappingSlotAddressSpaceId(slot: *const MappingSlot) u64 {
     return slot.mapping.address_space_id;
 }
 
-pub const MappingArena = indexed_arena.PagedIndexedArena(
+pub const MappingArena = indexed_arena.IndexedArenaWithKeyOptions(
+    u64,
     MappingSlot,
     task_runtime.MAX_TASKS,
-    1,
     MAPPING_INDEX_CAPACITY,
     mappingSlotAddressSpaceId,
+    .{ .track_generations = true },
 );
 comptime {
     if (@sizeOf(MappingDispatchMetadata) > MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES) {
@@ -727,8 +728,6 @@ comptime {
         @compileError("userspace mapping arena exceeds its compact size ceiling");
     }
 }
-const heap_backed_mappings = builtin.target.os.tag == .freestanding;
-const MappingArenaBacking = if (heap_backed_mappings) ?*MappingArena else MappingArena;
 
 pub const MappingHandle = MappingArena.Handle;
 
@@ -1843,45 +1842,31 @@ pub const Executor = struct {
     last_fault_address: FaultObservationWord = if (include_verification_evidence) 0 else {},
     last_fault_error_code: FaultObservationCode = if (include_verification_evidence) 0 else {},
     active_nx_probe_target: NxProbeTarget = if (include_verification_evidence) 0 else {},
-    mappings: MappingArenaBacking = if (heap_backed_mappings) null else MappingArena.init(),
+    mappings: table_backing.Lazy(MappingArena, null) = .{},
     group_spaces: [GROUP_SPACE_COUNT]?freestanding.paging.UserAddressSpace = @splat(null),
     group_refs: [GROUP_SPACE_COUNT]u8 = @splat(0),
     pending_retirements: [(task_runtime.MAX_TASKS + 63) / 64]u64 = @splat(0),
 
     comptime {
-        if (heap_backed_mappings and @sizeOf(@This()) > units.kibibytes(1)) {
+        if (@sizeOf(@This()) > units.kibibytes(1)) {
             @compileError("heap-backed userspace executors exceed their compact resident layout");
         }
     }
 
     fn mappingArena(self: *Executor) ?*MappingArena {
-        if (comptime heap_backed_mappings) return self.mappings;
-        return &self.mappings;
+        return self.mappings.get();
     }
 
     fn mappingArenaConst(self: *const Executor) ?*const MappingArena {
-        if (comptime heap_backed_mappings) return self.mappings;
-        return &self.mappings;
+        return self.mappings.get();
     }
 
     fn ensureMappingArena(self: *Executor) error{OutOfMemory}!*MappingArena {
-        if (self.mappingArena()) |mappings| return mappings;
-        if (comptime heap_backed_mappings) {
-            const mappings = table_backing.alloc(MappingArena) orelse return error.OutOfMemory;
-            initializeMappingArena(mappings);
-            self.mappings = mappings;
-            return mappings;
-        }
-        return &self.mappings;
+        return self.mappings.ensure() catch error.OutOfMemory;
     }
 
     fn releaseMappingArena(self: *Executor) void {
-        if (comptime heap_backed_mappings) {
-            if (self.mappings) |mappings| {
-                table_backing.free(MappingArena, mappings);
-                self.mappings = null;
-            }
-        }
+        self.mappings.release();
     }
 
     pub fn init(self: *Executor) void {
@@ -3037,13 +3022,6 @@ pub const Executor = struct {
         self.last_fault_error_code = 0;
     }
 };
-
-fn initializeMappingArena(mappings: *MappingArena) void {
-    @memset(std.mem.asBytes(mappings), 0);
-    const free_no_index = indexed_arena.reusableNoIndex(MappingArena.slot_capacity);
-    @memset(mappings.free_next[0..], free_no_index);
-    mappings.free_head = free_no_index;
-}
 
 fn prepareMappingDispatchMetadata(
     owner_task_id: u64,
@@ -4352,10 +4330,12 @@ fn installTestMappingAt(executor: *Executor, slot_index: usize, mapping: Mapping
     if (mapping.address_space_id == 0) {
         native_util.impossibleByInvariant("test userspace mapping requires a nonzero address-space identifier");
     }
-    const reserved_index = executor.mappings.reserveIndexAt(mapping.address_space_id, slot_index) orelse
+    const mappings = executor.ensureMappingArena() catch
+        native_util.impossibleByInvariant("test userspace mapping arena could not be allocated");
+    const reserved_index = mappings.reserveIndexAt(mapping.address_space_id, slot_index) orelse
         native_util.impossibleByInvariant("test userspace mapping slot could not be reserved");
-    executor.mappings.slotAt(reserved_index).mapping = mapping;
-    return executor.mappings.handleForIndex(reserved_index) orelse
+    mappings.slotAt(reserved_index).mapping = mapping;
+    return mappings.handleForIndex(reserved_index) orelse
         native_util.impossibleByInvariant("test userspace mapping has no handle");
 }
 
@@ -5140,7 +5120,7 @@ test "shared copy authority isolates grouped peers and matches the current deman
 
 test "zero-initialized mapping arenas preserve generational reuse" {
     var mappings: MappingArena = undefined;
-    initializeMappingArena(&mappings);
+    @memset(std.mem.asBytes(&mappings), 0);
 
     const first = mappings.reserveHandle(41).?;
     mappings.getByHandle(first).?.mapping.address_space_id = 41;
@@ -5171,7 +5151,7 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
         .mailbox_authority_cache = .{ .initialized = true, .refresh_count = 7, .authority_generation = 7 },
         .mailbox_publication_cache = .{ .initialized = true, .published_authority_generation = 7 },
     });
-    const retired_entry = &executor.mappings.slotAt(0).mapping;
+    const retired_entry = &executor.mappings.get().?.slotAt(0).mapping;
     try std.testing.expect(executor.findMappingByHandle(retired_handle, 42) == retired_entry);
     try std.testing.expect(executor.findMappingByHandle(retired_handle, 43) == null);
     var cached_handle = MappingHandle{};
@@ -5186,7 +5166,7 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
     try std.testing.expectEqual(@as(usize, 0), executor.materializedCount());
     try std.testing.expect(executor.findMapping(42) == null);
     try std.testing.expect(executor.findMappingByHandle(retired_handle, 42) == null);
-    const cleared_entry = &executor.mappings.slotAt(0).mapping;
+    const cleared_entry = &executor.mappings.get().?.slotAt(0).mapping;
     try std.testing.expectEqual(MappingDispatchMetadata{}, cleared_entry.dispatch_metadata);
     try std.testing.expectEqual(@as(u64, 0), cleared_entry.mailbox_authority_cache.refresh_count);
     try std.testing.expectEqual(@as(u64, 0), cleared_entry.mailbox_authority_cache.authority_generation);
@@ -5197,7 +5177,7 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
         .state = .live,
         .address_space_id = 42,
     });
-    const reused_entry = &executor.mappings.slotAt(0).mapping;
+    const reused_entry = &executor.mappings.get().?.slotAt(0).mapping;
     try std.testing.expect(!reused_handle.eql(retired_handle));
     try std.testing.expect(executor.findMappingByHandle(retired_handle, 42) == null);
     try std.testing.expect(executor.findMappingByHandle(reused_handle, 42) == reused_entry);
@@ -5210,7 +5190,7 @@ test "executor defers active address-space retirement until kernel handoff" {
     const previous_entry = native_entry.current().*;
     defer native_entry.current().* = previous_entry;
     const active_handle = installTestMappingAt(&executor, 0, .{ .state = .live, .address_space_id = 42 });
-    const active_entry = &executor.mappings.slotAt(0).mapping;
+    const active_entry = &executor.mappings.get().?.slotAt(0).mapping;
     executor.active_mapping = active_entry;
     executor.active_mapping_handle = active_handle;
     executor.active_task_id = 7;
@@ -5248,7 +5228,7 @@ test "foreign executor retirement rejects before mapping observations or selecte
     var executor = Executor{};
     try std.testing.expect(claimCurrentExecutor(&executor));
     const handle = installTestMappingAt(&executor, 0, .{ .state = .live, .address_space_id = 42 });
-    const entry = &executor.mappings.getByHandle(handle).?.mapping;
+    const entry = &executor.mappings.get().?.getByHandle(handle).?.mapping;
     executor.active_mapping = entry;
     executor.active_mapping_handle = handle;
     executor.active_task_id = 7;
@@ -5329,7 +5309,7 @@ test "executor pending group retirement waits for lease collection and coalesces
     const retirement = task_runtime.AddressSpaceRetirementEvent{ .address_space_id = 43, .reason = .terminate };
     try executor.retireAddressSpaceChecked(retirement);
     try executor.retireAddressSpaceChecked(retirement);
-    try std.testing.expectEqual(MappingState.retire_pending, executor.mappings.getByHandle(peer).?.mapping.state);
+    try std.testing.expectEqual(MappingState.retire_pending, executor.mappings.get().?.getByHandle(peer).?.mapping.state);
     try std.testing.expectEqual(@as(u64, 2), executor.pending_retirements[0]);
     executor.collectRetiredMappings();
     try std.testing.expectEqual(@as(usize, 2), executor.materializedCount());
@@ -5339,8 +5319,8 @@ test "executor pending group retirement waits for lease collection and coalesces
     try std.testing.expectEqual(@as(usize, 2), executor.materializedCount());
     _ = try runtime.execution.beginCollect(ticket);
     executor.collectRetiredMappings();
-    try std.testing.expect(executor.mappings.getByHandle(peer) == null);
-    try std.testing.expect(executor.mappings.getByHandle(first) != null);
+    try std.testing.expect(executor.mappings.get().?.getByHandle(peer) == null);
+    try std.testing.expect(executor.mappings.get().?.getByHandle(first) != null);
     try std.testing.expectEqual(@as(u8, 1), executor.group_refs[0]);
     try std.testing.expectEqual(@as(u64, 0), executor.pending_retirements[0]);
     try runtime.execution.finishCollect(ticket);
@@ -5379,11 +5359,13 @@ test "executor leased group roots reject preparation before refs mappings and ma
         .dispatch_metadata = metadata,
         .mailbox_captured = true,
     });
-    const entry = &executor.mappings.getByHandle(handle).?.mapping;
+    const entry = &executor.mappings.get().?.getByHandle(handle).?.mapping;
     const expected = executor;
+    // The mapping arena sits behind a heap handle; compare its contents too.
+    const expected_mappings = executor.mappings.get().?.*;
     const ticket = try runtime.execution.prepare(0, .{ .task_handle = 1, .task_id = 7, .process_generation = 1, .address_space_id = 42 });
     try runtime.execution.bindOwnedRoot(ticket, handle.value, 0x1000);
-    var out = MappingResolution{ .mappings = &executor.mappings, .slot_index = 99, .entry = entry, .handle = .{ .value = 77 } };
+    var out = MappingResolution{ .mappings = executor.mappings.get().?, .slot_index = 99, .entry = entry, .handle = .{ .value = 77 } };
     const unchanged = out;
     for ([_]dispatch_ownership.Phase{ .ready, .running, .returned, .collecting }) |phase| {
         switch (phase) {
@@ -5402,12 +5384,14 @@ test "executor leased group roots reject preparation before refs mappings and ma
         address_space.owner_task_id = 7;
         try std.testing.expectEqualDeep(unchanged, out);
         try std.testing.expectEqualDeep(expected, executor);
+        try std.testing.expectEqualDeep(expected_mappings, executor.mappings.get().?.*);
     }
     try runtime.execution.finishCollect(ticket);
     try std.testing.expect(executor.userAddressSpacePreparationReady(&space));
     try executor.ensureMaterializedInto(&address_space, &image, &out);
     try std.testing.expectEqual(handle.value, out.handle.value);
     try std.testing.expectEqualDeep(expected, executor);
+    try std.testing.expectEqualDeep(expected_mappings, executor.mappings.get().?.*);
 }
 
 test "executor owner stop preempts without invoking foreign shared scheduling policy" {
@@ -5463,7 +5447,7 @@ test "executor mapping arena enforces capacity and invalidates reused handles" {
         });
     }
     try std.testing.expectEqual(task_runtime.MAX_TASKS, executor.materializedCount());
-    try std.testing.expect(executor.mappings.reserveHandle(task_runtime.MAX_TASKS + 1) == null);
+    try std.testing.expect(executor.mappings.get().?.reserveHandle(task_runtime.MAX_TASKS + 1) == null);
 
     const retired_handle = handles[task_runtime.MAX_TASKS / 2];
     const retired_slot_index = retired_handle.slotIndex();
@@ -5471,8 +5455,8 @@ test "executor mapping arena enforces capacity and invalidates reused handles" {
     const retired_slot = retired_mappings.slotAt(retired_slot_index);
     executor.releaseMapping(retired_mappings, retired_slot_index, &retired_slot.mapping);
     const replacement_address_space_id: u64 = task_runtime.MAX_TASKS + 1;
-    const replacement_handle = executor.mappings.reserveHandle(replacement_address_space_id).?;
-    executor.mappings.getByHandle(replacement_handle).?.mapping = .{
+    const replacement_handle = executor.mappings.get().?.reserveHandle(replacement_address_space_id).?;
+    executor.mappings.get().?.getByHandle(replacement_handle).?.mapping = .{
         .state = .live,
         .address_space_id = replacement_address_space_id,
     };
@@ -7482,7 +7466,7 @@ test "userspace quantum arms at actual entry after idle and retains private exte
 test "userspace mapping retirement releases its private extended state allocation" {
     var executor = Executor{};
     defer executor.reset();
-    const mappings = executor.mappingArena().?;
+    const mappings = try executor.ensureMappingArena();
     const storage = table_backing.alloc(xstate.Storage) orelse return error.OutOfMemory;
     storage.initialize();
     const handle = installTestMappingAt(&executor, 0, .{ .address_space_id = 11, .owned_xstate = storage });

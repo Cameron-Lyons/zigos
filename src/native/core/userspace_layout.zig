@@ -1,7 +1,6 @@
 pub const page_size: u64 = 0x1000;
 pub const huge_page_size: u64 = 0x20_0000;
 pub const user_canonical_end_exclusive: u64 = 0x0000_8000_0000_0000;
-pub const USES_2M_IMAGE_PAGES = true;
 pub const IMAGE_SLOT_BYTES: u64 = 0x200_0000;
 pub const default_stack_top: u64 = 0x0000_007F_FFFF_F000;
 pub const default_stack_size: u64 = 64 * 1024;

@@ -9,11 +9,7 @@ const native_util = @import("../core/util.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service = @import("../task/task_runtime_service.zig");
 const units = @import("../core/units.zig");
-const root = @import("root");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 const copyText = native_util.copyText;
 const yesNo = native_util.yesNo;
@@ -30,23 +26,14 @@ pub const WindowOrderIndex = u8;
 pub const SessionCount = u8;
 pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
 pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 248;
-// Eight bounded text snapshots add 4,288 bytes; freestanding resident handles
-// stay unchanged because the surface arena is allocated on first presentation.
+// Eight bounded text snapshots add 4,288 bytes; resident session handles stay
+// unchanged because the surface arena is allocated on first presentation.
 pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 19_560;
 pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 19_568;
-pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 19_584;
-pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 216;
-pub const SESSION_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
-    FREESTANDING_SESSION_SIZE_CEILING_BYTES
-else
-    HOST_SESSION_SIZE_CEILING_BYTES;
+pub const SESSION_SIZE_CEILING_BYTES: usize = 216;
 const LEASE_SUMMARY_BUFFER_BYTES: usize = 96;
 // BSP-owned like every compositor session; see Session.display_revision.
 var display_revision_sequence: u64 = 0;
-// Freestanding sessions keep only handles resident and allocate each table on first use.
-const heap_backed_window_state = builtin.target.os.tag == .freestanding;
-const heap_backed_review_items = builtin.target.os.tag == .freestanding;
-const heap_backed_surface_arena = builtin.target.os.tag == .freestanding;
 
 comptime {
     if (MAX_WINDOWS > std.math.maxInt(WindowOrderIndex) or
@@ -230,7 +217,6 @@ const SurfaceSlot = struct {
 const WindowArena = indexed_arena.IndexedArenaWithKey(u64, WindowSlot, MAX_WINDOWS, WINDOW_INDEX_CAPACITY, windowSlotId);
 pub const ReviewItemArena = indexed_arena.IndexedArenaWithKey(u64, ReviewItemSlot, MAX_REVIEW_ITEMS, REVIEW_ITEM_INDEX_CAPACITY, reviewItemSlotKey);
 const SurfaceArena = indexed_arena.IndexedArenaWithKey(u64, SurfaceSlot, MAX_PRESENTED_SURFACES, SURFACE_INDEX_CAPACITY, surfaceSlotId);
-const SurfaceArenaBacking = if (heap_backed_surface_arena) ?*SurfaceArena else SurfaceArena;
 const SurfaceTaskIndex = indexed_arena.UniqueIndex(SURFACE_INDEX_CAPACITY);
 const TaskBundleIndex = indexed_arena.UniqueIndex(WINDOW_INDEX_CAPACITY);
 const TaskWindowIndex = indexed_arena.MultimapIndex(MAX_WINDOWS, MAX_WINDOWS, WINDOW_INDEX_CAPACITY);
@@ -243,50 +229,13 @@ pub const WindowState = struct {
     task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
     task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
     reviewer_window_index: ReviewerWindowIndex = ReviewerWindowIndex.init(),
-
-    fn init() WindowState {
-        return .{};
-    }
-
-    fn initializeAllocated(self: *WindowState) void {
-        @memset(std.mem.asBytes(self), 0);
-        self.windows.free_head = indexed_arena.reusableNoIndex(MAX_WINDOWS);
-        self.task_bundle_index.reset();
-        for (&self.task_window_index.buckets) |*bucket| bucket.* = .{};
-        for (&self.task_window_index.links) |*link| link.* = .{};
-        self.task_window_index.free_bucket_head = indexed_arena.reusableNoIndex(MAX_WINDOWS);
-        for (&self.reviewer_window_index.buckets) |*bucket| bucket.* = .{};
-        for (&self.reviewer_window_index.links) |*link| link.* = .{};
-        self.reviewer_window_index.free_bucket_head = indexed_arena.reusableNoIndex(MAX_WINDOWS);
-    }
 };
-
-const WindowStateStorage = if (heap_backed_window_state) ?*WindowState else WindowState;
-
-fn initializeSurfaceArena(surfaces: *SurfaceArena) void {
-    @memset(std.mem.asBytes(surfaces), 0);
-    surfaces.free_head = indexed_arena.reusableNoIndex(MAX_PRESENTED_SURFACES);
-}
 
 const ReviewItemBacking = struct {
     items: ReviewItemArena = ReviewItemArena.init(),
     item_order: [MAX_REVIEW_ITEMS]u64 = @as([MAX_REVIEW_ITEMS]u64, @splat(0)),
     window_review_item_index: WindowReviewItemIndex = WindowReviewItemIndex.init(),
-
-    fn init() ReviewItemBacking {
-        return .{};
-    }
-
-    fn initializeAllocated(self: *ReviewItemBacking) void {
-        @memset(std.mem.asBytes(self), 0);
-        self.items.free_head = indexed_arena.reusableNoIndex(MAX_REVIEW_ITEMS);
-        for (&self.window_review_item_index.buckets) |*bucket| bucket.* = .{};
-        for (&self.window_review_item_index.links) |*link| link.* = .{};
-        self.window_review_item_index.free_bucket_head = indexed_arena.reusableNoIndex(MAX_REVIEW_ITEMS);
-    }
 };
-
-const ReviewItemBackingStorage = if (heap_backed_review_items) ?*ReviewItemBacking else ReviewItemBacking;
 
 pub const Operation = enum(u8) {
     open_view = 1,
@@ -390,11 +339,11 @@ pub const Session = struct {
     trusted_view: ?*const @import("trusted_identity_entry.zig").View = null,
     next_window_id: u64 = 1,
     active_window_id: u64 = 0,
-    window_state: WindowStateStorage = if (heap_backed_window_state) null else WindowState.init(),
+    window_state: table_backing.Lazy(WindowState, null) = .{},
     window_count: SessionCount = 0,
-    review_items: ReviewItemBackingStorage = if (heap_backed_review_items) null else ReviewItemBacking.init(),
+    review_items: table_backing.Lazy(ReviewItemBacking, null) = .{},
     item_count: SessionCount = 0,
-    surfaces: SurfaceArenaBacking = if (heap_backed_surface_arena) null else SurfaceArena.init(),
+    surfaces: table_backing.Lazy(SurfaceArena, null) = .{},
     surface_task_index: SurfaceTaskIndex = SurfaceTaskIndex.init(),
     active_surface_head: u16 = NO_SURFACE_SLOT_INDEX,
     active_surface_tail: u16 = NO_SURFACE_SLOT_INDEX,
@@ -432,7 +381,7 @@ pub const Session = struct {
     comptime {
         if (@sizeOf(@This()) > SESSION_SIZE_CEILING_BYTES) {
             @compileError(std.fmt.comptimePrint(
-                "compositor session size {d} exceeds its target-specific compact size ceiling",
+                "compositor session size {d} exceeds its compact size ceiling",
                 .{@sizeOf(@This())},
             ));
         }
@@ -456,105 +405,51 @@ pub const Session = struct {
     }
 
     fn windowState(self: *Session) ?*WindowState {
-        if (comptime heap_backed_window_state) return self.window_state;
-        return &self.window_state;
+        return self.window_state.get();
     }
 
     fn windowStateConst(self: *const Session) ?*const WindowState {
-        if (comptime heap_backed_window_state) return self.window_state;
-        return &self.window_state;
+        return self.window_state.get();
     }
 
     fn ensureWindowState(self: *Session) error{OutOfMemory}!*WindowState {
-        if (self.windowState()) |window_state| return window_state;
-        if (comptime heap_backed_window_state) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(WindowState)) orelse return error.OutOfMemory;
-            const window_state: *WindowState = @ptrCast(@alignCast(allocation));
-            window_state.initializeAllocated();
-            self.window_state = window_state;
-            return window_state;
-        }
-        return &self.window_state;
+        return self.window_state.ensure() catch error.OutOfMemory;
     }
 
     fn releaseWindowState(self: *Session) void {
-        if (comptime heap_backed_window_state) {
-            if (self.window_state) |window_state| {
-                @memset(std.mem.asBytes(window_state), 0);
-                kernel_memory.kfree(@ptrCast(window_state));
-                self.window_state = null;
-            }
-        } else {
-            self.window_state = WindowState.init();
-        }
+        self.window_state.release();
     }
 
     fn reviewItemsPtr(self: *Session) ?*ReviewItemBacking {
-        if (comptime heap_backed_review_items) return self.review_items;
-        return &self.review_items;
+        return self.review_items.get();
     }
 
     fn reviewItemsConst(self: *const Session) ?*const ReviewItemBacking {
-        if (comptime heap_backed_review_items) return self.review_items;
-        return &self.review_items;
+        return self.review_items.get();
     }
 
     fn ensureReviewItems(self: *Session) error{OutOfMemory}!*ReviewItemBacking {
-        if (self.reviewItemsPtr()) |review_items| return review_items;
-        if (comptime heap_backed_review_items) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(ReviewItemBacking)) orelse return error.OutOfMemory;
-            const review_items: *ReviewItemBacking = @ptrCast(@alignCast(allocation));
-            review_items.initializeAllocated();
-            self.review_items = review_items;
-            return review_items;
-        }
-        return &self.review_items;
+        return self.review_items.ensure() catch error.OutOfMemory;
     }
 
     fn releaseReviewItems(self: *Session) void {
-        if (comptime heap_backed_review_items) {
-            if (self.review_items) |review_items| {
-                @memset(std.mem.asBytes(review_items), 0);
-                kernel_memory.kfree(@ptrCast(review_items));
-                self.review_items = null;
-            }
-        } else {
-            self.review_items = ReviewItemBacking.init();
-        }
+        self.review_items.release();
     }
 
     fn surfaceArena(self: *Session) ?*SurfaceArena {
-        if (comptime heap_backed_surface_arena) return self.surfaces;
-        return &self.surfaces;
+        return self.surfaces.get();
     }
 
     fn surfaceArenaConst(self: *const Session) ?*const SurfaceArena {
-        if (comptime heap_backed_surface_arena) return self.surfaces;
-        return &self.surfaces;
+        return self.surfaces.get();
     }
 
     fn ensureSurfaceArena(self: *Session) error{OutOfMemory}!*SurfaceArena {
-        if (self.surfaceArena()) |surfaces| return surfaces;
-        if (comptime heap_backed_surface_arena) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(SurfaceArena)) orelse return error.OutOfMemory;
-            const surfaces: *SurfaceArena = @ptrCast(@alignCast(allocation));
-            initializeSurfaceArena(surfaces);
-            self.surfaces = surfaces;
-            return surfaces;
-        }
-        return &self.surfaces;
+        return self.surfaces.ensure() catch error.OutOfMemory;
     }
 
     fn releaseSurfaceArena(self: *Session) void {
-        if (comptime heap_backed_surface_arena) {
-            if (self.surfaces) |surfaces| {
-                @memset(std.mem.asBytes(surfaces), 0);
-                kernel_memory.kfree(@ptrCast(surfaces));
-                self.surfaces = null;
-            }
-        } else {
-            self.surfaces = SurfaceArena.init();
-        }
+        self.surfaces.release();
     }
 
     pub fn beginPermissionReview(
@@ -566,6 +461,10 @@ pub const Session = struct {
         const surface_id = try requireTaskSurface(app_task);
         if (self.findWindowForTaskBundle(app_task.id, bundle.bundle_id)) |window| {
             return window;
+        }
+        // Another bundle's window already holds this hashed key.
+        if (self.windowStateConst()) |window_state| {
+            if (window_state.task_bundle_index.contains(taskBundleKey(app_task.id, bundle.bundle_id))) return error.PresentationConflict;
         }
 
         const allocation = try self.allocateWindow();
@@ -1108,7 +1007,7 @@ pub const Session = struct {
         if (window.subject_task_id == 0 or window.bundle_id_len == 0) return;
         const window_state = self.windowState() orelse
             native_util.impossibleByInvariant("indexed compositor windows retain window state");
-        window_state.task_bundle_index.insert(taskBundleKey(window.subject_task_id, window.bundleIdSlice()), slot_index);
+        window_state.task_bundle_index.insertAbsent(taskBundleKey(window.subject_task_id, window.bundleIdSlice()), slot_index);
     }
 
     fn indexWindowForTask(self: *Session, slot_index: usize, window: *const WindowRecord) void {
@@ -1767,9 +1666,9 @@ test "compositor compact record metadata preserves exact text capacities" {
     try std.testing.expectEqualStrings("", item.objectScopeSlice());
 }
 
-test "allocated compositor review backing initializes its arena order and index" {
+test "zero-filled compositor review backing is an empty arena order and index" {
     var review_items: ReviewItemBacking = undefined;
-    review_items.initializeAllocated();
+    @memset(std.mem.asBytes(&review_items), 0);
 
     try std.testing.expectEqual(@as(usize, 0), review_items.items.countInUse());
     try std.testing.expectEqual(@as(u64, 0), review_items.item_order[0]);
@@ -1782,9 +1681,9 @@ test "allocated compositor review backing initializes its arena order and index"
     try std.testing.expect(review_items.items.removeIndex(slot_index));
 }
 
-test "allocated compositor surface arena preserves empty and reusable slot invariants" {
+test "zero-filled compositor surface arena preserves empty and reusable slot invariants" {
     var surfaces: SurfaceArena = undefined;
-    initializeSurfaceArena(&surfaces);
+    @memset(std.mem.asBytes(&surfaces), 0);
 
     try std.testing.expectEqual(@as(usize, 0), surfaces.countInUse());
     const slot_index = surfaces.reserveIndex(7).?;
@@ -2325,6 +2224,46 @@ test "compositor session reuses an existing window for repeated bundle review" {
     try std.testing.expectEqual(@as(usize, 1), session.window_count);
 }
 
+test "a task-bundle key hash collision is a lookup miss and a review conflict" {
+    var runtime = task_runtime.Runtime.init();
+    defer runtime.reset();
+    const app_task = try runtime.createTask(.{
+        .owner = .{ .kind = .user, .serial = 3 },
+        .component_class = .app_component,
+        .budget = compositorTestBudget(4),
+        .ui_surface_id = 6,
+        .local_only = true,
+    });
+    const first_bundle = manifest.BundleManifest{
+        .bundle_id = "app.collision-first",
+        .display_name = "Collision First",
+        .publisher = "zigos.dev",
+    };
+    const second_bundle = manifest.BundleManifest{
+        .bundle_id = "app.collision-second",
+        .display_name = "Collision Second",
+        .publisher = "zigos.dev",
+    };
+
+    var session = Session.init();
+    defer session.deinit();
+    const first = try session.beginPermissionReview(11, app_task, first_bundle);
+    // Model a collision: the second bundle's key resolves to the first window.
+    const index = &session.windowState().?.task_bundle_index;
+    const first_key = taskBundleKey(app_task.id, first_bundle.bundle_id);
+    const second_key = taskBundleKey(app_task.id, second_bundle.bundle_id);
+    const slot_index = index.lookup(first_key).?;
+    index.remove(first_key);
+    index.insert(second_key, slot_index);
+
+    try std.testing.expect(session.findWindowForTaskBundle(app_task.id, second_bundle.bundle_id) == null);
+    try std.testing.expectError(error.PresentationConflict, session.beginPermissionReview(11, app_task, second_bundle));
+    try std.testing.expectEqual(@as(usize, 1), session.window_count);
+    try std.testing.expectEqual(first.id, session.findWindowConst(first.id).?.id);
+    try std.testing.expectEqualStrings(first_bundle.bundle_id, session.findWindowConst(first.id).?.bundleIdSlice());
+    try std.testing.expectEqual(@as(?usize, slot_index), index.lookup(second_key));
+}
+
 test "compositor session opens document workspace and full-screen task views" {
     var runtime = task_runtime.Runtime.init();
     const app_task = try runtime.createTask(.{
@@ -2418,7 +2357,7 @@ test "compositor session owns bounded monotonic surface presentations" {
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
     try std.testing.expectEqual(PresentResult.duplicate, try session.presentSurface(app_task, &presentation));
     try std.testing.expectEqual(@as(usize, 1), session.presentedSurfaceCount());
-    const surface_slot_index = session.surfaces.slotIndexOf(71).?;
+    const surface_slot_index = session.surfaces.get().?.slotIndexOf(71).?;
     try std.testing.expectEqual(@as(?usize, surface_slot_index), session.surface_task_index.lookup(surfaceTaskKey(app_task.id)));
     try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), session.active_surface_head);
     try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), session.active_surface_tail);
@@ -2567,7 +2506,7 @@ test "compositor surface indexes saturate prune restore and reuse exact slots" {
         try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(task, &presentation));
         task_ids[index] = task.id;
         surface_ids[index] = surface_id;
-        slot_indexes[index] = session.surfaces.slotIndexOf(surface_id).?;
+        slot_indexes[index] = session.surfaces.get().?.slotIndexOf(surface_id).?;
         try std.testing.expectEqual(@as(?usize, slot_indexes[index]), session.surface_task_index.lookup(surfaceTaskKey(task.id)));
     }
 
@@ -2592,7 +2531,7 @@ test "compositor surface indexes saturate prune restore and reuse exact slots" {
     try std.testing.expectEqual(@as(usize, MAX_PRESENTED_SURFACES - 1), session.presentedSurfaceCount());
 
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(overflow_task, &overflow_presentation));
-    try std.testing.expectEqual(removed_slot_index, session.surfaces.slotIndexOf(2_000).?);
+    try std.testing.expectEqual(removed_slot_index, session.surfaces.get().?.slotIndexOf(2_000).?);
     try std.testing.expectEqual(@as(u16, @intCast(removed_slot_index)), session.active_surface_tail);
     try std.testing.expectEqual(@as(usize, MAX_PRESENTED_SURFACES), session.presentedSurfaceCount());
 
@@ -2615,7 +2554,7 @@ test "compositor surface indexes saturate prune restore and reuse exact slots" {
         try std.testing.expect(active_index < MAX_PRESENTED_SURFACES);
         try std.testing.expect(!seen[active_index]);
         seen[active_index] = true;
-        const slot = &restored.surfaces.slots[active_index];
+        const slot = &restored.surfaces.get().?.slots[active_index];
         try std.testing.expect(slot.in_use);
         try std.testing.expectEqual(previous, slot.previous_active_index);
         try std.testing.expectEqual(@as(?usize, active_index), restored.surface_task_index.lookup(surfaceTaskKey(slot.surface.task_id)));

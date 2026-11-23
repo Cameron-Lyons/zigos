@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const component_port = @import("../kernel_api/component_port.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
@@ -11,19 +10,7 @@ const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const session_support = @import("session_manager_support.zig");
 const supervisor_mod = @import("supervisor.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
-const root = @import("root");
-
-pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = true;
-pub const HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING = true;
-pub const BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES: usize = 8;
-const heap_backed_package_service = builtin.target.os.tag == .freestanding and HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
-const heap_backed_background_dispatch = builtin.target.os.tag == .freestanding and HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING;
-const PackageServiceBacking = if (heap_backed_package_service) ?*package_service.Service else package_service.Service;
-const BackgroundDispatchBacking = if (heap_backed_background_dispatch) ?*background_dispatch.Controller else background_dispatch.Controller;
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
-else
-    struct {};
+const table_backing = @import("../core/table_backing.zig");
 
 pub const BootstrapState = session_support.BootstrapState;
 pub const ServiceBindings = session_support.ServiceBindings;
@@ -38,18 +25,15 @@ pub const ServiceGraph = struct {
 
 pub const Builder = struct {
     service_directory: native_service_registry.Service = native_service_registry.Service.init(),
-    package_service_instance: PackageServiceBacking = if (heap_backed_package_service) null else package_service.Service.init(),
+    package_service_instance: table_backing.Lazy(package_service.Service, package_service.Service.initializeAllocated) = .{},
     driver_directory: driver_service.Directory = driver_service.Directory.init(),
     driver_runtime: driver_runtime_mod.Runtime = driver_runtime_mod.Runtime.init(),
     supervisor: supervisor_mod.Supervisor = supervisor_mod.Supervisor.init(),
-    background_dispatcher: BackgroundDispatchBacking = if (heap_backed_background_dispatch) null else background_dispatch.Controller.init(),
+    background_dispatcher: table_backing.Lazy(background_dispatch.Controller, background_dispatch.Controller.initializeAllocated) = .{},
 
     comptime {
-        if (heap_backed_package_service and @sizeOf(@This()) > 22 * 1024) {
+        if (@sizeOf(@This()) > 22 * 1024) {
             @compileError("heap-backed service graph builders exceed their compact resident layout");
-        }
-        if (heap_backed_background_dispatch and @sizeOf(BackgroundDispatchBacking) > BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES) {
-            @compileError("heap-backed background dispatch exceeds its handle size ceiling");
         }
     }
 
@@ -58,62 +42,28 @@ pub const Builder = struct {
     }
 
     pub fn packageService(self: *Builder) ?*package_service.Service {
-        if (comptime heap_backed_package_service) return self.package_service_instance;
-        return &self.package_service_instance;
+        return self.package_service_instance.get();
     }
 
     pub fn ensurePackageService(self: *Builder) error{NoSpaceLeft}!*package_service.Service {
-        if (self.packageService()) |service| return service;
-        if (comptime heap_backed_package_service) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(package_service.Service)) orelse return error.NoSpaceLeft;
-            const service: *package_service.Service = @ptrCast(@alignCast(allocation));
-            service.initializeAllocated();
-            self.package_service_instance = service;
-            return service;
-        }
-        return &self.package_service_instance;
+        return self.package_service_instance.ensure();
     }
 
     pub fn releasePackageService(self: *Builder) void {
-        if (comptime heap_backed_package_service) {
-            if (self.package_service_instance) |service| {
-                service.deinit();
-                @memset(std.mem.asBytes(service), 0);
-                kernel_memory.kfree(@ptrCast(service));
-                self.package_service_instance = null;
-            }
-        } else {
-            self.package_service_instance.reset();
-        }
+        if (self.package_service_instance.get()) |service| service.deinit();
+        self.package_service_instance.release();
     }
 
     pub fn backgroundDispatch(self: *Builder) ?*background_dispatch.Controller {
-        if (comptime heap_backed_background_dispatch) return self.background_dispatcher;
-        return &self.background_dispatcher;
+        return self.background_dispatcher.get();
     }
 
     pub fn ensureBackgroundDispatch(self: *Builder) error{NoSpaceLeft}!*background_dispatch.Controller {
-        if (self.backgroundDispatch()) |controller| return controller;
-        if (comptime heap_backed_background_dispatch) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(background_dispatch.Controller)) orelse return error.NoSpaceLeft;
-            const controller: *background_dispatch.Controller = @ptrCast(@alignCast(allocation));
-            controller.initializeAllocated();
-            self.background_dispatcher = controller;
-            return controller;
-        }
-        return &self.background_dispatcher;
+        return self.background_dispatcher.ensure();
     }
 
     pub fn releaseBackgroundDispatch(self: *Builder) void {
-        if (comptime heap_backed_background_dispatch) {
-            if (self.background_dispatcher) |controller| {
-                @memset(std.mem.asBytes(controller), 0);
-                kernel_memory.kfree(@ptrCast(controller));
-                self.background_dispatcher = null;
-            }
-        } else {
-            self.background_dispatcher = background_dispatch.Controller.init();
-        }
+        self.background_dispatcher.release();
     }
 
     pub fn environment(

@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const contract = @import("contract.zig");
@@ -8,15 +7,13 @@ const indexed_arena = @import("../core/indexed_arena.zig");
 const notification_center = @import("../services/notification_center.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
-const root = @import("root");
+const table_backing = @import("../core/table_backing.zig");
 
 pub const MAX_SERVICES: usize = 24;
 pub const MAX_DIAGNOSTICS: usize = 64;
-pub const HEAP_BACKED_ACTIONABLE_DIAGNOSTICS_ON_FREESTANDING = true;
 pub const DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES: usize = 24;
-pub const DIAGNOSTIC_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 pub const SERVICE_RECORD_SIZE_CEILING_BYTES: usize = 40;
-pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 3_368;
+pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 1_840;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
 pub const SERVICE_CLASS_COUNT: usize = @typeInfo(contract.ServiceClass).@"enum".field_names.len;
 pub const ServiceClassSlotIndex = indexed_arena.ReusableIndex(MAX_SERVICES);
@@ -74,19 +71,6 @@ pub const DiagnosticEvent = struct {
 };
 
 const DiagnosticArray = [MAX_DIAGNOSTICS]DiagnosticEvent;
-const heap_backed_actionable_diagnostics = builtin.target.os.tag == .freestanding and HEAP_BACKED_ACTIONABLE_DIAGNOSTICS_ON_FREESTANDING;
-const DiagnosticBacking = if (heap_backed_actionable_diagnostics) ?*DiagnosticArray else DiagnosticArray;
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
-else
-    struct {};
-
-pub const actionable_diagnostic_layout = .{
-    .event_bytes = @sizeOf(DiagnosticEvent),
-    .ring_bytes = @sizeOf(DiagnosticArray),
-    .resident_backing_bytes = @sizeOf(DiagnosticBacking),
-    .heap_backed_on_freestanding = heap_backed_actionable_diagnostics,
-};
 
 pub const Error = error{
     ServiceTableFull,
@@ -129,7 +113,7 @@ const ServiceArena = indexed_arena.IndexedArena(ServiceSlot, MAX_SERVICES, SERVI
 pub const Supervisor = struct {
     service_arena: ServiceArena = ServiceArena.init(),
     service_class_slots: [SERVICE_CLASS_COUNT]ServiceClassSlotIndex = @as([SERVICE_CLASS_COUNT]ServiceClassSlotIndex, @splat(NO_SERVICE_CLASS_SLOT)),
-    diagnostics: DiagnosticBacking = if (heap_backed_actionable_diagnostics) null else @as([MAX_DIAGNOSTICS]DiagnosticEvent, @splat(zeroDiagnostic())),
+    diagnostics: table_backing.Lazy(DiagnosticArray, null) = .{},
     diagnostic_count: u8 = 0,
     next_diagnostic_slot: u8 = 0,
 
@@ -144,21 +128,10 @@ pub const Supervisor = struct {
         if (@sizeOf(DiagnosticEvent) > DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES) {
             @compileError("supervisor diagnostic event exceeds its compact layout");
         }
-        if (heap_backed_actionable_diagnostics and @sizeOf(DiagnosticBacking) > DIAGNOSTIC_HANDLE_SIZE_CEILING_BYTES) {
-            @compileError("heap-backed supervisor diagnostics exceed their handle size ceiling");
-        }
     }
 
     pub fn deinit(self: *Supervisor) void {
-        if (comptime heap_backed_actionable_diagnostics) {
-            if (self.diagnostics) |diagnostics| {
-                @memset(std.mem.asBytes(diagnostics), 0);
-                kernel_memory.kfree(@ptrCast(diagnostics));
-                self.diagnostics = null;
-            }
-        } else {
-            self.diagnostics = @as([MAX_DIAGNOSTICS]DiagnosticEvent, @splat(zeroDiagnostic()));
-        }
+        self.diagnostics.release();
         self.diagnostic_count = 0;
         self.next_diagnostic_slot = 0;
     }
@@ -441,25 +414,15 @@ pub const Supervisor = struct {
     }
 
     fn diagnosticsPtr(self: *Supervisor) ?*DiagnosticArray {
-        if (comptime heap_backed_actionable_diagnostics) return self.diagnostics;
-        return &self.diagnostics;
+        return self.diagnostics.get();
     }
 
     fn diagnosticsConst(self: *const Supervisor) ?*const DiagnosticArray {
-        if (comptime heap_backed_actionable_diagnostics) return self.diagnostics;
-        return &self.diagnostics;
+        return self.diagnostics.get();
     }
 
     fn ensureDiagnostics(self: *Supervisor) ?*DiagnosticArray {
-        if (self.diagnosticsPtr()) |diagnostics| return diagnostics;
-        if (comptime heap_backed_actionable_diagnostics) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(DiagnosticArray)) orelse return null;
-            const diagnostics: *DiagnosticArray = @ptrCast(@alignCast(allocation));
-            @memset(std.mem.asBytes(diagnostics), 0);
-            self.diagnostics = diagnostics;
-            return diagnostics;
-        }
-        return &self.diagnostics;
+        return self.diagnostics.ensure() catch null;
     }
 
     fn nextDiagnosticSlot(self: *Supervisor) usize {
@@ -498,15 +461,6 @@ fn zeroService() ServiceRecord {
         .contract_endpoint_id = 0,
         .state = .registered,
         .restart_count = 0,
-    };
-}
-
-fn zeroDiagnostic() DiagnosticEvent {
-    return .{
-        .service_id = 0,
-        .tick = 0,
-        .detail = 0,
-        .kind = .crash,
     };
 }
 
@@ -660,7 +614,7 @@ test "supervisor keeps bounded diagnostic metadata compact" {
     try std.testing.expect(!@hasField(DiagnosticEvent, "sequence"));
     try std.testing.expect(!@hasField(Supervisor, "next_diagnostic_sequence"));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DiagnosticEvent));
-    try std.testing.expectEqual(@as(usize, 1_536), actionable_diagnostic_layout.ring_bytes);
+    try std.testing.expectEqual(@as(usize, 1_536), @sizeOf(DiagnosticArray));
     try std.testing.expect(!@hasField(ServiceRecord, "last_transition_tick"));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ServiceRecord));
     try std.testing.expectEqual(@as(usize, SUPERVISOR_SIZE_CEILING_BYTES), @sizeOf(Supervisor));

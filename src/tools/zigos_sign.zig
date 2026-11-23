@@ -29,10 +29,10 @@ pub fn main(init: std.process.Init) !void {
         if (args.len != 3) return error.UnknownExample;
         const package = example_apps.byName(args[2]) orelse return error.UnknownExample;
         const digest = package_service.digestBundle(package.bundle);
-        const signature = try signing.signWithDefaultRegistry(.ed25519, package.signer, &digest);
+        const signature = try signing.sign(package.signer, &digest);
         try stdout_writer.interface.print(
             "bundle={s}\nverified={s}\n",
-            .{ package.bundle.bundle_id, if (signing.verifyWithDefaultRegistry(signature, &digest)) "yes" else "no" },
+            .{ package.bundle.bundle_id, if (signing.verify(signature, &digest)) "yes" else "no" },
         );
     } else if (std.mem.eql(u8, args[1], "sign-digest")) {
         if (args.len != 5) return error.InvalidHexLength;
@@ -63,7 +63,7 @@ fn printUsage(writer: anytype) !void {
 
 fn printSignedManifest(writer: anytype, bundle: manifest.BundleManifest, signer: signing.SignerIdentity) !void {
     const digest = package_service.digestBundle(bundle);
-    const signature = try signing.signWithDefaultRegistry(.ed25519, signer, &digest);
+    const signature = try signing.sign(signer, &digest);
     var digest_hex: [crypto_hash.hex_digest_bytes]u8 = undefined;
     var public_key_hex: [hex.encodedLen(manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES)]u8 = undefined;
     var signature_hex: [hex.encodedLen(manifest.MAX_SIGNATURE_VALUE_BYTES)]u8 = undefined;
@@ -137,8 +137,8 @@ fn printProviderPolicy(writer: anytype) !void {
 test "signing CLI helpers encode decode and verify manifest digests" {
     const package = example_apps.writer();
     const digest = package_service.digestBundle(package.bundle);
-    const signature = try signing.signWithDefaultRegistry(.ed25519, package.signer, &digest);
-    try std.testing.expect(signing.verifyWithDefaultRegistry(signature, &digest));
+    const signature = try signing.sign(package.signer, &digest);
+    try std.testing.expect(signing.verify(signature, &digest));
 
     var digest_hex: [crypto_hash.hex_digest_bytes]u8 = undefined;
     const encoded = try hex.encodeLower(&digest, &digest_hex);

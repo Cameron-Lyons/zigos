@@ -235,9 +235,6 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         pub fn initializeAllocated(self: *Self) void {
             @memset(std.mem.asBytes(self), 0);
-            self.slots.free_head = indexed_arena.reusableNoIndex(MAX_TABLE_CAPABILITIES);
-
-            self.target_generations.free_head = indexed_arena.reusableNoIndex(MAX_TABLE_TARGET_GENERATIONS);
             self.mutation_generation = 1;
         }
 

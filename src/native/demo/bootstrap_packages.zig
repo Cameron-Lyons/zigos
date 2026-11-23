@@ -27,8 +27,7 @@ const capture_signer = signing.SignerIdentity{
 };
 
 fn signDemoReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.BundleManifest) manifest.Signature {
-    return signing.signWithDefaultRegistry(
-        .ed25519,
+    return signing.sign(
         identity,
         &package_service.digestBundle(bundle),
     ) catch |err| native_util.bootProofFailure("bootstrap packages", err);

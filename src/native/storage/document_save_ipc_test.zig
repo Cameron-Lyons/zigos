@@ -502,7 +502,7 @@ test "document sessions deinit refuses suspended work before any channel mutatio
     var sessions = @import("../session/document_sessions.zig").Sessions{};
     defer sessions.deinit(99) catch unreachable;
     const binding = try sessions.open(&fixture.port, &fixture.device.service, fixture.open_request, 0);
-    const channel = &sessions.backing[0];
+    const channel = &sessions.backing.get().?[0];
     fixture.server = &channel.server.?;
     fixture.app_endpoint_id = channel.client_endpoint_id;
     fixture.app_endpoint_capability = binding.endpoint_capability_id;
@@ -1235,7 +1235,7 @@ pub const OwnedDocument = struct {
         fixture.channel.close(0);
         fixture.open_request.signer = signer;
         const binding = try self.documents.open(&fixture.port, &fixture.device.service, fixture.open_request, 0);
-        const channel = &self.documents.backing[0];
+        const channel = &self.documents.backing.get().?[0];
         fixture.server = &channel.server.?;
         fixture.app_endpoint_id = channel.client_endpoint_id;
         fixture.server_endpoint_id = binding.service_endpoint_id;
@@ -1307,7 +1307,7 @@ test "owned document worker excludes credential replacement and drains trusted e
     router.trusted_entry = .{ .authentication = &entry };
     router.clearTrustedEntry();
     try std.testing.expect(router.trusted_entry == null and !entry.busy() and !owned.coordinator.busy());
-    try std.testing.expect(paused.retained_blob and owned.documents.backing[0].server == null);
+    try std.testing.expect(paused.retained_blob and owned.documents.backing.get().?[0].server == null);
     try std.testing.expect(owned.session.operation_worker == null and owned.session.publication_guard == null);
     try std.testing.expect(fixture.signing_fixture.service.store.empty());
     try std.testing.expect(std.mem.allEqual(u8, &owned.session.client.command, 0));
@@ -1348,7 +1348,7 @@ test "owned document worker revokes expiry continuity and rollback before public
             _ = try fixture.receive(true);
             try std.testing.expectEqual(protocol.Status.permission_denied, fixture.client.last_status.?);
         } else {
-            try std.testing.expect(owned.documents.backing[0].server == null and !owned.session.replay.active);
+            try std.testing.expect(owned.documents.backing.get().?[0].server == null and !owned.session.replay.active);
             try std.testing.expect(owned.coordinator.nextWake() == null and !owned.coordinator.ready(now));
         }
     }
@@ -1381,7 +1381,7 @@ test "owned document worker cancels a queued TPM job without consuming its frame
     try std.testing.expect(owned.coordinator.busy() and !fixture.server.running and paused.opens == 0);
     try std.testing.expectEqual(@as(u16, 1), (try fixture.endpoints.descriptor(ids.endpoint(fixture.server_endpoint_id))).queued_messages);
     owned.session.lock();
-    try std.testing.expect(!owned.session.replay.active and owned.documents.backing[0].server == null);
+    try std.testing.expect(!owned.session.replay.active and owned.documents.backing.get().?[0].server == null);
     try std.testing.expect(owned.coordinator.service(11));
     try std.testing.expect(!owned.coordinator.busy() and paused.opens == 0 and owned.session.operation_worker == null);
     try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
@@ -1433,7 +1433,7 @@ test "owned document worker closes idle lifetime before immediate credential rep
     try fixture.queueCommit("old lifetime request");
     const auth = owned.adapter.authenticator();
     try auth.start_fn(auth.context, .pin, "73019428", 10);
-    try std.testing.expect(owned.documents.backing[0].server == null);
+    try std.testing.expect(owned.documents.backing.get().?[0].server == null);
     try std.testing.expectError(error.EndpointNotFound, fixture.endpoints.descriptor(ids.endpoint(fixture.server_endpoint_id)));
     try std.testing.expect(owned.coordinator.stack == null and !owned.coordinator.ready(10));
     auth.lock_fn(auth.context);
@@ -1483,7 +1483,7 @@ test "owned document worker resumes actual storage signing and excludes foreign 
     owned.session.coordinator.?.signer.key.authority = &fixture.signing_fixture.authority;
     const calls = paused.opens;
     try std.testing.expect(owned.coordinator.ready(12) and owned.coordinator.service(12));
-    try std.testing.expect(!owned.session.replay.active and owned.documents.backing[0].server == null);
+    try std.testing.expect(!owned.session.replay.active and owned.documents.backing.get().?[0].server == null);
     try std.testing.expectEqual(calls, paused.opens);
 }
 

@@ -14,9 +14,7 @@ const std = @import("std");
 const units = @import("../core/units.zig");
 const native_util = @import("../core/util.zig");
 
-pub const TASK_PAGE_SIZE: usize = 32;
-pub const TASK_PAGE_COUNT: usize = 4;
-pub const MAX_TASKS: usize = TASK_PAGE_SIZE * TASK_PAGE_COUNT;
+pub const MAX_TASKS: usize = 128;
 pub const MAX_TASK_CAPABILITIES: usize = 24;
 pub const MAX_TASK_COMPONENTS: usize = 8;
 pub const MAX_AUDIT_EVENTS: usize = 16;
@@ -485,7 +483,7 @@ fn taskSlotId(slot: *const TaskSlot) u64 {
     return slot.task.id;
 }
 
-pub const TaskArena = indexed_arena.PagedIndexedArena(TaskSlot, TASK_PAGE_SIZE, TASK_PAGE_COUNT, INDEX_CAPACITY, taskSlotId);
+pub const TaskArena = indexed_arena.IndexedArenaWithKeyOptions(u64, TaskSlot, MAX_TASKS, INDEX_CAPACITY, taskSlotId, .{ .track_generations = true });
 pub const TaskHandle = TaskArena.Handle;
 pub const TaskOwnerIndex = indexed_arena.MultimapIndex(MAX_TASKS, MAX_TASKS, TASK_OWNER_INDEX_CAPACITY);
 

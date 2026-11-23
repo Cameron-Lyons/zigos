@@ -11,10 +11,7 @@ const signing = @import("../../core/signing.zig");
 const workspace_index = @import("index.zig");
 const workspace_merkle = @import("merkle.zig");
 const workspace_sharing = @import("sharing.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    @import("../../../kernel/memory/memory.zig")
-else
-    struct {};
+const table_backing = @import("../../core/table_backing.zig");
 
 pub const MAX_WORKSPACES: usize = 8;
 pub const MAX_WORKSPACE_ENTRIES: usize = 96;
@@ -166,7 +163,6 @@ pub const EntryMutation = struct {
     entry: Entry = .{},
 };
 const MutationEntries = [MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation;
-const heap_backed_mutation_logs = builtin.target.os.tag == .freestanding;
 const RecoverableDeleteEntries = [MAX_RECOVERABLE_DELETES]Entry;
 const WorkspaceEntries = [MAX_WORKSPACE_ENTRIES]Entry;
 const WorkspaceLeafHashes = [MAX_WORKSPACE_ENTRIES]SnapshotRootAddress;
@@ -178,13 +174,21 @@ const WorkspaceEntryState = struct {
     path_slots: WorkspacePathSlots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY),
     object_slots: WorkspaceObjectSlots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY),
 };
-const heap_backed_recoverable_delete_logs = builtin.target.os.tag == .freestanding;
-const heap_backed_workspace_entries = builtin.target.os.tag == .freestanding;
-pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 152 else 43_928;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 7_808 else 358_016;
-const MutationBacking = if (heap_backed_mutation_logs) ?*MutationEntries else MutationEntries;
-const RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) ?*RecoverableDeleteEntries else RecoverableDeleteEntries;
-const WorkspaceEntryBacking = if (heap_backed_workspace_entries) ?*WorkspaceEntryState else WorkspaceEntryState;
+pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = 152;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 7_808;
+
+fn initializeWorkspaceEntryState(state: *WorkspaceEntryState) void {
+    @memset(&state.path_slots, workspace_index.no_entry_slot);
+    @memset(&state.object_slots, workspace_index.no_entry_slot);
+}
+
+fn initializeMutationEntries(entries: *MutationEntries) void {
+    entries.* = @as([MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation, @splat(EntryMutation{}));
+}
+
+fn initializeRecoverableDeleteEntries(entries: *RecoverableDeleteEntries) void {
+    entries.* = @as([MAX_RECOVERABLE_DELETES]Entry, @splat(Entry{}));
+}
 
 pub const CreateRequest = struct {
     owner: principal.PrincipalId,
@@ -342,35 +346,21 @@ pub const ExportPackage = struct {
 };
 
 pub const WorkspacePathIndex = struct {
-    entry_backing: WorkspaceEntryBacking = if (heap_backed_workspace_entries) null else .{},
+    entry_backing: table_backing.Lazy(WorkspaceEntryState, initializeWorkspaceEntryState) = .{},
     root_address: SnapshotRootAddress = workspace_merkle.zeroRootAddress(),
 
     pub fn ensureEntryBacking(self: *WorkspacePathIndex) error{NoSpaceLeft}!void {
-        if (comptime heap_backed_workspace_entries) {
-            if (self.entry_backing != null) return;
-            const allocation = kernel_memory.kmalloc(@sizeOf(WorkspaceEntryState)) orelse return error.NoSpaceLeft;
-            const backing: *WorkspaceEntryState = @ptrCast(@alignCast(allocation));
-            @memset(std.mem.asBytes(backing), 0);
-            @memset(&backing.path_slots, workspace_index.no_entry_slot);
-            @memset(&backing.object_slots, workspace_index.no_entry_slot);
-            self.entry_backing = backing;
-        }
+        _ = try self.entry_backing.ensure();
     }
 
     fn entryState(self: *WorkspacePathIndex) *WorkspaceEntryState {
-        if (comptime heap_backed_workspace_entries) {
-            return self.entry_backing orelse
-                native_util.impossibleByInvariant("non-empty workspace content retains backing");
-        }
-        return &self.entry_backing;
+        return self.entry_backing.get() orelse
+            native_util.impossibleByInvariant("non-empty workspace content retains backing");
     }
 
     fn entryStateConst(self: *const WorkspacePathIndex) *const WorkspaceEntryState {
-        if (comptime heap_backed_workspace_entries) {
-            return self.entry_backing orelse
-                native_util.impossibleByInvariant("non-empty workspace content retains backing");
-        }
-        return &self.entry_backing;
+        return self.entry_backing.get() orelse
+            native_util.impossibleByInvariant("non-empty workspace content retains backing");
     }
 
     pub fn entries(self: *WorkspacePathIndex) *WorkspaceEntries {
@@ -403,59 +393,29 @@ pub const WorkspacePathIndex = struct {
     }
 
     pub fn releaseEntryBacking(self: *WorkspacePathIndex) void {
-        if (comptime heap_backed_workspace_entries) {
-            if (self.entry_backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
-                self.entry_backing = null;
-            }
-        } else {
-            @memset(std.mem.asBytes(&self.entry_backing), 0);
-            self.entry_backing.path_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
-            self.entry_backing.object_slots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY);
-        }
+        self.entry_backing.release();
     }
 };
 
 pub const WorkspaceMutationLog = struct {
-    backing: MutationBacking = if (heap_backed_mutation_logs) null else @as([MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation, @splat(EntryMutation{})),
+    backing: table_backing.Lazy(MutationEntries, initializeMutationEntries) = .{},
 
     pub fn ensureBacking(self: *WorkspaceMutationLog) error{NoSpaceLeft}!void {
-        if (comptime heap_backed_mutation_logs) {
-            if (self.backing != null) return;
-            const allocation = kernel_memory.kmalloc(@sizeOf(MutationEntries)) orelse return error.NoSpaceLeft;
-            const backing: *MutationEntries = @ptrCast(@alignCast(allocation));
-            backing.* = @as([MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation, @splat(EntryMutation{}));
-            self.backing = backing;
-        }
+        _ = try self.backing.ensure();
     }
 
     pub fn entries(self: *WorkspaceMutationLog) *MutationEntries {
-        if (comptime heap_backed_mutation_logs) {
-            return self.backing orelse
-                native_util.impossibleByInvariant("live workspaces retain mutation-log backing");
-        }
-        return &self.backing;
+        return self.backing.get() orelse
+            native_util.impossibleByInvariant("live workspaces retain mutation-log backing");
     }
 
     pub fn entriesConst(self: *const WorkspaceMutationLog) *const MutationEntries {
-        if (comptime heap_backed_mutation_logs) {
-            return self.backing orelse
-                native_util.impossibleByInvariant("live workspaces retain mutation-log backing");
-        }
-        return &self.backing;
+        return self.backing.get() orelse
+            native_util.impossibleByInvariant("live workspaces retain mutation-log backing");
     }
 
     pub fn releaseBacking(self: *WorkspaceMutationLog) void {
-        if (comptime heap_backed_mutation_logs) {
-            if (self.backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
-                self.backing = null;
-            }
-        } else {
-            @memset(std.mem.asBytes(&self.backing), 0);
-        }
+        self.backing.release();
     }
 };
 
@@ -464,49 +424,31 @@ const WorkspaceShareTableData = struct {
         .principal_id = .{ .kind = .service, .serial = 0 },
     })),
     share_grant_principal_index: ShareGrantPrincipalIndex = ShareGrantPrincipalIndex.init(),
+
+    fn initialize(self: *WorkspaceShareTableData) void {
+        self.* = .{};
+    }
 };
-const heap_backed_workspace_share_tables = builtin.target.os.tag == .freestanding;
-const WorkspaceShareTableBacking = if (heap_backed_workspace_share_tables) ?*WorkspaceShareTableData else WorkspaceShareTableData;
 
 pub const WorkspaceShareTable = struct {
-    backing: WorkspaceShareTableBacking = if (heap_backed_workspace_share_tables) null else .{},
+    backing: table_backing.Lazy(WorkspaceShareTableData, WorkspaceShareTableData.initialize) = .{},
 
     pub fn ensureBacking(self: *WorkspaceShareTable) error{NoSpaceLeft}!void {
-        if (comptime heap_backed_workspace_share_tables) {
-            if (self.backing != null) return;
-            const allocation = kernel_memory.kmalloc(@sizeOf(WorkspaceShareTableData)) orelse return error.NoSpaceLeft;
-            const backing: *WorkspaceShareTableData = @ptrCast(@alignCast(allocation));
-            backing.* = .{};
-            self.backing = backing;
-        }
+        _ = try self.backing.ensure();
     }
 
     pub fn data(self: *WorkspaceShareTable) *WorkspaceShareTableData {
-        if (comptime heap_backed_workspace_share_tables) {
-            return self.backing orelse
-                native_util.impossibleByInvariant("live workspace sharing state retains backing");
-        }
-        return &self.backing;
+        return self.backing.get() orelse
+            native_util.impossibleByInvariant("live workspace sharing state retains backing");
     }
 
     pub fn dataConst(self: *const WorkspaceShareTable) *const WorkspaceShareTableData {
-        if (comptime heap_backed_workspace_share_tables) {
-            return self.backing orelse
-                native_util.impossibleByInvariant("live workspace sharing state retains backing");
-        }
-        return &self.backing;
+        return self.backing.get() orelse
+            native_util.impossibleByInvariant("live workspace sharing state retains backing");
     }
 
     pub fn releaseBacking(self: *WorkspaceShareTable) void {
-        if (comptime heap_backed_workspace_share_tables) {
-            if (self.backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
-                self.backing = null;
-            }
-        } else {
-            @memset(std.mem.asBytes(&self.backing), 0);
-        }
+        self.backing.release();
     }
 };
 
@@ -523,46 +465,26 @@ pub const WorkspaceStagingState = struct {
 };
 
 pub const RecoverableDeleteLog = struct {
-    backing: RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) null else @as([MAX_RECOVERABLE_DELETES]Entry, @splat(Entry{})),
+    backing: table_backing.Lazy(RecoverableDeleteEntries, initializeRecoverableDeleteEntries) = .{},
 
     pub fn ensureBacking(self: *RecoverableDeleteLog) error{NoSpaceLeft}!void {
-        if (comptime heap_backed_recoverable_delete_logs) {
-            if (self.backing != null) return;
-            const allocation = kernel_memory.kmalloc(@sizeOf(RecoverableDeleteEntries)) orelse return error.NoSpaceLeft;
-            const backing: *RecoverableDeleteEntries = @ptrCast(@alignCast(allocation));
-            backing.* = @as([MAX_RECOVERABLE_DELETES]Entry, @splat(Entry{}));
-            self.backing = backing;
-        }
+        _ = try self.backing.ensure();
     }
 
     pub fn entries(self: *RecoverableDeleteLog) *RecoverableDeleteEntries {
-        if (comptime heap_backed_recoverable_delete_logs) {
-            return self.backing orelse
-                native_util.impossibleByInvariant("live recoverable deletes retain backing");
-        }
-        return &self.backing;
+        return self.backing.get() orelse
+            native_util.impossibleByInvariant("live recoverable deletes retain backing");
     }
 
     pub fn entriesConst(self: *const RecoverableDeleteLog, count: usize) []const Entry {
         if (count == 0) return &.{};
-        if (comptime heap_backed_recoverable_delete_logs) {
-            const backing = self.backing orelse
-                native_util.impossibleByInvariant("non-empty recoverable deletes retain backing");
-            return backing[0..count];
-        }
-        return self.backing[0..count];
+        const backing = self.backing.get() orelse
+            native_util.impossibleByInvariant("non-empty recoverable deletes retain backing");
+        return backing[0..count];
     }
 
     pub fn releaseBacking(self: *RecoverableDeleteLog) void {
-        if (comptime heap_backed_recoverable_delete_logs) {
-            if (self.backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
-                self.backing = null;
-            }
-        } else {
-            @memset(std.mem.asBytes(&self.backing), 0);
-        }
+        self.backing.release();
     }
 };
 
@@ -678,19 +600,10 @@ const WorkspaceSlot = struct {
 };
 
 comptime {
-    if (heap_backed_mutation_logs and @sizeOf(WorkspaceMutationLog) > 16) {
-        @compileError("heap-backed workspace mutation logs exceed their compact layout");
-    }
-    if (heap_backed_workspace_share_tables and @sizeOf(WorkspaceShareTable) > @sizeOf(?*anyopaque)) {
-        @compileError("heap-backed workspace sharing state exceeds its compact handle");
-    }
-    if (heap_backed_workspace_entries and @sizeOf(@FieldType(WorkspacePathIndex, "entry_backing")) > @sizeOf(?*anyopaque)) {
-        @compileError("heap-backed workspace entries exceed their compact handle");
-    }
-    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries and @sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
+    if (@sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
         @compileError("heap-backed workspace records exceed their compact layout");
     }
-    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries and @sizeOf(WorkspaceSlot) > 160) {
+    if (@sizeOf(WorkspaceSlot) > 160) {
         @compileError("heap-backed workspace slots exceed their compact layout");
     }
 }
@@ -2379,10 +2292,10 @@ fn debugIndexChecksEnabled() bool {
 test "workspace sharing uses capacity-sized indexed backing" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ShareGrantPrincipalIndexSlot));
     try std.testing.expectEqual(@as(usize, 384), @sizeOf(ShareGrantPrincipalIndex));
-    try std.testing.expectEqual(@as(usize, 1_472), @sizeOf(WorkspaceShareTable));
-    try std.testing.expectEqual(@as(usize, 43_928), @sizeOf(WorkspaceRecord));
-    try std.testing.expectEqual(@as(usize, 43_936), @sizeOf(WorkspaceSlot));
-    try std.testing.expectEqual(@as(usize, 358_016), @sizeOf(Directory));
+    try std.testing.expectEqual(@as(usize, 1_472), @sizeOf(WorkspaceShareTableData));
+    try std.testing.expectEqual(WORKSPACE_RECORD_SIZE_CEILING_BYTES, @sizeOf(WorkspaceRecord));
+    try std.testing.expectEqual(@as(usize, 160), @sizeOf(WorkspaceSlot));
+    try std.testing.expectEqual(DIRECTORY_SIZE_CEILING_BYTES, @sizeOf(Directory));
 }
 
 test "workspace borrowed resolution returns the directory owned entry" {
@@ -2486,6 +2399,7 @@ test "directory reset scrubs live workspace and snapshot records" {
     workspace_slot.workspace.label_len = 6;
     @memcpy(workspace_slot.workspace.label[0..6], "secret");
     workspace_slot.workspace.counts.entry_count = 1;
+    try workspace_slot.workspace.path_index.ensureEntryBacking();
     workspace_slot.workspace.path_index.entries()[0] = try Entry.init("secret", ids.object(8), ids.version(9), .document);
 
     const snapshot_slot_index = directory.snapshots.reserveIndex(ids.snapshot(10)).?;

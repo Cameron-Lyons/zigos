@@ -293,28 +293,14 @@ const AcceleratorClaimSlot = struct {
 const SchedulerSlotArena = indexed_arena.IndexedArenaWithKey(u64, Slot, task_runtime.MAX_TASKS, task_runtime.MAX_TASKS * 2, schedulerSlotTaskId);
 const AcceleratorClaimArena = indexed_arena.IndexedArenaWithKey(u64, AcceleratorClaimSlot, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2, acceleratorClaimSlotId);
 const AcceleratorClaimTaskIndex = indexed_arena.MultimapIndex(MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2);
-const heap_backed_accelerator_claims = builtin.target.os.tag == .freestanding;
 pub const SCHEDULER_SLOT_SIZE_CEILING_BYTES: usize = 176;
 pub const ACCELERATOR_CLAIM_SLOT_SIZE_CEILING_BYTES: usize = 56;
 pub const ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES: usize = 15_888;
-pub const SCHEDULER_SIZE_CEILING_BYTES: usize = (if (heap_backed_accelerator_claims) @as(usize, 30_704) else 46_584) + @sizeOf(?dispatch_ownership.Ticket);
+pub const SCHEDULER_SIZE_CEILING_BYTES: usize = 30_704 + @sizeOf(?dispatch_ownership.Ticket);
 
 pub const AcceleratorClaimBacking = struct {
     claims: AcceleratorClaimArena = AcceleratorClaimArena.init(),
     task_index: AcceleratorClaimTaskIndex = AcceleratorClaimTaskIndex.init(),
-
-    fn init() AcceleratorClaimBacking {
-        return .{};
-    }
-
-    fn initializeAllocated(self: *AcceleratorClaimBacking) void {
-        @memset(std.mem.asBytes(self), 0);
-        self.claims.free_head = indexed_arena.reusableNoIndex(MAX_ACCELERATOR_CLAIMS);
-        const CompactIndex = @FieldType(AcceleratorClaimTaskIndex, "free_bucket_head");
-        const compact_no_index: CompactIndex = @intCast(MAX_ACCELERATOR_CLAIMS);
-        for (&self.task_index.links) |*link| link.bucket = compact_no_index;
-        self.task_index.free_bucket_head = compact_no_index;
-    }
 
     comptime {
         if (@sizeOf(@This()) > ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES) {
@@ -322,8 +308,6 @@ pub const AcceleratorClaimBacking = struct {
         }
     }
 };
-
-const AcceleratorClaimBackingStorage = if (heap_backed_accelerator_claims) ?*AcceleratorClaimBacking else AcceleratorClaimBacking;
 
 pub const Scheduler = struct {
     executor: *userspace_executor.Executor,
@@ -339,7 +323,7 @@ pub const Scheduler = struct {
     ready_tails: [RESOURCE_CLASS_COUNT]QueueSlotIndex = @as([RESOURCE_CLASS_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
     ready_counts: [RESOURCE_CLASS_COUNT]QueueSlotIndex = @as([RESOURCE_CLASS_COUNT]QueueSlotIndex, @splat(0)),
     ready_task_count: QueueSlotIndex = 0,
-    accelerator_claim_backing: AcceleratorClaimBackingStorage = if (heap_backed_accelerator_claims) null else AcceleratorClaimBacking.init(),
+    accelerator_claim_backing: table_backing.Lazy(AcceleratorClaimBacking, null) = .{},
     accelerator_claim_heads: [ENGINE_COUNT]QueueSlotIndex = @as([ENGINE_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
     accelerator_claim_tails: [ENGINE_COUNT]QueueSlotIndex = @as([ENGINE_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
     accelerator_deadline_heads: [ENGINE_COUNT]QueueSlotIndex = @as([ENGINE_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
@@ -374,49 +358,31 @@ pub const Scheduler = struct {
         requireRuntimeOwner();
         @memset(std.mem.asBytes(self), 0);
         self.executor = executor;
-        self.slots.free_head = indexed_arena.reusableNoIndex(task_runtime.MAX_TASKS);
         @memset(&self.ready_heads, QUEUE_NO_INDEX);
         @memset(&self.ready_tails, QUEUE_NO_INDEX);
         for (&self.accelerator_claim_heads) |*head| head.* = QUEUE_NO_INDEX;
         for (&self.accelerator_claim_tails) |*tail| tail.* = QUEUE_NO_INDEX;
         for (&self.accelerator_deadline_heads) |*head| head.* = QUEUE_NO_INDEX;
         for (&self.accelerator_deadline_tails) |*tail| tail.* = QUEUE_NO_INDEX;
-        if (comptime !heap_backed_accelerator_claims) {
-            self.accelerator_claim_backing.initializeAllocated();
-        }
         self.next_accelerator_claim_id = 1;
         self.resource_state = .{};
         self.resource_telemetry_source = .synthetic;
     }
 
     fn acceleratorClaimBacking(self: *Scheduler) ?*AcceleratorClaimBacking {
-        if (comptime heap_backed_accelerator_claims) return self.accelerator_claim_backing;
-        return &self.accelerator_claim_backing;
+        return self.accelerator_claim_backing.get();
     }
 
     fn acceleratorClaimBackingConst(self: *const Scheduler) ?*const AcceleratorClaimBacking {
-        if (comptime heap_backed_accelerator_claims) return self.accelerator_claim_backing;
-        return &self.accelerator_claim_backing;
+        return self.accelerator_claim_backing.get();
     }
 
     fn ensureAcceleratorClaimBacking(self: *Scheduler) ?*AcceleratorClaimBacking {
-        if (self.acceleratorClaimBacking()) |backing| return backing;
-        if (comptime heap_backed_accelerator_claims) {
-            const backing = table_backing.alloc(AcceleratorClaimBacking) orelse return null;
-            backing.initializeAllocated();
-            self.accelerator_claim_backing = backing;
-            return backing;
-        }
-        return &self.accelerator_claim_backing;
+        return self.accelerator_claim_backing.ensure() catch null;
     }
 
     fn releaseAcceleratorClaimBacking(self: *Scheduler) void {
-        if (comptime heap_backed_accelerator_claims) {
-            if (self.accelerator_claim_backing) |backing| {
-                table_backing.free(AcceleratorClaimBacking, backing);
-                self.accelerator_claim_backing = null;
-            }
-        }
+        self.accelerator_claim_backing.release();
     }
 
     pub fn deinit(self: *Scheduler) void {
@@ -2689,7 +2655,7 @@ const EventYieldTestDispatcher = if (builtin.is_test) struct {
 
 fn installEventYieldTestMapping(scheduler: *Scheduler, task: *const task_runtime.TaskRecord) !userspace_executor.MappingHandle {
     if (!builtin.is_test) @compileError("event yield mappings are test-only");
-    const mappings = &scheduler.executor.mappings;
+    const mappings = try scheduler.executor.mappings.ensure();
     const index = mappings.reserveIndex(task.address_space_id) orelse return error.UnavailableMappingSlot;
     mappings.slotAt(index).mapping = .{
         .state = .live,
@@ -2721,7 +2687,7 @@ test "voluntary event yield parks without a wait syscall and retains task and ca
     const slot = scheduler.slots.get(task.id).?;
     const task_handle = slot.task_handle;
     const mapping_handle = try installEventYieldTestMapping(&scheduler, task);
-    const mapping_before = executor.mappings.getByHandle(mapping_handle).?.mapping;
+    const mapping_before = executor.mappings.get().?.getByHandle(mapping_handle).?.mapping;
     const address_space = runtime.findAddressSpaceConst(task.address_space_id).?;
     const task_generation = task.capabilityGeneration();
     const capability_generation = capabilities.mutationGeneration();
@@ -2739,7 +2705,7 @@ test "voluntary event yield parks without a wait syscall and retains task and ca
     try std.testing.expect(runtime.findByHandle(task_handle, task.id).? == task);
     try std.testing.expect(runtime.findAddressSpaceConst(task.address_space_id).? == address_space);
     try std.testing.expect(slot.mapping_handle.eql(mapping_handle));
-    try std.testing.expectEqualDeep(mapping_before, executor.mappings.getByHandle(mapping_handle).?.mapping);
+    try std.testing.expectEqualDeep(mapping_before, executor.mappings.get().?.getByHandle(mapping_handle).?.mapping);
     try std.testing.expectEqual(@as(usize, 1), executor.materializedCount());
     try std.testing.expectEqual(@as(u16, 1), task.capability_count);
     try std.testing.expectEqual(@as(u64, 77), task.capabilityIds()[0]);
@@ -2763,7 +2729,7 @@ test "voluntary event yield parks without a wait syscall and retains task and ca
     try std.testing.expectEqual(@as(u64, 2), scheduler.taskDispatchAccounting(task.id).?.event_wait_count);
     try std.testing.expectEqualDeep(unrelated_slot, scheduler.slots.get(unrelated.id).?.*);
     try std.testing.expectEqualDeep(unrelated_accounting, scheduler.taskDispatchAccounting(unrelated.id).?.*);
-    try std.testing.expectEqualDeep(mapping_before, executor.mappings.getByHandle(mapping_handle).?.mapping);
+    try std.testing.expectEqualDeep(mapping_before, executor.mappings.get().?.getByHandle(mapping_handle).?.mapping);
 }
 
 test "voluntary event yield preserves wakes during exact leased dispatch without duplicate budget" {
@@ -2881,7 +2847,7 @@ test "voluntary event yield preserves interrupted continuation work within one a
         const slot = scheduler.slots.get(task.id).?;
         const task_handle = slot.task_handle;
         const mapping_handle = try installEventYieldTestMapping(&scheduler, task);
-        const mapping_before = executor.mappings.getByHandle(mapping_handle).?.mapping;
+        const mapping_before = executor.mappings.get().?.getByHandle(mapping_handle).?.mapping;
         const initial_wakes = scheduler.taskDispatchAccounting(task.id).?.wake_event_count;
         // Executor's actual IRQ/yield tests verify the stale wait returns to the
         // fresh user loop in place, within the same quantum and running lease.
@@ -2911,7 +2877,7 @@ test "voluntary event yield preserves interrupted continuation work within one a
         try std.testing.expect(!runtime.execution.hasLeases());
         try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
         try std.testing.expect(slot.task_handle.eql(task_handle) and slot.mapping_handle.eql(mapping_handle));
-        try std.testing.expectEqualDeep(mapping_before, executor.mappings.getByHandle(mapping_handle).?.mapping);
+        try std.testing.expectEqualDeep(mapping_before, executor.mappings.get().?.getByHandle(mapping_handle).?.mapping);
         try std.testing.expectEqualDeep(unrelated_slot, scheduler.slots.get(unrelated.id).?.*);
         try std.testing.expectEqualDeep(unrelated_accounting, scheduler.taskDispatchAccounting(unrelated.id).?.*);
     }
@@ -4841,8 +4807,9 @@ test "scheduler retirement domain isolates all CPU arenas and preflights complet
     }
     const MappingFixture = struct {
         fn install(executor: *userspace_executor.Executor, address_space_id: u64) !void {
-            const index = executor.mappings.reserveIndexAt(address_space_id, 0) orelse return error.UnavailableMappingSlot;
-            executor.mappings.slotAt(index).mapping = .{
+            const mappings = try executor.mappings.ensure();
+            const index = mappings.reserveIndexAt(address_space_id, 0) orelse return error.UnavailableMappingSlot;
+            mappings.slotAt(index).mapping = .{
                 .state = .live,
                 .address_space_id = address_space_id,
                 .dispatch_metadata = .{ .owner_task_id = address_space_id + 1 },

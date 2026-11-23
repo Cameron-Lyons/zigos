@@ -17,10 +17,7 @@ const userspace_scheduler = @import("../../task/userspace_scheduler.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const task_runtime_service = @import("../../task/task_runtime_service.zig");
 const network_policy = @import("../../sync/network_policy.zig");
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    @import("../../../kernel/memory/memory.zig")
-else
-    struct {};
+const table_backing = @import("../../core/table_backing.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../../kernel/boot/common.zig")
@@ -48,85 +45,61 @@ const MMU_PROOF_BUNDLE_ID = "zigos.proof.mmu-isolation";
 const GP_PROOF_BUNDLE_ID = "zigos.system.termination-probe";
 const USER_PAGE_FAULT_VECTOR: u8 = 14;
 const PAGE_FAULT_USER_MODE_BIT: u32 = 1 << 2;
-const HEAP_BACKED_PROOF_FIXTURES = builtin.target.os.tag == .freestanding;
-
-const FreestandingProofFixtures = struct {
+const ProofFixtures = struct {
     runtime: task_runtime.Runtime,
     restarted_runtime: task_runtime.Runtime,
     capabilities: capability.CapabilityTable,
     endpoints: endpoint.Table,
-};
 
-const HostProofFixtures = if (HEAP_BACKED_PROOF_FIXTURES) struct {} else struct {
-    var runtime: task_runtime.Runtime = task_runtime.Runtime.init();
-    var restarted_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
-    var capabilities: capability.CapabilityTable = capability.CapabilityTable.init();
-    var endpoints: endpoint.Table = endpoint.Table.init();
+    fn initialize(self: *ProofFixtures) void {
+        self.runtime.initializeAllocated();
+        self.restarted_runtime.initializeAllocated();
+        self.capabilities.initializeAllocated();
+    }
 };
 
 var reboot_proof_checkpoint_store: task_runtime_service.CheckpointStore = .{};
-var freestanding_proof_fixtures: ?*FreestandingProofFixtures = null;
+var proof_fixtures: table_backing.Lazy(ProofFixtures, ProofFixtures.initialize) = .{};
 var proof_shared: shared_memory.Table = shared_memory.Table.init();
 
-fn allocateFreestandingProofFixtures() bool {
-    if (comptime !HEAP_BACKED_PROOF_FIXTURES) return true;
-    if (freestanding_proof_fixtures != null) return false;
-    const allocation = kernel_memory.kmalloc(@sizeOf(FreestandingProofFixtures)) orelse return false;
-    const fixtures: *FreestandingProofFixtures = @ptrCast(@alignCast(allocation));
-    fixtures.runtime.initializeAllocated();
-    fixtures.restarted_runtime.initializeAllocated();
-    fixtures.capabilities.initializeAllocated();
-    fixtures.endpoints.initializeAllocated();
-    freestanding_proof_fixtures = fixtures;
-    return true;
-}
-
-fn releaseFreestandingProofFixtures() void {
-    if (comptime !HEAP_BACKED_PROOF_FIXTURES) return;
-    const fixtures = freestanding_proof_fixtures orelse return;
+fn releaseProofFixtures() void {
+    const fixtures = proof_fixtures.get() orelse return;
     fixtures.runtime.reset();
     fixtures.restarted_runtime.reset();
     fixtures.endpoints.reset();
     proof_shared.deinit();
     proof_shared = shared_memory.Table.init();
-    @memset(std.mem.asBytes(fixtures), 0);
-    kernel_memory.kfree(@ptrCast(fixtures));
-    freestanding_proof_fixtures = null;
+    proof_fixtures.release();
 }
 
 fn proofRuntime() *task_runtime.Runtime {
-    if (comptime HEAP_BACKED_PROOF_FIXTURES) return &freestanding_proof_fixtures.?.runtime;
-    return &HostProofFixtures.runtime;
+    return &proof_fixtures.get().?.runtime;
 }
 
 fn restartedProofRuntime() *task_runtime.Runtime {
-    if (comptime HEAP_BACKED_PROOF_FIXTURES) return &freestanding_proof_fixtures.?.restarted_runtime;
-    return &HostProofFixtures.restarted_runtime;
+    return &proof_fixtures.get().?.restarted_runtime;
 }
 
 fn proofCapabilities() *capability.CapabilityTable {
-    if (comptime HEAP_BACKED_PROOF_FIXTURES) return &freestanding_proof_fixtures.?.capabilities;
-    return &HostProofFixtures.capabilities;
+    return &proof_fixtures.get().?.capabilities;
 }
 
 fn proofEndpoints() *endpoint.Table {
-    if (comptime HEAP_BACKED_PROOF_FIXTURES) return &freestanding_proof_fixtures.?.endpoints;
-    return &HostProofFixtures.endpoints;
+    return &proof_fixtures.get().?.endpoints;
 }
 
-fn resetProofFixtures() void {
+fn resetProofFixtures() bool {
+    _ = proof_fixtures.ensure() catch return false;
     proofRuntime().reset();
     proofCapabilities().initializeAllocated();
     proofEndpoints().reset();
     proof_shared.deinit();
     proof_shared = shared_memory.Table.init();
+    return true;
 }
 
 pub fn runAndPrint() bool {
-    if (comptime HEAP_BACKED_PROOF_FIXTURES) {
-        if (!allocateFreestandingProofFixtures()) return false;
-    }
-    defer if (comptime HEAP_BACKED_PROOF_FIXTURES) releaseFreestandingProofFixtures();
+    defer releaseProofFixtures();
     if (!processIsolationBlocksForeignSharedMemory()) return false;
     common.printBootMarker(boot_markers.runtime_proof_process_isolation);
 
@@ -373,7 +346,7 @@ fn createGeneralProtectionProofResources(
 }
 
 pub fn processIsolationBlocksForeignSharedMemory() bool {
-    resetProofFixtures();
+    if (!resetProofFixtures()) return false;
     const runtime = proofRuntime();
     const capabilities = proofCapabilities();
     var kernel: native_kernel.Kernel = undefined;
@@ -419,7 +392,7 @@ pub fn processIsolationBlocksForeignSharedMemory() bool {
 }
 
 pub fn syscallSubjectSpoofingIsRejected() bool {
-    resetProofFixtures();
+    if (!resetProofFixtures()) return false;
     const runtime = proofRuntime();
     const capabilities = proofCapabilities();
     var kernel: native_kernel.Kernel = undefined;
@@ -537,6 +510,7 @@ pub fn driverAuthorityEscapeIsRejected() bool {
 }
 
 pub fn checkpointAuthorityIsNotReplayed() bool {
+    _ = proof_fixtures.ensure() catch return false;
     const runtime = proofRuntime();
     const restarted_runtime = restartedProofRuntime();
     reboot_proof_checkpoint_store.reset();
@@ -595,6 +569,7 @@ fn policyAuthority(serial: u64) principal.PrincipalId {
 }
 
 test "runtime negative proofs reject modeled bypasses" {
+    defer releaseProofFixtures();
     try std.testing.expect(processIsolationBlocksForeignSharedMemory());
     try std.testing.expect(syscallSubjectSpoofingIsRejected());
     try std.testing.expect(rawNetworkSendBypassIsDenied());

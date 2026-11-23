@@ -35,8 +35,7 @@ pub const floor: Floor = .{
     .canonical_47_bit_user = userspace_layout.user_end_exclusive == 0x0000_8000_0000_0000 and
         userspace_layout.stack_start == 0x0000_007F_0000_0000,
     .u64_user_stacks = task_runtime.UserStackByteLength == u64,
-    .image_2m_pages = userspace_layout.USES_2M_IMAGE_PAGES and
-        userspace_layout.image_start % userspace_layout.huge_page_size == 0,
+    .image_2m_pages = userspace_layout.image_start % userspace_layout.huge_page_size == 0,
     .register_fred_syscalls = syscall_surface.REGISTER_FRED_SYSCALLS,
     .rings_only_ipc = ipc_ring.DATA_PLANE_USES_SEALED_RINGS and
         endpoint.RINGS_ONLY_DATAPLANE and

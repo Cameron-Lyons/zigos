@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const ids = @import("../core/ids.zig");
@@ -9,8 +8,7 @@ const mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const pasteboard = @import("../services/secure_pasteboard.zig");
 const protocol = @import("../../userspace/clipboard_protocol.zig");
 const timer = @import("../../kernel/timer/timer.zig");
-const memory = if (builtin.target.os.tag == .freestanding) @import("../../kernel/memory/memory.zig") else struct {};
-const heap_backed = builtin.target.os.tag == .freestanding;
+const table_backing = @import("../core/table_backing.zig");
 pub const MAX_CHANNELS = 4;
 pub const DISPATCH_BUDGET = 2;
 pub const GESTURE_TICKS = 5 * timer.TICKS_PER_SECOND;
@@ -77,25 +75,20 @@ const State = struct {
 // The session records gestures only after authorized input_recv delivery.
 // Endpoint clients cannot mint this evidence by supplying a sequence number.
 pub const Sessions = struct {
-    backing: if (heap_backed) ?*State else ?State = null,
+    backing: table_backing.Lazy(State, null) = .{},
     owner_task_id: u64 = 0,
 
     fn state(self: *Sessions) ?*State {
-        if (comptime heap_backed) return self.backing;
-        return if (self.backing) |*s| s else null;
+        return self.backing.get();
     }
     fn stateConst(self: *const Sessions) ?*const State {
-        if (comptime heap_backed) return self.backing;
-        return if (self.backing) |*s| s else null;
+        return self.backing.get();
     }
     fn ensure(self: *Sessions, kernel: *port.KernelPort) !*State {
         if (self.state()) |s| return s;
-        if (comptime heap_backed) {
-            const allocation = memory.kmalloc(@sizeOf(State)) orelse return error.NoSpaceLeft;
-            self.backing = @ptrCast(@alignCast(allocation));
-            self.backing.?.* = .{ .kernel = kernel };
-        } else self.backing = .{ .kernel = kernel };
-        return self.state().?;
+        const s = try self.backing.ensure();
+        s.* = .{ .kernel = kernel };
+        return s;
     }
 
     pub fn open(self: *Sessions, manager: anytype, task_id: u64, now: u64) !mailbox.ClipboardBinding {
@@ -313,11 +306,7 @@ pub const Sessions = struct {
         for (&s.channels) |*channel| if (channel.task_id != 0) {
             self.closeTask(channel.task_id, now);
         };
-        if (comptime heap_backed) {
-            @memset(std.mem.asBytes(s), 0);
-            memory.kfree(@ptrCast(s));
-        }
-        self.backing = null;
+        self.backing.release();
     }
 };
 
@@ -457,7 +446,7 @@ fn peerState(s: *const State, channel: *const Channel, owner: u64) enum { active
 }
 
 comptime {
-    if (heap_backed and @sizeOf(Sessions) > 16) @compileError("clipboard session handle exceeds resident size bound");
+    if (@sizeOf(Sessions) > 16) @compileError("clipboard session handle exceeds resident size bound");
     if (@sizeOf(Channel) > 1024 or @sizeOf(State) > 16 * 1024) @compileError("clipboard state exceeds its lazy allocation bound");
 }
 

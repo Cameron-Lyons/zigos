@@ -1051,7 +1051,7 @@
       "negative_tests": [
         {
           "file": "src/native/task/task_runtime.zig",
-          "name": "task runtime crosses the first task slab page with indexed handles"
+          "name": "task runtime resolves indexed handles across many tasks"
         },
         {
           "file": "src/native/task/task_runtime_service.zig",

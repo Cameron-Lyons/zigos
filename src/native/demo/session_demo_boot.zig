@@ -126,6 +126,8 @@ fn runSessionLifecycle(
     service_bindings: *const session_boot_flow.ServiceBindings,
     notes_review: session_support.NotesReviewState,
 ) void {
+    // The scenario world runs without a production volume binding.
+    _ = manager.native_store.ensureCheckpointStore() catch |err| native_util.bootProofFailure("scenario checkpoint store", err);
     var lifecycle_context = scenario_world.Context{
         .capability_table = manager.capabilityTablePtr(),
         .runtime = manager.runtimePtr(),
