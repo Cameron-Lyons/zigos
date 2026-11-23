@@ -1,6 +1,5 @@
 const std = @import("std");
 const console = @import("../utils/console.zig");
-const endian = @import("../utils/endian.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const x2apic = @import("../interrupts/x2apic.zig");
@@ -57,7 +56,7 @@ pub const Error = xhci.Error || error{
 };
 
 const ControllerDmaMemory = struct {
-    physical_base: u32 = 0,
+    physical_base: u64 = 0,
     alias_base: usize = 0,
     byte_len: usize = 0,
 
@@ -359,9 +358,10 @@ pub fn probe(device_info: pci.PCIDevice) Error!void {
     const enabled_slots = try xhci.controller.configureDeviceSlots(capabilities, &mmio);
 
     const dma_frame_count = try xhci.dma_plan.controllerDmaFrameCount(capabilities, enabled_slots);
-    const dma_base = paging.allocIdentityDmaFrames(dma_frame_count) orelse return error.DmaAllocationFailed;
+    const dma_run = paging.allocGeneralFrames(dma_frame_count) orelse return error.DmaAllocationFailed;
     var retain_dma_frames = false;
-    errdefer if (!retain_dma_frames) paging.releaseIdentityDmaFrames(dma_base, dma_frame_count) catch {};
+    errdefer if (!retain_dma_frames) paging.releaseGeneralFrames(dma_run) catch {};
+    const dma_base = dma_run.base;
     const dma_plan = try xhci.dma_plan.planControllerDma(capabilities, enabled_slots, dma_base);
     if (try dma_plan.frameCount() > dma_frame_count) return error.DmaIsolationPlanInvalid;
     const dma_bytes = std.math.cast(usize, dma_plan.total_bytes) orelse
@@ -1953,12 +1953,10 @@ fn buildDmaWindows(
     var region_storage: [xhci.MAX_CONTROLLER_DMA_REGIONS]xhci.dma_plan.DmaAccessRegion = undefined;
     const regions = try xhci.dma_plan.controllerDmaAccessRegions(plan, &region_storage);
     for (regions, 0..) |region, index| {
-        const region_end = std.math.add(u64, region.address, region.bytes) catch
+        _ = std.math.add(u64, region.address, region.bytes) catch
             return error.DmaIsolationPlanInvalid;
-        if (region_end > std.math.maxInt(u32)) return error.DmaIsolationPlanInvalid;
         windows[index] = .{
-            .base = std.math.cast(u32, region.address) orelse
-                return error.DmaIsolationPlanInvalid,
+            .base = region.address,
             .length = std.math.cast(u32, region.bytes) orelse
                 return error.DmaIsolationPlanInvalid,
             .device_readable = region.device_readable,
@@ -2046,7 +2044,7 @@ fn readCapabilitySnapshot(base: usize) [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
     var offset: usize = 0;
     while (offset < snapshot.len) : (offset += @sizeOf(u32)) {
         const value = @as(*volatile u32, @ptrFromInt(base + offset)).*;
-        endian.writeU32Le(snapshot[offset..][0..@sizeOf(u32)], value);
+        std.mem.writeInt(u32, snapshot[offset..][0..@sizeOf(u32)], value, .little);
     }
     return snapshot;
 }
@@ -2054,12 +2052,12 @@ fn readCapabilitySnapshot(base: usize) [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
 fn validTestSnapshot() [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
     var snapshot = @as([xhci.CAPABILITY_REGISTERS_BYTES]u8, @splat(0));
     snapshot[0] = 0x40;
-    endian.writeU16Le(snapshot[2..4], 0x0110);
-    endian.writeU32Le(snapshot[4..8], 32 | (@as(u32, 8) << 8) | (@as(u32, 12) << 24));
-    endian.writeU32Le(snapshot[0x08..0x0C], (@as(u32, 1) << 21) | (@as(u32, 1) << 27));
-    endian.writeU32Le(snapshot[0x10..0x14], 1 | (@as(u32, 1) << 2) | (@as(u32, 0x2000) << 16));
-    endian.writeU32Le(snapshot[0x14..0x18], 0x2000);
-    endian.writeU32Le(snapshot[0x18..0x1C], 0x1000);
+    std.mem.writeInt(u16, snapshot[2..4], 0x0110, .little);
+    std.mem.writeInt(u32, snapshot[4..8], 32 | (@as(u32, 8) << 8) | (@as(u32, 12) << 24), .little);
+    std.mem.writeInt(u32, snapshot[0x08..0x0C], (@as(u32, 1) << 21) | (@as(u32, 1) << 27), .little);
+    std.mem.writeInt(u32, snapshot[0x10..0x14], 1 | (@as(u32, 1) << 2) | (@as(u32, 0x2000) << 16), .little);
+    std.mem.writeInt(u32, snapshot[0x14..0x18], 0x2000, .little);
+    std.mem.writeInt(u32, snapshot[0x18..0x1C], 0x1000, .little);
     return snapshot;
 }
 
@@ -2156,7 +2154,7 @@ test "xHCI hardware DMA windows retain page-granular access directions" {
     var windows: [xhci.MAX_CONTROLLER_DMA_REGIONS]intel_vtd.DmaWindow = undefined;
     const count = try buildDmaWindows(plan, &windows);
     try std.testing.expectEqual(@as(usize, 8), count);
-    try std.testing.expectEqual(@as(u32, 0x1000), windows[0].base);
+    try std.testing.expectEqual(@as(u64, 0x1000), windows[0].base);
     try std.testing.expect(windows[0].device_readable and !windows[0].device_writable);
     try std.testing.expect(windows[1].device_readable and windows[1].device_writable);
     try std.testing.expect(windows[2].device_readable and !windows[2].device_writable);
@@ -2164,15 +2162,19 @@ test "xHCI hardware DMA windows retain page-granular access directions" {
     try std.testing.expect(windows[6].device_readable and !windows[6].device_writable);
     try std.testing.expect(!windows[7].device_readable and windows[7].device_writable);
 
-    const outside_managed_width = try xhci.dma_plan.planControllerDma(
-        capabilities,
-        1,
-        @as(u64, std.math.maxInt(u32)) & ~(xhci.XHCI_PAGE_BYTES - 1),
-    );
-    try std.testing.expectError(
-        error.DmaIsolationPlanInvalid,
-        buildDmaWindows(outside_managed_width, &windows),
-    );
+    // AC64 controllers address DMA above 4 GiB; windows keep the exact base.
+    const high = try xhci.dma_plan.planControllerDma(capabilities, 1, 0x1_0000_0000);
+    try std.testing.expectEqual(count, try buildDmaWindows(high, &windows));
+    try std.testing.expectEqual(@as(u64, 0x1_0000_0000), windows[0].base);
+}
+
+test "xHCI controller DMA at its largest reportable size fits one VT-d domain span" {
+    var capabilities = xhci.defaultCapabilityRegisters();
+    capabilities.max_device_slots = xhci.maxDeviceSlotsU8();
+    capabilities.context_size = .bytes_64;
+    capabilities.max_scratchpad_buffers = 1023;
+    const frames = try xhci.dma_plan.controllerDmaFrameCount(capabilities, xhci.maxDeviceSlotsU8());
+    try std.testing.expect(@as(u64, frames) * PAGE_BYTES <= intel_vtd.MAX_DOMAIN_SPAN_BYTES);
 }
 
 test "keyboard repeat continuity changes across device teardown and controller reset" {

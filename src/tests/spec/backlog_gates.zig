@@ -403,7 +403,7 @@ pub fn firstHardwareTargetGate() !void {
         .width = 64,
         .height = 16,
         .pixels_per_scan_line = 64,
-        .format = .bgrx8888,
+        .pixel_mask = kernel_framebuffer.BGRX8888_MASK,
         .buffer_bytes = 64 * 16 * 4,
     };
     try kernel_framebuffer.validate(framebuffer_info);
@@ -512,7 +512,7 @@ pub fn firstHardwareTargetGate() !void {
 
     const composed_partial = kernel_hardware_proof.ProbeFacts{
         .real_target_sku = true,
-        .multiboot_handoff = true,
+        .boot_handoff = true,
         .memory_map = true,
         .framebuffer_gop = true,
         .acpi_xsdt = true,
@@ -532,7 +532,7 @@ pub fn firstHardwareTargetGate() !void {
 
     const composed_complete = kernel_hardware_proof.ProbeFacts{
         .real_target_sku = true,
-        .multiboot_handoff = true,
+        .boot_handoff = true,
         .memory_map = true,
         .framebuffer_gop = true,
         .acpi_xsdt = true,
@@ -752,7 +752,6 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         kernel_virtual_layout.physical_memory,
         kernel_virtual_layout.device_memory,
     ));
-    try std.testing.expectEqual(@as(u64, 1024 * 1024 * 1024), kernel_paging.LOW_IDENTITY_PHYSICAL_LIMIT);
     try std.testing.expectEqual(@as(u64, 512 * 1024 * 1024 * 1024), kernel_paging.MANAGED_PHYSICAL_BYTES);
     try std.testing.expectEqual(@as(usize, 512), kernel_paging.DIRECT_MAP_PDPT_ENTRIES);
     try std.testing.expect(kernel_mmio_windows.validLayout(&kernel_mmio_windows.all));

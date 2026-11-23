@@ -2,13 +2,7 @@
 //! Endpoint commands.
 
 const std = @import("std");
-const endian = @import("../../utils/endian.zig");
 const xhci = @import("../xhci.zig");
-
-const readU32Le = endian.readU32Le;
-const readU64Le = endian.readU64Le;
-const writeU32Le = endian.writeU32Le;
-const writeU64Le = endian.writeU64Le;
 
 const ADDRESS_DEVICE_COMMAND_TRB_TYPE = xhci.trb.ADDRESS_DEVICE_COMMAND_TRB_TYPE;
 const CONFIGURE_ENDPOINT_COMMAND_TRB_TYPE = xhci.trb.CONFIGURE_ENDPOINT_COMMAND_TRB_TYPE;
@@ -55,23 +49,17 @@ pub fn initializeAddressDeviceInputContext(
     if (input_context.len < required_bytes) return error.InvalidInputContext;
     @memset(input_context[0..required_bytes], 0);
 
-    writeU32Le(input_context[4..8], ADDRESS_DEVICE_ADD_CONTEXT_FLAGS);
+    std.mem.writeInt(u32, input_context[4..8], ADDRESS_DEVICE_ADD_CONTEXT_FLAGS, .little);
     const slot_context = input_context[entry_bytes..][0..entry_bytes];
-    writeU32Le(
-        slot_context[0..4],
-        (@as(u32, speed_id) << 20) | (ADDRESS_DEVICE_CONTEXT_ENTRIES << 27),
-    );
-    writeU32Le(slot_context[4..8], @as(u32, port_id) << 16);
+    std.mem.writeInt(u32, slot_context[0..4], (@as(u32, speed_id) << 20) | (ADDRESS_DEVICE_CONTEXT_ENTRIES << 27), .little);
+    std.mem.writeInt(u32, slot_context[4..8], @as(u32, port_id) << 16, .little);
 
     const endpoint_context = input_context[2 * entry_bytes ..][0..entry_bytes];
-    writeU32Le(
-        endpoint_context[4..8],
-        (DEFAULT_ENDPOINT_ERROR_COUNT << 1) |
-            (ENDPOINT_TYPE_CONTROL << 3) |
-            (@as(u32, max_packet_size) << 16),
-    );
-    writeU64Le(endpoint_context[8..16], control_transfer_ring_address | 1);
-    writeU32Le(endpoint_context[16..20], CONTROL_ENDPOINT_AVERAGE_TRB_LENGTH);
+    std.mem.writeInt(u32, endpoint_context[4..8], (DEFAULT_ENDPOINT_ERROR_COUNT << 1) |
+        (ENDPOINT_TYPE_CONTROL << 3) |
+        (@as(u32, max_packet_size) << 16), .little);
+    std.mem.writeInt(u64, endpoint_context[8..16], control_transfer_ring_address | 1, .little);
+    std.mem.writeInt(u32, endpoint_context[16..20], CONTROL_ENDPOINT_AVERAGE_TRB_LENGTH, .little);
 }
 
 pub fn initializeEvaluateEndpointZeroInputContext(
@@ -89,9 +77,9 @@ pub fn initializeEvaluateEndpointZeroInputContext(
         return error.InvalidInputContext;
     if (input_context.len < required_bytes) return error.InvalidInputContext;
     @memset(input_context[0..required_bytes], 0);
-    writeU32Le(input_context[4..8], EVALUATE_ENDPOINT_ZERO_ADD_CONTEXT_FLAGS);
+    std.mem.writeInt(u32, input_context[4..8], EVALUATE_ENDPOINT_ZERO_ADD_CONTEXT_FLAGS, .little);
     const endpoint_context = input_context[2 * entry_bytes ..][0..entry_bytes];
-    writeU32Le(endpoint_context[4..8], @as(u32, max_packet_size) << 16);
+    std.mem.writeInt(u32, endpoint_context[4..8], @as(u32, max_packet_size) << 16, .little);
 }
 
 pub fn initializeConfigureInterruptInEndpointInputContext(
@@ -124,32 +112,20 @@ pub fn initializeConfigureInterruptInEndpointInputContext(
     if (input_context.len < required_bytes) return error.InvalidInputContext;
     @memset(input_context[0..required_bytes], 0);
 
-    writeU32Le(
-        input_context[4..8],
-        (@as(u32, 1) << 0) | (@as(u32, 1) << keyboard.device_context_index),
-    );
+    std.mem.writeInt(u32, input_context[4..8], (@as(u32, 1) << 0) | (@as(u32, 1) << keyboard.device_context_index), .little);
     const slot_context = input_context[entry_bytes..][0..entry_bytes];
-    writeU32Le(
-        slot_context[0..4],
-        @as(u32, keyboard.device_context_index) << 27,
-    );
+    std.mem.writeInt(u32, slot_context[0..4], @as(u32, keyboard.device_context_index) << 27, .little);
 
     const endpoint_offset = (@as(usize, keyboard.device_context_index) + 1) * entry_bytes;
     const endpoint_context = input_context[endpoint_offset..][0..entry_bytes];
-    writeU32Le(endpoint_context[0..4], @as(u32, keyboard.interval) << 16);
-    writeU32Le(
-        endpoint_context[4..8],
-        (DEFAULT_ENDPOINT_ERROR_COUNT << 1) |
-            (ENDPOINT_TYPE_INTERRUPT_IN << 3) |
-            (@as(u32, keyboard.max_burst_size) << 8) |
-            (@as(u32, keyboard.max_packet_size) << 16),
-    );
-    writeU64Le(endpoint_context[8..16], interrupt_transfer_ring_address | 1);
-    writeU32Le(
-        endpoint_context[16..20],
-        INTERRUPT_ENDPOINT_AVERAGE_TRB_LENGTH |
-            (@as(u32, keyboard.max_esit_payload) << 16),
-    );
+    std.mem.writeInt(u32, endpoint_context[0..4], @as(u32, keyboard.interval) << 16, .little);
+    std.mem.writeInt(u32, endpoint_context[4..8], (DEFAULT_ENDPOINT_ERROR_COUNT << 1) |
+        (ENDPOINT_TYPE_INTERRUPT_IN << 3) |
+        (@as(u32, keyboard.max_burst_size) << 8) |
+        (@as(u32, keyboard.max_packet_size) << 16), .little);
+    std.mem.writeInt(u64, endpoint_context[8..16], interrupt_transfer_ring_address | 1, .little);
+    std.mem.writeInt(u32, endpoint_context[16..20], INTERRUPT_ENDPOINT_AVERAGE_TRB_LENGTH |
+        (@as(u32, keyboard.max_esit_payload) << 16), .little);
 }
 
 test "xHCI Address Device context encodes only slot and endpoint zero authority" {
@@ -162,24 +138,24 @@ test "xHCI Address Device context encodes only slot and endpoint zero authority"
         0x8000,
         &input_context,
     );
-    try std.testing.expectEqual(ADDRESS_DEVICE_ADD_CONTEXT_FLAGS, readU32Le(input_context[4..8]));
+    try std.testing.expectEqual(ADDRESS_DEVICE_ADD_CONTEXT_FLAGS, std.mem.readInt(u32, input_context[4..8], .little));
     const slot_offset: usize = 64;
     try std.testing.expectEqual(
         (@as(u32, 4) << 20) | (ADDRESS_DEVICE_CONTEXT_ENTRIES << 27),
-        readU32Le(input_context[slot_offset..][0..4]),
+        std.mem.readInt(u32, input_context[slot_offset..][0..4], .little),
     );
-    try std.testing.expectEqual(@as(u32, 7) << 16, readU32Le(input_context[slot_offset + 4 ..][0..4]));
+    try std.testing.expectEqual(@as(u32, 7) << 16, std.mem.readInt(u32, input_context[slot_offset + 4 ..][0..4], .little));
     const endpoint_offset: usize = 128;
     try std.testing.expectEqual(
         (DEFAULT_ENDPOINT_ERROR_COUNT << 1) |
             (ENDPOINT_TYPE_CONTROL << 3) |
             (@as(u32, 512) << 16),
-        readU32Le(input_context[endpoint_offset + 4 ..][0..4]),
+        std.mem.readInt(u32, input_context[endpoint_offset + 4 ..][0..4], .little),
     );
-    try std.testing.expectEqual(@as(u64, 0x8001), readU64Le(input_context[endpoint_offset + 8 ..][0..8]));
+    try std.testing.expectEqual(@as(u64, 0x8001), std.mem.readInt(u64, input_context[endpoint_offset + 8 ..][0..8], .little));
     try std.testing.expectEqual(
         CONTROL_ENDPOINT_AVERAGE_TRB_LENGTH,
-        readU32Le(input_context[endpoint_offset + 16 ..][0..4]),
+        std.mem.readInt(u32, input_context[endpoint_offset + 16 ..][0..4], .little),
     );
     try std.testing.expectEqualSlices(
         u8,
@@ -206,12 +182,12 @@ test "xHCI Address Device context encodes only slot and endpoint zero authority"
         0xA000,
         &compact_context,
     );
-    try std.testing.expectEqual(ADDRESS_DEVICE_ADD_CONTEXT_FLAGS, readU32Le(compact_context[4..8]));
+    try std.testing.expectEqual(ADDRESS_DEVICE_ADD_CONTEXT_FLAGS, std.mem.readInt(u32, compact_context[4..8], .little));
     try std.testing.expectEqual(
         (@as(u32, 3) << 20) | (ADDRESS_DEVICE_CONTEXT_ENTRIES << 27),
-        readU32Le(compact_context[32..36]),
+        std.mem.readInt(u32, compact_context[32..36], .little),
     );
-    try std.testing.expectEqual(@as(u64, 0xA001), readU64Le(compact_context[72..80]));
+    try std.testing.expectEqual(@as(u64, 0xA001), std.mem.readInt(u64, compact_context[72..80], .little));
     try std.testing.expectError(
         error.InvalidInputContext,
         initializeAddressDeviceInputContext(.bytes_32, 2, 3, 64, 0xA000, compact_context[0 .. compact_context.len - 1]),
@@ -227,9 +203,9 @@ test "xHCI Evaluate Context updates only endpoint-zero max packet size" {
     try initializeEvaluateEndpointZeroInputContext(.bytes_64, 32, &input_context);
     try std.testing.expectEqual(
         EVALUATE_ENDPOINT_ZERO_ADD_CONTEXT_FLAGS,
-        readU32Le(input_context[4..8]),
+        std.mem.readInt(u32, input_context[4..8], .little),
     );
-    try std.testing.expectEqual(@as(u32, 32) << 16, readU32Le(input_context[132..136]));
+    try std.testing.expectEqual(@as(u32, 32) << 16, std.mem.readInt(u32, input_context[132..136], .little));
     try std.testing.expectEqualSlices(u8, &(@as([64]u8, @splat(0))), input_context[64..128]);
     try std.testing.expectEqualSlices(u8, &(@as([48]u8, @splat(0))), input_context[144..192]);
 
@@ -265,31 +241,31 @@ test "xHCI Configure Endpoint context grants one interrupt-IN endpoint" {
         0xA000,
         &input_context,
     );
-    try std.testing.expectEqual(@as(u32, 0), readU32Le(input_context[0..4]));
-    try std.testing.expectEqual(@as(u32, 0b1001), readU32Le(input_context[4..8]));
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, input_context[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0b1001), std.mem.readInt(u32, input_context[4..8], .little));
     try std.testing.expectEqual(
         @as(u32, keyboard.device_context_index) << 27,
-        readU32Le(input_context[64..68]),
+        std.mem.readInt(u32, input_context[64..68], .little),
     );
     const endpoint_offset: usize = 4 * 64;
     try std.testing.expectEqual(
         @as(u32, keyboard.interval) << 16,
-        readU32Le(input_context[endpoint_offset..][0..4]),
+        std.mem.readInt(u32, input_context[endpoint_offset..][0..4], .little),
     );
     try std.testing.expectEqual(
         (DEFAULT_ENDPOINT_ERROR_COUNT << 1) |
             (ENDPOINT_TYPE_INTERRUPT_IN << 3) |
             (@as(u32, keyboard.max_packet_size) << 16),
-        readU32Le(input_context[endpoint_offset + 4 ..][0..4]),
+        std.mem.readInt(u32, input_context[endpoint_offset + 4 ..][0..4], .little),
     );
     try std.testing.expectEqual(
         @as(u64, 0xA001),
-        readU64Le(input_context[endpoint_offset + 8 ..][0..8]),
+        std.mem.readInt(u64, input_context[endpoint_offset + 8 ..][0..8], .little),
     );
     try std.testing.expectEqual(
         INTERRUPT_ENDPOINT_AVERAGE_TRB_LENGTH |
             (@as(u32, keyboard.max_esit_payload) << 16),
-        readU32Le(input_context[endpoint_offset + 16 ..][0..4]),
+        std.mem.readInt(u32, input_context[endpoint_offset + 16 ..][0..4], .little),
     );
     try std.testing.expectEqualSlices(u8, &(@as([64]u8, @splat(0))), input_context[128..192]);
 

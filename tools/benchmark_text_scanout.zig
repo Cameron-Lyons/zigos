@@ -17,7 +17,7 @@ pub fn main(init: std.process.Init) !void {
         .width = WIDTH,
         .height = HEIGHT,
         .pixels_per_scan_line = WIDTH,
-        .format = .bgrx8888,
+        .pixel_mask = graphics.framebuffer.BGRX8888_MASK,
         .buffer_bytes = WIDTH * HEIGHT * 4,
     };
     var output_buffer: [1024]u8 = undefined;

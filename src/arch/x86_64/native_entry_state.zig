@@ -1,5 +1,6 @@
 const std = @import("std");
 const cpu_identity = @import("../../kernel/cpu_identity.zig");
+const asm_abi = @import("../asm_abi.zig");
 
 pub const ENTRY_PKU: u8 = 1;
 pub const ENTRY_FRED: u8 = 2;
@@ -51,8 +52,7 @@ pub fn clearContinuation() void {
 // native_entry_state.inc is the assembly view of this layout. Every image that
 // links native entry fails to compile if a field, size or mode bit drifts.
 comptime {
-    @setEvalBranchQuota(200_000);
-    for (.{
+    asm_abi.expectConstants("native_entry_state.inc", @embedFile("native_entry_state.inc"), .{
         .{ "CPU_KERNEL_STACK_TOP", @offsetOf(State, "kernel_stack_top") },
         .{ "CPU_USER_STACK_POINTER", @offsetOf(State, "user_stack_pointer") },
         .{ "CPU_KERNEL_PORT", @offsetOf(State, "kernel_port") },
@@ -67,24 +67,7 @@ comptime {
         .{ "CPU_ENTRY_PKU", ENTRY_PKU },
         .{ "CPU_ENTRY_FRED", ENTRY_FRED },
         .{ "CPU_ENTRY_READY", ENTRY_READY },
-    }) |item| {
-        if (assemblyConstant(item[0]) != item[1])
-            @compileError("native_entry_state.inc " ++ item[0] ++ " does not match State");
-    }
-}
-
-fn assemblyConstant(comptime name: []const u8) usize {
-    var value: ?usize = null;
-    var lines = std.mem.tokenizeScalar(u8, @embedFile("native_entry_state.inc"), '\n');
-    while (lines.next()) |line| {
-        var fields = std.mem.tokenizeAny(u8, line, " \t\r");
-        if (!std.mem.eql(u8, fields.next() orelse continue, "#define")) continue;
-        if (!std.mem.eql(u8, fields.next() orelse continue, name)) continue;
-        const text = fields.next() orelse @compileError(name ++ " has no value");
-        if (value != null or fields.next() != null) @compileError(name ++ " is not one plain definition");
-        value = std.fmt.parseInt(usize, text, 0) catch @compileError(name ++ " is not an integer");
-    }
-    return value orelse @compileError("native_entry_state.inc does not define " ++ name);
+    });
 }
 
 test "all native CPU slots select and clear independent continuations in adversarial order" {

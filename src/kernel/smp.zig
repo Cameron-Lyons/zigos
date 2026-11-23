@@ -91,7 +91,6 @@ else
 var cpus: [MAX_CPUS]Cpu = @as([MAX_CPUS]Cpu, @splat(.{}));
 var cpu_count: u8 = 1;
 var online_count: u8 = 1;
-var bsp_cpu_index: u8 = 0;
 var tlb_requests = tlb_request.Coordinator.init(0) catch unreachable;
 var cache_transitions = cache_rendezvous.Coordinator.init(0) catch unreachable;
 var cache_transition_generation: u64 = 0;
@@ -108,7 +107,6 @@ pub fn init(madt: []const u8, admission_policy: cpu_policy.AdmissionPolicy) void
     cpus[0] = .{ .apic_id = bsp_apic_id, .online = true };
     cpu_count = 1;
     @atomicStore(u8, &online_count, 1, .release);
-    bsp_cpu_index = 0;
 
     if (builtin.target.os.tag == .freestanding) {
         const admission = inventoryFromMadt(bsp_apic_id, madt) catch |err| {
@@ -140,12 +138,12 @@ pub fn currentCpuIndex() u8 {
 
 // The shared executor, kernel port, and service tables belong to the BSP.
 // APs service architectural interrupts; they do not dispatch runtime work.
-pub fn runtimeOwnerCpu() u8 {
-    return bsp_cpu_index;
+pub inline fn runtimeOwnerCpu() u8 {
+    return cpu_identity.BSP_INDEX;
 }
 
-pub fn isRuntimeOwner() bool {
-    return currentCpuIndex() == runtimeOwnerCpu();
+pub inline fn isRuntimeOwner() bool {
+    return cpu_identity.isBsp();
 }
 
 pub fn irqDestinationId() u32 {
@@ -505,7 +503,7 @@ pub const ArchitectureProof = if (architecture_proof_enabled) struct {
     pub fn bindTopology(apic_ids: []const u32) void {
         if (comptime builtin.target.os.tag != .freestanding)
             @compileError("architecture proof topology requires a freestanding proof image");
-        if (initialized or apic_ids.len == 0 or apic_ids.len > MAX_CPUS or currentCpuIndex() != 0 or
+        if (initialized or apic_ids.len == 0 or apic_ids.len > MAX_CPUS or !cpu_identity.isBsp() or
             apic_ids[0] != x2apic.localId()) @panic("invalid architecture proof topology");
         for (apic_ids, 0..) |apic_id, logical| {
             for (apic_ids[0..logical]) |earlier| {
@@ -515,7 +513,6 @@ pub const ArchitectureProof = if (architecture_proof_enabled) struct {
         }
         cpu_count = @intCast(apic_ids.len);
         @atomicStore(u8, &online_count, cpu_count, .release);
-        bsp_cpu_index = 0;
         initialized = true;
     }
 } else struct {};
@@ -735,7 +732,6 @@ test "execution stop transport sends only admitted remote CPU fixed vectors" {
     const previous_cpu = currentCpuIndex();
     const previous_cpus = cpus;
     const previous_count = cpu_count;
-    const previous_bsp = bsp_cpu_index;
     const previous_initialized = initialized;
     const previous_observer = x2apic.Testing.swapWriteObserver(Trace.observe);
     defer {
@@ -743,13 +739,11 @@ test "execution stop transport sends only admitted remote CPU fixed vectors" {
         cpu_identity.setIndexForTest(previous_cpu);
         cpus = previous_cpus;
         cpu_count = previous_count;
-        bsp_cpu_index = previous_bsp;
         initialized = previous_initialized;
     }
     Trace.count = 0;
     Trace.invalid_msr = false;
     cpu_identity.setIndexForTest(0);
-    bsp_cpu_index = 0;
     initialized = true;
     cpu_count = MAX_CPUS;
     for (&cpus, 0..) |*cpu, index| {
@@ -804,7 +798,6 @@ test "prepared execution doorbell sends only admitted remote CPU fixed vectors" 
     const previous_cpu = currentCpuIndex();
     const previous_cpus = cpus;
     const previous_count = cpu_count;
-    const previous_bsp = bsp_cpu_index;
     const previous_initialized = initialized;
     const previous_observer = x2apic.Testing.swapWriteObserver(Trace.observe);
     defer {
@@ -812,13 +805,11 @@ test "prepared execution doorbell sends only admitted remote CPU fixed vectors" 
         cpu_identity.setIndexForTest(previous_cpu);
         cpus = previous_cpus;
         cpu_count = previous_count;
-        bsp_cpu_index = previous_bsp;
         initialized = previous_initialized;
     }
     Trace.count = 0;
     Trace.invalid_msr = false;
     cpu_identity.setIndexForTest(0);
-    bsp_cpu_index = 0;
     initialized = true;
     cpu_count = MAX_CPUS;
     for (&cpus, 0..) |*cpu, index| {
@@ -876,7 +867,6 @@ test "syscall doorbells follow admitted AP to BSP and BSP to AP ownership" {
     const previous_cpu = currentCpuIndex();
     const previous_cpus = cpus;
     const previous_count = cpu_count;
-    const previous_bsp = bsp_cpu_index;
     const previous_initialized = initialized;
     const previous_observer = x2apic.Testing.swapWriteObserver(Trace.observe);
     defer {
@@ -884,12 +874,10 @@ test "syscall doorbells follow admitted AP to BSP and BSP to AP ownership" {
         cpu_identity.setIndexForTest(previous_cpu);
         cpus = previous_cpus;
         cpu_count = previous_count;
-        bsp_cpu_index = previous_bsp;
         initialized = previous_initialized;
     }
     Trace.count = 0;
     Trace.invalid_msr = false;
-    bsp_cpu_index = 0;
     initialized = true;
     cpu_count = MAX_CPUS;
     for (&cpus, 0..) |*cpu, index| {

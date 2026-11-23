@@ -1,13 +1,8 @@
 const std = @import("std");
 const acpi = @import("acpi.zig");
-const endian = @import("../utils/endian.zig");
 const checksum = @import("../utils/checksum.zig");
 
 const finishChecksum = checksum.finishSum8Prefix;
-const readU32Le = endian.readU32Le;
-const readU64Le = endian.readU64Le;
-const writeU32Le = endian.writeU32Le;
-const writeU64Le = endian.writeU64Le;
 
 pub const MADT_SIGNATURE = "APIC";
 pub const SDT_HEADER_LENGTH: usize = acpi.SDT_HEADER_LENGTH;
@@ -99,11 +94,11 @@ pub const ProcessorIterator = struct {
             switch (EntryType.fromByte(entry[MADT_ENTRY_TYPE_OFFSET])) {
                 .processor_local_apic => return .{
                     .apic_id = entry[3],
-                    .enabled = (readU32Le(entry[MADT_LOCAL_APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0,
+                    .enabled = (std.mem.readInt(u32, entry[MADT_LOCAL_APIC_FLAGS_OFFSET..][0..4], .little) & MADT_PROCESSOR_ENABLED_FLAG) != 0,
                 },
                 .processor_local_x2apic => return .{
-                    .apic_id = readU32Le(entry[4..8]),
-                    .enabled = (readU32Le(entry[MADT_X2APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0,
+                    .apic_id = std.mem.readInt(u32, entry[4..8], .little),
+                    .enabled = (std.mem.readInt(u32, entry[MADT_X2APIC_FLAGS_OFFSET..][0..4], .little) & MADT_PROCESSOR_ENABLED_FLAG) != 0,
                 },
                 else => {},
             }
@@ -115,8 +110,8 @@ pub const ProcessorIterator = struct {
 pub fn parseMadt(table: []const u8) Error!Summary {
     const validated = try validatedMadt(table);
     var summary = Summary{
-        .local_apic_address = readU32Le(validated[MADT_LOCAL_APIC_ADDRESS_OFFSET..][0..4]),
-        .pc_at_compatible = (readU32Le(validated[MADT_FLAGS_OFFSET..][0..4]) & MADT_PC_AT_COMPATIBLE_FLAG) != 0,
+        .local_apic_address = std.mem.readInt(u32, validated[MADT_LOCAL_APIC_ADDRESS_OFFSET..][0..4], .little),
+        .pc_at_compatible = (std.mem.readInt(u32, validated[MADT_FLAGS_OFFSET..][0..4], .little) & MADT_PC_AT_COMPATIBLE_FLAG) != 0,
     };
 
     var offset: usize = MADT_HEADER_LENGTH;
@@ -166,7 +161,7 @@ fn parseEntry(entry_type: EntryType, entry: []const u8, summary: *Summary) Error
     switch (entry_type) {
         .processor_local_apic => {
             try incrementCount(&summary.processor_count);
-            if ((readU32Le(entry[MADT_LOCAL_APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0) {
+            if ((std.mem.readInt(u32, entry[MADT_LOCAL_APIC_FLAGS_OFFSET..][0..4], .little) & MADT_PROCESSOR_ENABLED_FLAG) != 0) {
                 try incrementCount(&summary.enabled_processor_count);
             }
         },
@@ -180,11 +175,11 @@ fn parseEntry(entry_type: EntryType, entry: []const u8, summary: *Summary) Error
             try incrementCount(&summary.local_apic_nmi_count);
         },
         .local_apic_address_override => {
-            summary.local_apic_address = readU64Le(entry[MADT_LOCAL_APIC_ADDRESS_OVERRIDE_OFFSET..][0..8]);
+            summary.local_apic_address = std.mem.readInt(u64, entry[MADT_LOCAL_APIC_ADDRESS_OVERRIDE_OFFSET..][0..8], .little);
         },
         .processor_local_x2apic => {
             try incrementCount(&summary.x2apic_count);
-            if ((readU32Le(entry[MADT_X2APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0) {
+            if ((std.mem.readInt(u32, entry[MADT_X2APIC_FLAGS_OFFSET..][0..4], .little) & MADT_PROCESSOR_ENABLED_FLAG) != 0) {
                 try incrementCount(&summary.enabled_processor_count);
             }
         },
@@ -195,35 +190,35 @@ fn parseEntry(entry_type: EntryType, entry: []const u8, summary: *Summary) Error
 fn validMadt() [MADT_TEST_TABLE_BYTES]u8 {
     var table = @as([MADT_TEST_TABLE_BYTES]u8, @splat(0));
     @memcpy(table[0..4], MADT_SIGNATURE);
-    writeU32Le(table[4..8], table.len);
+    std.mem.writeInt(u32, table[4..8], table.len, .little);
     table[8] = 5;
     @memcpy(table[10..16], "ZIGOS ");
     @memcpy(table[16..24], "NUC11TN ");
-    writeU32Le(table[MADT_LOCAL_APIC_ADDRESS_OFFSET..][0..4], 0xFEE0_0000);
-    writeU32Le(table[MADT_FLAGS_OFFSET..][0..4], MADT_PC_AT_COMPATIBLE_FLAG);
+    std.mem.writeInt(u32, table[MADT_LOCAL_APIC_ADDRESS_OFFSET..][0..4], 0xFEE0_0000, .little);
+    std.mem.writeInt(u32, table[MADT_FLAGS_OFFSET..][0..4], MADT_PC_AT_COMPATIBLE_FLAG, .little);
 
     table[44] = @backingInt(EntryType.processor_local_apic);
     table[45] = MADT_LOCAL_APIC_MIN_BYTES;
     table[46] = 0;
     table[47] = 1;
-    writeU32Le(table[48..52], MADT_PROCESSOR_ENABLED_FLAG);
+    std.mem.writeInt(u32, table[48..52], MADT_PROCESSOR_ENABLED_FLAG, .little);
 
     table[52] = @backingInt(EntryType.io_apic);
     table[53] = MADT_IO_APIC_MIN_BYTES;
     table[54] = 2;
-    writeU32Le(table[56..60], 0xFEC0_0000);
-    writeU32Le(table[60..64], 0);
+    std.mem.writeInt(u32, table[56..60], 0xFEC0_0000, .little);
+    std.mem.writeInt(u32, table[60..64], 0, .little);
 
     table[64] = @backingInt(EntryType.interrupt_source_override);
     table[65] = MADT_ISO_MIN_BYTES;
     table[66] = 0;
     table[67] = 0;
-    writeU32Le(table[68..72], 2);
+    std.mem.writeInt(u32, table[68..72], 2, .little);
     table[72] = 0x0D;
 
     table[74] = @backingInt(EntryType.local_apic_address_override);
     table[75] = MADT_LOCAL_APIC_ADDRESS_OVERRIDE_MIN_BYTES;
-    writeU64Le(table[78..86], 0x0000_0000_FEE0_0000);
+    std.mem.writeInt(u64, table[78..86], 0x0000_0000_FEE0_0000, .little);
 
     table[86] = @backingInt(EntryType.local_apic_nmi);
     table[87] = MADT_LOCAL_APIC_NMI_MIN_BYTES;
@@ -253,13 +248,13 @@ test "APIC MADT parser summarizes APIC topology" {
 test "APIC processor iterator reads x2APIC flags independently of processor UID" {
     var table: [MADT_TEST_TABLE_BYTES + MADT_X2APIC_MIN_BYTES]u8 = @splat(0);
     @memcpy(table[0..MADT_TEST_TABLE_BYTES], &validMadt());
-    writeU32Le(table[4..8], table.len);
+    std.mem.writeInt(u32, table[4..8], table.len, .little);
     const entry = table[MADT_TEST_TABLE_BYTES..];
     entry[0] = @backingInt(EntryType.processor_local_x2apic);
     entry[1] = MADT_X2APIC_MIN_BYTES;
-    writeU32Le(entry[4..8], 0x1234);
-    writeU32Le(entry[8..12], MADT_PROCESSOR_ENABLED_FLAG);
-    writeU32Le(entry[12..16], 0);
+    std.mem.writeInt(u32, entry[4..8], 0x1234, .little);
+    std.mem.writeInt(u32, entry[8..12], MADT_PROCESSOR_ENABLED_FLAG, .little);
+    std.mem.writeInt(u32, entry[12..16], 0, .little);
     finishChecksum(&table, 9, table.len);
     var processors = try ProcessorIterator.init(&table);
     _ = processors.next();
@@ -267,8 +262,8 @@ test "APIC processor iterator reads x2APIC flags independently of processor UID"
     try std.testing.expect(processors.next() == null);
     try std.testing.expectEqual(@as(u16, 2), (try parseMadt(&table)).enabled_processor_count);
 
-    writeU32Le(entry[8..12], 0);
-    writeU32Le(entry[12..16], 1);
+    std.mem.writeInt(u32, entry[8..12], 0, .little);
+    std.mem.writeInt(u32, entry[12..16], 1, .little);
     finishChecksum(&table, 9, table.len);
     processors = try ProcessorIterator.init(&table);
     _ = processors.next();

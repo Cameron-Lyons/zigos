@@ -1,13 +1,8 @@
 const std = @import("std");
 const paging = @import("../memory/paging64.zig");
-const endian = @import("../utils/endian.zig");
 const checksum = @import("../utils/checksum.zig");
 
 const checksumIsValid = checksum.sum8IsZero;
-const readU32Le = endian.readU32Le;
-const readU64Le = endian.readU64Le;
-const writeU32Le = endian.writeU32Le;
-const writeU64Le = endian.writeU64Le;
 
 const EFI_SYSTEM_TABLE_SIGNATURE: u64 = 0x5453_5953_2049_4249;
 const EFI_SYSTEM_TABLE_MIN_REVISION: u32 = 0x0002_0000;
@@ -166,19 +161,19 @@ const FirmwareFixture = struct {
 
     fn init() FirmwareFixture {
         var result: FirmwareFixture = .{};
-        writeU64Le(result.system[0..8], EFI_SYSTEM_TABLE_SIGNATURE);
-        writeU32Le(result.system[EFI_SYSTEM_TABLE_REVISION_OFFSET..][0..4], EFI_SYSTEM_TABLE_MIN_REVISION);
-        writeU32Le(result.system[EFI_SYSTEM_TABLE_HEADER_SIZE_OFFSET..][0..4], EFI_SYSTEM_TABLE_BYTES);
-        writeU64Le(result.system[EFI_SYSTEM_TABLE_ENTRY_COUNT_OFFSET..][0..8], 1);
-        writeU64Le(result.system[EFI_SYSTEM_TABLE_CONFIG_ADDRESS_OFFSET..][0..8], CONFIGURATION_ADDRESS);
+        std.mem.writeInt(u64, result.system[0..8], EFI_SYSTEM_TABLE_SIGNATURE, .little);
+        std.mem.writeInt(u32, result.system[EFI_SYSTEM_TABLE_REVISION_OFFSET..][0..4], EFI_SYSTEM_TABLE_MIN_REVISION, .little);
+        std.mem.writeInt(u32, result.system[EFI_SYSTEM_TABLE_HEADER_SIZE_OFFSET..][0..4], EFI_SYSTEM_TABLE_BYTES, .little);
+        std.mem.writeInt(u64, result.system[EFI_SYSTEM_TABLE_ENTRY_COUNT_OFFSET..][0..8], 1, .little);
+        std.mem.writeInt(u64, result.system[EFI_SYSTEM_TABLE_CONFIG_ADDRESS_OFFSET..][0..8], CONFIGURATION_ADDRESS, .little);
         result.systemChecksum();
         @memcpy(result.configuration[0..SMBIOS3_TABLE_GUID.len], &SMBIOS3_TABLE_GUID);
-        writeU64Le(result.configuration[EFI_CONFIGURATION_ENTRY_ADDRESS_OFFSET..][0..8], ENTRY_ADDRESS);
+        std.mem.writeInt(u64, result.configuration[EFI_CONFIGURATION_ENTRY_ADDRESS_OFFSET..][0..8], ENTRY_ADDRESS, .little);
         @memcpy(result.entry[0..SMBIOS3_ANCHOR.len], SMBIOS3_ANCHOR);
         result.entry[SMBIOS3_LENGTH_OFFSET] = SMBIOS3_MIN_LENGTH;
         result.entry[SMBIOS3_MAJOR_VERSION_OFFSET] = SMBIOS3_MAJOR_VERSION;
-        writeU32Le(result.entry[SMBIOS3_TABLE_LENGTH_OFFSET..][0..4], result.table.len);
-        writeU64Le(result.entry[SMBIOS3_TABLE_ADDRESS_OFFSET..][0..8], TABLE_ADDRESS);
+        std.mem.writeInt(u32, result.entry[SMBIOS3_TABLE_LENGTH_OFFSET..][0..4], result.table.len, .little);
+        std.mem.writeInt(u64, result.entry[SMBIOS3_TABLE_ADDRESS_OFFSET..][0..8], TABLE_ADDRESS, .little);
         checksum.finishSum8(result.entry[0..SMBIOS3_MIN_LENGTH], SMBIOS3_CHECKSUM_OFFSET);
         result.table[0] = SYSTEM_INFORMATION_TYPE;
         result.table[1] = STRUCTURE_HEADER_BYTES;
@@ -187,8 +182,8 @@ const FirmwareFixture = struct {
     }
 
     fn systemChecksum(self: *FirmwareFixture) void {
-        writeU32Le(self.system[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], 0);
-        writeU32Le(self.system[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], std.hash.Crc32.hash(&self.system));
+        std.mem.writeInt(u32, self.system[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], 0, .little);
+        std.mem.writeInt(u32, self.system[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], std.hash.Crc32.hash(&self.system), .little);
     }
 
     fn readInto(self: *FirmwareFixture, physical: u64, length: usize, out: *[]const u8) bool {
@@ -274,7 +269,7 @@ test "SMBIOS physical span wrapper rejects empty wrapping and unadmitted address
     try std.testing.expectEqual(sentinel.ptr, out.ptr);
     try std.testing.expectEqual(sentinel.len, out.len);
     memory = FirmwareFixture.init();
-    writeU64Le(memory.system[EFI_SYSTEM_TABLE_CONFIG_ADDRESS_OFFSET..][0..8], std.math.maxInt(u64) - 1);
+    std.mem.writeInt(u64, memory.system[EFI_SYSTEM_TABLE_CONFIG_ADDRESS_OFFSET..][0..8], std.math.maxInt(u64) - 1, .little);
     memory.systemChecksum();
     try std.testing.expect(!efiSystemTableContainsTargetSkuUncached(FirmwareFixture.SYSTEM_ADDRESS, NUC15CRSU7_SKU, &memory));
     try std.testing.expectEqual(@as(usize, 1), memory.reads);
@@ -300,18 +295,18 @@ test "SMBIOS public lookup performs no uncaptured native graph read" {
 
 fn parseEfiSystemTable(bytes: []const u8) Error!EfiSystemTable {
     if (bytes.len < EFI_SYSTEM_TABLE_BYTES) return error.TooSmall;
-    if (readU64Le(bytes[0..8]) != EFI_SYSTEM_TABLE_SIGNATURE) return error.BadSignature;
-    if (readU32Le(bytes[EFI_SYSTEM_TABLE_REVISION_OFFSET..][0..4]) < EFI_SYSTEM_TABLE_MIN_REVISION) {
+    if (std.mem.readInt(u64, bytes[0..8], .little) != EFI_SYSTEM_TABLE_SIGNATURE) return error.BadSignature;
+    if (std.mem.readInt(u32, bytes[EFI_SYSTEM_TABLE_REVISION_OFFSET..][0..4], .little) < EFI_SYSTEM_TABLE_MIN_REVISION) {
         return error.UnsupportedVersion;
     }
-    if (readU32Le(bytes[EFI_SYSTEM_TABLE_HEADER_SIZE_OFFSET..][0..4]) != EFI_SYSTEM_TABLE_BYTES) {
+    if (std.mem.readInt(u32, bytes[EFI_SYSTEM_TABLE_HEADER_SIZE_OFFSET..][0..4], .little) != EFI_SYSTEM_TABLE_BYTES) {
         return error.InvalidLength;
     }
     if (!efiTableHeaderChecksumIsValid(bytes[0..EFI_SYSTEM_TABLE_BYTES])) return error.BadChecksum;
 
-    const entry_count_u64 = readU64Le(bytes[EFI_SYSTEM_TABLE_ENTRY_COUNT_OFFSET..][0..8]);
+    const entry_count_u64 = std.mem.readInt(u64, bytes[EFI_SYSTEM_TABLE_ENTRY_COUNT_OFFSET..][0..8], .little);
     const entry_count = std.math.cast(usize, entry_count_u64) orelse return error.InvalidLength;
-    const configuration_table_address = readU64Le(bytes[EFI_SYSTEM_TABLE_CONFIG_ADDRESS_OFFSET..][0..8]);
+    const configuration_table_address = std.mem.readInt(u64, bytes[EFI_SYSTEM_TABLE_CONFIG_ADDRESS_OFFSET..][0..8], .little);
     if (entry_count == 0 or entry_count > MAX_CONFIGURATION_ENTRIES or configuration_table_address == 0) {
         return error.InvalidLength;
     }
@@ -327,7 +322,7 @@ fn efiTableHeaderChecksumIsValid(bytes: []const u8) bool {
     crc.update(bytes[0..EFI_SYSTEM_TABLE_CRC32_OFFSET]);
     crc.update(&@as([4]u8, @splat(0)));
     crc.update(bytes[EFI_SYSTEM_TABLE_CRC32_OFFSET + 4 ..]);
-    return crc.final() == readU32Le(bytes[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4]);
+    return crc.final() == std.mem.readInt(u32, bytes[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], .little);
 }
 
 fn findSmbios3EntryPointAddress(entries: []const u8) ?u64 {
@@ -336,7 +331,7 @@ fn findSmbios3EntryPointAddress(entries: []const u8) ?u64 {
     while (offset < entries.len) : (offset += EFI_CONFIGURATION_ENTRY_BYTES) {
         const entry = entries[offset..][0..EFI_CONFIGURATION_ENTRY_BYTES];
         if (!std.mem.eql(u8, entry[0..SMBIOS3_TABLE_GUID.len], &SMBIOS3_TABLE_GUID)) continue;
-        const address = readU64Le(entry[EFI_CONFIGURATION_ENTRY_ADDRESS_OFFSET..][0..8]);
+        const address = std.mem.readInt(u64, entry[EFI_CONFIGURATION_ENTRY_ADDRESS_OFFSET..][0..8], .little);
         return if (address == 0) null else address;
     }
     return null;
@@ -351,8 +346,8 @@ fn parseSmbios3EntryPoint(bytes: []const u8) Error!EntryPoint {
     if (!checksumIsValid(bytes[0..length])) return error.BadChecksum;
     if (bytes[SMBIOS3_MAJOR_VERSION_OFFSET] < SMBIOS3_MAJOR_VERSION) return error.UnsupportedVersion;
 
-    const table_length = readU32Le(bytes[SMBIOS3_TABLE_LENGTH_OFFSET..][0..4]);
-    const table_address = readU64Le(bytes[SMBIOS3_TABLE_ADDRESS_OFFSET..][0..8]);
+    const table_length = std.mem.readInt(u32, bytes[SMBIOS3_TABLE_LENGTH_OFFSET..][0..4], .little);
+    const table_address = std.mem.readInt(u64, bytes[SMBIOS3_TABLE_ADDRESS_OFFSET..][0..8], .little);
     if (table_length == 0 or table_length > MAX_TABLE_BYTES or table_address == 0) return error.InvalidLength;
 
     return .{
@@ -393,23 +388,23 @@ fn structureEnd(table: []const u8, strings_start: usize) ?usize {
 
 test "EFI64 system table exposes bounded configuration entries" {
     var bytes = @as([EFI_SYSTEM_TABLE_BYTES]u8, @splat(0));
-    writeU64Le(bytes[0..8], EFI_SYSTEM_TABLE_SIGNATURE);
-    writeU32Le(bytes[EFI_SYSTEM_TABLE_REVISION_OFFSET..][0..4], EFI_SYSTEM_TABLE_MIN_REVISION);
-    writeU32Le(bytes[EFI_SYSTEM_TABLE_HEADER_SIZE_OFFSET..][0..4], EFI_SYSTEM_TABLE_BYTES);
-    writeU64Le(bytes[EFI_SYSTEM_TABLE_ENTRY_COUNT_OFFSET..][0..8], 12);
-    writeU64Le(bytes[EFI_SYSTEM_TABLE_CONFIG_ADDRESS_OFFSET..][0..8], 0x1234_5000);
-    writeU32Le(bytes[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], std.hash.Crc32.hash(&bytes));
+    std.mem.writeInt(u64, bytes[0..8], EFI_SYSTEM_TABLE_SIGNATURE, .little);
+    std.mem.writeInt(u32, bytes[EFI_SYSTEM_TABLE_REVISION_OFFSET..][0..4], EFI_SYSTEM_TABLE_MIN_REVISION, .little);
+    std.mem.writeInt(u32, bytes[EFI_SYSTEM_TABLE_HEADER_SIZE_OFFSET..][0..4], EFI_SYSTEM_TABLE_BYTES, .little);
+    std.mem.writeInt(u64, bytes[EFI_SYSTEM_TABLE_ENTRY_COUNT_OFFSET..][0..8], 12, .little);
+    std.mem.writeInt(u64, bytes[EFI_SYSTEM_TABLE_CONFIG_ADDRESS_OFFSET..][0..8], 0x1234_5000, .little);
+    std.mem.writeInt(u32, bytes[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], std.hash.Crc32.hash(&bytes), .little);
 
     const parsed = try parseEfiSystemTable(&bytes);
     try std.testing.expectEqual(@as(usize, 12), parsed.configuration_table_count);
     try std.testing.expectEqual(@as(u64, 0x1234_5000), parsed.configuration_table_address);
 
-    writeU64Le(bytes[EFI_SYSTEM_TABLE_ENTRY_COUNT_OFFSET..][0..8], MAX_CONFIGURATION_ENTRIES + 1);
-    writeU32Le(bytes[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], 0);
-    writeU32Le(bytes[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], std.hash.Crc32.hash(&bytes));
+    std.mem.writeInt(u64, bytes[EFI_SYSTEM_TABLE_ENTRY_COUNT_OFFSET..][0..8], MAX_CONFIGURATION_ENTRIES + 1, .little);
+    std.mem.writeInt(u32, bytes[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], 0, .little);
+    std.mem.writeInt(u32, bytes[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4], std.hash.Crc32.hash(&bytes), .little);
     try std.testing.expectError(error.InvalidLength, parseEfiSystemTable(&bytes));
-    writeU64Le(bytes[EFI_SYSTEM_TABLE_ENTRY_COUNT_OFFSET..][0..8], 12);
-    writeU64Le(bytes[0..8], 0);
+    std.mem.writeInt(u64, bytes[EFI_SYSTEM_TABLE_ENTRY_COUNT_OFFSET..][0..8], 12, .little);
+    std.mem.writeInt(u64, bytes[0..8], 0, .little);
     try std.testing.expectError(error.BadSignature, parseEfiSystemTable(&bytes));
 }
 
@@ -418,8 +413,8 @@ test "SMBIOS 3 entry point validates checksum and table address" {
     @memcpy(entry[0..SMBIOS3_ANCHOR.len], SMBIOS3_ANCHOR);
     entry[SMBIOS3_LENGTH_OFFSET] = SMBIOS3_MIN_LENGTH;
     entry[SMBIOS3_MAJOR_VERSION_OFFSET] = SMBIOS3_MAJOR_VERSION;
-    writeU32Le(entry[SMBIOS3_TABLE_LENGTH_OFFSET..][0..4], 128);
-    writeU64Le(entry[SMBIOS3_TABLE_ADDRESS_OFFSET..][0..8], 0x0000_0000_00f1_0000);
+    std.mem.writeInt(u32, entry[SMBIOS3_TABLE_LENGTH_OFFSET..][0..4], 128, .little);
+    std.mem.writeInt(u64, entry[SMBIOS3_TABLE_ADDRESS_OFFSET..][0..8], 0x0000_0000_00f1_0000, .little);
     checksum.finishSum8(entry[0..], SMBIOS3_CHECKSUM_OFFSET);
 
     const parsed = try parseSmbios3EntryPoint(&entry);
@@ -433,7 +428,7 @@ test "SMBIOS 3 entry point validates checksum and table address" {
 test "EFI configuration table locates only the SMBIOS 3 entry point" {
     var entries = @as([EFI_CONFIGURATION_ENTRY_BYTES * 2]u8, @splat(0));
     @memcpy(entries[EFI_CONFIGURATION_ENTRY_BYTES..][0..SMBIOS3_TABLE_GUID.len], &SMBIOS3_TABLE_GUID);
-    writeU64Le(entries[EFI_CONFIGURATION_ENTRY_BYTES + EFI_CONFIGURATION_ENTRY_ADDRESS_OFFSET ..][0..8], 0x8000_4000);
+    std.mem.writeInt(u64, entries[EFI_CONFIGURATION_ENTRY_BYTES + EFI_CONFIGURATION_ENTRY_ADDRESS_OFFSET ..][0..8], 0x8000_4000, .little);
     try std.testing.expectEqual(@as(?u64, 0x8000_4000), findSmbios3EntryPointAddress(&entries));
 
     entries[EFI_CONFIGURATION_ENTRY_BYTES] ^= 0xff;

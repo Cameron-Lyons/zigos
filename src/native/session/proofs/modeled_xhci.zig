@@ -3,7 +3,6 @@
 //! production kernel and its hardware xHCI driver never link it.
 const std = @import("std");
 const xhci = @import("../../../kernel/drivers/xhci.zig");
-const readU16Le = @import("../../../kernel/utils/endian.zig").readU16Le;
 
 const Error = xhci.Error;
 const RingPlan = xhci.RingPlan;
@@ -408,7 +407,7 @@ pub fn enumerateBootKeyboard(device_id: u64, configuration_descriptor: []const u
                 };
                 const endpoint_address = descriptor[2];
                 const attributes = descriptor[3];
-                const max_packet_size = readU16Le(descriptor[4..6]);
+                const max_packet_size = std.mem.readInt(u16, descriptor[4..6], .little);
                 const interval = descriptor[6];
                 const is_interrupt_in = (endpoint_address & USB_ENDPOINT_DIRECTION_IN) != 0 and
                     (attributes & USB_ENDPOINT_TRANSFER_INTERRUPT) == USB_ENDPOINT_TRANSFER_INTERRUPT;

@@ -33,7 +33,7 @@ comptime {
     if (@alignOf(Descriptor) != @alignOf(u64)) @compileError("I225 RX descriptor alignment changed");
 }
 
-pub fn availableDescriptor(buffer_address: u32) Descriptor {
+pub fn availableDescriptor(buffer_address: u64) Descriptor {
     return .{
         .packet_or_metadata = buffer_address,
         .header_or_writeback = 0,

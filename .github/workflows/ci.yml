@@ -73,9 +73,9 @@ jobs:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
-      job-name: Native CPU, Crypto and Upper-Half Entry
-      command: zig build -Doptimize=fast native-crypto-check high-half-entry-check
-      timeout-minutes: 15
+      job-name: Native CPU, Crypto, Upper-Half Entry and AP Cache Policy
+      command: zig build -Doptimize=fast native-crypto-check high-half-entry-check ap-cache-rejection-check smp-cache-enabled-match-check
+      timeout-minutes: 20
 
   tpm-quotes:
     needs: zig-toolchain

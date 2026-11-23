@@ -7,10 +7,6 @@ pub const FrameRun = struct {
     count: u32,
 };
 
-pub const AllocationCursor = struct {
-    next_frame: u32 = 0,
-};
-
 pub const Stats = struct {
     total: u32,
     reserved: u32,
@@ -245,15 +241,6 @@ fn FixedWithReservationCapacity(
             return self.allocateBetween(count, 0, exclusive_end);
         }
 
-        pub fn allocateBelowWithCursor(
-            self: *Self,
-            count: u32,
-            exclusive_end: PhysicalAddress,
-            cursor: *AllocationCursor,
-        ) ?FrameRun {
-            return self.allocateBetweenWithCursor(count, 0, exclusive_end, cursor);
-        }
-
         pub fn allocateFrameBetween(
             self: *Self,
             inclusive_start: PhysicalAddress,
@@ -318,21 +305,6 @@ fn FixedWithReservationCapacity(
             };
         }
 
-        pub fn allocateBetweenWithCursor(
-            self: *Self,
-            count: u32,
-            inclusive_start: PhysicalAddress,
-            exclusive_end: PhysicalAddress,
-            cursor: *AllocationCursor,
-        ) ?FrameRun {
-            const shared_hint = self.search_frame_hint;
-            self.search_frame_hint = cursor.next_frame;
-            const run = self.allocateBetween(count, inclusive_start, exclusive_end);
-            cursor.next_frame = self.search_frame_hint;
-            self.search_frame_hint = shared_hint;
-            return run;
-        }
-
         pub fn allocateAlignedBetween(
             self: *Self,
             count: u32,
@@ -370,22 +342,6 @@ fn FixedWithReservationCapacity(
             self.cacheKnownUnreservedRange(start, start + count);
             self.search_frame_hint = if (start + count == frame_count) 0 else start + count;
             return .{ .base = @as(PhysicalAddress, start) * page_size, .count = count };
-        }
-
-        pub fn allocateAlignedBetweenWithCursor(
-            self: *Self,
-            count: u32,
-            alignment_frames: u32,
-            inclusive_start: PhysicalAddress,
-            exclusive_end: PhysicalAddress,
-            cursor: *AllocationCursor,
-        ) ?FrameRun {
-            const shared_hint = self.search_frame_hint;
-            self.search_frame_hint = cursor.next_frame;
-            const run = self.allocateAlignedBetween(count, alignment_frames, inclusive_start, exclusive_end);
-            cursor.next_frame = self.search_frame_hint;
-            self.search_frame_hint = shared_hint;
-            return run;
         }
 
         pub fn release(self: *Self, run: FrameRun) Error!void {
@@ -973,7 +929,7 @@ test "availability indexes respect partial words at every level" {
     }
 }
 
-test "sparse searches preserve physical bounds and independent cursor wraparound" {
+test "sparse searches preserve physical bounds and hint wraparound" {
     const frames = 262_144 + 131;
     const Allocator = Fixed(frames * 4096, 4096);
     var storage: Allocator.Storage = undefined;
@@ -982,15 +938,15 @@ test "sparse searches preserve physical bounds and independent cursor wraparound
     for ([_]u32{ 63, 4096, 262_144, frames - 1 }) |frame| {
         try allocator.makeAvailable(.{ .base = @as(PhysicalAddress, frame) * 4096, .count = 1 });
     }
-    var cursor = AllocationCursor{ .next_frame = frames - 1 };
-    try std.testing.expect(allocator.allocateBetweenWithCursor(1, 4097 * 4096, 262_144 * 4096, &cursor) == null);
-    try std.testing.expect(allocator.allocateBetweenWithCursor(1, 64 * 4096, 4096 * 4096, &cursor) == null);
-    cursor.next_frame = 262_143;
-    try std.testing.expectEqual(@as(PhysicalAddress, 262_144 * 4096), allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor).?.base);
-    try std.testing.expectEqual(@as(PhysicalAddress, 63 * 4096), allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor).?.base);
-    try std.testing.expectEqual(@as(PhysicalAddress, 4096 * 4096), allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor).?.base);
-    try std.testing.expect(allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor) == null);
-    try std.testing.expectEqual(@as(u32, 0), allocator.search_frame_hint);
+    allocator.search_frame_hint = frames - 1;
+    try std.testing.expect(allocator.allocateBetween(1, 4097 * 4096, 262_144 * 4096) == null);
+    try std.testing.expect(allocator.allocateBetween(1, 64 * 4096, 4096 * 4096) == null);
+    try std.testing.expectEqual(@as(u32, frames - 1), allocator.search_frame_hint);
+    allocator.search_frame_hint = 262_143;
+    try std.testing.expectEqual(@as(PhysicalAddress, 262_144 * 4096), allocator.allocateBelow(1, 262_145 * 4096).?.base);
+    try std.testing.expectEqual(@as(PhysicalAddress, 63 * 4096), allocator.allocateBelow(1, 262_145 * 4096).?.base);
+    try std.testing.expectEqual(@as(PhysicalAddress, 4096 * 4096), allocator.allocateBelow(1, 262_145 * 4096).?.base);
+    try std.testing.expect(allocator.allocateBelow(1, 262_145 * 4096) == null);
     try std.testing.expectEqual(@as(PhysicalAddress, (frames - 1) * 4096), allocator.allocate(1).?.base);
 }
 
@@ -1052,11 +1008,11 @@ test "indexed frame allocation matches a linear ownership model under churn" {
         const count = random.intRangeAtMost(u32, 1, @min(80, upper - lower));
         if (iteration % 3 != 0) {
             const hint = random.uintLessThan(u32, frames);
-            var cursor = AllocationCursor{ .next_frame = hint };
+            allocator.search_frame_hint = hint;
             const start = if (hint >= lower and hint < upper) hint else lower;
             const expected = Reference.find(&states, start, upper, count) orelse
                 Reference.find(&states, lower, upper, count);
-            const actual = allocator.allocateBetweenWithCursor(count, @as(PhysicalAddress, lower) * 4096, @as(PhysicalAddress, upper) * 4096, &cursor);
+            const actual = allocator.allocateBetween(count, @as(PhysicalAddress, lower) * 4096, @as(PhysicalAddress, upper) * 4096);
             if (expected) |frame| {
                 try std.testing.expectEqual(FrameRun{ .base = @as(PhysicalAddress, frame) * 4096, .count = count }, actual.?);
                 @memset(states[frame..][0..count], .allocated);
@@ -1256,35 +1212,6 @@ test "range allocation honors both physical boundaries" {
     try std.testing.expectEqual(@as(PhysicalAddress, 0), allocator.allocateBelow(1, 8 * page_size).?.base);
 }
 
-test "bounded allocation cursors retain independent range progress" {
-    const page_size: u32 = 4096;
-    const Allocator = Fixed(16 * page_size, page_size);
-    var storage: Allocator.Storage = undefined;
-    var allocator = Allocator.init(&storage);
-    var low_cursor = AllocationCursor{};
-    var high_cursor = AllocationCursor{ .next_frame = 8 };
-
-    const first_high = allocator.allocateBetweenWithCursor(
-        1,
-        8 * page_size,
-        16 * page_size,
-        &high_cursor,
-    ).?;
-    const first_low = allocator.allocateBelowWithCursor(1, 8 * page_size, &low_cursor).?;
-    const second_high = allocator.allocateBetweenWithCursor(
-        1,
-        8 * page_size,
-        16 * page_size,
-        &high_cursor,
-    ).?;
-
-    try std.testing.expectEqual(@as(PhysicalAddress, 8 * page_size), first_high.base);
-    try std.testing.expectEqual(@as(PhysicalAddress, 0), first_low.base);
-    try std.testing.expectEqual(@as(PhysicalAddress, 9 * page_size), second_high.base);
-    try std.testing.expectEqual(@as(u32, 1), low_cursor.next_frame);
-    try std.testing.expectEqual(@as(u32, 10), high_cursor.next_frame);
-}
-
 test "single-frame allocation wraps from a non-word-aligned hint" {
     const page_size: u32 = 4096;
     const Allocator = Fixed(70 * page_size, page_size);
@@ -1376,17 +1303,15 @@ test "aligned contiguous allocation skips fragmented candidates and a nonaligned
     try std.testing.expectEqual(run, allocator.allocateAlignedBetween(512, 512, 0, 4096 * page_size).?);
 }
 
-test "aligned contiguous allocation wraps independent cursors and preserves physical limits" {
+test "aligned contiguous allocation wraps its hint and preserves physical limits" {
     const page_size: u32 = 4096;
     const Allocator = Fixed(64 * page_size, page_size);
     var storage: Allocator.Storage = undefined;
     var allocator = Allocator.init(&storage);
-    allocator.search_frame_hint = 48;
-    var cursor = AllocationCursor{ .next_frame = 27 };
-    const run = allocator.allocateAlignedBetweenWithCursor(8, 8, 3 * page_size + 1, 35 * page_size - 1, &cursor).?;
+    allocator.search_frame_hint = 27;
+    const run = allocator.allocateAlignedBetween(8, 8, 3 * page_size + 1, 35 * page_size - 1).?;
     try std.testing.expectEqual(@as(u64, 8 * page_size), run.base);
-    try std.testing.expectEqual(@as(u32, 16), cursor.next_frame);
-    try std.testing.expectEqual(@as(u32, 48), allocator.search_frame_hint);
+    try std.testing.expectEqual(@as(u32, 16), allocator.search_frame_hint);
 
     const before = allocator.stats();
     const hint = allocator.search_frame_hint;
@@ -1538,13 +1463,12 @@ test "wrapped bounded allocations match exhaustive first-fit results" {
                                 Reference.find(unavailable, lower, upper, count, alignment);
                             var storage: Allocator.Storage = undefined;
                             var allocator = baseline.cloneInto(&storage);
-                            var cursor = AllocationCursor{ .next_frame = hint };
-                            const actual = allocator.allocateAlignedBetweenWithCursor(
+                            allocator.search_frame_hint = hint;
+                            const actual = allocator.allocateAlignedBetween(
                                 count,
                                 alignment,
                                 @as(PhysicalAddress, lower) * page_size,
                                 @as(PhysicalAddress, upper) * page_size,
-                                &cursor,
                             );
                             try std.testing.expectEqual(expected, if (actual) |run|
                                 @as(?u32, @intCast(run.base / page_size))
@@ -1552,7 +1476,10 @@ test "wrapped bounded allocations match exhaustive first-fit results" {
                                 null);
                             try std.testing.expectEqual(if (expected != null) count else @as(u32, 0), allocator.stats().allocated);
                             try std.testing.expectEqual(baseline.stats().reserved, allocator.stats().reserved);
-                            try std.testing.expectEqual(baseline.search_frame_hint, allocator.search_frame_hint);
+                            if (expected) |frame| {
+                                const next = frame + count;
+                                try std.testing.expectEqual(if (next == frame_total) 0 else next, allocator.search_frame_hint);
+                            } else try std.testing.expectEqual(hint, allocator.search_frame_hint);
                         }
                     }
                 }
@@ -1561,19 +1488,19 @@ test "wrapped bounded allocations match exhaustive first-fit results" {
     }
 }
 
-test "wrapped allocations retain runs crossing the cursor and bitmap boundary" {
+test "wrapped allocations retain runs crossing the hint and bitmap boundary" {
     const page_size: u32 = 4096;
     const Allocator = Fixed(128 * page_size, page_size);
     var storage: Allocator.Storage = undefined;
     var allocator = Allocator.init(&storage);
     try allocator.reserve(.{ .base = 0, .count = 128 });
     try allocator.makeAvailable(.{ .base = 62 * page_size, .count = 6 });
-    var cursor = AllocationCursor{ .next_frame = 65 };
-    const aligned = allocator.allocateAlignedBetweenWithCursor(4, 64, 0, 128 * page_size, &cursor).?;
+    allocator.search_frame_hint = 65;
+    const aligned = allocator.allocateAlignedBetween(4, 64, 0, 128 * page_size).?;
     try std.testing.expectEqual(FrameRun{ .base = 64 * page_size, .count = 4 }, aligned);
     try allocator.release(aligned);
-    cursor.next_frame = 64;
-    const run = allocator.allocateBetweenWithCursor(6, 0, 128 * page_size, &cursor).?;
+    allocator.search_frame_hint = 64;
+    const run = allocator.allocateBetween(6, 0, 128 * page_size).?;
     try std.testing.expectEqual(FrameRun{ .base = 62 * page_size, .count = 6 }, run);
 }
 

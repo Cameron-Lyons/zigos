@@ -2,14 +2,8 @@
 //! and USB legacy support) and the firmware-to-OS ownership handoff.
 
 const std = @import("std");
-const endian = @import("../../utils/endian.zig");
 const spin = @import("../../utils/spin.zig");
 const xhci = @import("../xhci.zig");
-
-const readU16Le = endian.readU16Le;
-const readU32Le = endian.readU32Le;
-const writeU16Le = endian.writeU16Le;
-const writeU32Le = endian.writeU32Le;
 
 const CAPABILITY_REGISTERS_BYTES = xhci.CAPABILITY_REGISTERS_BYTES;
 const CapabilityRegisters = xhci.CapabilityRegisters;
@@ -191,10 +185,10 @@ pub fn parseCapabilityRegistersInto(out: *CapabilityRegisters, mmio: []const u8)
         return error.InvalidCapabilityLength;
     }
 
-    const interface_version = readU16Le(mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES]);
+    const interface_version = std.mem.readInt(u16, mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES], .little);
     if (interface_version < MIN_SUPPORTED_INTERFACE_VERSION) return error.UnsupportedVersion;
 
-    const hcsparams1 = readU32Le(mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES]);
+    const hcsparams1 = std.mem.readInt(u32, mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES], .little);
     const max_device_slots: u8 = @truncate(hcsparams1);
     const max_interrupters: u16 = @intCast(
         (hcsparams1 >> HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) & HCSPARAMS1_MAX_INTERRUPTERS_MASK,
@@ -204,7 +198,7 @@ pub fn parseCapabilityRegistersInto(out: *CapabilityRegisters, mmio: []const u8)
     if (max_ports == 0) return error.MissingPorts;
     if (max_interrupters == 0) return error.MissingInterrupters;
 
-    const hcsparams2 = readU32Le(mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES]);
+    const hcsparams2 = std.mem.readInt(u32, mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES], .little);
     const scratchpad_hi: u16 = @intCast(
         (hcsparams2 >> HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_HI_SHIFT) &
             HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK,
@@ -217,7 +211,7 @@ pub fn parseCapabilityRegistersInto(out: *CapabilityRegisters, mmio: []const u8)
     const scratchpad_restore = (hcsparams2 & HCSPARAMS2_SCRATCHPAD_RESTORE) != 0;
     if (max_scratchpad_buffers == 0 and scratchpad_restore) return error.InvalidScratchpadRestore;
 
-    const hccparams1 = readU32Le(mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES]);
+    const hccparams1 = std.mem.readInt(u32, mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES], .little);
     const supports_64_bit_addressing = (hccparams1 & HCCPARAMS1_64_BIT_ADDRESSING) != 0;
     if (!supports_64_bit_addressing) return error.Unsupported32BitAddressing;
     const context_size: ContextSize = if ((hccparams1 & HCCPARAMS1_CONTEXT_SIZE) != 0)
@@ -227,10 +221,10 @@ pub fn parseCapabilityRegistersInto(out: *CapabilityRegisters, mmio: []const u8)
     const extended_capability_offset =
         (hccparams1 >> HCCPARAMS1_EXTENDED_CAPABILITY_POINTER_SHIFT) << EXTENDED_CAPABILITY_DWORD_SHIFT;
 
-    const doorbell_offset = readU32Le(mmio[DOORBELL_OFFSET_OFFSET .. DOORBELL_OFFSET_OFFSET + U32_REGISTER_BYTES]);
+    const doorbell_offset = std.mem.readInt(u32, mmio[DOORBELL_OFFSET_OFFSET .. DOORBELL_OFFSET_OFFSET + U32_REGISTER_BYTES], .little);
     if (doorbell_offset == 0) return error.MissingDoorbellRegisters;
     if ((doorbell_offset & DOORBELL_OFFSET_ALIGNMENT_MASK) != 0) return error.InvalidDoorbellOffset;
-    const runtime_register_offset = readU32Le(mmio[RUNTIME_REGISTER_OFFSET_OFFSET .. RUNTIME_REGISTER_OFFSET_OFFSET + U32_REGISTER_BYTES]);
+    const runtime_register_offset = std.mem.readInt(u32, mmio[RUNTIME_REGISTER_OFFSET_OFFSET .. RUNTIME_REGISTER_OFFSET_OFFSET + U32_REGISTER_BYTES], .little);
     if (runtime_register_offset == 0) return error.MissingRuntimeRegisters;
     if ((runtime_register_offset & RUNTIME_REGISTER_OFFSET_ALIGNMENT_MASK) != 0) {
         return error.InvalidRuntimeRegisterOffset;
@@ -502,25 +496,16 @@ fn osOwned(header: u32) bool {
 fn validCapabilityRegisters() [CAPABILITY_REGISTERS_BYTES]u8 {
     var mmio = @as([CAPABILITY_REGISTERS_BYTES]u8, @splat(0));
     mmio[CAPABILITY_LENGTH_OFFSET] = TEST_CAPABILITY_LENGTH;
-    writeU16Le(mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES], TEST_INTERFACE_VERSION);
-    writeU32Le(
-        mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES],
-        @as(u32, TEST_MAX_DEVICE_SLOTS) |
-            (@as(u32, TEST_MAX_INTERRUPTERS) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) |
-            (@as(u32, TEST_MAX_PORTS) << HCSPARAMS1_MAX_PORTS_SHIFT),
-    );
-    writeU32Le(
-        mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES],
-        (@as(u32, TEST_MAX_SCRATCHPAD_BUFFERS >> 5) << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_HI_SHIFT) |
-            ((@as(u32, TEST_MAX_SCRATCHPAD_BUFFERS) & HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK) << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_LO_SHIFT) |
-            HCSPARAMS2_SCRATCHPAD_RESTORE,
-    );
-    writeU32Le(
-        mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES],
-        HCCPARAMS1_64_BIT_ADDRESSING | HCCPARAMS1_CONTEXT_SIZE,
-    );
-    writeU32Le(mmio[DOORBELL_OFFSET_OFFSET .. DOORBELL_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_DOORBELL_OFFSET);
-    writeU32Le(mmio[RUNTIME_REGISTER_OFFSET_OFFSET .. RUNTIME_REGISTER_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_RUNTIME_REGISTER_OFFSET);
+    std.mem.writeInt(u16, mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES], TEST_INTERFACE_VERSION, .little);
+    std.mem.writeInt(u32, mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES], @as(u32, TEST_MAX_DEVICE_SLOTS) |
+        (@as(u32, TEST_MAX_INTERRUPTERS) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) |
+        (@as(u32, TEST_MAX_PORTS) << HCSPARAMS1_MAX_PORTS_SHIFT), .little);
+    std.mem.writeInt(u32, mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES], (@as(u32, TEST_MAX_SCRATCHPAD_BUFFERS >> 5) << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_HI_SHIFT) |
+        ((@as(u32, TEST_MAX_SCRATCHPAD_BUFFERS) & HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK) << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_LO_SHIFT) |
+        HCSPARAMS2_SCRATCHPAD_RESTORE, .little);
+    std.mem.writeInt(u32, mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES], HCCPARAMS1_64_BIT_ADDRESSING | HCCPARAMS1_CONTEXT_SIZE, .little);
+    std.mem.writeInt(u32, mmio[DOORBELL_OFFSET_OFFSET .. DOORBELL_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_DOORBELL_OFFSET, .little);
+    std.mem.writeInt(u32, mmio[RUNTIME_REGISTER_OFFSET_OFFSET .. RUNTIME_REGISTER_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_RUNTIME_REGISTER_OFFSET, .little);
     return mmio;
 }
 
@@ -531,7 +516,7 @@ test "xHCI in-place capability parsing preserves output until full admission" {
     var mmio = validCapabilityRegisters();
     try std.testing.expectError(error.TooSmall, parseCapabilityRegistersInto(&out, mmio[0..1]));
     try std.testing.expectEqualDeep(original, out);
-    writeU32Le(mmio[RUNTIME_REGISTER_OFFSET_OFFSET..][0..4], TEST_RUNTIME_REGISTER_OFFSET | 1);
+    std.mem.writeInt(u32, mmio[RUNTIME_REGISTER_OFFSET_OFFSET..][0..4], TEST_RUNTIME_REGISTER_OFFSET | 1, .little);
     try std.testing.expectError(error.InvalidRuntimeRegisterOffset, parseCapabilityRegistersInto(&out, &mmio));
     try std.testing.expectEqualDeep(original, out);
     mmio = validCapabilityRegisters();
@@ -559,22 +544,13 @@ test "xHCI capability parser extracts controller limits" {
 
 test "xHCI capability parser isolates context scratchpad and interrupter fields" {
     var mmio = validCapabilityRegisters();
-    writeU32Le(
-        mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES],
-        @as(u32, TEST_MAX_DEVICE_SLOTS) |
-            (@as(u32, TEST_MAX_INTERRUPTERS) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) |
-            (@as(u32, 0x1F) << 19) |
-            (@as(u32, TEST_MAX_PORTS) << HCSPARAMS1_MAX_PORTS_SHIFT),
-    );
-    writeU32Le(
-        mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES],
-        (HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_HI_SHIFT) |
-            (HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_LO_SHIFT),
-    );
-    writeU32Le(
-        mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES],
-        HCCPARAMS1_64_BIT_ADDRESSING,
-    );
+    std.mem.writeInt(u32, mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES], @as(u32, TEST_MAX_DEVICE_SLOTS) |
+        (@as(u32, TEST_MAX_INTERRUPTERS) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) |
+        (@as(u32, 0x1F) << 19) |
+        (@as(u32, TEST_MAX_PORTS) << HCSPARAMS1_MAX_PORTS_SHIFT), .little);
+    std.mem.writeInt(u32, mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES], (HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_HI_SHIFT) |
+        (HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_PART_MASK << HCSPARAMS2_MAX_SCRATCHPAD_BUFFERS_LO_SHIFT), .little);
+    std.mem.writeInt(u32, mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES], HCCPARAMS1_64_BIT_ADDRESSING, .little);
 
     const caps = try testing.parseCapabilityRegisters(mmio[0..]);
     try std.testing.expectEqual(TEST_MAX_INTERRUPTERS, caps.max_interrupters);
@@ -588,7 +564,7 @@ const TestExtendedCapabilityReader = struct {
 
     fn readDword(self: @This(), offset: u32) u32 {
         const start: usize = @intCast(offset);
-        return readU32Le(self.bytes[start .. start + @sizeOf(u32)]);
+        return std.mem.readInt(u32, self.bytes[start .. start + @sizeOf(u32)], .little);
     }
 };
 
@@ -600,12 +576,9 @@ const EndlessExtendedCapabilityReader = struct {
 
 test "xHCI capability parser extracts the extended capability pointer" {
     var mmio = validCapabilityRegisters();
-    writeU32Le(
-        mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES],
-        HCCPARAMS1_64_BIT_ADDRESSING |
-            HCCPARAMS1_CONTEXT_SIZE |
-            (@as(u32, 0x2000) << HCCPARAMS1_EXTENDED_CAPABILITY_POINTER_SHIFT),
-    );
+    std.mem.writeInt(u32, mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES], HCCPARAMS1_64_BIT_ADDRESSING |
+        HCCPARAMS1_CONTEXT_SIZE |
+        (@as(u32, 0x2000) << HCCPARAMS1_EXTENDED_CAPABILITY_POINTER_SHIFT), .little);
     const caps = try testing.parseCapabilityRegisters(mmio[0..]);
     try std.testing.expectEqual(@as(u32, 0x8000), caps.extended_capability_offset);
 }
@@ -615,35 +588,29 @@ test "xHCI legacy ownership accepts absent and firmware-released capabilities" {
     var reader = TestExtendedCapabilityReader{ .bytes = &registers };
     try std.testing.expectEqual(LegacyOwnership.not_present, try testing.inspectLegacyOwnership(0, reader));
 
-    writeU32Le(registers[0x40..0x44], @as(u32, 0x7F) | (@as(u32, 4) << EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT));
-    writeU32Le(registers[0x50..0x54], USB_LEGACY_SUPPORT_CAPABILITY_ID);
+    std.mem.writeInt(u32, registers[0x40..0x44], @as(u32, 0x7F) | (@as(u32, 4) << EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT), .little);
+    std.mem.writeInt(u32, registers[0x50..0x54], USB_LEGACY_SUPPORT_CAPABILITY_ID, .little);
     reader = .{ .bytes = &registers };
     try std.testing.expectEqual(LegacyOwnership.firmware_released, try testing.inspectLegacyOwnership(0x40, reader));
 
-    writeU32Le(registers[0x50..0x54], USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_OS_OWNED_SEMAPHORE);
+    std.mem.writeInt(u32, registers[0x50..0x54], USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_OS_OWNED_SEMAPHORE, .little);
     reader = .{ .bytes = &registers };
     try std.testing.expectEqual(LegacyOwnership.os_owned, try testing.inspectLegacyOwnership(0x40, reader));
 }
 
 test "xHCI supported protocols accept sparse nonoverlapping USB port ranges" {
     var registers = @as([0x100]u8, @splat(0));
-    writeU32Le(
-        registers[0x40..0x44],
-        SUPPORTED_PROTOCOL_CAPABILITY_ID |
-            (@as(u32, 4) << EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT) |
-            (@as(u32, 2) << SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT),
-    );
-    writeU32Le(registers[0x44..0x48], SUPPORTED_PROTOCOL_USB_NAME_STRING);
-    writeU32Le(registers[0x48..0x4C], 1 | (@as(u32, 6) << 8));
-    writeU32Le(registers[0x4C..0x50], 0);
-    writeU32Le(
-        registers[0x50..0x54],
-        SUPPORTED_PROTOCOL_CAPABILITY_ID |
-            (@as(u32, 3) << SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT),
-    );
-    writeU32Le(registers[0x54..0x58], SUPPORTED_PROTOCOL_USB_NAME_STRING);
-    writeU32Le(registers[0x58..0x5C], 7 | (@as(u32, 6) << 8));
-    writeU32Le(registers[0x5C..0x60], 1);
+    std.mem.writeInt(u32, registers[0x40..0x44], SUPPORTED_PROTOCOL_CAPABILITY_ID |
+        (@as(u32, 4) << EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT) |
+        (@as(u32, 2) << SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT), .little);
+    std.mem.writeInt(u32, registers[0x44..0x48], SUPPORTED_PROTOCOL_USB_NAME_STRING, .little);
+    std.mem.writeInt(u32, registers[0x48..0x4C], 1 | (@as(u32, 6) << 8), .little);
+    std.mem.writeInt(u32, registers[0x4C..0x50], 0, .little);
+    std.mem.writeInt(u32, registers[0x50..0x54], SUPPORTED_PROTOCOL_CAPABILITY_ID |
+        (@as(u32, 3) << SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT), .little);
+    std.mem.writeInt(u32, registers[0x54..0x58], SUPPORTED_PROTOCOL_USB_NAME_STRING, .little);
+    std.mem.writeInt(u32, registers[0x58..0x5C], 7 | (@as(u32, 6) << 8), .little);
+    std.mem.writeInt(u32, registers[0x5C..0x60], 1, .little);
 
     var capabilities = defaultCapabilityRegisters();
     capabilities.max_ports = 12;
@@ -670,7 +637,7 @@ test "xHCI supported protocols accept sparse nonoverlapping USB port ranges" {
     try full_range.append(1, std.math.maxInt(u8), .{ .kind = .usb3, .slot_type = 1 });
     try std.testing.expectEqual(ProtocolKind.usb3, full_range.forPort(std.math.maxInt(u8)).?.kind);
 
-    writeU32Le(registers[0x58..0x5C], 6 | (@as(u32, 6) << 8));
+    std.mem.writeInt(u32, registers[0x58..0x5C], 6 | (@as(u32, 6) << 8), .little);
     try std.testing.expectError(
         error.OverlappingSupportedProtocolPorts,
         testing.parseSupportedProtocols(capabilities, 0x40, reader),
@@ -684,7 +651,7 @@ test "xHCI supported protocols accept sparse nonoverlapping USB port ranges" {
     try std.testing.expect(in_place.forPort(1) == null);
     try std.testing.expect(in_place.forPort(6) == null);
     for (std.mem.asBytes(&in_place)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
-    writeU32Le(registers[0x58..0x5C], 8 | (@as(u32, 5) << 8));
+    std.mem.writeInt(u32, registers[0x58..0x5C], 8 | (@as(u32, 5) << 8), .little);
     const sparse = try testing.parseSupportedProtocols(capabilities, 0x40, reader);
     try std.testing.expect(sparse.forPort(7) == null);
     try std.testing.expectEqual(ProtocolKind.usb3, sparse.forPort(8).?.kind);
@@ -693,19 +660,16 @@ test "xHCI supported protocols accept sparse nonoverlapping USB port ranges" {
     try std.testing.expectError(error.MissingSupportedProtocols, parseSupportedProtocolsInto(&in_place, capabilities, 0, reader));
     try std.testing.expect(in_place.forPort(8) == null);
 
-    writeU32Le(registers[0x44..0x48], 0);
+    std.mem.writeInt(u32, registers[0x44..0x48], 0, .little);
     try std.testing.expectError(
         error.InvalidSupportedProtocol,
         testing.parseSupportedProtocols(capabilities, 0x40, reader),
     );
-    writeU32Le(registers[0x44..0x48], SUPPORTED_PROTOCOL_USB_NAME_STRING);
-    writeU32Le(
-        registers[0x40..0x44],
-        SUPPORTED_PROTOCOL_CAPABILITY_ID |
-            (@as(u32, 4) << EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT) |
-            (@as(u32, 1) << SUPPORTED_PROTOCOL_MINOR_REVISION_SHIFT) |
-            (@as(u32, 2) << SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT),
-    );
+    std.mem.writeInt(u32, registers[0x44..0x48], SUPPORTED_PROTOCOL_USB_NAME_STRING, .little);
+    std.mem.writeInt(u32, registers[0x40..0x44], SUPPORTED_PROTOCOL_CAPABILITY_ID |
+        (@as(u32, 4) << EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT) |
+        (@as(u32, 1) << SUPPORTED_PROTOCOL_MINOR_REVISION_SHIFT) |
+        (@as(u32, 2) << SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT), .little);
     try std.testing.expectError(
         error.InvalidSupportedProtocol,
         testing.parseSupportedProtocols(capabilities, 0x40, reader),
@@ -714,25 +678,13 @@ test "xHCI supported protocols accept sparse nonoverlapping USB port ranges" {
 
 test "xHCI supported protocol PSI definitions validate custom USB2 speed ids" {
     var registers = @as([0x80]u8, @splat(0));
-    writeU32Le(
-        registers[0x40..0x44],
-        SUPPORTED_PROTOCOL_CAPABILITY_ID |
-            (@as(u32, 2) << SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT),
-    );
-    writeU32Le(registers[0x44..0x48], SUPPORTED_PROTOCOL_USB_NAME_STRING);
-    writeU32Le(
-        registers[0x48..0x4C],
-        1 | (@as(u32, 1) << 8) | (@as(u32, 2) << 28),
-    );
-    writeU32Le(registers[0x4C..0x50], 5);
-    writeU32Le(
-        registers[0x50..0x54],
-        9 | (@as(u32, 2) << 4) | (@as(u32, 12) << 16),
-    );
-    writeU32Le(
-        registers[0x54..0x58],
-        10 | (@as(u32, 2) << 4) | (@as(u32, 480) << 16),
-    );
+    std.mem.writeInt(u32, registers[0x40..0x44], SUPPORTED_PROTOCOL_CAPABILITY_ID |
+        (@as(u32, 2) << SUPPORTED_PROTOCOL_MAJOR_REVISION_SHIFT), .little);
+    std.mem.writeInt(u32, registers[0x44..0x48], SUPPORTED_PROTOCOL_USB_NAME_STRING, .little);
+    std.mem.writeInt(u32, registers[0x48..0x4C], 1 | (@as(u32, 1) << 8) | (@as(u32, 2) << 28), .little);
+    std.mem.writeInt(u32, registers[0x4C..0x50], 5, .little);
+    std.mem.writeInt(u32, registers[0x50..0x54], 9 | (@as(u32, 2) << 4) | (@as(u32, 12) << 16), .little);
+    std.mem.writeInt(u32, registers[0x54..0x58], 10 | (@as(u32, 2) << 4) | (@as(u32, 480) << 16), .little);
     var capabilities = defaultCapabilityRegisters();
     capabilities.max_ports = 1;
     const reader = TestExtendedCapabilityReader{ .bytes = &registers };
@@ -744,10 +696,7 @@ test "xHCI supported protocol PSI definitions validate custom USB2 speed ids" {
     try std.testing.expectEqual(@as(u16, 1) << 9, protocol.full_speed_ids);
     try std.testing.expectEqual(@as(u16, 1) << 10, protocol.high_speed_ids);
 
-    writeU32Le(
-        registers[0x54..0x58],
-        9 | (@as(u32, 2) << 4) | (@as(u32, 480) << 16),
-    );
+    std.mem.writeInt(u32, registers[0x54..0x58], 9 | (@as(u32, 2) << 4) | (@as(u32, 480) << 16), .little);
     try std.testing.expectError(
         error.InvalidSupportedProtocol,
         testing.parseSupportedProtocols(capabilities, 0x40, reader),
@@ -756,10 +705,7 @@ test "xHCI supported protocol PSI definitions validate custom USB2 speed ids" {
 
 test "xHCI legacy ownership rejects firmware-owned and malformed chains" {
     var registers = @as([0x80]u8, @splat(0));
-    writeU32Le(
-        registers[0x40..0x44],
-        USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_BIOS_OWNED_SEMAPHORE,
-    );
+    std.mem.writeInt(u32, registers[0x40..0x44], USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_BIOS_OWNED_SEMAPHORE, .little);
     const reader = TestExtendedCapabilityReader{ .bytes = &registers };
     try std.testing.expectError(error.FirmwareOwnsController, testing.inspectLegacyOwnership(0x40, reader));
 
@@ -875,48 +821,36 @@ test "xHCI capability parser rejects unsupported controllers" {
     try std.testing.expectError(error.InvalidCapabilityLength, testing.parseCapabilityRegisters(mmio[0..]));
 
     mmio = validCapabilityRegisters();
-    writeU16Le(mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES], TEST_UNSUPPORTED_INTERFACE_VERSION);
+    std.mem.writeInt(u16, mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES], TEST_UNSUPPORTED_INTERFACE_VERSION, .little);
     try std.testing.expectError(error.UnsupportedVersion, testing.parseCapabilityRegisters(mmio[0..]));
 
     mmio = validCapabilityRegisters();
-    writeU16Le(mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES], 0x0100);
+    std.mem.writeInt(u16, mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES], 0x0100, .little);
     try std.testing.expectError(error.UnsupportedVersion, testing.parseCapabilityRegisters(mmio[0..]));
 
     mmio = validCapabilityRegisters();
-    writeU32Le(
-        mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES],
-        HCCPARAMS1_CONTEXT_SIZE,
-    );
+    std.mem.writeInt(u32, mmio[HCCPARAMS1_OFFSET .. HCCPARAMS1_OFFSET + U32_REGISTER_BYTES], HCCPARAMS1_CONTEXT_SIZE, .little);
     try std.testing.expectError(error.Unsupported32BitAddressing, testing.parseCapabilityRegisters(mmio[0..]));
 
     mmio = validCapabilityRegisters();
-    writeU32Le(
-        mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES],
-        HCSPARAMS2_SCRATCHPAD_RESTORE,
-    );
+    std.mem.writeInt(u32, mmio[HCSPARAMS2_OFFSET .. HCSPARAMS2_OFFSET + U32_REGISTER_BYTES], HCSPARAMS2_SCRATCHPAD_RESTORE, .little);
     try std.testing.expectError(error.InvalidScratchpadRestore, testing.parseCapabilityRegisters(mmio[0..]));
 
     mmio = validCapabilityRegisters();
-    writeU32Le(
-        mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES],
-        (@as(u32, TEST_MAX_INTERRUPTERS) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) |
-            (@as(u32, TEST_MAX_PORTS) << HCSPARAMS1_MAX_PORTS_SHIFT),
-    );
+    std.mem.writeInt(u32, mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES], (@as(u32, TEST_MAX_INTERRUPTERS) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT) |
+        (@as(u32, TEST_MAX_PORTS) << HCSPARAMS1_MAX_PORTS_SHIFT), .little);
     try std.testing.expectError(error.MissingDeviceSlots, testing.parseCapabilityRegisters(mmio[0..]));
 
     mmio = validCapabilityRegisters();
-    writeU32Le(
-        mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES],
-        @as(u32, 32) | (@as(u32, 8) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT),
-    );
+    std.mem.writeInt(u32, mmio[HCSPARAMS1_OFFSET .. HCSPARAMS1_OFFSET + U32_REGISTER_BYTES], @as(u32, 32) | (@as(u32, 8) << HCSPARAMS1_MAX_INTERRUPTERS_SHIFT), .little);
     try std.testing.expectError(error.MissingPorts, testing.parseCapabilityRegisters(mmio[0..]));
 
     mmio = validCapabilityRegisters();
-    writeU32Le(mmio[DOORBELL_OFFSET_OFFSET .. DOORBELL_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_DOORBELL_OFFSET + 1);
+    std.mem.writeInt(u32, mmio[DOORBELL_OFFSET_OFFSET .. DOORBELL_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_DOORBELL_OFFSET + 1, .little);
     try std.testing.expectError(error.InvalidDoorbellOffset, testing.parseCapabilityRegisters(mmio[0..]));
 
     mmio = validCapabilityRegisters();
-    writeU32Le(mmio[RUNTIME_REGISTER_OFFSET_OFFSET .. RUNTIME_REGISTER_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_RUNTIME_REGISTER_OFFSET + 4);
+    std.mem.writeInt(u32, mmio[RUNTIME_REGISTER_OFFSET_OFFSET .. RUNTIME_REGISTER_OFFSET_OFFSET + U32_REGISTER_BYTES], TEST_RUNTIME_REGISTER_OFFSET + 4, .little);
     try std.testing.expectError(error.InvalidRuntimeRegisterOffset, testing.parseCapabilityRegisters(mmio[0..]));
 }
 

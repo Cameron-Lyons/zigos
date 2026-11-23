@@ -35,7 +35,7 @@ pub const PROBE_FACTS_SIZE_CEILING_BYTES: usize = 656;
 
 pub const ProbeFacts = struct {
     real_target_sku: bool = false,
-    multiboot_handoff: bool = false,
+    boot_handoff: bool = false,
     memory_map: bool = false,
     memory_capacity_bytes: usize = 0,
     acpi_xsdt: bool = false,
@@ -98,7 +98,7 @@ pub const ProbeFacts = struct {
     attestation_verifier_metadata_digest_bound: bool = false,
 
     pub fn uefiBootReady(self: *const ProbeFacts) bool {
-        return self.real_target_sku and self.multiboot_handoff and self.memory_map and self.framebuffer_gop;
+        return self.real_target_sku and self.boot_handoff and self.memory_map and self.framebuffer_gop;
     }
 
     pub fn acpiTablesReady(self: *const ProbeFacts) bool {
@@ -573,7 +573,7 @@ pub fn allSubsystemMarkersReady(probe: *const ProbeFacts) bool {
 pub fn captureEarlyBootEvidence() void {
     facts.real_target_sku = false;
     if (handoff.capturedInfo()) |info| {
-        facts.multiboot_handoff = true;
+        facts.boot_handoff = true;
         if (handoff.summarizeMemoryMap(info.memoryMap()) catch null) |summary| {
             facts.memory_map = summary.hasUsableMemory();
             if (summary.hasUsableMemory()) {
@@ -849,7 +849,6 @@ inline fn validatedMadtMapping(comptime map_table: fn (u64, usize) ?[]const u8) 
 }
 
 test "retained MADT remaps firmware after scratch reuse and rejects changed backing" {
-    const endian = @import("../utils/endian.zig");
     const checksum = @import("../utils/checksum.zig");
     const Fixture = struct {
         const physical: u64 = 0x200000;
@@ -869,13 +868,13 @@ test "retained MADT remaps firmware after scratch reuse and rejects changed back
     Fixture.backing = @splat(0);
     Fixture.mappings = 0;
     @memcpy(Fixture.backing[0..4], apic.MADT_SIGNATURE);
-    endian.writeU32Le(Fixture.backing[4..8], Fixture.backing.len);
+    std.mem.writeInt(u32, Fixture.backing[4..8], Fixture.backing.len, .little);
     Fixture.backing[8] = 5;
-    endian.writeU32Le(Fixture.backing[36..40], 0xfee00000);
+    std.mem.writeInt(u32, Fixture.backing[36..40], 0xfee00000, .little);
     Fixture.backing[44] = 0;
     Fixture.backing[45] = 8;
     Fixture.backing[47] = 1;
-    endian.writeU32Le(Fixture.backing[48..52], 1);
+    std.mem.writeInt(u32, Fixture.backing[48..52], 1, .little);
     checksum.finishSum8Prefix(&Fixture.backing, 9, Fixture.backing.len);
     madt_table_physical = Fixture.physical;
     facts.acpi_madt = true;
@@ -910,7 +909,7 @@ fn printNewMarkers() void {
 fn runtimeMarkerReady(marker: RuntimeMarker) bool {
     return switch (marker) {
         .evidence_source, .board_sku, .smbios_sku => true,
-        .memory_map => facts.multiboot_handoff and facts.memory_map,
+        .memory_map => facts.boot_handoff and facts.memory_map,
         .acpi_xsdt => facts.acpi_xsdt,
         .acpi_madt => facts.acpi_madt,
         .acpi_fadt => facts.acpi_fadt,
@@ -1005,7 +1004,7 @@ test "hardware proof requires composed NUC subsystem evidence" {
     const target = &hardware_target.first_supported_target;
     const partial = ProbeFacts{
         .real_target_sku = true,
-        .multiboot_handoff = true,
+        .boot_handoff = true,
         .memory_map = true,
         .framebuffer_gop = true,
         .acpi_xsdt = true,
@@ -1037,7 +1036,7 @@ test "hardware proof requires composed NUC subsystem evidence" {
 
     const complete = ProbeFacts{
         .real_target_sku = true,
-        .multiboot_handoff = true,
+        .boot_handoff = true,
         .memory_map = true,
         .framebuffer_gop = true,
         .acpi_xsdt = true,

@@ -84,6 +84,9 @@ comptime {
     if (@as(usize, BAR_MAP_BYTES) > mmio_windows.intel_i225.bytes) {
         @compileError("I225 BAR mapping exceeds its reserved MMIO window");
     }
+    if (@as(u64, DMA_FRAME_COUNT) * PAGE_SIZE > intel_vtd.MAX_DOMAIN_SPAN_BYTES) {
+        @compileError("I225 DMA frames exceed one VT-d domain span");
+    }
     if (i225_irq.MAX_TX_COMPLETIONS_PER_SERVICE != i225_tx.CAPACITY) {
         @compileError("I225 interrupt TX service bound diverged from ring capacity");
     }
@@ -96,7 +99,7 @@ pub const MAX_PAYLOAD_BYTES = i225_frame.MAX_PAYLOAD_BYTES;
 const INTERRUPT_VECTOR = @import("network_hw.zig").INTERRUPT_VECTOR;
 
 const DmaAddress = struct {
-    physical: u32 = 0,
+    physical: u64 = 0,
     alias: usize = 0,
 
     fn offset(self: DmaAddress, byte_offset: u32) DmaAddress {
@@ -217,17 +220,17 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
         return error.RxQueueDisableTimeout;
     }
 
-    const frames_phys = paging.allocIdentityDmaFrames(DMA_FRAME_COUNT) orelse return error.DmaAllocationFailed;
+    const frames_run = paging.allocGeneralFrames(DMA_FRAME_COUNT) orelse return error.DmaAllocationFailed;
     var committed = false;
     errdefer if (!committed) {
         pending.writeReg32(REG_TXDCTL0, 0);
         pending.writeReg32(REG_RXDCTL0, 0);
         pending.writeReg32(REG_RCTL, pending.reg32(REG_RCTL) & ~RCTL_ENABLE);
-        paging.releaseIdentityDmaFrames(frames_phys, DMA_FRAME_COUNT) catch {};
+        paging.releaseGeneralFrames(frames_run) catch {};
     };
     const frames = DmaAddress{
-        .physical = frames_phys,
-        .alias = paging.directMapAddress(frames_phys) orelse return error.DmaAllocationFailed,
+        .physical = frames_run.base,
+        .alias = paging.directMapAddress(frames_run.base) orelse return error.DmaAllocationFailed,
     };
     zeroFrames(frames.alias, DMA_FRAME_COUNT);
     pending.tx_descriptor = frames.frame(TX_DESCRIPTOR_FRAME);
@@ -410,8 +413,8 @@ fn receivedPayload(index: u32, writeback: u64, output: []u8) ?u16 {
 
 fn configureTransmitQueue(pending: *Controller) Error!void {
     pending.writeReg32(REG_TDLEN0, i225_tx.RING_BYTES);
-    pending.writeReg32(REG_TDBAL0, pending.tx_descriptor.physical);
-    pending.writeReg32(REG_TDBAH0, 0);
+    pending.writeReg32(REG_TDBAL0, @truncate(pending.tx_descriptor.physical));
+    pending.writeReg32(REG_TDBAH0, @truncate(pending.tx_descriptor.physical >> 32));
     pending.writeReg32(REG_TDH0, 0);
     pending.writeReg32(REG_TDT0, 0);
 
@@ -552,8 +555,8 @@ fn configureReceiveQueue(pending: *Controller) Error!void {
     }
     publishDescriptor();
 
-    pending.writeReg32(REG_RDBAL0, pending.rx_descriptor.physical);
-    pending.writeReg32(REG_RDBAH0, 0);
+    pending.writeReg32(REG_RDBAL0, @truncate(pending.rx_descriptor.physical));
+    pending.writeReg32(REG_RDBAH0, @truncate(pending.rx_descriptor.physical >> 32));
     pending.writeReg32(REG_RDLEN0, i225_rx.RING_BYTES);
     pending.writeReg32(REG_RDH0, 0);
     pending.writeReg32(REG_RDT0, 0);

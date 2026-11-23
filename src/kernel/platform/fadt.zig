@@ -1,15 +1,8 @@
 const std = @import("std");
 const acpi = @import("acpi.zig");
-const endian = @import("../utils/endian.zig");
 const checksum = @import("../utils/checksum.zig");
 
 const finishChecksum = checksum.finishSum8Prefix;
-const readU16Le = endian.readU16Le;
-const readU32Le = endian.readU32Le;
-const readU64Le = endian.readU64Le;
-const writeU16Le = endian.writeU16Le;
-const writeU32Le = endian.writeU32Le;
-const writeU64Le = endian.writeU64Le;
 
 pub const FADT_SIGNATURE = "FACP";
 pub const SDT_HEADER_LENGTH: usize = acpi.SDT_HEADER_LENGTH;
@@ -76,21 +69,21 @@ pub fn parseFadt(table: []const u8) Error!FixedAcpiDescription {
     const table_length = sdt.length;
     if (table_length < MIN_FADT_PM_LENGTH or table_length > table.len) return error.InvalidLength;
 
-    const pm1a_control_block = readU32Le(table[FADT_PM1A_CONTROL_BLOCK_OFFSET..][0..4]);
-    const pm1b_control_block = readU32Le(table[FADT_PM1B_CONTROL_BLOCK_OFFSET..][0..4]);
+    const pm1a_control_block = std.mem.readInt(u32, table[FADT_PM1A_CONTROL_BLOCK_OFFSET..][0..4], .little);
+    const pm1b_control_block = std.mem.readInt(u32, table[FADT_PM1B_CONTROL_BLOCK_OFFSET..][0..4], .little);
     const pm1_control_length = table[FADT_PM1_CONTROL_LENGTH_OFFSET];
     if (pm1a_control_block == 0 and pm1b_control_block == 0) return error.MissingPmControlBlock;
     if (pm1_control_length < MIN_PM1_CONTROL_LENGTH) return error.InvalidPmControlLength;
 
     return .{
         .revision = table[FADT_REVISION_OFFSET],
-        .dsdt_address = readU32Le(table[FADT_DSDT_OFFSET..][0..4]),
-        .sci_interrupt = readU16Le(table[FADT_SCI_INTERRUPT_OFFSET..][0..2]),
-        .pm1a_event_block = readU32Le(table[FADT_PM1A_EVENT_BLOCK_OFFSET..][0..4]),
-        .pm1b_event_block = readU32Le(table[FADT_PM1B_EVENT_BLOCK_OFFSET..][0..4]),
+        .dsdt_address = std.mem.readInt(u32, table[FADT_DSDT_OFFSET..][0..4], .little),
+        .sci_interrupt = std.mem.readInt(u16, table[FADT_SCI_INTERRUPT_OFFSET..][0..2], .little),
+        .pm1a_event_block = std.mem.readInt(u32, table[FADT_PM1A_EVENT_BLOCK_OFFSET..][0..4], .little),
+        .pm1b_event_block = std.mem.readInt(u32, table[FADT_PM1B_EVENT_BLOCK_OFFSET..][0..4], .little),
         .pm1a_control_block = pm1a_control_block,
         .pm1b_control_block = pm1b_control_block,
-        .pm_timer_block = readU32Le(table[FADT_PM_TIMER_BLOCK_OFFSET..][0..4]),
+        .pm_timer_block = std.mem.readInt(u32, table[FADT_PM_TIMER_BLOCK_OFFSET..][0..4], .little),
         .pm1_event_length = table[FADT_PM1_EVENT_LENGTH_OFFSET],
         .pm1_control_length = pm1_control_length,
         .pm_timer_length = table[FADT_PM_TIMER_LENGTH_OFFSET],
@@ -102,7 +95,7 @@ pub fn parseFadt(table: []const u8) Error!FixedAcpiDescription {
 fn parseResetRegister(table: []const u8) ?GenericAddress {
     if (table.len < RESET_REGISTER_OFFSET + GENERIC_ADDRESS_STRUCTURE_BYTES) return null;
     const gas = table[RESET_REGISTER_OFFSET .. RESET_REGISTER_OFFSET + GENERIC_ADDRESS_STRUCTURE_BYTES];
-    const address = readU64Le(gas[GAS_ADDRESS_OFFSET..][0..8]);
+    const address = std.mem.readInt(u64, gas[GAS_ADDRESS_OFFSET..][0..8], .little);
     if (address == 0) return null;
     return .{
         .address_space_id = gas[0],
@@ -116,22 +109,22 @@ fn parseResetRegister(table: []const u8) ?GenericAddress {
 fn validFadt() [FADT_TEST_TABLE_BYTES]u8 {
     var table = @as([FADT_TEST_TABLE_BYTES]u8, @splat(0));
     @memcpy(table[0..4], FADT_SIGNATURE);
-    writeU32Le(table[4..8], table.len);
+    std.mem.writeInt(u32, table[4..8], table.len, .little);
     table[FADT_REVISION_OFFSET] = 6;
     @memcpy(table[10..16], "ZIGOS ");
     @memcpy(table[16..24], "NUC11TN ");
-    writeU32Le(table[FADT_DSDT_OFFSET..][0..4], 0x00AB_C000);
-    writeU16Le(table[FADT_SCI_INTERRUPT_OFFSET..][0..2], 9);
-    writeU32Le(table[FADT_PM1A_EVENT_BLOCK_OFFSET..][0..4], 0x1800);
-    writeU32Le(table[FADT_PM1A_CONTROL_BLOCK_OFFSET..][0..4], 0x1804);
-    writeU32Le(table[FADT_PM_TIMER_BLOCK_OFFSET..][0..4], 0x1808);
+    std.mem.writeInt(u32, table[FADT_DSDT_OFFSET..][0..4], 0x00AB_C000, .little);
+    std.mem.writeInt(u16, table[FADT_SCI_INTERRUPT_OFFSET..][0..2], 9, .little);
+    std.mem.writeInt(u32, table[FADT_PM1A_EVENT_BLOCK_OFFSET..][0..4], 0x1800, .little);
+    std.mem.writeInt(u32, table[FADT_PM1A_CONTROL_BLOCK_OFFSET..][0..4], 0x1804, .little);
+    std.mem.writeInt(u32, table[FADT_PM_TIMER_BLOCK_OFFSET..][0..4], 0x1808, .little);
     table[FADT_PM1_EVENT_LENGTH_OFFSET] = 4;
     table[FADT_PM1_CONTROL_LENGTH_OFFSET] = MIN_PM1_CONTROL_LENGTH;
     table[FADT_PM_TIMER_LENGTH_OFFSET] = 4;
     table[RESET_REGISTER_OFFSET] = 1;
     table[RESET_REGISTER_OFFSET + 1] = 8;
     table[RESET_REGISTER_OFFSET + 3] = 1;
-    writeU64Le(table[RESET_REGISTER_OFFSET + GAS_ADDRESS_OFFSET ..][0..8], 0xCF9);
+    std.mem.writeInt(u64, table[RESET_REGISTER_OFFSET + GAS_ADDRESS_OFFSET ..][0..8], 0xCF9, .little);
     table[RESET_VALUE_OFFSET] = 0x06;
     finishChecksum(table[0..], 9, table.len);
     return table;
@@ -151,7 +144,7 @@ test "FADT parser extracts PM control and reset plumbing" {
 
 test "FADT parser rejects missing PM control blocks" {
     var table = validFadt();
-    writeU32Le(table[FADT_PM1A_CONTROL_BLOCK_OFFSET..][0..4], 0);
+    std.mem.writeInt(u32, table[FADT_PM1A_CONTROL_BLOCK_OFFSET..][0..4], 0, .little);
     finishChecksum(table[0..], 9, table.len);
     try std.testing.expectError(error.MissingPmControlBlock, parseFadt(table[0..]));
 }

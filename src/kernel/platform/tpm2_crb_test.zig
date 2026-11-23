@@ -1,6 +1,5 @@
 const std = @import("std");
 const crb = @import("tpm2_crb.zig");
-const endian = @import("../utils/endian.zig");
 const checksum = @import("../utils/checksum.zig");
 
 comptime {
@@ -114,10 +113,10 @@ fn propertyReply(property: u32, value: u32) [27]u8 {
 fn table() [52]u8 {
     var bytes: [52]u8 = @splat(0);
     @memcpy(bytes[0..4], "TPM2");
-    endian.writeU32Le(bytes[4..8], bytes.len);
+    std.mem.writeInt(u32, bytes[4..8], bytes.len, .little);
     bytes[8] = 4;
-    endian.writeU64Le(bytes[40..48], physical_base + 0x40);
-    endian.writeU32Le(bytes[48..52], 7);
+    std.mem.writeInt(u64, bytes[40..48], physical_base + 0x40, .little);
+    std.mem.writeInt(u32, bytes[48..52], 7, .little);
     checksum.finishSum8Prefix(&bytes, 9, bytes.len);
     return bytes;
 }
@@ -131,18 +130,18 @@ test "TPM2 ACPI discovery requires a validated direct CRB control page" {
     bytes[12] ^= 1;
     try std.testing.expectError(error.BadChecksum, crb.parseAcpi(&bytes));
     bytes = table();
-    endian.writeU32Le(bytes[4..8], 48);
+    std.mem.writeInt(u32, bytes[4..8], 48, .little);
     checksum.finishSum8Prefix(&bytes, 9, 48);
     try std.testing.expectError(error.InvalidLength, crb.parseAcpi(&bytes));
     for ([_]u32{ 0, 2, 6, 8, 11, 13, 15 }) |method| {
         bytes = table();
-        endian.writeU32Le(bytes[48..52], method);
+        std.mem.writeInt(u32, bytes[48..52], method, .little);
         checksum.finishSum8Prefix(&bytes, 9, bytes.len);
         try std.testing.expectError(error.UnsupportedStartMethod, crb.parseAcpi(&bytes));
     }
     for ([_]u64{ 0, 0x40, physical_base, physical_base + 0x41, 0xffff_ffff_ffff_f040 }) |address| {
         bytes = table();
-        endian.writeU64Le(bytes[40..48], address);
+        std.mem.writeInt(u64, bytes[40..48], address, .little);
         checksum.finishSum8Prefix(&bytes, 9, bytes.len);
         try std.testing.expectError(error.InvalidAddress, crb.parseAcpi(&bytes));
     }

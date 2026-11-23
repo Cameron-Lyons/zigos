@@ -2,13 +2,7 @@
 //! layout, initialization and the device-visible access regions.
 
 const std = @import("std");
-const endian = @import("../../utils/endian.zig");
 const xhci = @import("../xhci.zig");
-
-const readU32Le = endian.readU32Le;
-const readU64Le = endian.readU64Le;
-const writeU32Le = endian.writeU32Le;
-const writeU64Le = endian.writeU64Le;
 
 const COMMAND_RING_INITIAL_CYCLE_STATE = xhci.trb.COMMAND_RING_INITIAL_CYCLE_STATE;
 const COMMAND_RING_TRBS = xhci.COMMAND_RING_TRBS;
@@ -363,8 +357,8 @@ pub fn initializeControllerDma(
         plan.event_ring_segment_table_address,
         plan.event_ring_segment_table_bytes,
     );
-    writeU64Le(erst[0..8], plan.ring_plan.event_ring_address);
-    writeU32Le(erst[8..12], plan.ring_plan.event_ring_trbs);
+    std.mem.writeInt(u64, erst[0..8], plan.ring_plan.event_ring_address, .little);
+    std.mem.writeInt(u32, erst[8..12], plan.ring_plan.event_ring_trbs, .little);
 
     const dcbaa = try dmaBytes(
         plan,
@@ -373,7 +367,7 @@ pub fn initializeControllerDma(
         plan.arena.dcbaa_bytes,
     );
     if (plan.arena.scratchpad_array_address != 0) {
-        writeU64Le(dcbaa[0..8], plan.arena.scratchpad_array_address);
+        std.mem.writeInt(u64, dcbaa[0..8], plan.arena.scratchpad_array_address, .little);
         const scratchpad_array = try dmaBytes(
             plan,
             memory,
@@ -387,7 +381,7 @@ pub fn initializeControllerDma(
                 plan.arena.scratchpad_buffers_address,
                 index * XHCI_PAGE_BYTES,
             ) catch return error.DmaLayoutOverflow;
-            writeU64Le(scratchpad_array[entry_offset..][0..8], buffer_address);
+            std.mem.writeInt(u64, scratchpad_array[entry_offset..][0..8], buffer_address, .little);
         }
     }
 }
@@ -555,8 +549,8 @@ fn initializeLinkTrb(
     const link_address = checkedAdd(ring_address, ring_bytes - TRB_BYTES) catch
         return error.DmaLayoutOverflow;
     const link = try dmaBytes(plan, memory, link_address, TRB_BYTES);
-    writeU64Le(link[0..8], ring_address);
-    writeU32Le(link[12..16], ringLinkControl(@intCast(COMMAND_RING_INITIAL_CYCLE_STATE)));
+    std.mem.writeInt(u64, link[0..8], ring_address, .little);
+    std.mem.writeInt(u32, link[12..16], ringLinkControl(@intCast(COMMAND_RING_INITIAL_CYCLE_STATE)), .little);
 }
 
 fn dmaBytes(
@@ -712,10 +706,10 @@ test "xHCI controller DMA plan initializes rings tables and scratchpad pointers"
     try initializeControllerDma(plan, &memory);
 
     const command_link = memory[(COMMAND_RING_TRBS - 1) * TRB_BYTES ..][0..TRB_BYTES];
-    try std.testing.expectEqual(@as(u64, 0x1000), readU64Le(command_link[0..8]));
+    try std.testing.expectEqual(@as(u64, 0x1000), std.mem.readInt(u64, command_link[0..8], .little));
     try std.testing.expectEqual(
         (@as(u32, LINK_TRB_TYPE) << TRB_TYPE_SHIFT) | LINK_TRB_TOGGLE_CYCLE | 1,
-        readU32Le(command_link[12..16]),
+        std.mem.readInt(u32, command_link[12..16], .little),
     );
     const transfer_link_offset: usize = @intCast(
         plan.arena.control_transfer_rings_address - plan.base_address +
@@ -723,7 +717,7 @@ test "xHCI controller DMA plan initializes rings tables and scratchpad pointers"
     );
     try std.testing.expectEqual(
         plan.arena.control_transfer_rings_address,
-        readU64Le(memory[transfer_link_offset..][0..8]),
+        std.mem.readInt(u64, memory[transfer_link_offset..][0..8], .little),
     );
     const interrupt_link_offset: usize = @intCast(
         plan.arena.interrupt_transfer_rings_address - plan.base_address +
@@ -731,33 +725,33 @@ test "xHCI controller DMA plan initializes rings tables and scratchpad pointers"
     );
     try std.testing.expectEqual(
         plan.arena.interrupt_transfer_rings_address,
-        readU64Le(memory[interrupt_link_offset..][0..8]),
+        std.mem.readInt(u64, memory[interrupt_link_offset..][0..8], .little),
     );
     const erst_offset: usize = @intCast(plan.event_ring_segment_table_address - plan.base_address);
     try std.testing.expectEqual(
         plan.ring_plan.event_ring_address,
-        readU64Le(memory[erst_offset..][0..8]),
+        std.mem.readInt(u64, memory[erst_offset..][0..8], .little),
     );
     try std.testing.expectEqual(
         plan.ring_plan.event_ring_trbs,
-        readU32Le(memory[erst_offset + 8 ..][0..4]),
+        std.mem.readInt(u32, memory[erst_offset + 8 ..][0..4], .little),
     );
     const dcbaa_offset: usize = @intCast(plan.arena.dcbaa_address - plan.base_address);
     try std.testing.expectEqual(
         plan.arena.scratchpad_array_address,
-        readU64Le(memory[dcbaa_offset..][0..8]),
+        std.mem.readInt(u64, memory[dcbaa_offset..][0..8], .little),
     );
-    try std.testing.expectEqual(@as(u64, 0), readU64Le(memory[dcbaa_offset + 8 ..][0..8]));
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, memory[dcbaa_offset + 8 ..][0..8], .little));
     const scratchpad_offset: usize = @intCast(
         plan.arena.scratchpad_array_address - plan.base_address,
     );
     try std.testing.expectEqual(
         plan.arena.scratchpad_buffers_address,
-        readU64Le(memory[scratchpad_offset..][0..8]),
+        std.mem.readInt(u64, memory[scratchpad_offset..][0..8], .little),
     );
     try std.testing.expectEqual(
         plan.arena.scratchpad_buffers_address + XHCI_PAGE_BYTES,
-        readU64Le(memory[scratchpad_offset + 8 ..][0..8]),
+        std.mem.readInt(u64, memory[scratchpad_offset + 8 ..][0..8], .little),
     );
 }
 
@@ -784,10 +778,10 @@ test "xHCI transfer ring reset discards stale slot TRBs before reuse" {
         memory[ring_offset..][0..TRB_BYTES],
     );
     const link_offset = ring_offset + ring_bytes - TRB_BYTES;
-    try std.testing.expectEqual(ring_address, readU64Le(memory[link_offset..][0..8]));
+    try std.testing.expectEqual(ring_address, std.mem.readInt(u64, memory[link_offset..][0..8], .little));
     try std.testing.expectEqual(
         ringLinkControl(1),
-        readU32Le(memory[link_offset + 12 ..][0..4]),
+        std.mem.readInt(u32, memory[link_offset + 12 ..][0..4], .little),
     );
 }
 

@@ -3,6 +3,7 @@ const std = @import("std");
 const cache = @import("../arch/cache_policy.zig");
 const x86 = @import("../arch/x86.zig");
 const support = @import("ap_cache_probe_support.zig");
+const asm_abi = @import("../arch/asm_abi.zig");
 
 const ControlRecord = extern struct {
     cr0: u32,
@@ -81,22 +82,9 @@ fn snapshotMatches(expected: *const cache.BootstrapMtrrSnapshot, actual: *const 
     return std.mem.eql(u8, std.mem.asBytes(expected), std.mem.asBytes(actual));
 }
 
-fn assemblyConstant(source: []const u8, name: []const u8) !usize {
-    var lines = std.mem.splitScalar(u8, source, '\n');
-    while (lines.next()) |line| {
-        if (!std.mem.startsWith(u8, line, "#define ")) continue;
-        var words = std.mem.tokenizeScalar(u8, line[8..], ' ');
-        const candidate = words.next() orelse continue;
-        if (std.mem.eql(u8, candidate, name)) return std.fmt.parseInt(usize, words.next() orelse return error.MissingValue, 0);
-    }
-    return error.MissingConstant;
-}
-
-test "enabled cache proof assembly layout matches captured controls and complete snapshot" {
-    const source = @embedFile("smp_cache_enabled_probe.S");
-    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ControlRecord));
-    try std.testing.expectEqual(@as(usize, 680), @sizeOf(Result));
-    inline for (.{
+// The probe assembly addresses Result and ControlRecord by these offsets.
+comptime {
+    asm_abi.expectConstants("smp_cache_enabled_probe.S", @embedFile("smp_cache_enabled_probe.S"), .{
         .{ "PROOF_FIRST_OFFSET", @offsetOf(Result, "first") },
         .{ "PROOF_SECOND_OFFSET", @offsetOf(Result, "second") },
         .{ "PROOF_OBSERVED_OFFSET", @offsetOf(Result, "observed") },
@@ -106,7 +94,11 @@ test "enabled cache proof assembly layout matches captured controls and complete
         .{ "PROOF_FLAGS_OFFSET", @offsetOf(ControlRecord, "flags") },
         .{ "PROOF_PAT_OFFSET", @offsetOf(ControlRecord, "pat") },
         .{ "PROOF_DEFAULT_OFFSET", @offsetOf(ControlRecord, "default_type") },
-    }) |pair| try std.testing.expectEqual(pair[1], try assemblyConstant(source, pair[0]));
+    });
+}
+
+test "enabled cache proof assembly runs one AP MTRR macro body twice without writes between calls" {
+    const source = @embedFile("smp_cache_enabled_probe.S");
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "    ZIGOS_INITIALIZE_AP_MTRRS "));
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, source, "    call zigos_arch_smp_cache_initialize\n"));
     const first = std.mem.indexOf(u8, source, "zigos_arch_smp_cache_first_call:\n").?;

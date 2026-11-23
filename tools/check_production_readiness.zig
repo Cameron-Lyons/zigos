@@ -375,7 +375,7 @@ const RETIRED_SOURCES = [_]SourceBan{
         .reason = "syscall entry must keep the userspace request pointer in %rdi",
     },
     .{
-        .paths = &.{ "src/kernel/memory/paging64.zig", "src/native/task/userspace_executor.zig" },
+        .paths = &.{ "src/kernel/memory/paging64.zig", "src/kernel/memory/paging/root_tracker.zig", "src/native/task/userspace_executor.zig" },
         .snippets = &.{ "var current_page_directory:", "var registered_executor:", "var trap_stack:", "switchPageDirectory" },
         .reason = "the native runtime must not restore a shared CPU owner or the flush-on-every-switch API",
     },

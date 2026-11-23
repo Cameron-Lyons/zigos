@@ -3,14 +3,8 @@
 //! status and doorbells.
 
 const std = @import("std");
-const endian = @import("../../utils/endian.zig");
 const spin = @import("../../utils/spin.zig");
 const xhci = @import("../xhci.zig");
-
-const readU32Le = endian.readU32Le;
-const readU64Le = endian.readU64Le;
-const writeU32Le = endian.writeU32Le;
-const writeU64Le = endian.writeU64Le;
 
 const COMMAND_RING_INITIAL_CYCLE_STATE = xhci.trb.COMMAND_RING_INITIAL_CYCLE_STATE;
 const CONTROLLER_HALT_TIMEOUT_MILLISECONDS = xhci.CONTROLLER_HALT_TIMEOUT_MILLISECONDS;
@@ -795,31 +789,25 @@ const MockDmaRegisterMmio = struct {
 
     fn ready() @This() {
         var mmio = @This(){};
-        writeU32Le(
-            mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_USB_STATUS_OFFSET ..][0..4],
-            USB_STATUS_HOST_CONTROLLER_HALTED,
-        );
-        writeU32Le(
-            mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_PAGE_SIZE_OFFSET ..][0..4],
-            PAGE_SIZE_4K_SUPPORTED,
-        );
+        std.mem.writeInt(u32, mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_USB_STATUS_OFFSET ..][0..4], USB_STATUS_HOST_CONTROLLER_HALTED, .little);
+        std.mem.writeInt(u32, mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_PAGE_SIZE_OFFSET ..][0..4], PAGE_SIZE_4K_SUPPORTED, .little);
         return mmio;
     }
 
     pub fn readReg32(self: *@This(), offset: u32) u32 {
-        return readU32Le(self.registers[@as(usize, offset)..][0..4]);
+        return std.mem.readInt(u32, self.registers[@as(usize, offset)..][0..4], .little);
     }
 
     pub fn readReg64(self: *@This(), offset: u32) u64 {
-        return readU64Le(self.registers[@as(usize, offset)..][0..8]);
+        return std.mem.readInt(u64, self.registers[@as(usize, offset)..][0..8], .little);
     }
 
     pub fn writeReg32(self: *@This(), offset: u32, value: u32) void {
-        if (self.accept_writes) writeU32Le(self.registers[@as(usize, offset)..][0..4], value);
+        if (self.accept_writes) std.mem.writeInt(u32, self.registers[@as(usize, offset)..][0..4], value, .little);
     }
 
     pub fn writeReg64(self: *@This(), offset: u32, value: u64) void {
-        if (self.accept_writes) writeU64Le(self.registers[@as(usize, offset)..][0..8], value);
+        if (self.accept_writes) std.mem.writeInt(u64, self.registers[@as(usize, offset)..][0..8], value, .little);
     }
 };
 
@@ -863,30 +851,21 @@ test "xHCI DMA register programming rejects unsafe controller states" {
     const capabilities = defaultCapabilityRegisters();
     const plan = try planControllerDma(capabilities, TEST_MAX_DEVICE_SLOTS, 0x4000);
     var mmio = MockDmaRegisterMmio.ready();
-    writeU32Le(
-        mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_USB_STATUS_OFFSET ..][0..4],
-        0,
-    );
+    std.mem.writeInt(u32, mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_USB_STATUS_OFFSET ..][0..4], 0, .little);
     try std.testing.expectError(
         error.DmaProgrammingUnavailable,
         programControllerDmaRegisters(capabilities, plan, &mmio),
     );
 
     mmio = MockDmaRegisterMmio.ready();
-    writeU32Le(
-        mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_PAGE_SIZE_OFFSET ..][0..4],
-        0,
-    );
+    std.mem.writeInt(u32, mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_PAGE_SIZE_OFFSET ..][0..4], 0, .little);
     try std.testing.expectError(
         error.UnsupportedPageSize,
         programControllerDmaRegisters(capabilities, plan, &mmio),
     );
 
     mmio = MockDmaRegisterMmio.ready();
-    writeU64Le(
-        mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_COMMAND_RING_CONTROL_OFFSET ..][0..8],
-        COMMAND_RING_RUNNING,
-    );
+    std.mem.writeInt(u64, mmio.registers[@as(usize, TEST_CAPABILITY_LENGTH) + OPERATIONAL_COMMAND_RING_CONTROL_OFFSET ..][0..8], COMMAND_RING_RUNNING, .little);
     try std.testing.expectError(
         error.DmaProgrammingUnavailable,
         programControllerDmaRegisters(capabilities, plan, &mmio),

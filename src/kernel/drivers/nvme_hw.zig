@@ -66,6 +66,9 @@ comptime {
     if (@as(usize, BAR_MAP_BYTES) + PAGE_SIZE > mmio_windows.nvme.bytes) {
         @compileError("NVMe BAR and MSI-X entry mappings exceed their reserved MMIO window");
     }
+    if (@as(u64, DMA_FRAME_COUNT) * PAGE_SIZE > intel_vtd.MAX_DOMAIN_SPAN_BYTES) {
+        @compileError("NVMe DMA frames exceed one VT-d domain span");
+    }
 }
 
 pub const Error = error{
@@ -113,7 +116,7 @@ const DMA_FRAME_COUNT: u32 = PRP_LIST_FIRST_FRAME + PRP_LIST_PAGE_COUNT;
 const DMA_WINDOW_COUNT: usize = 6;
 
 const DmaAddress = struct {
-    physical: u32 = 0,
+    physical: u64 = 0,
     alias: usize = 0,
 };
 
@@ -139,7 +142,7 @@ const DmaFrames = struct {
 
     fn frame(self: DmaFrames, index: u32) DmaAddress {
         return .{
-            .physical = self.base.physical + index * PAGE_SIZE,
+            .physical = self.base.physical + @as(u64, index) * PAGE_SIZE,
             .alias = self.base.alias + @as(usize, index) * PAGE_SIZE,
         };
     }
@@ -401,14 +404,16 @@ pub fn createIoQueues(self: *Controller, frames: DmaFrames) Error!void {
 
     var create_cq = @as([16]u32, @splat(0));
     create_cq[0] = ADMIN_OPC_CREATE_IO_CQ;
-    create_cq[6] = cq.physical;
+    create_cq[6] = @truncate(cq.physical);
+    create_cq[7] = @truncate(cq.physical >> 32);
     create_cq[10] = ((IO_QUEUE_ENTRIES - 1) << 16) | IO_QUEUE_ID;
     create_cq[11] = nvme_interrupt.createCompletionQueueControl();
     try submit(self, &self.admin, &create_cq);
 
     var create_sq = @as([16]u32, @splat(0));
     create_sq[0] = ADMIN_OPC_CREATE_IO_SQ;
-    create_sq[6] = sq.physical;
+    create_sq[6] = @truncate(sq.physical);
+    create_sq[7] = @truncate(sq.physical >> 32);
     create_sq[10] = ((IO_QUEUE_ENTRIES - 1) << 16) | IO_QUEUE_ID;
     create_sq[11] = (@as(u32, IO_QUEUE_ID) << 16) | 1;
     try submit(self, &self.admin, &create_sq);
@@ -582,7 +587,8 @@ fn identifyNamespace(self: *Controller, buffer: DmaAddress) Error!void {
     var cmd = @as([16]u32, @splat(0));
     cmd[0] = ADMIN_OPC_IDENTIFY;
     cmd[1] = self.nsid;
-    cmd[6] = buffer.physical;
+    cmd[6] = @truncate(buffer.physical);
+    cmd[7] = @truncate(buffer.physical >> 32);
     cmd[10] = IDENTIFY_CNS_NAMESPACE;
     try submit(self, &self.admin, &cmd);
     const words: [*]volatile u32 = @ptrFromInt(buffer.alias);
@@ -603,7 +609,7 @@ fn identifyNamespace(self: *Controller, buffer: DmaAddress) Error!void {
     self.namespace_sectors = nsze;
 }
 
-fn issueFaultProbe(self: *Controller, guard_phys: u32) void {
+fn issueFaultProbe(self: *Controller, guard_phys: u64) void {
     const queue = &self.admin;
     const cid = queue.next_cid;
     queue.next_cid +%= 1;
@@ -618,11 +624,12 @@ fn issueFaultProbe(self: *Controller, guard_phys: u32) void {
     self.writeReg32(sqDoorbell(self, queue.qid), queue.sq_tail);
 }
 
-fn faultProbeCommand(nsid: u32, guard_phys: u32) [16]u32 {
+fn faultProbeCommand(nsid: u32, guard_phys: u64) [16]u32 {
     var command = @as([16]u32, @splat(0));
     command[0] = ADMIN_OPC_IDENTIFY;
     command[1] = nsid;
-    command[6] = guard_phys;
+    command[6] = @truncate(guard_phys);
+    command[7] = @truncate(guard_phys >> 32);
     command[10] = IDENTIFY_CNS_NAMESPACE;
     return command;
 }
@@ -648,12 +655,12 @@ fn guardPatternIntact(bytes: []const u8) bool {
 pub fn prepareDma(dev: pci.PCIDevice) Error!intel_vtd.DmaDomain {
     if (pci.busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
     if (dma_frames == null) {
-        const dma_base = paging.allocIdentityDmaFrames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
-        const dma_alias = paging.directMapAddress(dma_base) orelse {
-            paging.releaseIdentityDmaFrames(dma_base, DMA_FRAME_COUNT) catch {};
+        const dma = paging.allocGeneralFrames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
+        const dma_alias = paging.directMapAddress(dma.base) orelse {
+            paging.releaseGeneralFrames(dma) catch {};
             return error.QueueAllocationFailed;
         };
-        const frames = DmaFrames{ .base = .{ .physical = dma_base, .alias = dma_alias } };
+        const frames = DmaFrames{ .base = .{ .physical = dma.base, .alias = dma_alias } };
         dma_windows = frames.windows();
         dma_frames = frames;
         dma_device_id = pci.stableDeviceId(dev);
@@ -694,9 +701,9 @@ pub fn attachAsBackend(dev: pci.PCIDevice) !?intel_vtd.FaultRecord {
 
     var fault_proof: ?intel_vtd.FaultRecord = null;
     if (isolation_required) {
-        const guard_phys = paging.allocIdentityDmaFrames(1) orelse return error.QueueAllocationFailed;
+        const guard_phys = paging.allocGeneralFrame() orelse return error.QueueAllocationFailed;
         var guard_releasable = false;
-        defer if (guard_releasable) paging.releaseIdentityDmaFrames(guard_phys, 1) catch {};
+        defer if (guard_releasable) paging.releaseGeneralFrame(guard_phys) catch {};
         const guard = DmaAddress{
             .physical = guard_phys,
             .alias = paging.directMapAddress(guard_phys) orelse return error.QueueAllocationFailed,

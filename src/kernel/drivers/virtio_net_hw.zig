@@ -29,7 +29,7 @@ const Queue = struct {
     state: virtqueue.Queue,
     ring: usize,
     buffers: usize,
-    buffer_physical: u32,
+    buffer_physical: u64,
     notification: usize,
 
     fn memory(self: *const Queue) *volatile virtqueue.Ring {
@@ -39,7 +39,7 @@ const Queue = struct {
         return @as([*]u8, @ptrFromInt(self.buffers + @as(usize, id) * virtqueue.BUFFER_BYTES))[0..virtqueue.BUFFER_BYTES];
     }
     fn submit(self: *Queue, id: u16, length: u32) !void {
-        try self.state.submit(self.memory(), id, self.buffer_physical + @as(u32, id) * virtqueue.BUFFER_BYTES, length);
+        try self.state.submit(self.memory(), id, self.buffer_physical + @as(u64, id) * virtqueue.BUFFER_BYTES, length);
     }
     fn notify(self: *const Queue, index: u16) void {
         if (virtqueue.Queue.shouldNotify(self.memory())) reg(u16, self.notification).* = index;
@@ -117,8 +117,9 @@ pub fn prepare(device: pci.PCIDevice) !void {
         }
     }
     if (!coherent or !ethernet.validUnicastMac(mac)) return error.InvalidMac;
-    const dma = paging.allocIdentityDmaFrames(DMA_PAGES) orelse return error.DmaAllocationFailed;
-    errdefer paging.releaseIdentityDmaFrames(dma, DMA_PAGES) catch {};
+    const dma_run = paging.allocGeneralFrames(DMA_PAGES) orelse return error.DmaAllocationFailed;
+    errdefer paging.releaseGeneralFrames(dma_run) catch {};
+    const dma = dma_run.base;
     const alias = paging.directMapAddress(dma) orelse return error.DmaAllocationFailed;
     @memset(@as([*]u8, @ptrFromInt(alias))[0 .. DMA_PAGES * PAGE], 0);
     var pending = Controller{
@@ -144,7 +145,7 @@ pub fn prepare(device: pci.PCIDevice) !void {
     console.print("ZIGOS:VIRTIO_NET:PREPARED\n");
 }
 
-fn setupQueue(common: usize, index: u16, physical: u32, alias: usize, buffer_physical: u32, buffers: usize, layout: transport.Layout, bars: *const [6]transport.Bar, slot: usize) !Queue {
+fn setupQueue(common: usize, index: u16, physical: u64, alias: usize, buffer_physical: u64, buffers: usize, layout: transport.Layout, bars: *const [6]transport.Bar, slot: usize) !Queue {
     reg(u16, common + 22).* = index;
     if (reg(u16, common + 24).* < virtqueue.CAPACITY or reg(u16, common + 28).* != 0) return error.InvalidQueue;
     reg(u16, common + 24).* = virtqueue.CAPACITY;

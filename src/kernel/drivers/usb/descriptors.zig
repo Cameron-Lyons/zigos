@@ -2,10 +2,7 @@
 //! interface selection for xHCI enumeration.
 
 const std = @import("std");
-const endian = @import("../../utils/endian.zig");
 const xhci = @import("../xhci.zig");
-
-const readU16Le = endian.readU16Le;
 
 const Error = xhci.Error;
 const HID_BOOT_KEYBOARD_REPORT_BYTES = xhci.HID_BOOT_KEYBOARD_REPORT_BYTES;
@@ -176,7 +173,7 @@ pub const ConfigurationDescriptorParser = struct {
                 }
                 const endpoint_address = descriptor[2];
                 const transfer_type = descriptor[3] & 0x03;
-                const packet_payload_bytes = readU16Le(descriptor[4..6]) & 0x07FF;
+                const packet_payload_bytes = std.mem.readInt(u16, descriptor[4..6], .little) & 0x07FF;
                 if ((endpoint_address & 0x70) != 0 or (endpoint_address & 0x0F) == 0 or
                     (transfer_type != 1 and packet_payload_bytes == 0))
                 {
@@ -191,7 +188,7 @@ pub const ConfigurationDescriptorParser = struct {
                     const endpoint = PendingBootKeyboardEndpoint{
                         .interface_number = self.active_boot_keyboard_interface.?,
                         .endpoint_id = endpoint_address & 0x0F,
-                        .raw_max_packet_size = readU16Le(descriptor[4..6]),
+                        .raw_max_packet_size = std.mem.readInt(u16, descriptor[4..6], .little),
                         .descriptor_interval = descriptor[6],
                     };
                     switch (self.protocol.kind) {
@@ -329,7 +326,7 @@ fn superspeedBootKeyboardConfiguration(
         return error.InvalidUsbDescriptor;
     }
     const max_packet_size = endpoint.raw_max_packet_size & 0x07FF;
-    const max_esit_payload = readU16Le(companion[4..6]);
+    const max_esit_payload = std.mem.readInt(u16, companion[4..6], .little);
     const maximum_payload = std.math.mul(
         u16,
         max_packet_size,
@@ -417,10 +414,10 @@ pub fn parseUsbDeviceDescriptor(
     {
         return error.InvalidUsbDescriptor;
     }
-    const usb_version_bcd = readU16Le(descriptor[2..4]);
+    const usb_version_bcd = std.mem.readInt(u16, descriptor[2..4], .little);
     const device_class = descriptor[4];
     const device_subclass = descriptor[5];
-    const device_version_bcd = readU16Le(descriptor[12..14]);
+    const device_version_bcd = std.mem.readInt(u16, descriptor[12..14], .little);
     const configuration_count = descriptor[17];
     if (!validBcd(usb_version_bcd) or !validBcd(device_version_bcd) or
         (device_class == 0 and device_subclass != 0) or configuration_count == 0)
@@ -445,8 +442,8 @@ pub fn parseUsbDeviceDescriptor(
             speed_id,
             descriptor,
         ),
-        .vendor_id = readU16Le(descriptor[8..10]),
-        .product_id = readU16Le(descriptor[10..12]),
+        .vendor_id = std.mem.readInt(u16, descriptor[8..10], .little),
+        .product_id = std.mem.readInt(u16, descriptor[10..12], .little),
         .device_version_bcd = device_version_bcd,
         .manufacturer_string_index = descriptor[14],
         .product_string_index = descriptor[15],
@@ -465,7 +462,7 @@ pub fn parseUsbConfigurationDescriptorHeader(
     {
         return error.InvalidUsbDescriptor;
     }
-    const total_length = readU16Le(descriptor[2..4]);
+    const total_length = std.mem.readInt(u16, descriptor[2..4], .little);
     const interface_count = descriptor[4];
     const configuration_value = descriptor[5];
     const attributes = descriptor[7];

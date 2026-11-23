@@ -19,6 +19,15 @@ const efi_paging = @import("../../boot/efi_paging.zig");
 const paging_info = @import("../../boot/paging_info.zig");
 const sparse = @import("../../arch/sparse_physical_map.zig");
 const smp = @import("../smp.zig");
+const paging_failure = @import("paging/failure.zig");
+const alias_proofs = @import("paging/direct_alias.zig");
+const root_tracker = @import("paging/root_tracker.zig");
+
+test {
+    _ = paging_failure;
+    _ = alias_proofs;
+    _ = root_tracker;
+}
 
 const PAGE_SIZE: u32 = virtual_layout.PAGE_BYTES;
 const PML4_SHIFT = table64.PML4_SHIFT;
@@ -26,7 +35,6 @@ const PDPT_SHIFT = table64.PDPT_SHIFT;
 const PAGE_DIRECTORY_SHIFT = table64.PAGE_DIRECTORY_SHIFT;
 const PAGE_TABLE_SHIFT = table64.PAGE_TABLE_SHIFT;
 const PAGE_OFFSET_MASK: usize = PAGE_SIZE - 1;
-const MAX_U32: u32 = ~@as(u32, 0);
 
 pub const PAGE_PRESENT: u32 = 0x1;
 pub const PAGE_WRITABLE: u32 = 0x2;
@@ -37,7 +45,6 @@ pub const PAGE_ACCESSED: u32 = 0x20;
 pub const PAGE_DIRTY: u32 = 0x40;
 
 pub const PAGE_EXECUTABLE: u32 = 0x200;
-pub const LOW_IDENTITY_PHYSICAL_LIMIT: frame_allocator.PhysicalAddress = 1024 * 1024 * 1024;
 
 const ENTRY_PRESENT = table64.PRESENT;
 const ENTRY_WRITABLE = table64.WRITABLE;
@@ -136,8 +143,6 @@ pub fn bootPagingArenaRetirement() *const firmware_memory_map.BootArenaRetiremen
 const PhysicalFrameAllocator = frame_allocator.Fixed(FRAME_ALLOCATOR_BYTES, PAGE_SIZE);
 var physical_frames: PhysicalFrameAllocator = undefined;
 var frame_lock = spin.Lock.init();
-var high_memory_zone_has_free_frames: bool = false;
-var low_identity_frame_cursor = frame_allocator.AllocationCursor{};
 var process_contexts = pcid_allocator.Allocator.init();
 var process_context_lock = spin.Lock.init();
 var process_context_identifiers_enabled: bool = false;
@@ -316,7 +321,7 @@ pub inline fn mapKernelWriteCombiningRange(virtual_start: usize, physical_start:
 /// Only the checksummed firmware MCFG allocation can authorize its reserved
 /// ECAM aperture. Ordinary reserved RAM retains the device-mapping rejection.
 pub inline fn registerPciEcam(allocation: @import("../platform/mcfg.zig").Allocation) DeviceMapError!void {
-    if (cpu_identity.currentIndex() != 0) return error.WrongCpu;
+    if (!cpu_identity.isBsp()) return error.WrongCpu;
     if (@import("../interrupts/context.zig").active()) return error.InterruptContext;
     if (comptime builtin.target.os.tag != .freestanding) return error.Unavailable;
     if (!kernelAddressSpaceActive()) return error.WrongAddressSpace;
@@ -344,7 +349,7 @@ pub inline fn mapKernelFirmwareRange(virtual_start: usize, physical_start: u64, 
 }
 
 inline fn mapKernelPhysicalRange(virtual_start: usize, physical_start: u64, size_bytes: usize, kind: physical_mapper.Kind, writable: bool) DeviceMapError!void {
-    if (cpu_identity.currentIndex() != 0) return error.WrongCpu;
+    if (!cpu_identity.isBsp()) return error.WrongCpu;
     if (@import("../interrupts/context.zig").active()) return error.InterruptContext;
     if (comptime builtin.target.os.tag != .freestanding) return error.Unavailable;
     if (!kernelAddressSpaceActive()) return error.WrongAddressSpace;
@@ -515,163 +520,7 @@ fn invalidateUserPagesWith(backend: anytype, identifier: u16, identifiers_enable
     backend.invalidateRemote(identifier);
 }
 
-const PagingFailure = enum {
-    kernel_text_outside_upper_half_image_window,
-    kernel_text_outside_low_physical_aperture,
-    kernel_immutable_data_outside_upper_half_image_window,
-    kernel_immutable_image_outside_low_physical_aperture,
-    invalid_page_aligned_kernel_image_extents,
-    kernel_end_outside_physical_image_aperture,
-    invalid_physical_kernel_image_end,
-    page_table_frame_outside_direct_map_aperture,
-    data_frame_outside_direct_map_aperture,
-    page_table_pointer_outside_direct_map_aperture,
-    missing_kernel_page_table_root,
-    corrupt_process_context_identifier_accounting,
-    allocated_frame_direct_alias_missing,
-    allocated_frame_outside_low_identity_aperture,
-    out_of_physical_memory_while_mapping_page,
-    attempted_to_map_an_unaligned_page,
-    user_mapping_collided_with_inherited_kernel_memory,
-    attempted_to_replace_an_owned_user_page,
-    attempted_to_create_a_writable_executable_user_page,
-    page_mapping_address_overflow,
-    corrupt_pml4_allocation_accounting,
-    corrupt_rejected_huge_page_allocation_accounting,
-    corrupt_retired_user_range_accounting,
-    corrupt_retired_user_hierarchy_accounting,
-    invalid_framebuffer_ownership_extent,
-    invalid_ram_direct_map_authority,
-    final_paging_arena_outside_direct_map_aperture,
-    sparse_kernel_hierarchy_admission_failed,
-    corrupt_high_memory_probe_accounting,
-    high_memory_probe_outside_direct_map_aperture,
-    high_memory_direct_map_leaf_missing,
-    high_memory_direct_map_permissions_are_invalid,
-    high_memory_direct_map_probe_failed,
-    missing_boot_info_handoff,
-    missing_admitted_cache_policy,
-    invalid_native_boot_memory_ownership,
-    insufficient_early_heap_for_physical_frame_state,
-    invalid_native_memory_map_allocator_admission,
-    invalid_live_boot_handoff_extent,
-    invalid_kernel_or_efi_heap_reservation,
-    physical_memory_reservation_table_overflow,
-    no_usable_physical_frames_remain_after_kernel_reservation,
-    current_cpu_has_no_verified_paging_root,
-    kernel_paging_root_not_initialized,
-    current_cpu_failed_kernel_cr3_admission,
-    address_space_root_exceeds_machine_address_width,
-    invalid_address_space_cr3_value,
-    address_space_switch_rejected_root,
-    pcid_switch_requires_current_cpu_admission,
-};
-
-// Share cold diagnostics as bytes and bounded offsets, without one pointer
-// relocation and standalone literal for every fatal path.
-const paging_failure_messages = blk: {
-    const messages = [_][]const u8{
-        "Kernel text lies outside the upper-half image window!\n",
-        "Kernel text lies outside the low physical aperture!\n",
-        "Kernel immutable data lies outside the upper-half image window!\n",
-        "Kernel immutable image lies outside the low physical aperture!\n",
-        "Invalid page-aligned kernel image extents!\n",
-        "Kernel end lies outside the physical image aperture!\n",
-        "Invalid physical kernel image end!\n",
-        "Page-table frame lies outside the direct-map aperture!\n",
-        "Data frame lies outside the direct-map aperture!\n",
-        "Page-table pointer lies outside the direct-map aperture!\n",
-        "Missing kernel page-table root!\n",
-        "Corrupt process-context identifier accounting!\n",
-        "Allocated frame has no WB direct alias!\n",
-        "Allocated frame lies outside the low identity aperture!\n",
-        "Out of physical memory while mapping page!\n",
-        "Attempted to map an unaligned page!\n",
-        "User mapping collided with inherited kernel memory!\n",
-        "Attempted to replace an owned user page!\n",
-        "Attempted to create a writable executable user page!\n",
-        "Page mapping address overflow!\n",
-        "Corrupt PML4 allocation accounting!\n",
-        "Corrupt rejected huge-page allocation accounting!\n",
-        "Corrupt retired user-range accounting!\n",
-        "Corrupt retired user-hierarchy accounting!\n",
-        "Invalid framebuffer ownership extent!\n",
-        "Invalid RAM direct-map authority!\n",
-        "Final paging arena lies outside the direct-map aperture!\n",
-        "Sparse kernel hierarchy admission failed!\n",
-        "Corrupt high-memory probe accounting!\n",
-        "High-memory probe lies outside the direct-map aperture!\n",
-        "High-memory direct-map leaf is missing!\n",
-        "High-memory direct-map permissions are invalid!\n",
-        "High-memory direct-map probe failed!\n",
-        "Missing validated EFI boot handoff!\n",
-        "Missing admitted cache policy!\n",
-        "Invalid native boot memory ownership!\n",
-        "Insufficient early heap for physical-frame state!\n",
-        "Invalid native memory map allocator admission!\n",
-        "Invalid live EFI handoff extent!\n",
-        "Invalid kernel or EFI heap reservation!\n",
-        "Physical-memory reservation table overflow!\n",
-        "No usable physical frames remain after kernel reservation!\n",
-        "Current CPU has no verified paging root!\n",
-        "Kernel paging root is not initialized!\n",
-        "Current CPU failed kernel CR3 admission!\n",
-        "Address-space root exceeds the machine address width!\n",
-        "Invalid address-space CR3 value!\n",
-        "Address-space switch rejected its root!\n",
-        "PCID switch requires current CPU admission!\n",
-    };
-    if (messages.len != @typeInfo(PagingFailure).@"enum".field_names.len)
-        @compileError("paging failure messages must cover every reason");
-    var byte_count: usize = 0;
-    for (messages) |message| byte_count += message.len;
-    if (byte_count > std.math.maxInt(u16)) @compileError("paging diagnostics exceed their bounded offsets");
-    var bytes: []const u8 = "";
-    var offsets: [messages.len + 1]u16 = undefined;
-    var cursor: usize = 0;
-    for (messages, 0..) |message, index| {
-        offsets[index] = @intCast(cursor);
-        bytes = bytes ++ message;
-        cursor += message.len;
-    }
-    offsets[messages.len] = @intCast(cursor);
-    break :blk .{ .bytes = bytes, .offsets = offsets };
-};
-
-noinline fn haltPagingFailure(reason: PagingFailure) noreturn {
-    @branchHint(.cold);
-    early_console.print(pagingFailureMessage(reason));
-    while (true) x86.hlt();
-}
-
-fn pagingFailureMessage(reason: PagingFailure) []const u8 {
-    const index: usize = @backingInt(reason);
-    return paging_failure_messages.bytes[paging_failure_messages.offsets[index]..paging_failure_messages.offsets[index + 1]];
-}
-
-test "paging diagnostic runtime selectors retain addressable bytes for every fatal reason" {
-    var selected: u8 = 0;
-    const selector: *volatile u8 = &selected;
-    const blob = paging_failure_messages.bytes;
-    for (0..@typeInfo(PagingFailure).@"enum".field_names.len) |index| {
-        selector.* = @intCast(index);
-        const reason: PagingFailure = @fromBackingInt(@intCast(selector.*));
-        const message = pagingFailureMessage(reason);
-        try std.testing.expect(message.len != 0);
-        try std.testing.expect(@intFromPtr(message.ptr) >= @intFromPtr(blob.ptr));
-        try std.testing.expect(@intFromPtr(message.ptr) + message.len <= @intFromPtr(blob.ptr) + blob.len);
-        try std.testing.expectEqual(@as(u8, '\n'), message[message.len - 1]);
-    }
-    selector.* = @backingInt(PagingFailure.invalid_native_boot_memory_ownership);
-    try std.testing.expectEqualStrings("Invalid native boot memory ownership!\n", pagingFailureMessage(@fromBackingInt(@intCast(selector.*))));
-}
-
-inline fn lowIdentityFrameAddress(address: frame_allocator.PhysicalAddress) u32 {
-    if (address >= LOW_IDENTITY_PHYSICAL_LIMIT) {
-        haltPagingFailure(.allocated_frame_outside_low_identity_aperture);
-    }
-    return @intCast(address);
-}
+const haltPagingFailure = paging_failure.halt;
 
 pub fn directMapAddress(address: frame_allocator.PhysicalAddress) ?usize {
     return virtual_layout.directMappedAddress(address, MANAGED_PHYSICAL_BYTES);
@@ -688,72 +537,18 @@ pub fn mappedRamSpan(physical: u64, bytes: u64) ?usize {
 pub inline fn checkedUserAddressSpacePhysicalRoot(space: *const UserAddressSpace) ?u64 {
     if (comptime builtin.target.os.tag != .freestanding) return null;
     const Backend = struct {
-        inline fn owns(_: *@This(), physical: u64) bool {
+        pub inline fn owns(_: *@This(), physical: u64) bool {
             return physical_frames.isAllocated(physical);
         }
 
-        inline fn writableAlias(_: *@This(), physical: u64) ?usize {
+        pub inline fn writableAlias(_: *@This(), physical: u64) ?usize {
             return allocatedFrameAlias(physical, PAGE_SIZE, true);
         }
     };
     var backend = Backend{};
     acquireFrameLock();
     defer releaseFrameLock();
-    return checkedUserRootWith(&backend, @intFromPtr(space.directory), space.switch_cr3);
-}
-
-inline fn checkedUserRootWith(backend: anytype, directory: usize, switch_cr3: usize) ?u64 {
-    const physical = virtual_layout.directMappedPhysicalAddress(directory, MANAGED_PHYSICAL_BYTES) orelse return null;
-    if (physical == 0 or physical % PAGE_SIZE != 0 or
-        (switch_cr3 & ~(x86.CR3_ADDRESS_MASK | x86.CR3_PCID_MASK | x86.CR3_NO_FLUSH)) != 0 or
-        (switch_cr3 & x86.CR3_ADDRESS_MASK) != physical or !backend.owns(physical)) return null;
-    const alias = backend.writableAlias(physical) orelse return null;
-    if (alias != directory) return null;
-    return physical;
-}
-
-test "retained user root admission requires allocated backing and an exact writable WB alias" {
-    const physical: u64 = 0x2000;
-    const alias = directMapAddress(physical).?;
-    const Backend = struct {
-        allocated: bool = true,
-        cached: bool = false,
-        alias: ?usize,
-        reads: usize = 0,
-
-        fn owns(self: *@This(), value: u64) bool {
-            return value == physical and self.allocated and !self.cached;
-        }
-
-        fn writableAlias(self: *@This(), value: u64) ?usize {
-            self.reads += 1;
-            return if (value == physical) self.alias else null;
-        }
-    };
-    var backend = Backend{ .alias = alias };
-    try std.testing.expectEqual(physical, checkedUserRootWith(&backend, alias, physical).?);
-    try std.testing.expectEqual(physical, checkedUserRootWith(&backend, alias, physical | 17 | x86.CR3_NO_FLUSH).?);
-    for ([_]struct { directory: usize, cr3: usize }{
-        .{ .directory = 0, .cr3 = physical },
-        .{ .directory = directMapAddress(0).?, .cr3 = 0 },
-        .{ .directory = alias + 1, .cr3 = physical },
-        .{ .directory = alias, .cr3 = physical + PAGE_SIZE },
-        .{ .directory = alias, .cr3 = physical | (@as(usize, 1) << 62) },
-    }) |invalid| {
-        const before = backend.reads;
-        try std.testing.expectEqual(@as(?u64, null), checkedUserRootWith(&backend, invalid.directory, invalid.cr3));
-        try std.testing.expectEqual(before, backend.reads);
-    }
-    backend.allocated = false;
-    try std.testing.expectEqual(@as(?u64, null), checkedUserRootWith(&backend, alias, physical));
-    backend.allocated = true;
-    backend.cached = true;
-    try std.testing.expectEqual(@as(?u64, null), checkedUserRootWith(&backend, alias, physical));
-    backend.cached = false;
-    backend.alias = null;
-    try std.testing.expectEqual(@as(?u64, null), checkedUserRootWith(&backend, alias, physical));
-    backend.alias = alias + PAGE_SIZE;
-    try std.testing.expectEqual(@as(?u64, null), checkedUserRootWith(&backend, alias, physical));
+    return alias_proofs.checkedUserRoot(&backend, @intFromPtr(space.directory), space.switch_cr3);
 }
 
 // Allocator-owned frames come only from effective-WB usable RAM, and a device
@@ -768,59 +563,13 @@ inline fn allocatedFrameAlias(physical: u64, bytes: u64, write: bool) ?usize {
     return alias;
 }
 
-// Spans are sorted, disjoint and half-open; adjacent spans with different
-// write permissions remain separate. An empty range proves nothing.
-fn spansCover(spans: []const firmware_memory_map.PhysicalSpan, start: u64, end: u64) bool {
-    if (start >= end) return false;
-    var low: usize = 0;
-    var high = spans.len;
-    while (low < high) {
-        const middle = low + (high - low) / 2;
-        if (spans[middle].start <= start) low = middle + 1 else high = middle;
-    }
-    if (low == 0) return false;
-    var index = low - 1;
-    var cursor = start;
-    while (cursor < end) : (index += 1) {
-        if (index == spans.len or spans[index].start > cursor or spans[index].end <= cursor) return false;
-        cursor = spans[index].end;
-    }
-    return true;
-}
-
-test "direct RAM span admission requires complete coverage across adjacent spans only" {
-    // Two adjacent spans, then a framebuffer-sized hole before the last span.
-    const spans = [_]firmware_memory_map.PhysicalSpan{
-        .{ .start = 0x10_0000, .end = 0x20_0000 },
-        .{ .start = 0x20_0000, .end = 0x40_0000 },
-        .{ .start = 0x8000_0000, .end = 0x9000_0000 },
-    };
-    for ([_]struct { start: u64, end: u64, covered: bool }{
-        .{ .start = 0x10_0000, .end = 0x10_1000, .covered = true },
-        .{ .start = 0x1F_F000, .end = 0x20_1000, .covered = true },
-        .{ .start = 0x10_0000, .end = 0x40_0000, .covered = true },
-        .{ .start = 0x8FFF_F000, .end = 0x9000_0000, .covered = true },
-        .{ .start = 0x0F_F000, .end = 0x10_1000, .covered = false },
-        .{ .start = 0x3F_F000, .end = 0x40_1000, .covered = false },
-        .{ .start = 0x40_0000, .end = 0x40_1000, .covered = false },
-        .{ .start = 0x3F_F000, .end = 0x8000_1000, .covered = false },
-        .{ .start = 0x7FFF_F000, .end = 0x8000_1000, .covered = false },
-        .{ .start = 0x8FFF_F000, .end = 0x9000_1000, .covered = false },
-        .{ .start = 0x9000_0000, .end = 0x9000_1000, .covered = false },
-        .{ .start = 0, .end = 0x1000, .covered = false },
-        .{ .start = 0x10_0000, .end = 0x10_0000, .covered = false },
-        .{ .start = 0x20_0000, .end = 0x10_0000, .covered = false },
-    }) |case| try std.testing.expectEqual(case.covered, spansCover(&spans, case.start, case.end));
-    try std.testing.expect(!spansCover(&.{}, 0x10_0000, 0x10_1000));
-}
-
 fn mappedRamSpanForAccess(physical: u64, bytes: u64, write: bool) ?usize {
     if (comptime builtin.target.os.tag != .freestanding) return null;
     const cache = cache_policy.admittedMtrrView() catch return null;
     var backend = DirectSpanTables{};
     const root = if (kernel_switch_cr3 != 0) runtime: {
         const end = std.math.add(u64, physical, bytes) catch return null;
-        if (!spansCover(direct_ram[0..direct_ram_count], physical, end)) return null;
+        if (!alias_proofs.spansCover(direct_ram[0..direct_ram_count], physical, end)) return null;
         break :runtime trackedCurrentDirectory() catch return null;
     } else boot: {
         const info = handoff.capturedInfo() orelse return null;
@@ -833,13 +582,13 @@ fn mappedRamSpanForAccess(physical: u64, bytes: u64, write: bool) ?usize {
         firmware_memory_map.requireRamWriteBack(memory_map, arenas.transition_base, arenas.transitionBytes(), cache) catch return null;
         break :boot backend.table(root_physical | ENTRY_PRESENT) orelse return null;
     };
-    return mappedRamSpanPermissionsWith(&backend, root, physical, bytes, cache, write);
+    return alias_proofs.mappedRamSpanPermissionsWith(&backend, root, physical, bytes, cache, write);
 }
 
 const DirectSpanTables = struct {
     transition: ?firmware_memory_map.PhysicalSpan = null,
 
-    fn table(self: *@This(), entry: u64) ?*const PageTable {
+    pub fn table(self: *@This(), entry: u64) ?*const PageTable {
         const physical = entryAddress(entry);
         if (physical == 0 or physical >= MANAGED_PHYSICAL_BYTES or physical % PAGE_SIZE != 0) return null;
         if (self.transition) |arena| {
@@ -849,118 +598,6 @@ const DirectSpanTables = struct {
         return @ptrFromInt(directMapAddress(physical) orelse return null);
     }
 };
-
-fn mappedRamSpanWith(backend: anytype, root: *const PageTable, physical: u64, bytes: u64, cache: cache_policy.ValidatedMtrrView) ?usize {
-    return mappedRamSpanPermissionsWith(backend, root, physical, bytes, cache, false);
-}
-
-fn mappedRamSpanPermissionsWith(backend: anytype, root: *const PageTable, physical: u64, bytes: u64, cache: cache_policy.ValidatedMtrrView, write: bool) ?usize {
-    const end = std.math.add(u64, physical, bytes) catch return null;
-    if (bytes == 0 or end > MANAGED_PHYSICAL_BYTES) return null;
-    cache.requireWriteBack(physical, bytes) catch return null;
-    const alias = directMapAddress(physical) orelse return null;
-    var cursor = physical;
-    while (cursor < end) {
-        const virtual = directMapAddress(cursor) orelse return null;
-        var current = root;
-        var found = false;
-        for ([_]u6{ PML4_SHIFT, PDPT_SHIFT, PAGE_DIRECTORY_SHIFT, PAGE_TABLE_SHIFT }, 0..) |shift, level| {
-            const entry = current[tableIndex(virtual, shift)];
-            if (!entryPresent(entry) or entry & ENTRY_USER != 0 or (write and entry & ENTRY_WRITABLE == 0)) return null;
-            const large = level != 3 and table64.isLargePage(entry);
-            if (large and level != 1 and level != 2) return null;
-            if (large or level == 3) {
-                const leaf_bytes: u64 = if (large) @as(u64, 1) << shift else PAGE_SIZE;
-                const pat_bit: u64 = if (large) 1 << 12 else ENTRY_LARGE_PAGE;
-                if (table64.isExecutable(entry) or entry & (ENTRY_WRITE_THROUGH | ENTRY_CACHE_DISABLE | pat_bit) != 0 or
-                    entryAddress(entry) != (cursor & ~(leaf_bytes - 1))) return null;
-                cursor = @min(end, (cursor & ~(leaf_bytes - 1)) + leaf_bytes);
-                found = true;
-                break;
-            }
-            if (entry & (ENTRY_WRITE_THROUGH | ENTRY_CACHE_DISABLE) != 0) return null;
-            current = backend.table(entry) orelse return null;
-        }
-        if (!found) return null;
-    }
-    return alias;
-}
-
-test "sparse physical readers prove complete supervisor NX WB aliases before pointers" {
-    const Model = struct {
-        pdpt: PageTable = @splat(0),
-        directory: PageTable = @splat(0),
-        pages: PageTable = @splat(0),
-        reads: usize = 0,
-
-        fn table(self: *@This(), entry: u64) ?*const PageTable {
-            self.reads += 1;
-            return switch (entryAddress(entry)) {
-                0x1000 => &self.pdpt,
-                0x2000 => &self.directory,
-                0x3000 => &self.pages,
-                else => null,
-            };
-        }
-    };
-    const state: cache_policy.MtrrState = .{ .physical_bits = 36, .default_type = cache_policy.MTRR_ENABLED | 6 };
-    const view = try cache_policy.ValidatedMtrrView.init(&state);
-    var root: PageTable = @splat(0);
-    root[256] = 0x1000 | ENTRY_PRESENT;
-    var model = Model{};
-    model.pdpt[0] = 0x2000 | ENTRY_PRESENT;
-    model.directory[0] = 0x3000 | ENTRY_PRESENT;
-    const valid = 0x5000 | ENTRY_PRESENT | table64.NO_EXECUTE;
-    model.pages[5] = valid;
-    try std.testing.expectEqual(directMapAddress(0x5000), mappedRamSpanWith(&model, &root, 0x5000, PAGE_SIZE, view));
-    try std.testing.expect(mappedRamSpanPermissionsWith(&model, &root, 0x5000, PAGE_SIZE, view, true) == null);
-    root[256] |= ENTRY_WRITABLE;
-    model.pdpt[0] |= ENTRY_WRITABLE;
-    model.directory[0] |= ENTRY_WRITABLE;
-    model.pages[5] |= ENTRY_WRITABLE;
-    try std.testing.expectEqual(directMapAddress(0x5000), mappedRamSpanPermissionsWith(&model, &root, 0x5000, PAGE_SIZE, view, true));
-    for ([_]*u64{ &root[256], &model.pdpt[0], &model.directory[0], &model.pages[5] }) |entry| {
-        entry.* &= ~ENTRY_WRITABLE;
-        try std.testing.expect(mappedRamSpanPermissionsWith(&model, &root, 0x5000, PAGE_SIZE, view, true) == null);
-        try std.testing.expect(mappedRamSpanWith(&model, &root, 0x5000, PAGE_SIZE, view) != null);
-        entry.* |= ENTRY_WRITABLE;
-    }
-    model.pages[5] = valid;
-    try std.testing.expectEqual(directMapAddress(0x5fff), mappedRamSpanWith(&model, &root, 0x5fff, 1, view));
-    try std.testing.expect(mappedRamSpanWith(&model, &root, 0x5fff, 2, view) == null);
-    for ([_]u64{ valid | ENTRY_USER, valid | ENTRY_WRITE_THROUGH, valid | ENTRY_CACHE_DISABLE, valid | ENTRY_LARGE_PAGE, valid & ~table64.NO_EXECUTE, valid & ~ENTRY_PRESENT, valid + PAGE_SIZE }) |invalid| {
-        model.pages[5] = invalid;
-        try std.testing.expect(mappedRamSpanWith(&model, &root, 0x5000, 1, view) == null);
-    }
-    model.pages[5] = valid;
-    root[256] |= ENTRY_USER;
-    model.reads = 0;
-    try std.testing.expect(mappedRamSpanWith(&model, &root, 0x5000, 1, view) == null);
-    try std.testing.expectEqual(@as(usize, 0), model.reads);
-    root[256] &= ~ENTRY_USER;
-    for ([_]u64{ ENTRY_WRITE_THROUGH, ENTRY_CACHE_DISABLE }) |selector| {
-        root[256] |= selector;
-        model.reads = 0;
-        try std.testing.expect(mappedRamSpanWith(&model, &root, 0x5000, 1, view) == null);
-        try std.testing.expectEqual(@as(usize, 0), model.reads);
-        root[256] &= ~selector;
-    }
-    model.directory[0] = ENTRY_PRESENT | ENTRY_LARGE_PAGE | table64.NO_EXECUTE;
-    try std.testing.expectEqual(directMapAddress(0x5000), mappedRamSpanWith(&model, &root, 0x5000, PAGE_SIZE, view));
-    model.pdpt[0] = ENTRY_PRESENT | ENTRY_LARGE_PAGE | table64.NO_EXECUTE;
-    try std.testing.expectEqual(directMapAddress(0x5000), mappedRamSpanWith(&model, &root, 0x5000, LARGE_2M_PAGE_SIZE, view));
-    // A requested WB/UC crossing is rejected before any hierarchy read.
-    var mixed_state = state;
-    mixed_state.capabilities = 1;
-    mixed_state.variable[0] = .{ .base = 0x6000, .mask = (((@as(u64, 1) << 36) - 1) & ~@as(u64, PAGE_SIZE - 1)) | cache_policy.MTRR_VALID };
-    const mixed = try cache_policy.ValidatedMtrrView.init(&mixed_state);
-    model.reads = 0;
-    try std.testing.expect(mappedRamSpanWith(&model, &root, 0x5fff, 2, mixed) == null);
-    try std.testing.expectEqual(@as(usize, 0), model.reads);
-    for ([_]u64{ 0, std.math.maxInt(u64) }) |length| {
-        try std.testing.expect(mappedRamSpanWith(&model, &root, 0x5000, length, mixed) == null);
-    }
-}
 
 pub const SIPI_PHYSICAL_LIMIT: frame_allocator.PhysicalAddress = 1024 * 1024;
 var reserved_sipi_page: ?u32 = null;
@@ -986,36 +623,16 @@ pub fn claimSipiTrampolinePage() ?u32 {
 pub fn allocGeneralFrame() ?frame_allocator.PhysicalAddress {
     acquireFrameLock();
     defer releaseFrameLock();
-    return allocGeneralFrameFrom(
-        &physical_frames,
-        &high_memory_zone_has_free_frames,
-        &low_identity_frame_cursor,
-        LOW_IDENTITY_PHYSICAL_LIMIT,
-        FRAME_ALLOCATOR_BYTES,
-    );
+    return physical_frames.allocateFrameBetween(0, FRAME_ALLOCATOR_BYTES);
 }
 
-fn allocGeneralFrameFrom(
-    allocator: anytype,
-    high_zone_has_free_frames: *bool,
-    low_cursor: *frame_allocator.AllocationCursor,
-    low_identity_limit: frame_allocator.PhysicalAddress,
-    managed_bytes: frame_allocator.PhysicalAddress,
-) ?frame_allocator.PhysicalAddress {
-    if (high_zone_has_free_frames.*) {
-        if (allocator.allocateFrameBetween(low_identity_limit, managed_bytes)) |base| {
-            return base;
-        }
-        high_zone_has_free_frames.* = false;
-    }
-    const run = allocator.allocateBelowWithCursor(1, low_identity_limit, low_cursor) orelse return null;
-    return run.base;
-}
-
+/// Every allocator-managed frame is effective-WB RAM with a direct alias, so
+/// DMA buffers come from the same pool: every DMA-capable driver programs
+/// 64-bit bus addresses, and VT-d maps each window at its physical address.
 pub fn allocGeneralFrames(count: u32) ?FrameRun {
     acquireFrameLock();
     defer releaseFrameLock();
-    return allocGeneralFramesLocked(count);
+    return physical_frames.allocate(count);
 }
 
 // Explicit physical bounds apply to the complete run.
@@ -1028,79 +645,10 @@ pub fn allocGeneralFramesBetween(count: u32, start: frame_allocator.PhysicalAddr
     return physical_frames.allocateBetween(count, start, end);
 }
 
-fn allocGeneralFramesLocked(count: u32) ?FrameRun {
-    return allocGeneralRunFrom(
-        &physical_frames,
-        &high_memory_zone_has_free_frames,
-        &low_identity_frame_cursor,
-        count,
-        LOW_IDENTITY_PHYSICAL_LIMIT,
-        FRAME_ALLOCATOR_BYTES,
-    );
-}
-
-fn allocGeneralRunFrom(
-    allocator: anytype,
-    high_zone_has_free_frames: *bool,
-    low_cursor: *frame_allocator.AllocationCursor,
-    count: u32,
-    low_identity_limit: frame_allocator.PhysicalAddress,
-    managed_bytes: frame_allocator.PhysicalAddress,
-) ?FrameRun {
-    if (high_zone_has_free_frames.*) {
-        if (allocator.allocateBetween(count, low_identity_limit, managed_bytes)) |run| return run;
-        if (count == 1) high_zone_has_free_frames.* = false;
-    }
-    return allocator.allocateBelowWithCursor(count, low_identity_limit, low_cursor);
-}
-
 fn allocGeneralAlignedFrames(count: u32, alignment_frames: u32) ?FrameRun {
     acquireFrameLock();
     defer releaseFrameLock();
-    return allocGeneralAlignedRunFrom(
-        &physical_frames,
-        high_memory_zone_has_free_frames,
-        &low_identity_frame_cursor,
-        count,
-        alignment_frames,
-        LOW_IDENTITY_PHYSICAL_LIMIT,
-        FRAME_ALLOCATOR_BYTES,
-    );
-}
-
-fn allocGeneralAlignedRunFrom(
-    allocator: anytype,
-    high_zone_has_free_frames: bool,
-    low_cursor: *frame_allocator.AllocationCursor,
-    count: u32,
-    alignment_frames: u32,
-    low_identity_limit: frame_allocator.PhysicalAddress,
-    managed_bytes: frame_allocator.PhysicalAddress,
-) ?FrameRun {
-    if (high_zone_has_free_frames) {
-        if (allocator.allocateAlignedBetween(count, alignment_frames, low_identity_limit, managed_bytes)) |run| return run;
-    }
-    return allocator.allocateAlignedBetweenWithCursor(count, alignment_frames, 0, low_identity_limit, low_cursor);
-}
-
-pub fn allocIdentityDmaFrames(count: u32) ?u32 {
-    acquireFrameLock();
-    defer releaseFrameLock();
-    const run = physical_frames.allocateBelowWithCursor(
-        count,
-        LOW_IDENTITY_PHYSICAL_LIMIT,
-        &low_identity_frame_cursor,
-    ) orelse return null;
-    return lowIdentityFrameAddress(run.base);
-}
-
-pub fn releaseIdentityDmaFrames(base: u32, count: u32) FrameReleaseError!void {
-    acquireFrameLock();
-    defer releaseFrameLock();
-    const shared_hint = physical_frames.search_frame_hint;
-    defer physical_frames.search_frame_hint = shared_hint;
-    try releasePhysicalFramesLocked(base, count);
-    low_identity_frame_cursor.next_frame = physical_frames.search_frame_hint;
+    return physical_frames.allocateAlignedBetween(count, alignment_frames, 0, FRAME_ALLOCATOR_BYTES);
 }
 
 pub inline fn releaseGeneralFrames(run: FrameRun) FrameReleaseError!void {
@@ -1117,37 +665,8 @@ inline fn releasePhysicalFrames(base: frame_allocator.PhysicalAddress, count: u3
     try releasePhysicalFramesLocked(base, count);
 }
 
-fn releasePhysicalFramesLocked(base: frame_allocator.PhysicalAddress, count: u32) FrameReleaseError!void {
-    try releaseRunWithCursorTo(&physical_frames, &high_memory_zone_has_free_frames, &low_identity_frame_cursor, .{
-        .base = base,
-        .count = count,
-    }, LOW_IDENTITY_PHYSICAL_LIMIT);
-}
-
-inline fn releaseRunWithCursorTo(
-    allocator: anytype,
-    high_zone_has_free_frames: *bool,
-    low_cursor: *frame_allocator.AllocationCursor,
-    run: FrameRun,
-    low_identity_limit: frame_allocator.PhysicalAddress,
-) FrameReleaseError!void {
-    try releaseRunTo(allocator, high_zone_has_free_frames, run, low_identity_limit);
-    // Low allocations use their own cursor, so the allocator's release hint
-    // alone would keep walking fresh RAM instead of reusing the returned run.
-    // The caller holds the frame lock across bitmap and cursor publication.
-    if (run.base < low_identity_limit) low_cursor.next_frame = allocator.search_frame_hint;
-}
-
-fn releaseRunTo(
-    allocator: anytype,
-    high_zone_has_free_frames: *bool,
-    run: FrameRun,
-    low_identity_limit: frame_allocator.PhysicalAddress,
-) FrameReleaseError!void {
-    try allocator.release(run);
-    // The validated run may start below the boundary and still return high frames.
-    const end = run.base + @as(frame_allocator.PhysicalAddress, run.count) * PAGE_SIZE;
-    if (end > low_identity_limit) high_zone_has_free_frames.* = true;
+inline fn releasePhysicalFramesLocked(base: frame_allocator.PhysicalAddress, count: u32) FrameReleaseError!void {
+    try physical_frames.release(.{ .base = base, .count = count });
 }
 
 pub fn frameStats() FrameStats {
@@ -1284,7 +803,7 @@ fn publishLeafMutation(backend: anytype, entry: *PageTableEntry, replacement: Pa
 fn requireKernelMappingOwner() KernelMappingOwnerError!void {
     // Kernel mappings belong to the sole runtime owner, including before SMP
     // admission. Check before mutation even when no remote flush is needed.
-    if (cpu_identity.currentIndex() != 0) return error.WrongCpu;
+    if (!cpu_identity.isBsp()) return error.WrongCpu;
 }
 
 fn publishCurrentLeafMutation(backend: anytype, entry: *PageTableEntry, replacement: PageTableEntry, address: usize) KernelMappingOwnerError!void {
@@ -3130,17 +2649,14 @@ fn initializeKernelHierarchy(arenas: paging_info.Info, memory_map: handoff.Memor
     return result.used_pages;
 }
 
+// RAM beyond the kernel image window has no image alias; only the sparse
+// direct map reaches it. Prove one such frame is a writable NX supervisor page.
 fn validateHighMemoryDirectMap() bool {
-    acquireFrameLock();
-    const run = physical_frames.allocateBetween(1, LOW_IDENTITY_PHYSICAL_LIMIT, FRAME_ALLOCATOR_BYTES) orelse {
-        releaseFrameLock();
-        return false;
-    };
-    releaseFrameLock();
-    defer releasePhysicalFrames(run.base, 1) catch
+    const frame = allocGeneralFramesBetween(1, kernel_address.image_physical_limit, FRAME_ALLOCATOR_BYTES) orelse return false;
+    defer releaseGeneralFrames(frame) catch
         haltPagingFailure(.corrupt_high_memory_probe_accounting);
 
-    const direct_alias = directMapAddress(run.base) orelse
+    const direct_alias = directMapAddress(frame.base) orelse
         haltPagingFailure(.high_memory_probe_outside_direct_map_aperture);
     const permissions = currentPagePermissions(direct_alias) orelse
         haltPagingFailure(.high_memory_direct_map_leaf_missing);
@@ -3178,8 +2694,6 @@ pub fn init() void {
     physical_frames = PhysicalFrameAllocator.bindStorage(frame_storage);
     firmware_memory_map.initializeAllocator(FRAME_ALLOCATOR_BYTES, PAGE_SIZE, &physical_frames, memory_map, cache) catch
         haltPagingFailure(.invalid_native_memory_map_allocator_admission);
-    high_memory_zone_has_free_frames = false;
-    low_identity_frame_cursor = .{};
     firmware_memory_map.reserveLiveHandoffRanges(
         FRAME_ALLOCATOR_BYTES,
         PAGE_SIZE,
@@ -3280,68 +2794,10 @@ pub fn page_fault_handler(regs: *const @import("../interrupts/isr.zig").Register
     panic_utils.panic("unrecoverable page fault at 0x{x} (instruction=0x{x})", .{ faulting_address, regs.eip });
 }
 
-const RootTrackingError = error{
-    InvalidCpu,
-    InvalidRoot,
-    Uninitialized,
-    AlreadyInitialized,
-    HardwareMismatch,
-};
-
-// Each CPU owns its slot. Every other CR3 writer restores the value it read,
-// so the slot is authoritative and switches never read CR3 back.
-const CurrentRootSlot = struct {
-    directory: usize align(128) = 0,
-    switch_cr3: usize = 0,
-};
-
-const CurrentRootTracker = struct {
-    slots: [cpu_identity.MAX_CPUS]CurrentRootSlot = @splat(.{}),
-
-    fn slot(self: *@This(), index: u8) RootTrackingError!*CurrentRootSlot {
-        if (index >= self.slots.len) return error.InvalidCpu;
-        return &self.slots[index];
-    }
-
-    inline fn get(self: *@This(), index: u8) RootTrackingError!*PageDirectory {
-        const selected = try self.slot(index);
-        const directory = @atomicLoad(usize, &selected.directory, .acquire);
-        if (directory == 0) return error.Uninitialized;
-        return @ptrFromInt(directory);
-    }
-
-    fn initialize(self: *@This(), index: u8, directory: *PageDirectory, switch_cr3: usize, actual_cr3: usize) RootTrackingError!void {
-        const selected = try self.slot(index);
-        if (@atomicLoad(usize, &selected.directory, .acquire) != 0) return error.AlreadyInitialized;
-        try validateTrackedRoot(directory, switch_cr3);
-        if (!cr3ReadbackMatchesSwitch(actual_cr3, switch_cr3)) return error.HardwareMismatch;
-        selected.switch_cr3 = switch_cr3;
-        @atomicStore(usize, &selected.directory, @intFromPtr(directory), .release);
-    }
-
-    fn switchWith(self: *@This(), index: u8, directory: *PageDirectory, switch_cr3: usize, backend: anytype) RootTrackingError!void {
-        const selected = try self.slot(index);
-        if (@atomicLoad(usize, &selected.directory, .acquire) == 0) return error.Uninitialized;
-        try validateTrackedRoot(directory, switch_cr3);
-        // A validated value names exactly one root frame, alias and PCID.
-        if (selected.switch_cr3 == switch_cr3) return;
-        backend.write(switch_cr3);
-        selected.switch_cr3 = switch_cr3;
-        @atomicStore(usize, &selected.directory, @intFromPtr(directory), .release);
-    }
-
-    fn activeOnAnyCpu(self: *@This(), directory: *const PageDirectory) bool {
-        for (&self.slots) |*selected| {
-            if (@atomicLoad(usize, &selected.directory, .acquire) == @intFromPtr(directory)) return true;
-        }
-        return false;
-    }
-};
-
-var current_roots: CurrentRootTracker = .{};
+var current_roots: root_tracker.Tracker = .{};
 var kernel_switch_cr3: usize = 0;
 
-inline fn trackedCurrentDirectory() RootTrackingError!*PageDirectory {
+inline fn trackedCurrentDirectory() root_tracker.Error!*PageDirectory {
     return current_roots.get(cpu_identity.currentIndex());
 }
 
@@ -3360,14 +2816,6 @@ pub fn initializeCurrentKernelRoot() void {
     defer if (restore_interrupts) x86.sti();
     current_roots.initialize(cpu_identity.currentIndex(), kernelPageDirectory(), kernel_switch_cr3, x86.readCr3()) catch
         haltPagingFailure(.current_cpu_failed_kernel_cr3_admission);
-}
-
-fn validateTrackedRoot(directory: *const PageDirectory, switch_cr3: usize) RootTrackingError!void {
-    const physical = virtual_layout.directMappedPhysicalAddress(@intFromPtr(directory), MANAGED_PHYSICAL_BYTES) orelse
-        return error.InvalidRoot;
-    if (physical == 0 or physical % PAGE_SIZE != 0 or
-        (switch_cr3 & ~(x86.CR3_ADDRESS_MASK | x86.CR3_PCID_MASK | x86.CR3_NO_FLUSH)) != 0 or
-        (switch_cr3 & x86.CR3_ADDRESS_MASK) != physical) return error.InvalidRoot;
 }
 
 fn addressSpaceCr3(directory_physical: frame_allocator.PhysicalAddress, pcid: pcid_allocator.Identifier) usize {
@@ -3389,21 +2837,15 @@ fn switchAddressSpace(directory: *PageDirectory, switch_cr3: usize) void {
 }
 
 const HardwareRootSwitch = struct {
-    fn write(_: @This(), value: usize) void {
+    pub fn write(_: @This(), value: usize) void {
         if (!x86.processContextIdentifiersEnabled() and (value & ~x86.CR3_ADDRESS_MASK) != 0)
             haltPagingFailure(.pcid_switch_requires_current_cpu_admission);
         x86.writeCr3(value);
     }
 };
 
-fn switchTrackedCurrentRootWith(directory: *PageDirectory, switch_cr3: usize, backend: anytype) RootTrackingError!void {
+fn switchTrackedCurrentRootWith(directory: *PageDirectory, switch_cr3: usize, backend: anytype) root_tracker.Error!void {
     return current_roots.switchWith(cpu_identity.currentIndex(), directory, switch_cr3, backend);
-}
-
-inline fn cr3ReadbackMatchesSwitch(current_cr3: usize, switch_cr3: usize) bool {
-    // NO_FLUSH controls MOV to CR3; hardware never retains it in CR3. Keep the
-    // root and PCID comparison even when this CPU's cached directory matches.
-    return current_cr3 == (switch_cr3 & ~x86.CR3_NO_FLUSH);
 }
 
 fn invalidate_page(virt_addr: usize) void {
@@ -3417,9 +2859,6 @@ comptime {
     if (DIRECT_MAP_PDPT_ENTRIES == 0 or DIRECT_MAP_PDPT_ENTRIES > table64.TABLE_ENTRIES) {
         @compileError("the direct-map aperture must fit one page-directory-pointer table");
     }
-    if (LOW_IDENTITY_PHYSICAL_LIMIT != LARGE_1G_PAGE_SIZE) {
-        @compileError("the low identity aperture must occupy exactly one page directory");
-    }
     if (PhysicalFrameAllocator.storage_bytes + (2 * PAGE_SIZE) >= memory.HEAP_SIZE - (8 * 1024 * 1024)) {
         @compileError("early frame state leaves no kernel heap payload");
     }
@@ -3429,9 +2868,6 @@ comptime {
     if (FRAME_ALLOCATOR_BYTES > MANAGED_PHYSICAL_BYTES or FRAME_ALLOCATOR_BYTES % LARGE_1G_PAGE_SIZE != 0) {
         @compileError("allocator-managed RAM must lie inside the direct-map aperture");
     }
-    if (@alignOf(CurrentRootSlot) != 128 or @sizeOf(CurrentRootSlot) != 128) {
-        @compileError("per-CPU current roots must occupy independent cache lines");
-    }
     if (tableIndex(virtual_layout.physical_memory.base, PML4_SHIFT) == 0 or
         tableIndex(virtual_layout.physical_memory.base, PDPT_SHIFT) != 0)
     {
@@ -3439,54 +2875,12 @@ comptime {
     }
 }
 
-test "CR3 readback ignores the transient switch control and preserves root and PCID identity" {
-    const root_address: usize = 0x0000_0000_1234_5000;
-    const current_cr3 = x86.pcidCr3Value(root_address, 7, false).?;
-    const preserving_switch = x86.pcidCr3Value(root_address, 7, true).?;
-    try std.testing.expect(current_cr3 != preserving_switch);
-    try std.testing.expect(cr3ReadbackMatchesSwitch(current_cr3, preserving_switch));
-    try std.testing.expect(cr3ReadbackMatchesSwitch(current_cr3, current_cr3));
-    try std.testing.expect(!cr3ReadbackMatchesSwitch(
-        x86.pcidCr3Value(root_address + PAGE_SIZE, 7, false).?,
-        preserving_switch,
-    ));
-    try std.testing.expect(!cr3ReadbackMatchesSwitch(
-        x86.pcidCr3Value(root_address, 8, false).?,
-        preserving_switch,
-    ));
-    try std.testing.expect(cr3ReadbackMatchesSwitch(root_address, root_address));
-}
-
-test "current root admission rejects uninitialized mismatched and repeated CPU bindings" {
-    var tracker: CurrentRootTracker = .{};
-    const kernel: *PageDirectory = @ptrFromInt(virtual_layout.physical_memory.base + PAGE_SIZE);
-    const expected = x86.pcidCr3Value(PAGE_SIZE, 0, true).?;
-    for (0..cpu_identity.MAX_CPUS) |position| {
-        const index: u8 = @intCast(if (position % 2 == 0) cpu_identity.MAX_CPUS - 1 - position / 2 else position / 2);
-        try std.testing.expectError(error.Uninitialized, tracker.get(index));
-        try std.testing.expectError(error.HardwareMismatch, tracker.initialize(index, kernel, expected, PAGE_SIZE | 1));
-        try std.testing.expectError(error.Uninitialized, tracker.get(index));
-        try tracker.initialize(index, kernel, expected, PAGE_SIZE);
-        try std.testing.expectEqual(kernel, try tracker.get(index));
-        try std.testing.expectError(error.AlreadyInitialized, tracker.initialize(index, kernel, expected, PAGE_SIZE));
-        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(&tracker.slots[index]) % 128);
-        if (index != 0) try std.testing.expectEqual(@as(usize, 128), @intFromPtr(&tracker.slots[index]) - @intFromPtr(&tracker.slots[index - 1]));
-    }
-    try std.testing.expectError(error.InvalidCpu, tracker.get(cpu_identity.MAX_CPUS));
-    try std.testing.expectError(error.InvalidCpu, tracker.initialize(cpu_identity.MAX_CPUS, kernel, expected, PAGE_SIZE));
-    var empty: CurrentRootTracker = .{};
-    try std.testing.expectError(error.InvalidRoot, empty.initialize(0, kernel, 2 * PAGE_SIZE, 2 * PAGE_SIZE));
-    try std.testing.expectError(error.InvalidRoot, empty.initialize(0, @ptrFromInt(PAGE_SIZE), PAGE_SIZE, PAGE_SIZE));
-    try std.testing.expectError(error.InvalidRoot, empty.initialize(0, kernel, expected | (1 << 62), PAGE_SIZE));
-    try std.testing.expectError(error.Uninitialized, empty.get(0));
-}
-
 test "all sixteen modeled current roots switch independently and retain remote active ownership" {
     const Model = struct {
         hardware: [cpu_identity.MAX_CPUS]usize = @splat(PAGE_SIZE),
         writes: [cpu_identity.MAX_CPUS]u32 = @splat(0),
 
-        fn write(self: *@This(), value: usize) void {
+        pub fn write(self: *@This(), value: usize) void {
             const index = cpu_identity.currentIndex();
             self.writes[index] += 1;
             self.hardware[index] = value & ~x86.CR3_NO_FLUSH;
@@ -3533,41 +2927,6 @@ test "all sixteen modeled current roots switch independently and retain remote a
     try std.testing.expect(current_roots.activeOnAnyCpu(kernel));
 }
 
-test "current root switching writes only changed roots or PCIDs and rejects invalid roots before hardware" {
-    const Model = struct {
-        hardware: usize = PAGE_SIZE,
-        writes: u32 = 0,
-
-        fn write(self: *@This(), value: usize) void {
-            self.writes += 1;
-            self.hardware = value & ~x86.CR3_NO_FLUSH;
-        }
-    };
-    var tracker: CurrentRootTracker = .{};
-    const kernel: *PageDirectory = @ptrFromInt(virtual_layout.physical_memory.base + PAGE_SIZE);
-    const other: *PageDirectory = @ptrFromInt(virtual_layout.physical_memory.base + 2 * PAGE_SIZE);
-    var model: Model = .{};
-    try std.testing.expectError(error.Uninitialized, tracker.switchWith(0, kernel, PAGE_SIZE, &model));
-    try std.testing.expectEqual(@as(u32, 0), model.writes);
-    try tracker.initialize(0, kernel, PAGE_SIZE, PAGE_SIZE);
-    try tracker.switchWith(0, kernel, PAGE_SIZE, &model);
-    try std.testing.expectEqual(@as(u32, 0), model.writes);
-    try tracker.switchWith(0, other, 2 * PAGE_SIZE, &model);
-    try tracker.switchWith(0, other, 2 * PAGE_SIZE, &model);
-    try std.testing.expectEqual(@as(u32, 1), model.writes);
-    try std.testing.expectEqual(@as(usize, 2 * PAGE_SIZE), model.hardware);
-    try std.testing.expectEqual(other, try tracker.get(0));
-    // The same root under another PCID is a distinct hardware context.
-    const tagged = x86.pcidCr3Value(2 * PAGE_SIZE, 5, true).?;
-    try tracker.switchWith(0, other, tagged, &model);
-    try std.testing.expectEqual(@as(u32, 2), model.writes);
-    try std.testing.expectError(error.InvalidRoot, tracker.switchWith(0, other, 3 * PAGE_SIZE, &model));
-    try std.testing.expectError(error.InvalidRoot, tracker.switchWith(0, kernel, tagged, &model));
-    try std.testing.expectEqual(@as(u32, 2), model.writes);
-    try std.testing.expectEqual(other, try tracker.get(0));
-    try std.testing.expect(!tracker.activeOnAnyCpu(kernel));
-}
-
 test "task roots inherit upper-half kernel mappings without the low AP bridge" {
     var kernel: PageDirectory = @splat(0);
     var task: PageDirectory = @splat(0);
@@ -3606,204 +2965,6 @@ test "direct physical aliases cover only the managed aperture" {
     try std.testing.expect(directMapAddress(MANAGED_PHYSICAL_BYTES) == null);
 }
 
-test "general contiguous allocation prefers high memory" {
-    const test_frame_count = 8;
-    const low_frame_count = 4;
-    const managed_bytes = test_frame_count * PAGE_SIZE;
-    const low_identity_limit = low_frame_count * PAGE_SIZE;
-    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var storage: TestAllocator.Storage = undefined;
-    var allocator = TestAllocator.init(&storage);
-    var high_zone_has_free_frames = true;
-    var low_cursor = frame_allocator.AllocationCursor{};
-
-    const run = allocGeneralRunFrom(
-        &allocator,
-        &high_zone_has_free_frames,
-        &low_cursor,
-        2,
-        low_identity_limit,
-        managed_bytes,
-    ).?;
-    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, low_identity_limit), run.base);
-    try std.testing.expectEqual(@as(u32, 2), run.count);
-    try std.testing.expect(high_zone_has_free_frames);
-}
-
-test "released low-memory runs are reused before fresh sparse RAM" {
-    const managed_bytes = 24 * PAGE_SIZE;
-    const low_identity_limit = 20 * PAGE_SIZE;
-    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var storage: TestAllocator.Storage = undefined;
-    var allocator = TestAllocator.init(&storage);
-    // Model unavailable holes and an exhausted high zone. The fresh low run
-    // beyond the hole must stay available while a released run is recycled.
-    try allocator.reserve(.{ .base = 0, .count = 2 });
-    try allocator.reserve(.{ .base = 9 * PAGE_SIZE, .count = 2 });
-    try allocator.reserve(.{ .base = low_identity_limit, .count = 4 });
-    var high_zone_has_free_frames = false;
-    var low_cursor = frame_allocator.AllocationCursor{};
-    const first = allocGeneralRunFrom(&allocator, &high_zone_has_free_frames, &low_cursor, 3, low_identity_limit, managed_bytes).?;
-    const survivor = allocGeneralRunFrom(&allocator, &high_zone_has_free_frames, &low_cursor, 3, low_identity_limit, managed_bytes).?;
-    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 2 * PAGE_SIZE), first.base);
-    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 5 * PAGE_SIZE), survivor.base);
-    const live_stats = allocator.stats();
-
-    for (0..4) |_| {
-        try releaseRunWithCursorTo(&allocator, &high_zone_has_free_frames, &low_cursor, first, low_identity_limit);
-        const replacement = allocGeneralRunFrom(&allocator, &high_zone_has_free_frames, &low_cursor, first.count, low_identity_limit, managed_bytes).?;
-        try std.testing.expectEqual(first, replacement);
-        try std.testing.expectEqual(live_stats, allocator.stats());
-        try std.testing.expect(allocator.isAllocated(survivor.base));
-        try std.testing.expect(allocator.isAllocated(survivor.base + 2 * PAGE_SIZE));
-        try std.testing.expect(!allocator.isAllocated(11 * PAGE_SIZE));
-        try std.testing.expect(allocator.isReserved(9 * PAGE_SIZE));
-        try std.testing.expect(!high_zone_has_free_frames);
-    }
-}
-
-test "run releases preserve low allocation progress when high or rejected" {
-    const managed_bytes = 12 * PAGE_SIZE;
-    const low_identity_limit = 8 * PAGE_SIZE;
-    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var storage: TestAllocator.Storage = undefined;
-    var allocator = TestAllocator.init(&storage);
-    _ = allocator.allocate(12).?;
-    var high_zone_has_free_frames = false;
-    var low_cursor = frame_allocator.AllocationCursor{ .next_frame = 6 };
-    const high_run = FrameRun{ .base = low_identity_limit, .count = 2 };
-    try releaseRunWithCursorTo(&allocator, &high_zone_has_free_frames, &low_cursor, high_run, low_identity_limit);
-    try std.testing.expectEqual(@as(u32, 6), low_cursor.next_frame);
-    try std.testing.expect(high_zone_has_free_frames);
-
-    const before = allocator.stats();
-    try std.testing.expectError(error.NotAllocated, releaseRunWithCursorTo(&allocator, &high_zone_has_free_frames, &low_cursor, high_run, low_identity_limit));
-    try std.testing.expectError(error.Unaligned, releaseRunWithCursorTo(&allocator, &high_zone_has_free_frames, &low_cursor, .{ .base = PAGE_SIZE + 1, .count = 1 }, low_identity_limit));
-    try std.testing.expectEqual(@as(u32, 6), low_cursor.next_frame);
-    try std.testing.expectEqual(before, allocator.stats());
-    try std.testing.expect(allocator.isAllocated(2 * PAGE_SIZE));
-    try std.testing.expect(allocator.isAllocated(3 * PAGE_SIZE));
-}
-
-test "general allocation progress survives low-memory allocation activity" {
-    const test_frame_count = 12;
-    const low_frame_count = 4;
-    const managed_bytes = test_frame_count * PAGE_SIZE;
-    const low_identity_limit = low_frame_count * PAGE_SIZE;
-    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var storage: TestAllocator.Storage = undefined;
-    var allocator = TestAllocator.init(&storage);
-    var high_zone_has_free_frames = true;
-    var low_cursor = frame_allocator.AllocationCursor{};
-
-    const first_high = allocGeneralRunFrom(
-        &allocator,
-        &high_zone_has_free_frames,
-        &low_cursor,
-        1,
-        low_identity_limit,
-        managed_bytes,
-    ).?;
-    const first_low = allocator.allocateBelowWithCursor(1, low_identity_limit, &low_cursor).?;
-    const second_high = allocGeneralRunFrom(
-        &allocator,
-        &high_zone_has_free_frames,
-        &low_cursor,
-        1,
-        low_identity_limit,
-        managed_bytes,
-    ).?;
-
-    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, low_identity_limit), first_high.base);
-    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 0), first_low.base);
-    try std.testing.expectEqual(
-        @as(frame_allocator.PhysicalAddress, low_identity_limit + PAGE_SIZE),
-        second_high.base,
-    );
-}
-
-test "general contiguous allocation preserves the high-memory availability hint across fragmentation" {
-    const test_frame_count = 8;
-    const low_frame_count = 4;
-    const managed_bytes = test_frame_count * PAGE_SIZE;
-    const low_identity_limit = low_frame_count * PAGE_SIZE;
-    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var storage: TestAllocator.Storage = undefined;
-    var allocator = TestAllocator.init(&storage);
-    try allocator.reserve(.{ .base = 4 * PAGE_SIZE, .count = 1 });
-    try allocator.reserve(.{ .base = 6 * PAGE_SIZE, .count = 1 });
-    var high_zone_has_free_frames = true;
-    var low_cursor = frame_allocator.AllocationCursor{};
-
-    const run = allocGeneralRunFrom(
-        &allocator,
-        &high_zone_has_free_frames,
-        &low_cursor,
-        2,
-        low_identity_limit,
-        managed_bytes,
-    ).?;
-    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 0), run.base);
-    try std.testing.expect(high_zone_has_free_frames);
-}
-
-test "general single-frame allocation caches an exhausted high zone" {
-    const test_frame_count = 8;
-    const low_frame_count = 4;
-    const managed_bytes = test_frame_count * PAGE_SIZE;
-    const low_identity_limit = low_frame_count * PAGE_SIZE;
-    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var storage: TestAllocator.Storage = undefined;
-    var allocator = TestAllocator.init(&storage);
-    try allocator.reserve(.{ .base = low_identity_limit, .count = test_frame_count - low_frame_count });
-    var high_zone_has_free_frames = true;
-    var low_cursor = frame_allocator.AllocationCursor{};
-
-    const run = allocGeneralRunFrom(
-        &allocator,
-        &high_zone_has_free_frames,
-        &low_cursor,
-        1,
-        low_identity_limit,
-        managed_bytes,
-    ).?;
-    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 0), run.base);
-    try std.testing.expect(!high_zone_has_free_frames);
-}
-
-test "releasing a run across the identity boundary restores high-memory allocation" {
-    const managed_bytes = 8 * PAGE_SIZE;
-    const low_identity_limit = 4 * PAGE_SIZE;
-    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var storage: TestAllocator.Storage = undefined;
-    var allocator = TestAllocator.init(&storage);
-    _ = allocator.allocate(8).?;
-    var high_zone_has_free_frames = false;
-    var low_cursor = frame_allocator.AllocationCursor{};
-
-    try releaseRunTo(&allocator, &high_zone_has_free_frames, .{
-        .base = 3 * PAGE_SIZE,
-        .count = 2,
-    }, low_identity_limit);
-    try std.testing.expect(high_zone_has_free_frames);
-    const run = allocGeneralRunFrom(&allocator, &high_zone_has_free_frames, &low_cursor, 1, low_identity_limit, managed_bytes).?;
-    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, low_identity_limit), run.base);
-
-    high_zone_has_free_frames = false;
-    try std.testing.expectError(error.NotAllocated, releaseRunTo(&allocator, &high_zone_has_free_frames, .{
-        .base = 3 * PAGE_SIZE,
-        .count = 2,
-    }, low_identity_limit));
-    try std.testing.expect(!high_zone_has_free_frames);
-    try std.testing.expect(allocator.isAllocated(low_identity_limit));
-
-    try releaseRunTo(&allocator, &high_zone_has_free_frames, .{
-        .base = 2 * PAGE_SIZE,
-        .count = 1,
-    }, low_identity_limit);
-    try std.testing.expect(!high_zone_has_free_frames);
-}
-
 test "sparse direct-map capacity remains bounded to 512 GiB" {
     try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 512 * 1024 * 1024 * 1024), MANAGED_PHYSICAL_BYTES);
     try std.testing.expectEqual(@as(usize, 512), DIRECT_MAP_PDPT_ENTRIES);
@@ -3819,43 +2980,6 @@ test "aligned user mappings prefer 2 MiB leaves" {
     const aligned = try ownedUserHugeLeaf(LARGE_2M_PAGE_SIZE, permissions);
     try std.testing.expect(table64.isLargePage(aligned));
     try std.testing.expectEqual(@as(usize, LARGE_2M_PAGE_SIZE), entryAddress(aligned));
-}
-
-test "huge allocation preserves high-zone availability and falls back without leaking frames" {
-    const low_identity_limit = LARGE_2M_PAGE_SIZE;
-    const managed_bytes = 2 * LARGE_2M_PAGE_SIZE;
-    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var storage: TestAllocator.Storage = undefined;
-    var allocator = TestAllocator.init(&storage);
-    // Both aligned 2 MiB spans contain one unavailable frame, though almost
-    // their entire physical memory remains suitable for ordinary user pages.
-    try allocator.reserve(.{ .base = 0, .count = 1 });
-    try allocator.reserve(.{ .base = low_identity_limit, .count = 1 });
-    var high_zone_has_free_frames = true;
-    var low_cursor = frame_allocator.AllocationCursor{};
-    const before = allocator.stats();
-    try std.testing.expect(allocGeneralAlignedRunFrom(
-        &allocator,
-        high_zone_has_free_frames,
-        &low_cursor,
-        LARGE_2M_FRAME_COUNT,
-        LARGE_2M_FRAME_COUNT,
-        low_identity_limit,
-        managed_bytes,
-    ) == null);
-    try std.testing.expectEqual(before, allocator.stats());
-    const ordinary = allocGeneralRunFrom(
-        &allocator,
-        &high_zone_has_free_frames,
-        &low_cursor,
-        1,
-        low_identity_limit,
-        managed_bytes,
-    ).?;
-    try std.testing.expectEqual(low_identity_limit + PAGE_SIZE, ordinary.base);
-    try std.testing.expect(high_zone_has_free_frames);
-    try allocator.release(ordinary);
-    try std.testing.expectEqual(before, allocator.stats());
 }
 
 test "leaf mappings encode global and execute permissions explicitly" {

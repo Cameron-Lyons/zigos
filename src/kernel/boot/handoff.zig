@@ -127,7 +127,6 @@ pub fn framebufferInfo(info: *const BootInfo) Error!framebuffer.Info {
         .width = fb.width,
         .height = fb.height,
         .pixels_per_scan_line = fb.pitch / 4,
-        .format = .bitmask,
         .pixel_mask = .{
             .red = fb.red_mask,
             .green = fb.green_mask,

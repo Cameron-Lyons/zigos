@@ -1,4 +1,5 @@
 const std = @import("std");
+const asm_abi = @import("asm_abi.zig");
 
 // Native mappings have one immutable interpretation on every logical CPU.
 // Admission requires the complete power-on table from firmware. Each CPU then
@@ -402,6 +403,47 @@ pub const BootstrapMtrrSnapshot = extern struct {
     }
 };
 
+// cache_policy.inc and mtrr_bootstrap.inc are the assembly views of these
+// controls and of the SIPI snapshot layout.
+comptime {
+    asm_abi.expectConstants("cache_policy.inc", @embedFile("x86_64/cache_policy.inc"), .{
+        .{ "ZIGOS_CACHE_PAT_MSR", PAT_MSR },
+        .{ "ZIGOS_CACHE_CPUID_PAT", CPUID_PAT },
+        .{ "ZIGOS_CACHE_CONTROL_MASK", CACHE_CONTROL_MASK },
+        .{ "ZIGOS_CACHE_CR0_CD", CR0_CD },
+        .{ "ZIGOS_CACHE_CR0_NW", CR0_NW },
+        .{ "ZIGOS_CACHE_CR0_PG", CR0_PG },
+        .{ "ZIGOS_CACHE_CR4_PGE", 1 << 7 },
+        .{ "ZIGOS_CACHE_PAT_LOW", @as(u32, @truncate(BOOTSTRAP_PAT)) },
+        .{ "ZIGOS_CACHE_PAT_HIGH", @as(u32, @truncate(BOOTSTRAP_PAT >> 32)) },
+        .{ "ZIGOS_CACHE_NATIVE_PAT_LOW", @as(u32, @truncate(NATIVE_PAT)) },
+        .{ "ZIGOS_CACHE_NATIVE_PAT_HIGH", @as(u32, @truncate(NATIVE_PAT >> 32)) },
+        .{ "ZIGOS_CACHE_WB_SELECTOR", WRITE_BACK_SELECTOR },
+        .{ "ZIGOS_CACHE_UC_SELECTOR", UNCACHEABLE_SELECTOR },
+    });
+    asm_abi.expectConstants("mtrr_bootstrap.inc", @embedFile("x86_64/mtrr_bootstrap.inc"), .{
+        .{ "ZIGOS_MTRR_SNAPSHOT_VERSION", BOOTSTRAP_MTRR_VERSION },
+        .{ "ZIGOS_MTRR_SNAPSHOT_BYTES", @sizeOf(BootstrapMtrrSnapshot) },
+        .{ "ZIGOS_MTRR_VERSION_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "version") },
+        .{ "ZIGOS_MTRR_WIDTH_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "physical_bits") },
+        .{ "ZIGOS_MTRR_CAP_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "capabilities") },
+        .{ "ZIGOS_MTRR_DEFAULT_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "default_type") },
+        .{ "ZIGOS_MTRR_FIXED_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "fixed") },
+        .{ "ZIGOS_MTRR_VARIABLE_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "variable") },
+        .{ "ZIGOS_MTRR_MAX_VARIABLE", MAX_VARIABLE_MTRRS },
+        .{ "ZIGOS_MTRR_CAP_MSR", 0xfe },
+        .{ "ZIGOS_MTRR_DEFAULT_MSR", 0x2ff },
+        .{ "ZIGOS_MTRR_VARIABLE_MSR", MTRR_VARIABLE_BASE_MSR },
+        .{ "ZIGOS_MTRR_ENABLE", MTRR_ENABLED },
+        .{ "ZIGOS_MTRR_FIXED_ENABLE", MTRR_FIXED_ENABLED },
+        .{ "ZIGOS_MTRR_FIXED_SUPPORT", MTRR_FIXED_SUPPORTED },
+        .{ "ZIGOS_MTRR_WC_SUPPORT", MTRR_WC_SUPPORTED },
+        .{ "ZIGOS_MTRR_CPUID_SUPPORT", 1 << 12 },
+    });
+    if (@sizeOf(VariableMtrr) != 16 or @alignOf(BootstrapMtrrSnapshot) != 8)
+        @compileError("the SIPI MTRR snapshot must keep its packed 8-byte-aligned wire layout");
+}
+
 pub inline fn copyBootstrapMtrrSnapshot(out: *BootstrapMtrrSnapshot) MtrrError!void {
     if (!@atomicLoad(bool, &bsp_cache_policy.ready, .acquire)) return error.UninitializedBspCachePolicy;
     out.version = BOOTSTRAP_MTRR_VERSION;
@@ -674,37 +716,7 @@ test "MTRR BSP snapshot admission compares implemented disabled pairs and fixed 
     try std.testing.expectEqual(@as(?u8, 36), admittedPhysicalAddressBits());
 }
 
-fn assemblyConstantFrom(source: []const u8, name: []const u8) !u64 {
-    var lines = std.mem.tokenizeScalar(u8, source, '\n');
-    var value: ?u64 = null;
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (!std.mem.startsWith(u8, trimmed, "#define ZIGOS_")) continue;
-        var definition = std.mem.tokenizeAny(u8, trimmed[8..], " \t");
-        if (!std.mem.eql(u8, definition.next() orelse return error.InvalidAssemblyConstant, name)) continue;
-        if (value != null) return error.DuplicateAssemblyConstant;
-        value = try std.fmt.parseInt(u64, definition.next() orelse return error.InvalidAssemblyConstant, 0);
-        if (definition.next() != null) return error.InvalidAssemblyConstant;
-    }
-    return value orelse error.MissingAssemblyConstant;
-}
-
-test "bootstrap cache assembly constants match complete PAT controls and selectors" {
-    inline for (.{
-        .{ "ZIGOS_CACHE_PAT_MSR", PAT_MSR },
-        .{ "ZIGOS_CACHE_CPUID_PAT", CPUID_PAT },
-        .{ "ZIGOS_CACHE_CONTROL_MASK", CACHE_CONTROL_MASK },
-        .{ "ZIGOS_CACHE_CR0_CD", CR0_CD },
-        .{ "ZIGOS_CACHE_CR0_NW", CR0_NW },
-        .{ "ZIGOS_CACHE_CR0_PG", CR0_PG },
-        .{ "ZIGOS_CACHE_CR4_PGE", @as(u64, 1 << 7) },
-        .{ "ZIGOS_CACHE_PAT_LOW", @as(u32, @truncate(BOOTSTRAP_PAT)) },
-        .{ "ZIGOS_CACHE_PAT_HIGH", @as(u32, @truncate(BOOTSTRAP_PAT >> 32)) },
-        .{ "ZIGOS_CACHE_NATIVE_PAT_LOW", @as(u32, @truncate(NATIVE_PAT)) },
-        .{ "ZIGOS_CACHE_NATIVE_PAT_HIGH", @as(u32, @truncate(NATIVE_PAT >> 32)) },
-        .{ "ZIGOS_CACHE_WB_SELECTOR", WRITE_BACK_SELECTOR },
-        .{ "ZIGOS_CACHE_UC_SELECTOR", UNCACHEABLE_SELECTOR },
-    }) |item| try std.testing.expectEqual(@as(u64, item[1]), try assemblyConstantFrom(@embedFile("x86_64/cache_policy.inc"), item[0]));
+test "cache selectors name the PAT entries the native table defines" {
     try std.testing.expectEqual(WRITE_BACK_SELECTOR, selector(.write_back));
     try std.testing.expectEqual(UNCACHEABLE_SELECTOR, selector(.uncacheable));
     try std.testing.expectEqual(WRITE_COMBINING_SELECTOR, selector(.write_combining));
@@ -758,36 +770,6 @@ test "native PAT programming writes the native table and the BSP flushes caches 
     try std.testing.expectError(error.CacheDisabled, validateNative(.{ .pat_supported = true, .cr0 = CR0_CD, .pat = NATIVE_PAT }));
 }
 
-test "actual AP cache macro flushes no-fill state before enabling caches without PAT writes" {
-    const source = @embedFile("x86_64/cache_policy.inc");
-    const start = std.mem.indexOf(u8, source, ".macro ZIGOS_ENABLE_AP_CACHES reject").?;
-    const body = source[start..][0..std.mem.indexOf(u8, source[start..], ".endm").?];
-    const ordered = [_][]const u8{
-        "cli",                             "movl %cr0, %eax",                       "testl $ZIGOS_CACHE_CR0_PG, %eax", "jnz .Lcache_ap_live_paging",
-        "andl $~ZIGOS_CACHE_CR0_NW, %eax", "orl $ZIGOS_CACHE_CR0_CD, %eax",         "movl %eax, %cr0",                 "wbinvd",
-        "movl %cr0, %eax",                 "andl $~ZIGOS_CACHE_CONTROL_MASK, %eax", "movl %eax, %cr0",
-    };
-    var cursor: usize = 0;
-    for (ordered) |instruction| {
-        const position = std.mem.indexOf(u8, body[cursor..], instruction) orelse return error.MissingCacheTransitionInstruction;
-        cursor += position + instruction.len;
-    }
-    try std.testing.expect(std.mem.indexOf(u8, body, "wrmsr") == null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "    invd\n") == null);
-    // All inherited CD/NW combinations converge to normal caching while all
-    // unrelated control bits survive. The BSP still rejects inherited controls.
-    const unrelated: usize = 0x10033;
-    for ([_]usize{ 0, CR0_CD, CR0_NW, CACHE_CONTROL_MASK }) |inherited| {
-        const initial = unrelated | inherited;
-        const no_fill = (initial & ~CR0_NW) | CR0_CD;
-        try std.testing.expectEqual(CR0_CD, no_fill & CACHE_CONTROL_MASK);
-        const enabled = no_fill & ~CACHE_CONTROL_MASK;
-        try std.testing.expectEqual(unrelated, enabled);
-        try validateBootstrap(.{ .pat_supported = true, .cr0 = enabled, .pat = BOOTSTRAP_PAT });
-        if (inherited != 0) try std.testing.expectError(error.CacheDisabled, validateBootstrap(.{ .pat_supported = true, .cr0 = initial, .pat = BOOTSTRAP_PAT }));
-    }
-}
-
 test "bootstrap cache admission rejects unsupported PAT and inherited cache controls" {
     const admitted = BootstrapState{ .pat_supported = true, .cr0 = 0x8001_0033, .pat = BOOTSTRAP_PAT };
     try validateBootstrap(admitted);
@@ -819,31 +801,6 @@ test "bootstrap cache admission validates every PAT byte and rejects valid alter
             }
         }
     }
-}
-
-test "SIPI snapshot ABI and register constants match the actual assembly" {
-    const source = @embedFile("x86_64/mtrr_bootstrap.inc");
-    inline for (.{
-        .{ "ZIGOS_MTRR_SNAPSHOT_VERSION", BOOTSTRAP_MTRR_VERSION },
-        .{ "ZIGOS_MTRR_SNAPSHOT_BYTES", @sizeOf(BootstrapMtrrSnapshot) },
-        .{ "ZIGOS_MTRR_VERSION_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "version") },
-        .{ "ZIGOS_MTRR_WIDTH_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "physical_bits") },
-        .{ "ZIGOS_MTRR_CAP_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "capabilities") },
-        .{ "ZIGOS_MTRR_DEFAULT_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "default_type") },
-        .{ "ZIGOS_MTRR_FIXED_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "fixed") },
-        .{ "ZIGOS_MTRR_VARIABLE_OFFSET", @offsetOf(BootstrapMtrrSnapshot, "variable") },
-        .{ "ZIGOS_MTRR_MAX_VARIABLE", MAX_VARIABLE_MTRRS },
-        .{ "ZIGOS_MTRR_CAP_MSR", 0xfe },
-        .{ "ZIGOS_MTRR_DEFAULT_MSR", 0x2ff },
-        .{ "ZIGOS_MTRR_VARIABLE_MSR", MTRR_VARIABLE_BASE_MSR },
-        .{ "ZIGOS_MTRR_ENABLE", MTRR_ENABLED },
-        .{ "ZIGOS_MTRR_FIXED_ENABLE", MTRR_FIXED_ENABLED },
-        .{ "ZIGOS_MTRR_FIXED_SUPPORT", MTRR_FIXED_SUPPORTED },
-        .{ "ZIGOS_MTRR_WC_SUPPORT", MTRR_WC_SUPPORTED },
-        .{ "ZIGOS_MTRR_CPUID_SUPPORT", 1 << 12 },
-    }) |item| try std.testing.expectEqual(@as(u64, item[1]), try assemblyConstantFrom(source, item[0]));
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(VariableMtrr));
-    try std.testing.expectEqual(@as(usize, 8), @alignOf(BootstrapMtrrSnapshot));
 }
 
 test "SIPI snapshot producer rejects every nonwritable disabled operand" {
@@ -896,107 +853,4 @@ test "SIPI snapshot publication requires admitted immutable policy and valid wir
     snapshot.physical_bits = state.physical_bits;
     snapshot.variable[31].base = 1 << 36;
     try std.testing.expectError(error.InvalidMtrrEncoding, snapshot.validate());
-}
-
-test "actual SIPI MTRR macro preflights before writes and never disables enabled policy" {
-    const source = @embedFile("x86_64/mtrr_bootstrap.inc");
-    const preflight_end = std.mem.indexOf(u8, source, ".Lmtrr_preflight_done\\@:\n").?;
-    const preflight = source[0..preflight_end];
-    try std.testing.expect(std.mem.indexOf(u8, preflight, "    wrmsr") == null);
-    for ([_][]const u8{
-        "ZIGOS_MTRR_SNAPSHOT_VERSION", "ZIGOS_MTRR_CPUID_SUPPORT", "ZIGOS_CACHE_PAT_HIGH",    "0x80000008",
-        "cmpl $32",                    "cmpl $52",                 "ZIGOS_MTRR_CAP_OFFSET+4", "ZIGOS_MTRR_MAX_VARIABLE",
-        "testl $~0xcff",               "ZIGOS_MTRR_FIXED_SUPPORT", "movl $88",                "testl $0xf00",
-        "testl $0x7ff",                "testl %ecx, %eax",
-    }) |check| try std.testing.expect(std.mem.indexOf(u8, preflight, check) != null);
-    const enabled_start = std.mem.indexOf(u8, source, "    // Never disable an enabled policy").?;
-    const repair_start = std.mem.indexOf(u8, source, ".Lmtrr_repair\\@:\n").?;
-    const enabled = source[enabled_start..repair_start];
-    try std.testing.expect(std.mem.indexOf(u8, enabled, "wrmsr") == null);
-    try std.testing.expect(std.mem.indexOf(u8, enabled, "call .Lmtrr_compare") != null);
-    const repair_end = std.mem.indexOf(u8, source[repair_start..], "// Both loops").? + repair_start;
-    const repair = source[repair_start..repair_end];
-    var cursor: usize = 0;
-    for ([_][]const u8{
-        "andl $~ZIGOS_CACHE_CR0_NW", "orl $ZIGOS_CACHE_CR0_CD",  "movl %eax, %cr0",                 "wbinvd",
-        "movl %eax, %cr3",           "andl $~ZIGOS_MTRR_ENABLE", "wrmsr",                           "call .Lmtrr_program",
-        "call .Lmtrr_compare",       "rdmsr",                    "wrmsr",                           "rdmsr",
-        "wbinvd",                    "movl %eax, %cr3",          "andl $~ZIGOS_CACHE_CONTROL_MASK", "movl %eax, %cr0",
-    }) |instruction| {
-        const found = std.mem.indexOf(u8, repair[cursor..], instruction) orelse return error.MissingMtrrSequence;
-        cursor += found + instruction.len;
-    }
-    try std.testing.expect(std.mem.indexOf(u8, source, "    invd\n") == null);
-}
-
-test "actual SIPI bridge retires AP private writes before high entry" {
-    const source = @embedFile("../kernel/smp/ap_trampoline.S");
-    const start = std.mem.indexOf(u8, source, "smp_long_mode:\n").?;
-    const end = std.mem.indexOf(u8, source[start..], ".Lap_codegen_rejected:\n").? + start;
-    const body = source[start..end];
-    var cursor: usize = 0;
-    for ([_][]const u8{
-        "movq (smp_trampoline_stack - smp_trampoline_start)(%rbx), %rsp",
-        "ZIGOS_ENABLE_NATIVE_XSTATE",
-        "movq (smp_trampoline_entry - smp_trampoline_start)(%rbx), %rax",
-        "    pushq $0\n",
-        "    wbinvd\n",
-        "    jmpq *%rax\n",
-    }) |instruction| {
-        const found = std.mem.indexOf(u8, body[cursor..], instruction) orelse return error.MissingApPrivateCacheRetirement;
-        cursor += found + instruction.len;
-    }
-    // After the flush only the register-indirect jump may execute. In
-    // particular, no low stack or descriptor write may recreate a dirty line.
-    const flush_end = std.mem.indexOf(u8, body, "    wbinvd\n").? + "    wbinvd\n".len;
-    try std.testing.expectEqualStrings("jmpq *%rax", std.mem.trim(u8, body[flush_end..], " \t\r\n"));
-
-    const gdt_start = std.mem.indexOf(u8, source, "smp_trampoline_gdt:\n").?;
-    const gdt_end = std.mem.indexOf(u8, source[gdt_start..], "smp_trampoline_gdt_end:\n").? + gdt_start;
-    var descriptors: usize = 0;
-    var lines = std.mem.splitScalar(u8, source[gdt_start..gdt_end], '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (!std.mem.startsWith(u8, trimmed, ".quad ")) continue;
-        const value = try std.fmt.parseInt(u64, trimmed[".quad ".len..], 0);
-        if (descriptors == 0) {
-            try std.testing.expectEqual(@as(u64, 0), value);
-        } else {
-            const access: u8 = @truncate(value >> 40);
-            try std.testing.expectEqual(@as(u8, 0x91), access & 0x91);
-            try std.testing.expectEqual(@as(u8, if (descriptors % 2 == 1) 0x9b else 0x93), access);
-        }
-        descriptors += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 5), descriptors);
-}
-
-test "actual SIPI publisher flushes the complete page after bounded payload stores" {
-    const source = @embedFile("../kernel/smp/trampoline.zig");
-    const body = source[std.mem.indexOf(u8, source, "pub fn patch(").?..];
-    var cursor: usize = 0;
-    for ([_][]const u8{
-        "cpu_features.clflushLineBytes() orelse return false",
-        "@intFromPtr(bridge.bytes.ptr) % PAGE_BYTES != 0",
-        "cache_policy.copyBootstrapMtrrSnapshot(snapshot)",
-        "for (offsets, values)",
-        "if (@import(\"builtin\").target.os.tag == .freestanding)",
-        "while (offset < PAGE_BYTES) : (offset += line_bytes)",
-        "x86.flushCacheLine(@intFromPtr(bridge.bytes.ptr) + offset)",
-        "asm volatile (\"mfence\" ::: .{ .memory = true })",
-        "return true",
-    }) |instruction| {
-        const found = std.mem.indexOf(u8, body[cursor..], instruction) orelse return error.MissingCoherentSipiPublication;
-        cursor += found + instruction.len;
-    }
-    // Every admitted power-of-two stride divides a physical page; the final
-    // line includes the stack even though the copied bridge stops128 bytes short.
-    var line_bytes: usize = 8;
-    while (line_bytes <= 4096) : (line_bytes *= 2) {
-        var flushed: [4096]bool = @splat(false);
-        var offset: usize = 0;
-        while (offset < 4096) : (offset += line_bytes) @memset(flushed[offset..][0..line_bytes], true);
-        try std.testing.expectEqual(@as(usize, 4096), offset);
-        for (flushed) |byte| try std.testing.expect(byte);
-    }
 }

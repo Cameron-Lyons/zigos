@@ -10,14 +10,24 @@ const cpu_features = @import("../../arch/cpu_features.zig");
 
 const PAGE_SIZE: u32 = 4096;
 const PAGE_MASK: u64 = PAGE_SIZE - 1;
-const MANAGED_DMA_LIMIT: u64 = 128 * 1024 * 1024;
+// Second-stage tables map each window at its physical address, and every DMA
+// buffer is allocator-managed RAM. A 3-level hierarchy already spans it.
+const MANAGED_DMA_LIMIT: u64 = paging.FRAME_ALLOCATOR_BYTES;
+const PAGE_SHIFT: u6 = 12;
+const TABLE_INDEX_BITS: u6 = 9;
 const TABLE_ENTRY_COUNT: usize = 512;
-const TABLE_PAGE_COUNT: u32 = 24;
 const INTERRUPT_TABLE_PAGE_COUNT: u32 = 1;
 const ROOT_PAGE: u32 = 0;
 const FIRST_DYNAMIC_TABLE_PAGE: u32 = 1;
 const MAX_DMA_DOMAINS: usize = 3;
 const MAX_DMA_WINDOWS_PER_DOMAIN: usize = 8;
+/// Every window of one domain lies inside a single span of at most this many
+/// bytes. The largest requester, an xHCI controller holding every scratchpad
+/// buffer it can report, stays under 5 MiB.
+pub const MAX_DOMAIN_SPAN_BYTES: u64 = 8 * 1024 * 1024;
+// The pool holds the root table and, per domain, a context page plus the
+// tables of a worst-case span, so validated domains never exhaust it.
+const TABLE_PAGE_COUNT: u32 = FIRST_DYNAMIC_TABLE_PAGE + MAX_DMA_DOMAINS * (1 + domainTablePageBound());
 const INTERRUPT_TABLE_PAGE: u32 = TABLE_PAGE_COUNT;
 const FIRST_INVALIDATION_QUEUE_PAGE: u32 = INTERRUPT_TABLE_PAGE + INTERRUPT_TABLE_PAGE_COUNT;
 const INTERRUPT_REMAP_ENTRY_COUNT: usize = PAGE_SIZE / 16;
@@ -38,6 +48,9 @@ const MAX_FAULT_RECORD_PAGES: usize = 2;
 comptime {
     if (dmar.MAX_REMAPPING_UNITS * UNIT_MMIO_STRIDE > mmio_windows.intel_vtd.bytes) {
         @compileError("VT-d unit mappings exceed their reserved MMIO window");
+    }
+    if (MANAGED_DMA_LIMIT > @as(u64, 1) << 39) {
+        @compileError("VT-d DMA windows must fit the 39-bit second-stage hierarchy");
     }
 }
 
@@ -122,7 +135,7 @@ const DmaAddress = struct {
 };
 
 pub const DmaWindow = struct {
-    base: u32,
+    base: u64,
     length: u32 = PAGE_SIZE,
     device_readable: bool,
     device_writable: bool,
@@ -219,11 +232,11 @@ pub const FaultRecord = struct {
     request_type: RequestType,
     info: u64,
 
-    pub fn provesBlockedWrite(self: FaultRecord, expected_requester: u16, expected_address: u32) bool {
+    pub fn provesBlockedWrite(self: FaultRecord, expected_requester: u16, expected_address: u64) bool {
         return self.source_id == expected_requester and
             self.reason < 0x20 and
             self.request_type == .write and
-            self.info == (@as(u64, expected_address) & ~PAGE_MASK);
+            self.info == (expected_address & ~PAGE_MASK);
     }
 };
 
@@ -314,10 +327,11 @@ fn enforceValidatedDevices(summary: *const dmar.Summary, domains: []const DmaDom
 
     const retained_page_count = FIRST_INVALIDATION_QUEUE_PAGE +
         @as(u32, @intCast(remapping_unit_count));
-    const table_base = paging.allocIdentityDmaFrames(retained_page_count) orelse
+    const table_run = paging.allocGeneralFrames(retained_page_count) orelse
         return error.TableAllocationFailed;
     var may_release_tables = true;
-    errdefer if (may_release_tables) paging.releaseIdentityDmaFrames(table_base, retained_page_count) catch {};
+    errdefer if (may_release_tables) paging.releaseGeneralFrames(table_run) catch {};
+    const table_base = table_run.base;
     const table_memory = DmaAddress{
         .physical = table_base,
         .alias = paging.directMapAddress(table_base) orelse return error.TableAllocationFailed,
@@ -371,12 +385,10 @@ fn validateDomains(domains: []const DmaDomain) Error!void {
         for (domains[0..index]) |prior| {
             if (requesterId(prior.device) == source_id) return error.InvalidDmaWindow;
             for (domain.windows) |window| {
-                const window_end = @as(u64, window.base) + window.length;
+                const window_end = window.base + window.length;
                 for (prior.windows) |prior_window| {
-                    const prior_end = @as(u64, prior_window.base) + prior_window.length;
-                    if (@as(u64, window.base) < prior_end and
-                        @as(u64, prior_window.base) < window_end)
-                    {
+                    const prior_end = prior_window.base + prior_window.length;
+                    if (window.base < prior_end and prior_window.base < window_end) {
                         return error.InvalidDmaWindow;
                     }
                 }
@@ -387,8 +399,10 @@ fn validateDomains(domains: []const DmaDomain) Error!void {
 
 fn validateWindows(windows: []const DmaWindow) Error!void {
     if (windows.len == 0 or windows.len > MAX_DMA_WINDOWS_PER_DOMAIN) return error.InvalidDmaWindow;
+    var span_base: u64 = std.math.maxInt(u64);
+    var span_end: u64 = 0;
     for (windows, 0..) |window, index| {
-        const window_end = @as(u64, window.base) + window.length;
+        const window_end = std.math.add(u64, window.base, window.length) catch return error.InvalidDmaWindow;
         if (window.length == 0 or window.length % PAGE_SIZE != 0 or window.base % PAGE_SIZE != 0 or
             (!window.device_readable and !window.device_writable) or
             window_end > MANAGED_DMA_LIMIT)
@@ -396,12 +410,28 @@ fn validateWindows(windows: []const DmaWindow) Error!void {
             return error.InvalidDmaWindow;
         }
         for (windows[0..index]) |prior| {
-            const prior_end = @as(u64, prior.base) + prior.length;
-            if (@as(u64, window.base) < prior_end and @as(u64, prior.base) < window_end) {
+            const prior_end = prior.base + prior.length;
+            if (window.base < prior_end and prior.base < window_end) {
                 return error.InvalidDmaWindow;
             }
         }
+        span_base = @min(span_base, window.base);
+        span_end = @max(span_end, window_end);
     }
+    if (span_end - span_base > MAX_DOMAIN_SPAN_BYTES) return error.InvalidDmaWindow;
+}
+
+// A span ends below 2^39, so it sits under one L3 even at 48 bits: the root,
+// that L3, then every directory and leaf table a span straddling each 1 GiB
+// and 2 MiB boundary it can reaches.
+fn domainTablePageBound() u32 {
+    return 2 + spannedRegions(MAX_DOMAIN_SPAN_BYTES, PAGE_SHIFT + 2 * TABLE_INDEX_BITS) +
+        spannedRegions(MAX_DOMAIN_SPAN_BYTES, PAGE_SHIFT + TABLE_INDEX_BITS);
+}
+
+// The most aligned 2^shift-byte regions a page-aligned span can touch.
+fn spannedRegions(span: u64, shift: u6) u32 {
+    return @intCast(((span - PAGE_SIZE + (@as(u64, 1) << shift) - 1) >> shift) + 1);
 }
 
 fn chooseAddressWidth(sagaw: u8) ?AddressWidth {
@@ -513,7 +543,7 @@ fn validateCapabilitiesWithCacheMaintenance(capability: u64, extended: u64, host
 
 const TableBuilder = struct {
     tables: *Tables,
-    table_base: u32,
+    table_base: u64,
     address_width: AddressWidth,
     next_page: u32 = FIRST_DYNAMIC_TABLE_PAGE,
     context_pages: [256]u8 = @as([256]u8, @splat(0)),
@@ -537,61 +567,56 @@ const TableBuilder = struct {
 
     fn addDomain(self: *TableBuilder, domain: DmaDomain, domain_id: u16) Error!void {
         const context_page = try self.contextPage(domain.device.bus);
-        const l4_page = if (self.address_width == .bits48) try self.allocatePage() else null;
-        const l3_page = try self.allocatePage();
-        const l2_page = try self.allocatePage();
+        const root_page = try self.allocatePage();
 
         const context_index = (@as(usize, domain.device.device) * 8 + domain.device.function) * 2;
-        const second_stage_root = tablePagePhysical(
-            self.table_base,
-            if (l4_page) |page| page else l3_page,
-        );
-        self.tables.*[context_page][context_index] = second_stage_root | PRESENT;
+        self.tables.*[context_page][context_index] = tablePagePhysical(self.table_base, root_page) | PRESENT;
         self.tables.*[context_page][context_index + 1] = (@as(u64, domain_id) << 8) |
             @backingInt(self.address_width);
 
-        if (l4_page) |page| {
-            self.tables.*[page][0] = tablePagePhysical(self.table_base, l3_page) |
-                SECOND_STAGE_READ | SECOND_STAGE_WRITE;
-        }
-        self.tables.*[l3_page][0] = tablePagePhysical(self.table_base, l2_page) |
-            SECOND_STAGE_READ | SECOND_STAGE_WRITE;
-
         for (domain.windows) |window| {
-            var page_base: u64 = window.base;
-            const window_end = @as(u64, window.base) + window.length;
+            var page_base = window.base;
+            const window_end = window.base + window.length;
             while (page_base < window_end) : (page_base += PAGE_SIZE) {
-                try self.mapPage(l2_page, @intCast(page_base), window);
+                try self.mapPage(root_page, page_base, window);
             }
         }
     }
 
-    fn mapPage(self: *TableBuilder, l2_page: u32, page_base: u32, window: DmaWindow) Error!void {
-        const l2_index: usize = @intCast((page_base >> 21) & 0x1FF);
-        const l2_entry = &self.tables.*[l2_page][l2_index];
-        var leaf_page: u32 = undefined;
-        if (l2_entry.* == 0) {
-            leaf_page = try self.allocatePage();
-            l2_entry.* = tablePagePhysical(self.table_base, leaf_page) |
-                SECOND_STAGE_READ | SECOND_STAGE_WRITE;
-        } else {
-            const leaf_phys = l2_entry.* & ADDRESS_MASK;
-            leaf_page = @intCast((leaf_phys - self.table_base) / PAGE_SIZE);
+    // Walk from the domain root to the 4 KiB leaf, taking each absent
+    // intermediate table from the retained pool. Exhaustion fails closed.
+    fn mapPage(self: *TableBuilder, root_page: u32, page_base: u64, window: DmaWindow) Error!void {
+        var page = root_page;
+        var shift: u6 = switch (self.address_width) {
+            .bits39 => 30,
+            .bits48 => 39,
+        };
+        while (shift > PAGE_SHIFT) : (shift -= TABLE_INDEX_BITS) {
+            const entry = &self.tables.*[page][tableIndex(page_base, shift)];
+            if (entry.* == 0) {
+                page = try self.allocatePage();
+                entry.* = tablePagePhysical(self.table_base, page) | SECOND_STAGE_READ | SECOND_STAGE_WRITE;
+            } else {
+                page = @intCast(tablePageIndex(self.table_base, entry.*));
+            }
         }
 
-        const leaf_index: usize = @intCast((page_base >> 12) & 0x1FF);
-        const leaf_entry = &self.tables.*[leaf_page][leaf_index];
+        const leaf_entry = &self.tables.*[page][tableIndex(page_base, PAGE_SHIFT)];
         if (leaf_entry.* != 0) return error.InvalidDmaWindow;
         var permissions: u64 = 0;
         if (window.device_readable) permissions |= SECOND_STAGE_READ;
         if (window.device_writable) permissions |= SECOND_STAGE_WRITE;
-        leaf_entry.* = @as(u64, page_base) | permissions;
+        leaf_entry.* = page_base | permissions;
     }
 };
 
+fn tableIndex(address: u64, shift: u6) usize {
+    return @intCast((address >> shift) & (TABLE_ENTRY_COUNT - 1));
+}
+
 fn populateTables(
     tables: *Tables,
-    table_base: u32,
+    table_base: u64,
     domains: []const DmaDomain,
     address_width: AddressWidth,
 ) Error!void {
@@ -606,7 +631,7 @@ fn populateTables(
     }
 }
 
-fn programUnit(unit: UnitRegisters, root_table_base: u32) Error!void {
+fn programUnit(unit: UnitRegisters, root_table_base: u64) Error!void {
     var status = read32(unit.base + REG_GLOBAL_STATUS);
     if ((status & (GLOBAL_QUEUED_INVALIDATION_ENABLE | GLOBAL_INTERRUPT_REMAP_ENABLE)) != 0) {
         return error.FirmwareRemappingActive;
@@ -826,7 +851,7 @@ fn invalidationDescriptors(status_address: u64) [2][2]u64 {
     };
 }
 
-pub fn waitForBlockedWrite(device_info: pci.PCIDevice, expected_address: u32) Error!FaultRecord {
+pub fn waitForBlockedWrite(device_info: pci.PCIDevice, expected_address: u64) Error!FaultRecord {
     if (!faultMonitoringEnabled()) return error.DmaFaultMissing;
     const expected_requester = requesterId(device_info);
     if (protectedRequesterIndex(expected_requester) == null) return error.DmaFaultMissing;
@@ -960,15 +985,15 @@ fn activeInvalidationQueueAddress(index: usize) DmaAddress {
     );
 }
 
-fn invalidationQueueBase(table_base: u32, index: usize) u64 {
+fn invalidationQueueBase(table_base: u64, index: usize) u64 {
     return tablePagePhysical(
         table_base,
         FIRST_INVALIDATION_QUEUE_PAGE + @as(u32, @intCast(index)),
     );
 }
 
-fn tablePagePhysical(table_base: u32, page: u32) u64 {
-    return @as(u64, table_base) + @as(u64, page) * PAGE_SIZE;
+fn tablePagePhysical(table_base: u64, page: u32) u64 {
+    return table_base + @as(u64, page) * PAGE_SIZE;
 }
 
 fn publishTables() void {
@@ -1052,13 +1077,13 @@ fn syntheticXhci() pci.PCIDevice {
     return device_info;
 }
 
-fn tablePageIndex(table_base: u32, entry: u64) usize {
+fn tablePageIndex(table_base: u64, entry: u64) usize {
     return @intCast(((entry & ADDRESS_MASK) - table_base) / PAGE_SIZE);
 }
 
 test "VT-d tables expose only the NVMe requester and exact DMA pages" {
     var tables: Tables align(PAGE_SIZE) = undefined;
-    const table_base: u32 = 0x0100_0000;
+    const table_base: u64 = 0x0100_0000;
     const windows = [_]DmaWindow{
         .{ .base = 0x0200_0000, .device_readable = true, .device_writable = false },
         .{ .base = 0x0200_1000, .device_readable = false, .device_writable = true },
@@ -1084,10 +1109,10 @@ test "VT-d tables expose only the NVMe requester and exact DMA pages" {
     const l2_page = tablePageIndex(table_base, tables[l3_page][0]);
     const leaf_page = tablePageIndex(table_base, tables[l2_page][@intCast(windows[0].base >> 21)]);
     const leaf = tables[leaf_page];
-    try std.testing.expectEqual(@as(u64, windows[0].base) | SECOND_STAGE_READ, leaf[0]);
-    try std.testing.expectEqual(@as(u64, windows[1].base) | SECOND_STAGE_WRITE, leaf[1]);
+    try std.testing.expectEqual(windows[0].base | SECOND_STAGE_READ, leaf[0]);
+    try std.testing.expectEqual(windows[1].base | SECOND_STAGE_WRITE, leaf[1]);
     try std.testing.expectEqual(
-        @as(u64, windows[2].base) | SECOND_STAGE_READ | SECOND_STAGE_WRITE,
+        windows[2].base | SECOND_STAGE_READ | SECOND_STAGE_WRITE,
         leaf[2],
     );
     try std.testing.expectEqual(@as(u64, 0), leaf[3]);
@@ -1099,7 +1124,7 @@ test "VT-d tables allocate a distinct leaf table across a 2 MiB boundary" {
         .{ .base = 0x021F_F000, .device_readable = true, .device_writable = false },
         .{ .base = 0x0220_0000, .device_readable = false, .device_writable = true },
     };
-    const table_base: u32 = 0x0100_0000;
+    const table_base: u64 = 0x0100_0000;
     const domains = [_]DmaDomain{.{ .device = syntheticNvme(), .windows = &windows }};
     try populateTables(&tables, table_base, &domains, .bits48);
 
@@ -1120,7 +1145,7 @@ test "VT-d tables allocate a distinct leaf table across a 2 MiB boundary" {
 
 test "VT-d domains isolate NVMe and I225 requesters with multi-page windows" {
     var tables: Tables align(PAGE_SIZE) = undefined;
-    const table_base: u32 = 0x0100_0000;
+    const table_base: u64 = 0x0100_0000;
     const storage_windows = [_]DmaWindow{
         .{ .base = 0x0200_0000, .device_readable = true, .device_writable = true },
     };
@@ -1163,18 +1188,18 @@ test "VT-d domains isolate NVMe and I225 requesters with multi-page windows" {
     );
     const first_leaf_index: usize = @intCast(network_windows[0].base >> 12 & 0x1FF);
     try std.testing.expectEqual(
-        @as(u64, network_windows[0].base) | SECOND_STAGE_READ,
+        network_windows[0].base | SECOND_STAGE_READ,
         tables[i225_leaf][first_leaf_index],
     );
     try std.testing.expectEqual(
-        @as(u64, network_windows[0].base + PAGE_SIZE) | SECOND_STAGE_READ,
+        (network_windows[0].base + PAGE_SIZE) | SECOND_STAGE_READ,
         tables[i225_leaf][first_leaf_index + 1],
     );
 }
 
 test "VT-d tables isolate storage network and xHCI requesters" {
     var tables: Tables align(PAGE_SIZE) = undefined;
-    const table_base: u32 = 0x0100_0000;
+    const table_base: u64 = 0x0100_0000;
     const storage_windows = [_]DmaWindow{
         .{ .base = 0x0200_0000, .device_readable = true, .device_writable = true },
     };
@@ -1214,6 +1239,66 @@ test "VT-d tables isolate storage network and xHCI requesters" {
     try std.testing.expect(tables[xhci_l2][second_l2] != 0);
     try std.testing.expect(tablePageIndex(table_base, tables[xhci_l2][first_l2]) !=
         tablePageIndex(table_base, tables[xhci_l2][second_l2]));
+}
+
+test "VT-d tables map 64-bit windows across a 1 GiB boundary at their physical address" {
+    const table_base: u64 = 0x2_0000_0000;
+    const windows = [_]DmaWindow{
+        .{ .base = 0x1_3FFF_F000, .length = 2 * PAGE_SIZE, .device_readable = true, .device_writable = true },
+    };
+    try validateWindows(&windows);
+    const domains = [_]DmaDomain{.{ .device = syntheticNvme(), .windows = &windows }};
+    inline for (.{ AddressWidth.bits39, AddressWidth.bits48 }) |width| {
+        var tables: Tables align(PAGE_SIZE) = undefined;
+        try populateTables(&tables, table_base, &domains, width);
+        const context_page = tablePageIndex(table_base, tables[ROOT_PAGE][@as(usize, syntheticNvme().bus) * 2]);
+        const context_index = (@as(usize, syntheticNvme().device) * 8 + syntheticNvme().function) * 2;
+        var level_root = tablePageIndex(table_base, tables[context_page][context_index]);
+        if (width == .bits48) {
+            try std.testing.expectEqual(@as(u64, 0), tables[level_root][1]);
+            level_root = tablePageIndex(table_base, tables[level_root][0]);
+        }
+        // Each 1 GiB half of the window owns its own directory and leaf table.
+        for ([_]u64{ windows[0].base, windows[0].base + PAGE_SIZE }) |address| {
+            const directory = tablePageIndex(table_base, tables[level_root][tableIndex(address, 30)]);
+            const leaf = tablePageIndex(table_base, tables[directory][tableIndex(address, 21)]);
+            try std.testing.expectEqual(address | SECOND_STAGE_READ | SECOND_STAGE_WRITE, tables[leaf][tableIndex(address, PAGE_SHIFT)]);
+        }
+        try std.testing.expect(tables[level_root][4] != tables[level_root][5]);
+    }
+    const outside = [_]DmaWindow{.{ .base = MANAGED_DMA_LIMIT - PAGE_SIZE, .length = 2 * PAGE_SIZE, .device_readable = true, .device_writable = false }};
+    try std.testing.expectError(error.InvalidDmaWindow, validateWindows(&outside));
+    const wrapping = [_]DmaWindow{.{ .base = std.math.maxInt(u64) & ~PAGE_MASK, .device_readable = true, .device_writable = false }};
+    try std.testing.expectError(error.InvalidDmaWindow, validateWindows(&wrapping));
+}
+
+test "VT-d table pool covers every domain at its worst-case span placement" {
+    const gib: u64 = 1 << 30;
+    const span: u32 = @intCast(MAX_DOMAIN_SPAN_BYTES);
+    // Each span starts on the last page below a 1 GiB boundary, so it reaches
+    // two directories and every 2 MiB leaf it can.
+    const storage = [_]DmaWindow{.{ .base = gib - PAGE_SIZE, .length = span, .device_readable = true, .device_writable = true }};
+    const network = [_]DmaWindow{.{ .base = 2 * gib - PAGE_SIZE, .length = span, .device_readable = true, .device_writable = true }};
+    const usb = [_]DmaWindow{.{ .base = 3 * gib - PAGE_SIZE, .length = span, .device_readable = true, .device_writable = true }};
+    const domains = [_]DmaDomain{
+        .{ .device = syntheticNvme(), .windows = &storage },
+        .{ .device = syntheticI225(), .windows = &network },
+        .{ .device = syntheticXhci(), .windows = &usb },
+    };
+    try validateDomains(&domains);
+    var tables: Tables align(PAGE_SIZE) = undefined;
+    try populateTables(&tables, 0x0100_0000, &domains, .bits48);
+    // The bound is exact: the last pool page holds the final leaf.
+    try std.testing.expect(!std.mem.allEqual(u64, &tables[TABLE_PAGE_COUNT - 1], 0));
+
+    // The span runs from the lowest window base to the highest window end.
+    const edge = [_]DmaWindow{
+        .{ .base = gib, .device_readable = true, .device_writable = false },
+        .{ .base = gib + span - PAGE_SIZE, .device_readable = false, .device_writable = true },
+    };
+    try validateWindows(&edge);
+    const wide = [_]DmaWindow{ edge[0], .{ .base = gib + span, .device_readable = false, .device_writable = true } };
+    try std.testing.expectError(error.InvalidDmaWindow, validateWindows(&wide));
 }
 
 test "VT-d window policy rejects aliases and capability selection prefers fewer walks" {
@@ -1290,14 +1375,10 @@ test "VT-d active units stay compact and derive remapping addresses" {
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(UnitRegisters));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ActiveUnit));
     try std.testing.expectEqual(@as(usize, 0), FULL_INVALIDATION_QUEUE_SCRUBS_PER_COMMAND);
-    try std.testing.expectEqual(
-        @as(u64, 0x0021_9000),
-        invalidationQueueBase(0x0020_0000, 0),
-    );
-    try std.testing.expectEqual(
-        @as(u64, 0x0021_A000),
-        invalidationQueueBase(0x0020_0000, 1),
-    );
+    // Queues follow the table pool and the interrupt table, one page per unit.
+    const first_queue = 0x0020_0000 + @as(u64, TABLE_PAGE_COUNT + INTERRUPT_TABLE_PAGE_COUNT) * PAGE_SIZE;
+    try std.testing.expectEqual(first_queue, invalidationQueueBase(0x0020_0000, 0));
+    try std.testing.expectEqual(first_queue + PAGE_SIZE, invalidationQueueBase(0x0020_0000, 1));
 }
 
 test "VT-d remapped MSI binds vector destination and exact requester" {
@@ -1365,17 +1446,17 @@ test "VT-d primary fault parser binds requester address and write direction" {
     try std.testing.expectEqual(reason, fault.reason);
     try std.testing.expectEqual(RequestType.write, fault.request_type);
     try std.testing.expectEqual(address, fault.info);
-    try std.testing.expect(fault.provesBlockedWrite(requester, @truncate(address)));
+    try std.testing.expect(fault.provesBlockedWrite(requester, address));
 
     var wrong_source = fault;
     wrong_source.source_id +%= 1;
-    try std.testing.expect(!wrong_source.provesBlockedWrite(requester, @truncate(address)));
+    try std.testing.expect(!wrong_source.provesBlockedWrite(requester, address));
     var interrupt_fault = fault;
     interrupt_fault.reason = 0x22;
-    try std.testing.expect(!interrupt_fault.provesBlockedWrite(requester, @truncate(address)));
+    try std.testing.expect(!interrupt_fault.provesBlockedWrite(requester, address));
     var read_fault = fault;
     read_fault.request_type = .read;
-    try std.testing.expect(!read_fault.provesBlockedWrite(requester, @truncate(address)));
+    try std.testing.expect(!read_fault.provesBlockedWrite(requester, address));
 }
 
 test "VT-d interrupt isolation requires coherent queued-remapping hardware" {
