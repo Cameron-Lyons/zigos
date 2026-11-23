@@ -15,7 +15,6 @@ const root = @import("root");
 
 pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = true;
 pub const HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING = true;
-pub const STACK_LOCAL_BOOT_SERVICE_BINDINGS = true;
 pub const BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 const heap_backed_package_service = builtin.target.os.tag == .freestanding and HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
 const heap_backed_background_dispatch = builtin.target.os.tag == .freestanding and HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING;
@@ -187,15 +186,4 @@ pub const Builder = struct {
         graph.service_bindings = service_bindings;
         return true;
     }
-};
-
-pub const boot_service_bindings_layout = .{
-    .uses_stack_workspace = STACK_LOCAL_BOOT_SERVICE_BINDINGS and !@hasField(Builder, "service_bindings"),
-    .workspace_size_bytes = @sizeOf(ServiceBindings),
-};
-
-pub const background_dispatch_layout = .{
-    .heap_backs_log_on_freestanding = HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING,
-    .controller_size_bytes = background_dispatch.CONTROLLER_SIZE_CEILING_BYTES,
-    .freestanding_handle_size_bytes = if (HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING) @sizeOf(?*background_dispatch.Controller) else background_dispatch.CONTROLLER_SIZE_CEILING_BYTES,
 };

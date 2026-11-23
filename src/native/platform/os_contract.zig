@@ -26,7 +26,7 @@ const humane_shell = @import("rendered_shell/humane_shell.zig");
 const signing = @import("../core/signing.zig");
 const manifest_linter = @import("../sdk/manifest_linter.zig");
 const agent_delegation_service = @import("../services/agent_delegation_service.zig");
-const indexing_service = @import("../services/indexing_service.zig");
+const indexing_service = @import("../../kernel/boot/benchmark/models/indexing_service.zig");
 const network_policy = @import("../sync/network_policy.zig");
 const network_session_service = @import("../services/network_session_service.zig");
 const package_digest = @import("../services/package_service_digest.zig");
@@ -2885,7 +2885,6 @@ fn serviceBootstrapContractCheck(
     const contract = service_catalog.serviceContractForClass(class) orelse return false;
     return entry.published_native_service and
         entry.userspace_image != null and
-        launch.mode == .kernel_contract and
         launch.grants.len != 0 and
         launch.grants[0] == .service_task_authority and
         contract.interface_id == interface_id and
@@ -7185,7 +7184,6 @@ fn personalContextCatalogBindingCheck() bool {
     const image = userspace_registry.findByServiceClass(.personal_context) orelse return false;
     return entry.published_native_service and
         entry.userspace_image != null and
-        launch.mode == .kernel_contract and
         launch.grants.len != 0 and
         launch.grants[0] == .service_task_authority and
         contract.interface_id == .personal_context and

@@ -7,14 +7,6 @@ const wire = @import("component_abi_wire.zig");
 
 pub const MAGIC = wire.MAGIC;
 pub const VERSION = wire.VERSION;
-pub const EXACT_INTERFACE_VERSIONS = true;
-pub const TYPED_ID_ONLY_MESSAGE_VALIDATION = true;
-
-const COMPONENT_MODEL_REQ = "REQ-COMPONENT-MODEL";
-const SCHEMA_TEST_FILE = "src/native/services/component_abi_schema.zig";
-const ABI_TEST_FILE = "src/native/services/typed_component_abi.zig";
-const SCHEMA_TEST_NAME = "component ABI schema emits manifest interfaces and service catalog bindings";
-const ABI_TEST_NAME = "typed component ABI derives operation IDs, wire types, and validators from schema";
 
 pub const Error = error{
     UnknownInterface,
@@ -179,37 +171,12 @@ pub const OperationId = enum(u16) {
     personal_context_revoke = 0x1A03,
 };
 
-pub const ServiceBinding = enum(u8) {
-    task_runtime,
-    session_manager,
-    policy_mediation,
-    permission_review_ui,
-    service_registry,
-    network_stack,
-    storage_object,
-    package_install_update,
-    compositor_ui_session,
-    indexing_search,
-    sync_replication,
-    media_print_helpers,
-    attention_broker,
-    task_lifecycle,
-    secure_pasteboard,
-    object_resilience,
-    sensitive_capture,
-    secret_vault,
-    personal_context,
-};
-
 const InterfaceSpec = struct {
     id: InterfaceId,
     key: InterfaceKey,
     name: []const u8,
     version_major: u16 = 1,
     version_minor: u16 = 0,
-    coverage_requirement_id: []const u8 = COMPONENT_MODEL_REQ,
-    coverage_file: []const u8 = SCHEMA_TEST_FILE,
-    coverage_test_name: []const u8 = SCHEMA_TEST_NAME,
 };
 
 fn iface(comptime key: InterfaceKey, comptime name: []const u8) InterfaceSpec {
@@ -255,8 +222,6 @@ pub const interface_specs = [_]InterfaceSpec{
 };
 
 pub const INTERFACE_COUNT: usize = interface_specs.len;
-pub const DIRECT_INTERFACE_INDEX = true;
-pub const TOTAL_INTERFACE_ID_MAP = true;
 const FIRST_INTERFACE_ID: u16 = @backingInt(interface_specs[0].id);
 
 const OperationSpec = struct {
@@ -265,9 +230,6 @@ const OperationSpec = struct {
     name: []const u8,
     Request: type,
     Response: type,
-    coverage_requirement_id: []const u8 = COMPONENT_MODEL_REQ,
-    coverage_file: []const u8 = ABI_TEST_FILE,
-    coverage_test_name: []const u8 = ABI_TEST_NAME,
 };
 
 fn op(
@@ -368,40 +330,6 @@ pub const operation_specs = [_]OperationSpec{
     op(.secret_vault, .secret_revoke, "revoke", wire.SecretRevokeRequestWire, wire.SecretVaultResponseWire),
 };
 
-const ServiceBindingSpec = struct {
-    service: ServiceBinding,
-    interface: InterfaceKey,
-    coverage_requirement_id: []const u8 = COMPONENT_MODEL_REQ,
-    coverage_file: []const u8 = SCHEMA_TEST_FILE,
-    coverage_test_name: []const u8 = SCHEMA_TEST_NAME,
-};
-
-fn binding(comptime service: ServiceBinding, comptime interface: InterfaceKey) ServiceBindingSpec {
-    return .{ .service = service, .interface = interface };
-}
-
-pub const service_binding_specs = [_]ServiceBindingSpec{
-    binding(.task_runtime, .task_runtime),
-    binding(.session_manager, .session_manager),
-    binding(.policy_mediation, .policy_mediation),
-    binding(.permission_review_ui, .permission_review),
-    binding(.service_registry, .service_registry),
-    binding(.network_stack, .network_policy),
-    binding(.storage_object, .object_workspace),
-    binding(.package_install_update, .package_install),
-    binding(.compositor_ui_session, .ui_session),
-    binding(.indexing_search, .index_search),
-    binding(.sync_replication, .sync_replication),
-    binding(.media_print_helpers, .media_print),
-    binding(.attention_broker, .attention_broker),
-    binding(.task_lifecycle, .task_lifecycle),
-    binding(.secure_pasteboard, .secure_pasteboard),
-    binding(.object_resilience, .object_resilience),
-    binding(.sensitive_capture, .sensitive_capture),
-    binding(.secret_vault, .secret_vault),
-    binding(.personal_context, .personal_context),
-};
-
 pub const OperationDecl = struct {
     id: OperationId,
     request_size: u32,
@@ -409,8 +337,6 @@ pub const OperationDecl = struct {
 };
 
 pub const MAX_OPERATIONS_PER_INTERFACE: usize = maxOperationsPerInterface();
-pub const COMPACT_INTERFACE_CONTRACT_METADATA = true;
-pub const DIRECT_OPERATION_INDEX = true;
 pub const OPERATION_DECL_SIZE_CEILING_BYTES: usize = 12;
 pub const INTERFACE_CONTRACT_SIZE_CEILING_BYTES: usize = 120;
 
@@ -446,34 +372,8 @@ pub const InterfaceContract = struct {
     }
 };
 
-pub const ServiceCatalogBinding = struct {
-    service: ServiceBinding,
-    interface_id: InterfaceId,
-    interface: manifest.InterfaceDecl,
-    coverage_requirement_id: []const u8,
-};
-
 pub const manifest_interfaces = buildManifestInterfaces();
-pub const service_catalog_bindings = buildServiceCatalogBindings();
 pub const contracts = buildContracts();
-
-pub const CoverageReferenceKind = enum(u8) {
-    manifest_interface,
-    service_catalog_binding,
-    contract_operation,
-};
-
-pub const CoverageReference = struct {
-    kind: CoverageReferenceKind,
-    requirement_id: []const u8,
-    file: []const u8,
-    test_name: []const u8,
-    service_name: []const u8 = "",
-    interface_name: []const u8,
-    operation_name: []const u8 = "",
-};
-
-pub const coverage_references = buildCoverageReferences();
 
 pub fn interfaceDecl(comptime key: InterfaceKey) manifest.InterfaceDecl {
     const spec = interfaceSpec(key);
@@ -486,14 +386,6 @@ pub fn interfaceDecl(comptime key: InterfaceKey) manifest.InterfaceDecl {
 
 pub fn interfaceId(comptime key: InterfaceKey) InterfaceId {
     return interfaceSpec(key).id;
-}
-
-pub fn interfaceForService(comptime service: ServiceBinding) manifest.InterfaceDecl {
-    return interfaceDecl(serviceBindingSpec(service).interface);
-}
-
-pub fn interfaceIdForService(comptime service: ServiceBinding) InterfaceId {
-    return interfaceId(serviceBindingSpec(service).interface);
 }
 
 pub fn requestType(comptime operation_id: OperationId) type {
@@ -554,28 +446,12 @@ pub fn validateMessage(
     if (operation_decl.response_size != actual_response_len) return error.InvalidResponseLength;
 }
 
-pub fn coverageReferenceCountForRequirement(requirement_id: []const u8) usize {
-    var count: usize = 0;
-    for (coverage_references) |reference| {
-        if (std.mem.eql(u8, reference.requirement_id, requirement_id)) count += 1;
-    }
-    return count;
-}
-
 fn interfaceSpec(comptime key: InterfaceKey) InterfaceSpec {
     @setEvalBranchQuota(8192);
     inline for (interface_specs) |spec| {
         if (spec.key == key) return spec;
     }
     @compileError("component ABI interface key is missing a schema entry");
-}
-
-fn serviceBindingSpec(comptime service: ServiceBinding) ServiceBindingSpec {
-    @setEvalBranchQuota(2048);
-    inline for (service_binding_specs) |spec| {
-        if (spec.service == service) return spec;
-    }
-    @compileError("component ABI service binding key is missing a schema entry");
 }
 
 fn operationSpec(comptime operation_id: OperationId) OperationSpec {
@@ -607,23 +483,6 @@ fn buildManifestInterfaces() [interface_specs.len]manifest.InterfaceDecl {
         inline while (peer_index < index) : (peer_index += 1) {
             if (interface_specs[peer_index].key == spec.key) @compileError("duplicate component ABI interface key");
             if (std.mem.eql(u8, interface_specs[peer_index].name, spec.name)) @compileError("duplicate component ABI interface name");
-        }
-    }
-    return entries;
-}
-
-fn buildServiceCatalogBindings() [service_binding_specs.len]ServiceCatalogBinding {
-    var entries: [service_binding_specs.len]ServiceCatalogBinding = undefined;
-    inline for (service_binding_specs, 0..) |spec, index| {
-        entries[index] = .{
-            .service = spec.service,
-            .interface_id = interfaceId(spec.interface),
-            .interface = interfaceDecl(spec.interface),
-            .coverage_requirement_id = spec.coverage_requirement_id,
-        };
-        comptime var peer_index: usize = 0;
-        inline while (peer_index < index) : (peer_index += 1) {
-            if (service_binding_specs[peer_index].service == spec.service) @compileError("duplicate component ABI service catalog binding");
         }
     }
     return entries;
@@ -720,65 +579,18 @@ fn maxOperationsPerInterface() usize {
     return max_count;
 }
 
-fn buildCoverageReferences() [interface_specs.len + service_binding_specs.len + operation_specs.len]CoverageReference {
-    var refs: [interface_specs.len + service_binding_specs.len + operation_specs.len]CoverageReference = undefined;
-    var index: usize = 0;
-    inline for (interface_specs) |spec| {
-        refs[index] = .{
-            .kind = .manifest_interface,
-            .requirement_id = spec.coverage_requirement_id,
-            .file = spec.coverage_file,
-            .test_name = spec.coverage_test_name,
-            .interface_name = spec.name,
-        };
-        index += 1;
-    }
-    inline for (service_binding_specs) |spec| {
-        const iface_spec = interfaceSpec(spec.interface);
-        refs[index] = .{
-            .kind = .service_catalog_binding,
-            .requirement_id = spec.coverage_requirement_id,
-            .file = spec.coverage_file,
-            .test_name = spec.coverage_test_name,
-            .service_name = @tagName(spec.service),
-            .interface_name = iface_spec.name,
-        };
-        index += 1;
-    }
-    inline for (operation_specs) |spec| {
-        const iface_spec = interfaceSpec(spec.interface);
-        refs[index] = .{
-            .kind = .contract_operation,
-            .requirement_id = spec.coverage_requirement_id,
-            .file = spec.coverage_file,
-            .test_name = spec.coverage_test_name,
-            .interface_name = iface_spec.name,
-            .operation_name = spec.name,
-        };
-        index += 1;
-    }
-    return refs;
-}
-
-test "component ABI schema emits manifest interfaces and service catalog bindings" {
-    try std.testing.expect(DIRECT_INTERFACE_INDEX);
-    try std.testing.expect(TOTAL_INTERFACE_ID_MAP);
-    try std.testing.expect(COMPACT_INTERFACE_CONTRACT_METADATA);
-    try std.testing.expect(DIRECT_OPERATION_INDEX);
+test "component ABI schema emits manifest interfaces and interface contracts" {
     try std.testing.expectEqual(u8, @FieldType(InterfaceContract, "operation_count"));
     try std.testing.expectEqual(OPERATION_DECL_SIZE_CEILING_BYTES, @sizeOf(OperationDecl));
     try std.testing.expectEqual(INTERFACE_CONTRACT_SIZE_CEILING_BYTES, @sizeOf(InterfaceContract));
     try std.testing.expectEqual(interface_specs.len, manifest_interfaces.len);
     try std.testing.expectEqual(interface_specs.len, INTERFACE_COUNT);
-    try std.testing.expectEqual(service_binding_specs.len, service_catalog_bindings.len);
     try std.testing.expectEqualStrings("zigos.service.registry", interfaceDecl(.service_registry).name);
-    try std.testing.expectEqualStrings("zigos.service.network.policy", interfaceForService(.network_stack).name);
-    try std.testing.expectEqualStrings("zigos.object.workspace", interfaceForService(.storage_object).name);
+    try std.testing.expectEqualStrings("zigos.service.network.policy", interfaceDecl(.network_policy).name);
+    try std.testing.expectEqualStrings("zigos.object.workspace", interfaceDecl(.object_workspace).name);
     try std.testing.expectEqual(InterfaceId.service_registry, interfaceId(.service_registry));
-    try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForService(.storage_object));
-    try std.testing.expectEqual(InterfaceId.package_install, interfaceIdForService(.package_install_update));
-    try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForDecl(interfaceForService(.storage_object)).?);
-    try std.testing.expectEqual(InterfaceId.service_registry, contractFor(interfaceForService(.service_registry).name).?.interface_id);
+    try std.testing.expectEqual(InterfaceId.object_workspace, interfaceIdForDecl(interfaceDecl(.object_workspace)).?);
+    try std.testing.expectEqual(InterfaceId.service_registry, contractFor(interfaceDecl(.service_registry).name).?.interface_id);
     try std.testing.expectEqual(@as(usize, 0), interfaceIndexForId(.task_runtime));
     try std.testing.expectEqual(INTERFACE_COUNT - 1, interfaceIndexForId(.personal_context));
     const service_registry_contract = contractForId(.service_registry);
@@ -791,8 +603,8 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expect(contractFor("zigos.service.network.policy").?.operation(.network_open_session) != null);
     try std.testing.expect(contractFor("zigos.index.search").?.operation(.semantic_index_query) != null);
     try std.testing.expect(contractFor("zigos.sync.replication").?.operation(.sync_workspace_replicate) != null);
-    try std.testing.expect(contractFor(interfaceForService(.package_install_update).name).?.operation(.package_rollback) != null);
-    try std.testing.expect(contractFor(interfaceForService(.package_install_update).name).?.operation(.package_remove) != null);
+    try std.testing.expect(contractFor(interfaceDecl(.package_install).name).?.operation(.package_rollback) != null);
+    try std.testing.expect(contractFor(interfaceDecl(.package_install).name).?.operation(.package_remove) != null);
     try std.testing.expect(contractFor("zigos.ai.inference").?.operation(.ai_run_local) != null);
     try std.testing.expect(contractFor("zigos.ai.model.registry").?.operation(.ai_model_attest) != null);
     try std.testing.expect(contractFor("zigos.privacy.budget").?.operation(.privacy_authorize_egress) != null);
@@ -813,26 +625,10 @@ test "component ABI schema emits manifest interfaces and service catalog binding
     try std.testing.expect(contractFor("zigos.object.resilience").?.operation(.object_backup_prepare) != null);
     try std.testing.expect(contractFor("zigos.sensitive.capture").?.operation(.capture_start) != null);
     try std.testing.expect(contractFor("zigos.secret.vault").?.operation(.secret_import) != null);
-    try std.testing.expectEqual(InterfaceId.secure_pasteboard, interfaceId(.secure_pasteboard));
-    try std.testing.expectEqual(InterfaceId.secure_pasteboard, interfaceIdForService(.secure_pasteboard));
-    try std.testing.expectEqual(InterfaceId.object_resilience, interfaceId(.object_resilience));
-    try std.testing.expectEqual(InterfaceId.object_resilience, interfaceIdForService(.object_resilience));
-    try std.testing.expectEqual(InterfaceId.sensitive_capture, interfaceId(.sensitive_capture));
-    try std.testing.expectEqual(InterfaceId.sensitive_capture, interfaceIdForService(.sensitive_capture));
-    try std.testing.expectEqual(InterfaceId.secret_vault, interfaceId(.secret_vault));
-    try std.testing.expectEqual(InterfaceId.secret_vault, interfaceIdForService(.secret_vault));
-    try std.testing.expectEqual(InterfaceId.attention_broker, interfaceId(.attention_broker));
-    try std.testing.expectEqual(InterfaceId.attention_broker, interfaceIdForService(.attention_broker));
-    try std.testing.expectEqual(InterfaceId.task_lifecycle, interfaceId(.task_lifecycle));
-    try std.testing.expectEqual(InterfaceId.task_lifecycle, interfaceIdForService(.task_lifecycle));
-    try std.testing.expect(contractFor(interfaceForService(.service_registry).name).?.contract_hash != 0);
-    try std.testing.expect(contractFor(interfaceForService(.sync_replication).name).?.contract_hash != 0);
-    try std.testing.expectEqual(
-        interface_specs.len + service_binding_specs.len + operation_specs.len,
-        coverageReferenceCountForRequirement(COMPONENT_MODEL_REQ),
-    );
+    try std.testing.expect(contractFor(interfaceDecl(.service_registry).name).?.contract_hash != 0);
+    try std.testing.expect(contractFor(interfaceDecl(.sync_replication).name).?.contract_hash != 0);
 
-    for (service_catalog_bindings) |entry| {
-        try validateInterface(entry.interface);
+    for (manifest_interfaces) |interface| {
+        try validateInterface(interface);
     }
 }

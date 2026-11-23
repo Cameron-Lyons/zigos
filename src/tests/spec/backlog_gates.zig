@@ -35,7 +35,7 @@ const network_driver_task = @import("../../native/drivers/network_driver_task.zi
 const network_policy = @import("../../native/sync/network_policy.zig");
 const kernel_xhci = @import("../../kernel/drivers/xhci.zig");
 const principal = @import("../../native/core/principal.zig");
-const runtime_negative_proofs = @import("../../native/session/runtime_negative_proofs.zig");
+const runtime_negative_proofs = @import("../../native/session/proofs/runtime_negative_proofs.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
 const spec_support = @import("support.zig");
 const supervisor = @import("../../native/session/supervisor.zig");
@@ -214,9 +214,8 @@ pub fn syncPrivateOverlayEndToEndGate() !void {
 
 pub fn componentAbiDepthGate() !void {
     const interface_id = typed_component_abi.InterfaceId.service_registry;
-    try std.testing.expectEqual(typed_component_abi.coverage_references.len, typed_component_abi.coverageReferenceCountForRequirement("REQ-COMPONENT-MODEL"));
-    try std.testing.expectEqualStrings("zigos.object.workspace", typed_component_abi.interfaceForService(.storage_object).name);
-    try std.testing.expectEqualStrings("zigos.package.install", typed_component_abi.interfaceForService(.package_install_update).name);
+    try std.testing.expectEqualStrings("zigos.object.workspace", typed_component_abi.Interface(.object_workspace).name);
+    try std.testing.expectEqualStrings("zigos.package.install", typed_component_abi.Interface(.package_install).name);
 
     var header = typed_component_abi.WireHeader{
         .operation = @backingInt(typed_component_abi.OperationId.service_connect),

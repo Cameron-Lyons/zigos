@@ -1,20 +1,15 @@
 const std = @import("std");
-const event_ledger = @import("../platform/event_ledger.zig");
-const manifest = @import("../policy/manifest.zig");
-const native_util = @import("../core/util.zig");
-const policy_object = @import("../policy/policy_object.zig");
-const principal = @import("../core/principal.zig");
+const event_ledger = @import("../../../../native/platform/event_ledger.zig");
+const manifest = @import("../../../../native/policy/manifest.zig");
+const native_util = @import("../../../../native/core/util.zig");
+const policy_object = @import("../../../../native/policy/policy_object.zig");
+const principal = @import("../../../../native/core/principal.zig");
 const copyTextExact = native_util.copyTextExact;
 
 pub const MAX_DOCUMENTS: usize = 32;
 pub const MAX_RESULTS: usize = 8;
 pub const MAX_TITLE_BYTES: usize = 64;
 pub const MAX_BODY_BYTES: usize = 192;
-pub const BOUNDED_DOCUMENT_SCAN = true;
-pub const DENSE_DOCUMENT_TABLE = true;
-pub const COMPACT_DOCUMENT_METADATA = true;
-pub const CACHED_TITLE_FINGERPRINT = true;
-pub const PACKED_DOCUMENT_METADATA = true;
 pub const DOCUMENT_RECORD_SIZE_CEILING_BYTES: usize = 288;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 9_232;
 const DOCUMENT_TITLE_LENGTH_BITS: u6 = 7;
@@ -609,7 +604,7 @@ test "semantic memory queries are local policy gated and redacted" {
         .max_semantic_query_bytes = 64,
     }, .{
         .label = "semantic-memory-policy",
-        .seed = @import("../core/signing.zig").seedFromByte(0xE1),
+        .seed = @import("../../../../native/core/signing.zig").seedFromByte(0xE1),
     });
 
     var ledger = event_ledger.Ledger.init();

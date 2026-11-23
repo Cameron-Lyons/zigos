@@ -84,12 +84,3 @@ pub const Environment = struct {
     diagnostic_ledger: *event_ledger.Ledger,
     background_dispatcher: ?*background_dispatch.Controller,
 };
-
-pub fn hasGrantForKind(grants: []const policy_mediation.UserGrant, kind: manifest.PermissionKind) bool {
-    for (grants) |grant| {
-        if (grant.kind == kind and grant.allow) {
-            return true;
-        }
-    }
-    return false;
-}

@@ -150,12 +150,6 @@ pub const KernelContext = struct {
     }
 };
 
-pub const kernel_context_layout = .{
-    .freestanding_endpoint_table_size_ceiling_bytes = endpoint_mod.FREESTANDING_TABLE_SIZE_CEILING_BYTES,
-    .freestanding_endpoint_table_handle_size_bytes = @sizeOf(?*endpoint_mod.Table),
-    .heap_backs_endpoint_table_on_freestanding = HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING,
-};
-
 pub const RuntimeContext = struct {
     runtime: TaskRuntimeBacking = if (heap_backed_task_runtime) null else task_runtime.Runtime.init(),
     runtime_checkpoint_store: task_runtime_service_mod.CheckpointStore = .{},
@@ -303,16 +297,6 @@ pub const RuntimeContext = struct {
         const scheduler = self.userspaceScheduler() orelse return;
         _ = scheduler.executeTask(task_id, 0);
     }
-
-    pub fn runScheduler(self: *RuntimeContext, now_ticks: u64) bool {
-        const scheduler = self.userspaceScheduler() orelse return false;
-        return scheduler.runNext(now_ticks);
-    }
-
-    pub fn schedulerHasReadyTasks(self: *const RuntimeContext) bool {
-        const scheduler = self.userspaceSchedulerConst() orelse return false;
-        return scheduler.hasReadyTasks();
-    }
 };
 
 pub const RecoveryContext = struct {
@@ -356,10 +340,4 @@ pub const RecoveryContext = struct {
             self.review_ux_controller = native_ux.Controller.init();
         }
     }
-};
-
-pub const recovery_context_layout = .{
-    .heap_backs_review_ux_controller_on_freestanding = HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING,
-    .review_ux_controller_size_bytes = native_ux.CONTROLLER_SIZE_CEILING_BYTES,
-    .freestanding_review_ux_controller_handle_size_bytes = if (HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING) @sizeOf(?*native_ux.Controller) else native_ux.CONTROLLER_SIZE_CEILING_BYTES,
 };

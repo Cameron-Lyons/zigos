@@ -8,10 +8,6 @@ const secure_secret_store = @import("../platform/secure_secret_store.zig");
 const manifest = @import("../policy/manifest.zig");
 
 pub const MAX_HANDLES: usize = secure_secret_store.MAX_HANDLES;
-pub const BOUNDED_HANDLE_SCAN = true;
-pub const RECLAIMS_TERMINAL_HANDLES = true;
-pub const COMPACT_ACTIVE_HANDLE_COUNT_METADATA = true;
-pub const DIRECT_HANDLE_LOOKUP = true;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 17_280;
 
 comptime {
@@ -761,7 +757,6 @@ test "secret vault unload preserves stale lease rejection across repeated restor
 }
 
 test "secret vault stores active handle count in capacity-sized metadata" {
-    try std.testing.expect(COMPACT_ACTIVE_HANDLE_COUNT_METADATA);
     try std.testing.expect(@FieldType(Service, "active_handle_count") == u8);
     try std.testing.expect(@sizeOf(Service) <= SERVICE_SIZE_CEILING_BYTES);
 }

@@ -419,11 +419,11 @@ fn serviceLabel(comptime kind: ServiceKind) []const u8 {
 
 fn serviceEntry(comptime kind: ServiceKind) []const u8 {
     return switch (kind) {
-        .storage => component_abi_schema.interfaceForService(.storage_object).name,
-        .sync => component_abi_schema.interfaceForService(.sync_replication).name,
-        .network => component_abi_schema.interfaceForService(.network_stack).name,
-        .package => component_abi_schema.interfaceForService(.package_install_update).name,
-        .compositor => component_abi_schema.interfaceForService(.compositor_ui_session).name,
+        .storage => component_abi_schema.interfaceDecl(.object_workspace).name,
+        .sync => component_abi_schema.interfaceDecl(.sync_replication).name,
+        .network => component_abi_schema.interfaceDecl(.network_policy).name,
+        .package => component_abi_schema.interfaceDecl(.package_install).name,
+        .compositor => component_abi_schema.interfaceDecl(.ui_session).name,
         .generic => "zigos.service.generic",
     };
 }

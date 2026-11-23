@@ -9,18 +9,11 @@ pub const WireHeader = schema.WireHeader;
 
 pub const InterfaceKey = schema.InterfaceKey;
 pub const InterfaceId = schema.InterfaceId;
-pub const ServiceBinding = schema.ServiceBinding;
 pub const OperationId = schema.OperationId;
 pub const OperationDecl = schema.OperationDecl;
 pub const InterfaceContract = schema.InterfaceContract;
-pub const ServiceCatalogBinding = schema.ServiceCatalogBinding;
-pub const CoverageReference = schema.CoverageReference;
-pub const CoverageReferenceKind = schema.CoverageReferenceKind;
 pub const MAX_OPERATIONS_PER_INTERFACE = schema.MAX_OPERATIONS_PER_INTERFACE;
 pub const INTERFACE_COUNT = schema.INTERFACE_COUNT;
-pub const DIRECT_INTERFACE_INDEX = schema.DIRECT_INTERFACE_INDEX;
-pub const TOTAL_INTERFACE_ID_MAP = schema.TOTAL_INTERFACE_ID_MAP;
-pub const COMPACT_INTERFACE_CONTRACT_METADATA = schema.COMPACT_INTERFACE_CONTRACT_METADATA;
 pub const INTERFACE_CONTRACT_SIZE_CEILING_BYTES = schema.INTERFACE_CONTRACT_SIZE_CEILING_BYTES;
 
 pub const ServiceRegisterRequest = schema.requestType(.service_register);
@@ -157,8 +150,6 @@ pub const SecretVaultResponse = schema.responseType(.secret_import);
 
 pub const contracts = schema.contracts;
 pub const manifest_interfaces = schema.manifest_interfaces;
-pub const service_catalog_bindings = schema.service_catalog_bindings;
-pub const coverage_references = schema.coverage_references;
 
 pub fn Interface(comptime key: InterfaceKey) manifest.InterfaceDecl {
     return schema.interfaceDecl(key);
@@ -166,14 +157,6 @@ pub fn Interface(comptime key: InterfaceKey) manifest.InterfaceDecl {
 
 pub fn interfaceId(comptime key: InterfaceKey) InterfaceId {
     return schema.interfaceId(key);
-}
-
-pub fn interfaceForService(comptime service: ServiceBinding) manifest.InterfaceDecl {
-    return schema.interfaceForService(service);
-}
-
-pub fn interfaceIdForService(comptime service: ServiceBinding) InterfaceId {
-    return schema.interfaceIdForService(service);
 }
 
 pub fn Request(comptime operation_id: OperationId) type {
@@ -218,231 +201,21 @@ pub fn validateMessage(
     return schema.validateMessage(interface_id, operation_id, header, actual_request_len, actual_response_len);
 }
 
-pub fn coverageReferenceCountForRequirement(requirement_id: []const u8) usize {
-    return schema.coverageReferenceCountForRequirement(requirement_id);
-}
-
 test "typed component ABI derives operation IDs, wire types, and validators from schema" {
     const registry = contractFor("zigos.service.registry").?;
     try std.testing.expect(registry.contract_hash != 0);
     try std.testing.expect(registry.operation(.service_register) != null);
     try validateInterface(Interface(.object_workspace));
-    try std.testing.expectEqual(@as(u16, 0x0102), @backingInt(OperationId.service_connect));
-    try std.testing.expectEqual(@as(u16, 0x0402), @backingInt(OperationId.network_open_session));
-    try std.testing.expectEqual(@as(u16, 0x0403), @backingInt(OperationId.network_record_transfer));
-    try std.testing.expectEqual(@as(u16, 0x0404), @backingInt(OperationId.network_revoke_session));
-    try std.testing.expectEqual(@as(u16, 0x0603), @backingInt(OperationId.package_rollback));
-    try std.testing.expectEqual(@as(u16, 0x0604), @backingInt(OperationId.package_remove));
-    try std.testing.expectEqual(@as(u16, 0x0702), @backingInt(OperationId.ai_run_local));
-    try std.testing.expectEqual(@as(u16, 0x0D02), @backingInt(OperationId.ai_model_attest));
-    try std.testing.expectEqual(@as(u16, 0x0801), @backingInt(OperationId.privacy_authorize_egress));
-    try std.testing.expectEqual(@as(u16, 0x0902), @backingInt(OperationId.diagnostics_share_remote));
-    try std.testing.expectEqual(@as(u16, 0x0A01), @backingInt(OperationId.consent_record));
-    try std.testing.expectEqual(@as(u16, 0x0B03), @backingInt(OperationId.permission_lease_expire));
-    try std.testing.expectEqual(@as(u16, 0x0C03), @backingInt(OperationId.data_delete_receipt));
-    try std.testing.expectEqual(@as(u16, 0x0E01), @backingInt(OperationId.identity_session_authorize));
-    try std.testing.expectEqual(@as(u16, 0x0E04), @backingInt(OperationId.identity_credential_register));
-    try std.testing.expectEqual(@as(u16, 0x0E05), @backingInt(OperationId.identity_credential_assert));
-    try std.testing.expectEqual(@as(u16, 0x0E06), @backingInt(OperationId.identity_credential_recover));
-    try std.testing.expectEqual(@as(u16, 0x0E07), @backingInt(OperationId.identity_credential_revoke));
-    try std.testing.expectEqual(@as(u16, 0x0F01), @backingInt(OperationId.agent_authorize));
-    try std.testing.expectEqual(@as(u16, 0x0F04), @backingInt(OperationId.agent_bind_session));
-    try std.testing.expectEqual(@as(u16, 0x1001), @backingInt(OperationId.accessibility_profile_get));
-    try std.testing.expectEqual(@as(u16, 0x1101), @backingInt(OperationId.background_authorize));
-    try std.testing.expectEqual(@as(u16, 0x1201), @backingInt(OperationId.pasteboard_offer));
-    try std.testing.expectEqual(@as(u16, 0x1202), @backingInt(OperationId.pasteboard_read));
-    try std.testing.expectEqual(@as(u16, 0x1203), @backingInt(OperationId.pasteboard_revoke));
-    try std.testing.expectEqual(@as(u16, 0x1301), @backingInt(OperationId.object_backup_prepare));
-    try std.testing.expectEqual(@as(u16, 0x1302), @backingInt(OperationId.object_restore_authorize));
-    try std.testing.expectEqual(@as(u16, 0x1303), @backingInt(OperationId.object_backup_revoke));
-    try std.testing.expectEqual(@as(u16, 0x1401), @backingInt(OperationId.index_upsert));
-    try std.testing.expectEqual(@as(u16, 0x1402), @backingInt(OperationId.index_query));
-    try std.testing.expectEqual(@as(u16, 0x1403), @backingInt(OperationId.semantic_index_query));
-    try std.testing.expectEqual(@as(u16, 0x1501), @backingInt(OperationId.sync_device_enroll));
-    try std.testing.expectEqual(@as(u16, 0x1502), @backingInt(OperationId.sync_workspace_replicate));
-    try std.testing.expectEqual(@as(u16, 0x1503), @backingInt(OperationId.sync_conflict_review));
-    try std.testing.expectEqual(@as(u16, 0x1504), @backingInt(OperationId.sync_conflict_resolve));
-    try std.testing.expectEqual(@as(u16, 0x1505), @backingInt(OperationId.sync_transport_frame));
-    try std.testing.expectEqual(@as(u16, 0x1601), @backingInt(OperationId.capture_start));
-    try std.testing.expectEqual(@as(u16, 0x1602), @backingInt(OperationId.capture_sample));
-    try std.testing.expectEqual(@as(u16, 0x1603), @backingInt(OperationId.capture_stop));
-    try std.testing.expectEqual(@as(u16, 0x1701), @backingInt(OperationId.secret_import));
-    try std.testing.expectEqual(@as(u16, 0x1702), @backingInt(OperationId.secret_lend));
-    try std.testing.expectEqual(@as(u16, 0x1703), @backingInt(OperationId.secret_rotate));
-    try std.testing.expectEqual(@as(u16, 0x1704), @backingInt(OperationId.secret_revoke));
-    try std.testing.expectEqual(@as(u16, 0x1801), @backingInt(OperationId.attention_post));
-    try std.testing.expectEqual(@as(u16, 0x1802), @backingInt(OperationId.attention_dismiss));
-    try std.testing.expectEqual(@as(u16, 0x1803), @backingInt(OperationId.attention_query));
-    try std.testing.expectEqual(@as(u16, 0x1901), @backingInt(OperationId.lifecycle_suspend));
-    try std.testing.expectEqual(@as(u16, 0x1902), @backingInt(OperationId.lifecycle_resume));
-    try std.testing.expectEqual(@as(u16, 0x1903), @backingInt(OperationId.lifecycle_terminate));
-    try std.testing.expectEqual(@as(u16, 0x1A01), @backingInt(OperationId.personal_context_lease));
-    try std.testing.expectEqual(@as(u16, 0x1A02), @backingInt(OperationId.personal_context_query));
-    try std.testing.expectEqual(@as(u16, 0x1A03), @backingInt(OperationId.personal_context_revoke));
-    try std.testing.expectEqual(@sizeOf(ServiceConnectionRequest), @sizeOf(Request(.service_connect)));
-    try std.testing.expectEqual(@sizeOf(ServiceConnectionResponse), @sizeOf(Response(.service_connect)));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(WireHeader));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(ServiceRegisterRequest));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ServiceConnectionRequest));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ServiceConnectionResponse));
-    try std.testing.expectEqual(@sizeOf(NetworkOpenSessionRequest), @sizeOf(Request(.network_open_session)));
-    try std.testing.expectEqual(@sizeOf(NetworkRecordTransferRequest), @sizeOf(Request(.network_record_transfer)));
-    try std.testing.expect(@hasField(NetworkRecordTransferRequest, "expected_policy_id"));
-    try std.testing.expect(@hasField(NetworkRecordTransferRequest, "expected_capability_id"));
-    try std.testing.expectEqual(@sizeOf(NetworkRevokeSessionRequest), @sizeOf(Request(.network_revoke_session)));
-    try std.testing.expect(@hasField(NetworkRevokeSessionRequest, "expected_policy_id"));
-    try std.testing.expect(@hasField(NetworkRevokeSessionRequest, "expected_capability_id"));
-    try std.testing.expectEqual(@sizeOf(NetworkSessionResponse), @sizeOf(Response(.network_revoke_session)));
-    try std.testing.expectEqual(@sizeOf(PackageRollbackRequest), @sizeOf(Request(.package_rollback)));
-    try std.testing.expect(@hasField(PackageRollbackRequest, "expected_active_digest"));
-    try std.testing.expectEqual(@sizeOf(PackageRollbackResponse), @sizeOf(Response(.package_rollback)));
-    try std.testing.expectEqual(@sizeOf(PackageRemoveRequest), @sizeOf(Request(.package_remove)));
-    try std.testing.expect(@hasField(PackageRemoveRequest, "expected_active_digest"));
-    try std.testing.expectEqual(@sizeOf(PackageRemoveResponse), @sizeOf(Response(.package_remove)));
-    try std.testing.expect(@hasField(PackageRemoveResponse, "removed_existing"));
-    try std.testing.expect(@hasField(PackageRemoveResponse, "removed_revision_count"));
-    try std.testing.expect(@hasField(PackageRemoveResponse, "deletion_receipt_id"));
-    try std.testing.expect(@hasField(PackageRemoveResponse, "removed_bundle_digest"));
-    try std.testing.expectEqual(@sizeOf(AiRunLocalRequest), @sizeOf(Request(.ai_run_local)));
-    try std.testing.expectEqual(@sizeOf(AiRunLocalResponse), @sizeOf(Response(.ai_run_local)));
-    try std.testing.expectEqual(@sizeOf(AiModelAttestRequest), @sizeOf(Request(.ai_model_attest)));
-    try std.testing.expectEqual(@sizeOf(AiModelAttestResponse), @sizeOf(Response(.ai_model_attest)));
-    try std.testing.expectEqual(@sizeOf(PrivacyAuthorizeEgressRequest), @sizeOf(Request(.privacy_authorize_egress)));
-    try std.testing.expectEqual(@sizeOf(PrivacyAuthorizeEgressResponse), @sizeOf(Response(.privacy_authorize_egress)));
-    try std.testing.expectEqual(@sizeOf(DiagnosticsShareRemoteRequest), @sizeOf(Request(.diagnostics_share_remote)));
-    try std.testing.expectEqual(@sizeOf(DiagnosticsShareRemoteResponse), @sizeOf(Response(.diagnostics_share_remote)));
-    try std.testing.expectEqual(@sizeOf(ConsentRecordRequest), @sizeOf(Request(.consent_record)));
-    try std.testing.expectEqual(@sizeOf(ConsentRecordResponse), @sizeOf(Response(.consent_record)));
-    try std.testing.expectEqual(@sizeOf(PermissionLeaseIssueRequest), @sizeOf(Request(.permission_lease_issue)));
-    try std.testing.expectEqual(@sizeOf(PermissionLeaseIssueResponse), @sizeOf(Response(.permission_lease_issue)));
-    try std.testing.expectEqual(@sizeOf(DataExportPrepareRequest), @sizeOf(Request(.data_export_prepare)));
-    try std.testing.expectEqual(@sizeOf(DataDeleteReceiptResponse), @sizeOf(Response(.data_delete_receipt)));
-    try std.testing.expectEqual(@sizeOf(IdentitySessionAuthorizeRequest), @sizeOf(Request(.identity_session_authorize)));
-    try std.testing.expectEqual(@sizeOf(IdentitySessionAuthorizeResponse), @sizeOf(Response(.identity_session_authorize)));
-    try std.testing.expectEqual(@sizeOf(IdentityCredentialRegisterRequest), @sizeOf(Request(.identity_credential_register)));
-    try std.testing.expectEqual(@sizeOf(IdentityCredentialAssertRequest), @sizeOf(Request(.identity_credential_assert)));
-    try std.testing.expectEqual(@sizeOf(IdentityCredentialRecoverRequest), @sizeOf(Request(.identity_credential_recover)));
-    try std.testing.expectEqual(@sizeOf(IdentityCredentialRevokeRequest), @sizeOf(Request(.identity_credential_revoke)));
-    try std.testing.expectEqual(@sizeOf(IdentityCredentialResponse), @sizeOf(Response(.identity_credential_recover)));
-    try std.testing.expectEqual(@sizeOf(AgentAuthorizeRequest), @sizeOf(Request(.agent_authorize)));
-    try std.testing.expectEqual(@sizeOf(AgentAuthorizeResponse), @sizeOf(Response(.agent_authorize)));
-    try std.testing.expectEqual(@sizeOf(AgentRecordActionRequest), @sizeOf(Request(.agent_record_action)));
-    try std.testing.expect(@hasField(AgentRecordActionRequest, "expected_subject_serial"));
-    try std.testing.expect(@hasField(AgentRecordActionRequest, "expected_subject_kind"));
-    try std.testing.expect(@hasField(AgentRecordActionRequest, "expected_task_id"));
-    try std.testing.expect(@hasField(AgentRecordActionRequest, "expected_generation"));
-    try std.testing.expectEqual(@sizeOf(AgentBindSessionRequest), @sizeOf(Request(.agent_bind_session)));
-    try std.testing.expectEqual(@sizeOf(AgentBindSessionResponse), @sizeOf(Response(.agent_bind_session)));
-    try std.testing.expectEqual(@sizeOf(AccessibilityProfileApplyRequest), @sizeOf(Request(.accessibility_profile_apply)));
-    try std.testing.expectEqual(@sizeOf(AccessibilityProfileApplyResponse), @sizeOf(Response(.accessibility_profile_apply)));
-    try std.testing.expectEqual(@sizeOf(BackgroundAuthorizeRequest), @sizeOf(Request(.background_authorize)));
-    try std.testing.expectEqual(@sizeOf(BackgroundAuthorizeResponse), @sizeOf(Response(.background_authorize)));
-    try std.testing.expectEqual(@sizeOf(BackgroundCompleteRequest), @sizeOf(Request(.background_complete)));
-    try std.testing.expect(@hasField(BackgroundCompleteRequest, "record_id"));
-    try std.testing.expect(@hasField(BackgroundCompleteRequest, "expected_task_id"));
-    try std.testing.expect(@hasField(BackgroundCompleteRequest, "expected_background_task_len"));
-    try std.testing.expect(@hasField(BackgroundCompleteRequest, "expected_trigger"));
-    try std.testing.expect(@hasField(BackgroundCompleteRequest, "completed_tick"));
-    try std.testing.expectEqual(@sizeOf(PasteboardOfferRequest), @sizeOf(Request(.pasteboard_offer)));
-    try std.testing.expectEqual(@sizeOf(PasteboardReadRequest), @sizeOf(Request(.pasteboard_read)));
-    try std.testing.expectEqual(@sizeOf(PasteboardRevokeRequest), @sizeOf(Request(.pasteboard_revoke)));
-    try std.testing.expectEqual(@sizeOf(PasteboardResponse), @sizeOf(Response(.pasteboard_read)));
-    try std.testing.expectEqual(@sizeOf(ObjectBackupPrepareRequest), @sizeOf(Request(.object_backup_prepare)));
-    try std.testing.expectEqual(@sizeOf(ObjectRestoreAuthorizeRequest), @sizeOf(Request(.object_restore_authorize)));
-    try std.testing.expectEqual(@sizeOf(ObjectBackupRevokeRequest), @sizeOf(Request(.object_backup_revoke)));
-    try std.testing.expectEqual(@sizeOf(ObjectResilienceResponse), @sizeOf(Response(.object_restore_authorize)));
-    try std.testing.expectEqual(@sizeOf(IndexUpsertRequest), @sizeOf(Request(.index_upsert)));
-    try std.testing.expectEqual(@sizeOf(IndexQueryRequest), @sizeOf(Request(.index_query)));
-    try std.testing.expectEqual(@sizeOf(SemanticIndexQueryRequest), @sizeOf(Request(.semantic_index_query)));
-    try std.testing.expectEqual(@sizeOf(IndexResponse), @sizeOf(Response(.semantic_index_query)));
-    try std.testing.expect(@hasField(IndexResponse, "index_generation"));
-    try std.testing.expectEqual(@sizeOf(SyncDeviceEnrollRequest), @sizeOf(Request(.sync_device_enroll)));
-    try std.testing.expectEqual(@sizeOf(SyncWorkspaceReplicateRequest), @sizeOf(Request(.sync_workspace_replicate)));
-    try std.testing.expectEqual(@sizeOf(SyncConflictReviewRequest), @sizeOf(Request(.sync_conflict_review)));
-    try std.testing.expectEqual(@sizeOf(SyncConflictResolveRequest), @sizeOf(Request(.sync_conflict_resolve)));
-    try std.testing.expectEqual(@sizeOf(SyncTransportFrameRequest), @sizeOf(Request(.sync_transport_frame)));
-    try std.testing.expectEqual(@sizeOf(SyncResponse), @sizeOf(Response(.sync_conflict_resolve)));
-    try std.testing.expectEqual(@sizeOf(CaptureStartRequest), @sizeOf(Request(.capture_start)));
-    try std.testing.expectEqual(@sizeOf(CaptureSampleRequest), @sizeOf(Request(.capture_sample)));
-    try std.testing.expect(@hasField(CaptureSampleRequest, "expected_device_id"));
-    try std.testing.expect(@hasField(CaptureSampleRequest, "expected_foreground_session_id"));
-    try std.testing.expect(@hasField(CaptureSampleRequest, "expected_kind"));
-    try std.testing.expectEqual(@sizeOf(CaptureStopRequest), @sizeOf(Request(.capture_stop)));
-    try std.testing.expect(@hasField(CaptureStopRequest, "expected_device_id"));
-    try std.testing.expect(@hasField(CaptureStopRequest, "expected_foreground_session_id"));
-    try std.testing.expect(@hasField(CaptureStopRequest, "expected_kind"));
-    try std.testing.expectEqual(@sizeOf(CaptureResponse), @sizeOf(Response(.capture_stop)));
-    try std.testing.expectEqual(@sizeOf(SecretImportRequest), @sizeOf(Request(.secret_import)));
-    try std.testing.expectEqual(@sizeOf(SecretLendRequest), @sizeOf(Request(.secret_lend)));
-    try std.testing.expectEqual(@sizeOf(SecretRotateRequest), @sizeOf(Request(.secret_rotate)));
-    try std.testing.expectEqual(@sizeOf(SecretRevokeRequest), @sizeOf(Request(.secret_revoke)));
-    try std.testing.expect(@hasField(SecretRevokeRequest, "subject_serial"));
-    try std.testing.expect(@hasField(SecretRevokeRequest, "subject_kind"));
-    try std.testing.expect(@hasField(SecretRevokeRequest, "expected_holder_serial"));
-    try std.testing.expect(@hasField(SecretRevokeRequest, "expected_holder_kind"));
-    try std.testing.expect(@hasField(SecretRevokeRequest, "expected_holder_task_id"));
-    try std.testing.expectEqual(@sizeOf(SecretVaultResponse), @sizeOf(Response(.secret_revoke)));
-    try std.testing.expectEqual(@sizeOf(AttentionPostRequest), @sizeOf(Request(.attention_post)));
-    try std.testing.expectEqual(@sizeOf(AttentionDismissRequest), @sizeOf(Request(.attention_dismiss)));
-    try std.testing.expect(@hasField(AttentionDismissRequest, "expected_source_serial"));
-    try std.testing.expect(@hasField(AttentionDismissRequest, "expected_source_kind"));
-    try std.testing.expect(@hasField(AttentionDismissRequest, "expected_notification_task_id"));
-    try std.testing.expectEqual(@sizeOf(AttentionQueryRequest), @sizeOf(Request(.attention_query)));
-    try std.testing.expectEqual(@sizeOf(AttentionResponse), @sizeOf(Response(.attention_query)));
-    try std.testing.expectEqual(@sizeOf(LifecycleControlRequest), @sizeOf(Request(.lifecycle_suspend)));
-    try std.testing.expect(@hasField(LifecycleControlRequest, "target_owner_serial"));
-    try std.testing.expect(@hasField(LifecycleControlRequest, "target_owner_kind"));
-    try std.testing.expectEqual(@sizeOf(LifecycleControlResponse), @sizeOf(Response(.lifecycle_terminate)));
-    try std.testing.expectEqual(@sizeOf(PersonalContextLeaseRequest), @sizeOf(Request(.personal_context_lease)));
-    try std.testing.expectEqual(@sizeOf(PersonalContextQueryRequest), @sizeOf(Request(.personal_context_query)));
-    try std.testing.expectEqual(@sizeOf(PersonalContextRevokeRequest), @sizeOf(Request(.personal_context_revoke)));
-    try std.testing.expectEqual(@sizeOf(PersonalContextResponse), @sizeOf(Response(.personal_context_query)));
-    try std.testing.expect(@hasField(PersonalContextResponse, "result_count"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "lease_revocation_generation"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "top_score"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "top_title_hits"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "top_body_hits"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "top_sensitivity"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "receipt_id"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "receipt_index_generation"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "receipt_privacy_flags"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "receipt_max_pack_sensitivity"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "top_object_id"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "top_version_id"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "top_title_fingerprint"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "receipt_issued_at_tick"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "request_fingerprint"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "query_fingerprint"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "pack_digest"));
-    try std.testing.expect(@hasField(PersonalContextResponse, "receipt_digest"));
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(WorkspacePutVersionRequest))), contractFor("zigos.object.workspace").?.operation(.workspace_put_version).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PackageUpdateRequest))), contractFor("zigos.package.install").?.operation(.package_update).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PackageRollbackRequest))), contractFor("zigos.package.install").?.operation(.package_rollback).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PackageRemoveRequest))), contractFor("zigos.package.install").?.operation(.package_remove).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AiAuthorizeRequest))), contractFor("zigos.ai.inference").?.operation(.ai_authorize).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AiModelRegisterRequest))), contractFor("zigos.ai.model.registry").?.operation(.ai_model_register).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PrivacyQueryBudgetRequest))), contractFor("zigos.privacy.budget").?.operation(.privacy_query_budget).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(DiagnosticsPrepareExportRequest))), contractFor("zigos.diagnostics.export").?.operation(.diagnostics_prepare_export).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(ConsentRevokeRequest))), contractFor("zigos.consent.receipts").?.operation(.consent_revoke).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PermissionLeaseRenewRequest))), contractFor("zigos.permission.lease").?.operation(.permission_lease_renew).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(DataDeleteRequest))), contractFor("zigos.data.rights").?.operation(.data_delete_request).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(IdentitySessionStepUpRequest))), contractFor("zigos.identity.session").?.operation(.identity_session_step_up).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(IdentityCredentialAssertRequest))), contractFor("zigos.identity.session").?.operation(.identity_credential_assert).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AgentRecordActionRequest))), contractFor("zigos.agent.delegation").?.operation(.agent_record_action).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AgentKillSwitchRequest))), contractFor("zigos.agent.delegation").?.operation(.agent_kill_switch).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AccessibilityProfileAuditRequest))), contractFor("zigos.accessibility.profile").?.operation(.accessibility_profile_audit).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(BackgroundCompleteRequest))), contractFor("zigos.background.activity").?.operation(.background_complete).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PasteboardReadRequest))), contractFor("zigos.secure.pasteboard").?.operation(.pasteboard_read).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(ObjectRestoreAuthorizeRequest))), contractFor("zigos.object.resilience").?.operation(.object_restore_authorize).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(SemanticIndexQueryRequest))), contractFor("zigos.index.search").?.operation(.semantic_index_query).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(SyncWorkspaceReplicateRequest))), contractFor("zigos.sync.replication").?.operation(.sync_workspace_replicate).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(CaptureStartRequest))), contractFor("zigos.sensitive.capture").?.operation(.capture_start).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(SecretImportRequest))), contractFor("zigos.secret.vault").?.operation(.secret_import).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(SecretRevokeRequest))), contractFor("zigos.secret.vault").?.operation(.secret_revoke).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AttentionPostRequest))), contractFor("zigos.attention.broker").?.operation(.attention_post).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(AttentionDismissRequest))), contractFor("zigos.attention.broker").?.operation(.attention_dismiss).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(LifecycleControlRequest))), contractFor("zigos.task.lifecycle").?.operation(.lifecycle_terminate).?.request_size);
-    try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(PersonalContextQueryRequest))), contractFor("zigos.personal.context").?.operation(.personal_context_query).?.request_size);
+    for (&contracts) |*contract| {
+        try std.testing.expect(contract.contract_hash != 0);
+        for (contract.operations[0..contract.operation_count]) |decl| {
+            try std.testing.expectEqual(decl, contract.operation(decl.id).?);
+        }
+    }
 }
 
 test "typed component ABI rejects incompatible interfaces and malformed messages" {

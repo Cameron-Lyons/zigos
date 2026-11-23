@@ -160,11 +160,6 @@ pub fn serviceRecordForClass(services: CoreServices, class: contract.ServiceClas
     return serviceRecordForKey(services, record_key);
 }
 
-pub fn serviceIdForClass(services: CoreServices, class: contract.ServiceClass) ?u64 {
-    const service = serviceRecordForClass(services, class) orelse return null;
-    return service.id;
-}
-
 fn principalForOwnerKey(ids: Principals, owner_key: service_catalog.BootstrapOwnerKey) principal.PrincipalId {
     return switch (owner_key) {
         .policy_authority => ids.policy_authority,
@@ -220,7 +215,7 @@ test "bootstrap service ownership and service records resolve from service catal
     const services = try registerCoreServices(&supervisor, &runtime_service, ids);
 
     try std.testing.expectEqual(ids.storage_service, ownerForServiceClass(ids, .storage_object).?);
-    try std.testing.expectEqual(services.storage_service.id, serviceIdForClass(services, .storage_object).?);
+    try std.testing.expectEqual(services.storage_service.id, serviceRecordForClass(services, .storage_object).?.id);
     for (service_catalog.catalog) |entry| {
         const owner = ownerForServiceClass(ids, entry.class) orelse return error.TestUnexpectedResult;
         const service = serviceRecordForClass(services, entry.class) orelse return error.TestUnexpectedResult;

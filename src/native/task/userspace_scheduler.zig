@@ -943,6 +943,8 @@ pub const Scheduler = struct {
         if (!smp.isRuntimeOwner() or !self.initialized or syscall_service_active) return 0;
         const runtime = self.runtime_ptr orelse return 0;
         if (port.kernel.runtime != runtime or self.executor.bound_runtime != runtime or self.executor.binding_owner != @as(*const anyopaque, self)) return 0;
+        // Only the BSP drains copied requests. Mapping admission, the fixed
+        // input copy and invocation stay within one serialized interval.
         const x86 = @import("../../arch/x86.zig");
         const restore_if = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
         if (comptime builtin.target.os.tag == .freestanding) x86.cli();

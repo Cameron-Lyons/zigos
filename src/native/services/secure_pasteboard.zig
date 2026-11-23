@@ -10,10 +10,6 @@ const copyText = native_util.copyText;
 pub const MAX_GRANTS: usize = 16;
 pub const MAX_PAYLOAD_BYTES: usize = 512;
 pub const MAX_PURPOSE_BYTES: usize = 96;
-pub const BOUNDED_GRANT_SCAN = true;
-pub const DIRECT_GRANT_LOOKUP = true;
-pub const RECLAIMS_TERMINAL_GRANTS = true;
-pub const COMPACT_GRANT_LENGTHS = true;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 11_144;
 
 comptime {

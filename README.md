@@ -1717,7 +1717,7 @@ SetupMode must be zero; AuditMode, if present, must be zero. Missing required
 state, malformed values, and read errors leave the boot unverified.
 Unsigned QEMU boots cannot claim an authenticated root or
 use it for runtime measured-state attestation. Runtime measurement snapshots and the embedded
-fixture-signed manifests check consistency; they do not establish release
+build artifact manifest check consistency; they do not establish release
 authority, prove TPM PCR values, or enforce rollback protection.
 
 When firmware provides TCG2 with an active SHA-256 bank, the loader extends

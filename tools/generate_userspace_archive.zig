@@ -2,8 +2,6 @@ const std = @import("std");
 const native_archive_deps = @import("native_archive_deps");
 const crypto_hash = native_archive_deps.crypto_hash;
 const elf_image_inspector = native_archive_deps;
-const hex = native_archive_deps.hex;
-const signing = native_archive_deps;
 const units = native_archive_deps.units;
 
 const EmbeddedInfo = elf_image_inspector.Inspection;
@@ -11,7 +9,6 @@ const ChunkIndex = native_archive_deps.EmbeddedFileChunkIndex;
 const max_userspace_image_bytes: usize = units.mebibytes(16);
 const max_bootloader_source_bytes: usize = units.mebibytes(1);
 const max_build_artifact_entries: usize = 32;
-const build_artifact_manifest_payload_buffer_bytes: usize = units.kibibytes(4);
 const archive_chunk_bytes: usize = native_archive_deps.embedded_file_chunk_bytes;
 const archive_chunk_pool_name = "userspace_chunks.bin";
 
@@ -55,13 +52,6 @@ const BuildArtifactEntry = struct {
     digest: crypto_hash.Digest,
 };
 
-const BuildArtifactSignature = struct {
-    format: []const u8 = signing.SIGNATURE_FORMAT_ED25519,
-    signer: []const u8 = "",
-    public_key: [signing.ED25519_PUBLIC_KEY_BYTES]u8 = @splat(0),
-    value: [signing.ED25519_SIGNATURE_BYTES]u8 = @splat(0),
-};
-
 const BuildArtifactManifest = struct {
     generation: u64,
     entry_count: usize = 0,
@@ -70,7 +60,6 @@ const BuildArtifactManifest = struct {
         .label = "",
         .digest = crypto_hash.zero_digest,
     }),
-    signature: BuildArtifactSignature = .{},
 
     fn init(generation: u64) BuildArtifactManifest {
         return .{ .generation = generation };
@@ -88,10 +77,6 @@ const BuildArtifactManifest = struct {
 };
 
 const build_manifest_generation: u64 = 1;
-const build_manifest_signer = signing.SignerIdentity{
-    .label = "zigos-build-artifact-manifest",
-    .seed = signing.seedFromByte(0xC7),
-};
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -392,8 +377,6 @@ fn writeBuildArtifactManifest(
         try build_manifest.addDigest(.userspace_image, artifact.bundle_id, artifact.embedded_info.file_sha256);
     }
 
-    try signBuildArtifactManifest(&build_manifest);
-
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     const writer = &aw.writer;
@@ -406,15 +389,7 @@ fn writeBuildArtifactManifest(
         \\};
         \\
     );
-    try writer.print("pub const generation: u64 = {d};\n", .{build_manifest.generation});
-    try writer.print("pub const signature_format = \"{f}\";\n", .{std.zig.fmtString(build_manifest.signature.format)});
-    try writer.print("pub const signature_signer = \"{f}\";\n", .{std.zig.fmtString(build_manifest.signature.signer)});
-    try writer.writeAll("pub const signature_public_key = [_]u8{");
-    try writeByteArray(writer, &build_manifest.signature.public_key);
-    try writer.writeAll("};\n");
-    try writer.writeAll("pub const signature_value = [_]u8{");
-    try writeByteArray(writer, &build_manifest.signature.value);
-    try writer.writeAll("};\n\n");
+    try writer.print("pub const generation: u64 = {d};\n\n", .{build_manifest.generation});
     try writer.writeAll("pub const entries = [_]Entry{\n");
     for (build_manifest.entries[0..build_manifest.entry_count]) |entry| {
         try writer.print(
@@ -458,47 +433,6 @@ fn rawSha256(bytes: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     hasher.update(bytes);
     return crypto_hash.finalize(&hasher);
-}
-
-fn signBuildArtifactManifest(manifest: *BuildArtifactManifest) !void {
-    var payload_buffer: [build_artifact_manifest_payload_buffer_bytes]u8 = undefined;
-    const payload = try encodeBuildArtifactManifest(
-        manifest.generation,
-        manifest.entries[0..manifest.entry_count],
-        &payload_buffer,
-    );
-    const signature = try signing.signWithDefaultRegistry(.ed25519, build_manifest_signer, payload);
-    manifest.signature = .{
-        .format = signature.formatSlice(),
-        .signer = signature.signer,
-        .public_key = signature.ed25519PublicKeySlice()[0..signing.ED25519_PUBLIC_KEY_BYTES].*,
-        .value = signature.ed25519SignatureSlice()[0..signing.ED25519_SIGNATURE_BYTES].*,
-    };
-}
-
-fn encodeBuildArtifactManifest(generation: u64, entries: []const BuildArtifactEntry, buffer: []u8) ![]const u8 {
-    var offset: usize = 0;
-    offset = try appendFormat(buffer, offset, "ZBAM1|g={d}|n={d}", .{ generation, entries.len });
-    for (entries) |entry| {
-        offset = try appendFormat(buffer, offset, "|{s}:{s}:", .{
-            @tagName(entry.kind),
-            entry.label,
-        });
-        offset = try appendHexDigest(buffer, offset, &entry.digest);
-    }
-    return buffer[0..offset];
-}
-
-fn appendFormat(buffer: []u8, offset: usize, comptime fmt: []const u8, args: anytype) !usize {
-    const text = std.fmt.bufPrint(buffer[offset..], fmt, args) catch return error.ManifestTooLarge;
-    return offset + text.len;
-}
-
-fn appendHexDigest(buffer: []u8, offset: usize, digest: *const crypto_hash.Digest) !usize {
-    const output_len = crypto_hash.hex_digest_bytes;
-    if (offset + output_len > buffer.len) return error.ManifestTooLarge;
-    _ = hex.encodeLower(digest, buffer[offset..][0..output_len]) catch return error.ManifestTooLarge;
-    return offset + output_len;
 }
 
 fn writeByteArray(writer: anytype, bytes: []const u8) !void {

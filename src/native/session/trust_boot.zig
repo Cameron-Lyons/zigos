@@ -91,21 +91,8 @@ pub const TrustBoot = struct {
         };
     }
 
-    pub fn verifyProductionArtifactManifest(
-        self: *const TrustBoot,
-        graph: *const service_graph_builder_mod.ServiceGraph,
-    ) bool {
-        const artifact_manifest = self.buildProductionArtifactManifest(graph) catch return false;
-        if (builtin.target.os.tag == .freestanding) {
-            if (!self.verifyGeneratedProductionArtifactManifest(true)) return false;
-            common.printBootMarker(boot_markers.platform_artifact_manifest_verified);
-            return true;
-        }
-        const signed_manifest = signProductionArtifactManifest(artifact_manifest) catch return false;
-        if (!measured_boot.verifySignedArtifactManifest(
-            &signed_manifest,
-            measured_boot.production_artifact_manifest_signer,
-        )) return false;
+    pub fn verifyProductionArtifactManifest(self: *const TrustBoot) bool {
+        if (!self.verifyGeneratedProductionArtifactManifest()) return false;
         common.printBootMarker(boot_markers.platform_artifact_manifest_verified);
         return true;
     }
@@ -390,78 +377,69 @@ pub const TrustBoot = struct {
         self: *TrustBoot,
         graph: *const service_graph_builder_mod.ServiceGraph,
     ) bool {
-        const artifact_manifest = self.buildProductionArtifactManifest(graph) catch return false;
-        const signed_manifest = signProductionArtifactManifest(artifact_manifest) catch return false;
-        if (!measured_boot.verifySignedArtifactManifest(
-            &signed_manifest,
-            measured_boot.production_artifact_manifest_signer,
-        )) return false;
-        if (builtin.target.os.tag == .freestanding) {
-            if (!self.verifyGeneratedProductionArtifactManifest(false)) return false;
-        }
-
         var measured = measured_boot.Recorder.init();
         measured.begin(1);
-        const kernel_digest = productionKernelMeasurementDigest() catch return false;
-        const base_manifest_digest = self.productionBaseImageManifestDigest(graph);
-        const policy_digest = self.productionPolicyDigest(graph);
-        measured.add(.kernel, "bootloader+kernel-zigos-native", &kernel_digest) catch return false;
-        measured.add(.base_image, "production-native-base", &base_manifest_digest) catch return false;
-        measured.add(.policy, "production-policy-set", &policy_digest) catch return false;
+        var artifact_manifest = measured_boot.ArtifactManifest.init(1);
+        self.measureProductionArtifacts(graph, &measured, &artifact_manifest) catch return false;
 
-        for (critical_service_classes) |class| {
-            const service_record = self.supervisor.findByClass(class) orelse return false;
-            const image = self.criticalServiceImage(service_record) orelse return false;
-            measured.addCriticalServiceImage(service_record, image) catch return false;
-        }
-        measured.addDriverSet("production-driver-set", self.driver_directory) catch return false;
-
-        var boot = measured.finalize();
-        if (builtin.target.os.tag == .freestanding) {
-            const handoff = measured_boot.MeasurementSnapshot.fromBootRecord(&boot) catch return false;
-            if (config.smokeFaultIs(.tampered_artifact_manifest)) {
-                var tampered_manifest = signed_manifest;
-                tampered_manifest.manifest.entries[0].digest[0] ^= 0x5A;
-                if (measured_boot.verifyMeasurementSnapshot(
-                    &handoff,
-                    &tampered_manifest,
-                    measured_boot.production_artifact_manifest_signer,
-                    productionRootProvenance(),
-                )) |_| {
-                    return false;
-                } else |err| switch (err) {
-                    error.UntrustedArtifactManifest, error.ManifestMismatch => {
-                        common.printBootMarker(boot_markers.platform_artifact_manifest_tamper_rejected);
-                        return false;
-                    },
-                    else => return false,
-                }
-            }
-            if (directArtifactTamperFixture()) |fixture| {
-                if (!rejectDirectArtifactTamper(&handoff, &signed_manifest, fixture.kind, fixture.marker)) return false;
-                return false;
-            }
-            boot = measured_boot.verifyMeasurementSnapshot(
+        const recorded = measured.finalize();
+        const handoff = measured_boot.MeasurementSnapshot.fromBootRecord(&recorded) catch return false;
+        if (config.smokeFaultIs(.tampered_artifact_manifest)) {
+            var tampered_manifest = artifact_manifest;
+            tampered_manifest.entries[0].digest[0] ^= 0x5A;
+            if (measured_boot.verifyMeasurementSnapshot(
                 &handoff,
-                &signed_manifest,
-                measured_boot.production_artifact_manifest_signer,
+                &tampered_manifest,
                 productionRootProvenance(),
-            ) catch return false;
-            common.printBootMarker(boot_markers.platform_measurement_snapshot_verified);
-        } else {
-            measured_boot.verifyBootRecordAgainstManifest(
-                &boot,
-                &artifact_manifest,
-                productionRootProvenance(),
-            ) catch return false;
+            )) |_| {
+                return false;
+            } else |err| switch (err) {
+                error.ManifestMismatch => {
+                    common.printBootMarker(boot_markers.platform_artifact_manifest_tamper_rejected);
+                    return false;
+                },
+                else => return false,
+            }
         }
+        if (directArtifactTamperFixture()) |fixture| {
+            rejectDirectArtifactTamper(&handoff, &artifact_manifest, fixture.kind, fixture.marker);
+            return false;
+        }
+        const boot = measured_boot.verifyMeasurementSnapshot(
+            &handoff,
+            &artifact_manifest,
+            productionRootProvenance(),
+        ) catch return false;
+        common.printBootMarker(boot_markers.platform_measurement_snapshot_verified);
         measured_boot_console.printMeasurementSummary(&boot);
         supportMeasuredBootShape(&boot);
-        self.recordMeasurementComparison(&boot);
-        return true;
+        return self.recordMeasurementComparison(&boot);
     }
 
-    fn verifyGeneratedProductionArtifactManifest(self: *const TrustBoot, print_markers: bool) bool {
+    /// Hashes every boot artifact once, recording the same digests in the boot
+    /// record and in the expected manifest that the snapshot is checked against.
+    fn measureProductionArtifacts(
+        self: *const TrustBoot,
+        graph: *const service_graph_builder_mod.ServiceGraph,
+        recorder: *measured_boot.Recorder,
+        artifact_manifest: *measured_boot.ArtifactManifest,
+    ) !void {
+        const kernel_digest = try productionKernelMeasurementDigest();
+        const base_manifest_digest = self.productionBaseImageManifestDigest(graph);
+        const policy_digest = self.productionPolicyDigest(graph);
+        try measured_boot.addMeasuredArtifact(recorder, artifact_manifest, .kernel, "bootloader+kernel-zigos-native", &kernel_digest);
+        try measured_boot.addMeasuredArtifact(recorder, artifact_manifest, .base_image, "production-native-base", &base_manifest_digest);
+        try measured_boot.addMeasuredArtifact(recorder, artifact_manifest, .policy, "production-policy-set", &policy_digest);
+
+        for (critical_service_classes) |class| {
+            const service = self.supervisor.findByClass(class) orelse return error.MissingBootstrapLaunch;
+            const image = self.criticalServiceImage(service) orelse return error.MissingUserspaceImage;
+            try measured_boot.addMeasuredCriticalServiceImage(recorder, artifact_manifest, service, image);
+        }
+        try measured_boot.addMeasuredDriverSet(recorder, artifact_manifest, "production-driver-set", self.driver_directory);
+    }
+
+    fn verifyGeneratedProductionArtifactManifest(self: *const TrustBoot) bool {
         if (builtin.target.os.tag != .freestanding) return true;
 
         const root = @import("root");
@@ -472,8 +450,8 @@ pub const TrustBoot = struct {
         measured_boot.buildArtifactManifestFromGeneratedInto(&generated_manifest, root.production_artifact_manifest) catch {
             return failGeneratedArtifactManifest("generated_manifest_invalid");
         };
-        if (!measured_boot.verifyBuildArtifactManifest(&generated_manifest)) {
-            return failGeneratedArtifactManifest("generated_manifest_untrusted");
+        if (!generated_manifest.hasRequiredShape()) {
+            return failGeneratedArtifactManifest("generated_manifest_incomplete");
         }
 
         const bootloader_source_digest = bootloaderSourceDigest() catch {
@@ -524,34 +502,9 @@ pub const TrustBoot = struct {
             return failGeneratedArtifactManifest("userspace_image_count_mismatch");
         }
 
-        if (print_markers) {
-            common.printBootMarker(boot_markers.platform_boot_descriptor_verified);
-            common.printBootMarker(boot_markers.platform_build_artifact_manifest_verified);
-        }
+        common.printBootMarker(boot_markers.platform_boot_descriptor_verified);
+        common.printBootMarker(boot_markers.platform_build_artifact_manifest_verified);
         return true;
-    }
-
-    fn buildProductionArtifactManifest(
-        self: *const TrustBoot,
-        graph: *const service_graph_builder_mod.ServiceGraph,
-    ) !measured_boot.ArtifactManifest {
-        var manifest_record = measured_boot.ArtifactManifest.init(1);
-        const kernel_digest = try productionKernelMeasurementDigest();
-        const base_manifest_digest = self.productionBaseImageManifestDigest(graph);
-        const policy_digest = self.productionPolicyDigest(graph);
-        try manifest_record.add(.kernel, "bootloader+kernel-zigos-native", &kernel_digest);
-        try manifest_record.add(.base_image, "production-native-base", &base_manifest_digest);
-        try manifest_record.add(.policy, "production-policy-set", &policy_digest);
-
-        for (critical_service_classes) |class| {
-            const service = self.supervisor.findByClass(class) orelse return error.MissingBootstrapLaunch;
-            const bundle_id = service_catalog.bundleIdForServiceClass(service.class) orelse return error.MissingBootstrapLaunch;
-            const image = self.userspace_catalog.findByBundleId(bundle_id) orelse return error.MissingUserspaceImage;
-            try manifest_record.addCriticalServiceImage(service, image);
-        }
-
-        try manifest_record.addDriverSet("production-driver-set", self.driver_directory);
-        return manifest_record;
     }
 
     fn productionBaseImageManifestDigest(
@@ -639,40 +592,32 @@ pub const TrustBoot = struct {
     }
 
     fn criticalServiceImage(
-        self: *TrustBoot,
+        self: *const TrustBoot,
         service_record: *const supervisor_mod.ServiceRecord,
     ) ?*const userspace_loader.ImageRecord {
         const bundle_id = service_catalog.bundleIdForServiceClass(service_record.class) orelse return null;
         return self.userspace_catalog.findByBundleId(bundle_id);
     }
 
-    fn recordMeasurementComparison(self: *TrustBoot, boot: *const measured_boot.BootRecord) void {
+    fn recordMeasurementComparison(self: *TrustBoot, boot: *const measured_boot.BootRecord) bool {
         const measurement_signer = signing.SignerIdentity{
             .label = "zigos-measured-boot-state",
             .seed = signing.seedFromByte(0xA6),
         };
-        const direct_previous = loadDirectMeasuredBootSummary(self.native_store.storage_service_instance.service_id);
+        const storage = &self.native_store.storage_service_instance;
         var journal = measured_boot.MeasurementJournal.init(
-            &self.native_store.storage_service_instance,
+            storage,
             session_bootstrap.principals().package_service,
             measurement_signer,
-        ) catch |err| native_util.bootProofFailure("trust boot", err);
-        var comparison = journal.record(boot.*, 130) catch |err| native_util.bootProofFailure("trust boot", err);
-        const current_summary = measured_boot.BootSummary.fromRecord(boot);
-        if (comparison.previous == null) {
-            if (direct_previous) |previous| {
-                comparison.previous = previous;
-                comparison.same_root_digest = std.mem.eql(u8, &previous.root_digest, &current_summary.root_digest);
-                comparison.same_generation = previous.generation == current_summary.generation;
-                comparison.same_record_shape = previous.record_count == current_summary.record_count and
-                    std.mem.eql(u16, &previous.kind_counts, &current_summary.kind_counts);
-            }
+        ) catch return false;
+        var comparison = journal.record(boot.*, 130) catch return false;
+        if (comptime includesVerificationEvidence()) {
+            recordDirectMeasuredBootSummary(storage.service_id, &comparison);
         }
-        _ = storeDirectMeasuredBootSummary(self.native_store.storage_service_instance.service_id, current_summary);
         self.native_store.checkpoint();
         if (comparison.previous == null) {
             common.printBootMarker(boot_markers.platform_measured_boot_first);
-            return;
+            return true;
         }
         if (comparison.same_root_digest) {
             common.printBootMarker(boot_markers.platform_measured_boot_same_root);
@@ -680,6 +625,7 @@ pub const TrustBoot = struct {
         if (comparison.same_record_shape) {
             common.printBootMarker(boot_markers.platform_measured_boot_same_shape);
         }
+        return true;
     }
 
     fn seedProductionHealthNetworkProbe(
@@ -890,7 +836,6 @@ fn hashPrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, id: principal.Pri
 fn hashServiceRecord(hasher: *crypto_hash.Hasher, service: *const supervisor_mod.ServiceRecord) void {
     const descriptor = service.descriptor();
     crypto_hash.updateInt(hasher, "service-id", service.id);
-    crypto_hash.updateInt(hasher, "service-isolation-domain-id", service.isolationDomainId());
     crypto_hash.updateEnum(hasher, "service-class", service.class);
     crypto_hash.updateEnum(hasher, "service-boundary", descriptor.boundary);
     hashPrincipal(hasher, "service-owner", service.owner);
@@ -947,53 +892,9 @@ test "production policy measurement excludes runtime resource grants" {
     try std.testing.expect(capabilityTargetAffectsProductionPolicy(.policy));
 }
 
-const ArtifactManifestSigningBackend = struct {
-    seed: signing.Seed,
-
-    fn sign(context: *anyopaque, key: signing.ReleaseRootKeyHandle, message: []const u8) ![signing.SIGNATURE_BYTES]u8 {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        const key_pair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(self.seed);
-        if (!std.mem.eql(u8, &key.public_key, &key_pair.public_key.toBytes())) {
-            return error.ReleaseKeyIdentityMismatch;
-        }
-        return (try key_pair.sign(message, null)).toBytes();
-    }
-};
-
-fn signProductionArtifactManifest(
-    artifact_manifest: measured_boot.ArtifactManifest,
-) !measured_boot.SignedArtifactManifest {
-    const identity = measured_boot.production_artifact_manifest_signer;
-    var backend = ArtifactManifestSigningBackend{ .seed = identity.seed };
-    var provider_impl = try signing.ExternalReleaseProvider.init(
-        .{
-            .name = "smoke-kms-artifact-manifest",
-            .profile = .ed25519,
-            .role = .production,
-            .provider_boundary = .cloud_kms,
-            .custody = .cloud_kms,
-            .hardware_backed = true,
-            .rotation_supported = true,
-            .revocation_supported = true,
-            .customer_verifiable = true,
-            .verifier_protocol = .dsse_in_toto_slsa,
-        },
-        .{
-            .key_id = "kms://zigos/smoke/artifact-manifest/1",
-            .label = identity.label,
-            .public_key = try signing.publicKey(identity),
-            .generation = 1,
-            .provider_boundary = .cloud_kms,
-            .custody = .cloud_kms,
-        },
-        &backend,
-        ArtifactManifestSigningBackend.sign,
-    );
-    return measured_boot.signArtifactManifestWithProvider(
-        artifact_manifest,
-        identity,
-        provider_impl.provider(),
-    );
+fn includesVerificationEvidence() bool {
+    if (builtin.target.os.tag != .freestanding) return false;
+    return @import("../../kernel/config.zig").includesVerificationEvidence();
 }
 
 const DirectArtifactTamperFixture = struct {
@@ -1011,31 +912,23 @@ inline fn directArtifactTamperFixture() ?DirectArtifactTamperFixture {
 
 fn rejectDirectArtifactTamper(
     handoff: *const measured_boot.MeasurementSnapshot,
-    signed_manifest: *const measured_boot.SignedArtifactManifest,
+    artifact_manifest: *const measured_boot.ArtifactManifest,
     kind: measured_boot.MeasurementKind,
     marker: []const u8,
-) bool {
+) void {
     var tampered_handoff = handoff.*;
-    if (!tamperFirstHandoffRecord(&tampered_handoff, kind)) return false;
+    if (!tamperFirstHandoffRecord(&tampered_handoff, kind)) return;
 
-    if (measured_boot.verifyMeasurementSnapshot(
+    _ = measured_boot.verifyMeasurementSnapshot(
         &tampered_handoff,
-        signed_manifest,
-        measured_boot.production_artifact_manifest_signer,
+        artifact_manifest,
         productionRootProvenance(),
-    )) |_| {
-        return false;
-    } else |err| {
-        switch (err) {
-            error.ManifestMismatch,
-            error.UntrustedArtifactManifest,
-            error.UntrustedRootProvenance,
-            => {},
-            else => return false,
-        }
-        common.printBootMarker(marker);
-        return true;
-    }
+    ) catch |err| switch (err) {
+        error.ManifestMismatch,
+        error.UntrustedRootProvenance,
+        => common.printBootMarker(marker),
+        else => {},
+    };
 }
 
 fn tamperFirstHandoffRecord(
@@ -1066,6 +959,24 @@ fn supportMeasuredBootShape(boot: *const measured_boot.BootRecord) void {
             common.printBootMarker(boot_markers.platform_boot_image_unverified);
         }
     }
+}
+
+/// Verification kernels leave storage checkpointing disabled, so their measured
+/// boot journal does not survive a cold reboot. They carry the boot summary in
+/// a raw sector instead and fall back to it when the journal has no previous
+/// record. Production kernels rely on the checkpointed journal alone.
+fn recordDirectMeasuredBootSummary(storage_service_id: u64, comparison: *measured_boot.BootComparison) void {
+    const current = comparison.current;
+    if (comparison.previous == null) {
+        if (loadDirectMeasuredBootSummary(storage_service_id)) |previous| {
+            comparison.previous = previous;
+            comparison.same_root_digest = std.mem.eql(u8, &previous.root_digest, &current.root_digest);
+            comparison.same_generation = previous.generation == current.generation;
+            comparison.same_record_shape = previous.record_count == current.record_count and
+                std.mem.eql(u16, &previous.kind_counts, &current.kind_counts);
+        }
+    }
+    _ = storeDirectMeasuredBootSummary(storage_service_id, current);
 }
 
 const direct_measured_boot_lba: u64 = 1536;

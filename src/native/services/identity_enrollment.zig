@@ -60,12 +60,12 @@ pub const Record = struct {
 
     pub fn digest(self: *const Record) !tpm.Key {
         var bytes: [MAX_BYTES]u8 = undefined;
-        return hash(try self.encode(&bytes));
+        return digestBytes(try self.encode(&bytes));
     }
 
     pub fn decode(bytes: []const u8, trusted_digest: *const tpm.Key) !Record {
         if (bytes.len > MAX_BYTES or bytes.len < 124 or std.mem.allEqual(u8, trusted_digest, 0)) return error.InvalidIdentityEnrollment;
-        if (!std.crypto.timing_safe.eql(tpm.Key, hash(bytes), trusted_digest.*)) return error.UntrustedIdentityEnrollment;
+        if (!std.crypto.timing_safe.eql(tpm.Key, digestBytes(bytes), trusted_digest.*)) return error.UntrustedIdentityEnrollment;
         var r = wire.Reader{ .bytes = bytes };
         if (!std.mem.eql(u8, try r.take(8), "ZGIDEN01")) return error.InvalidIdentityEnrollment;
         const owner = try r.int(u64);
@@ -93,7 +93,8 @@ pub const Record = struct {
     }
 };
 
-fn hash(bytes: []const u8) tpm.Key {
+/// Domain-separated digest that pins an encoded enrollment record.
+pub fn digestBytes(bytes: []const u8) tpm.Key {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     h.update("zigos:identity-enrollment:v1\x00");
     h.update(bytes);
@@ -115,7 +116,7 @@ test "identity enrollment requires an independent digest and canonical complete 
         if (Record.decode(encoded[0..length], &trusted)) |_| return error.AcceptedTruncatedEnrollment else |_| {}
     }
     try std.testing.expectError(error.UntrustedIdentityEnrollment, Record.decode(bytes[0 .. encoded.len + 1], &trusted));
-    try std.testing.expectError(error.InvalidResponse, Record.decode(bytes[0 .. encoded.len + 1], &hash(bytes[0 .. encoded.len + 1])));
+    try std.testing.expectError(error.InvalidResponse, Record.decode(bytes[0 .. encoded.len + 1], &digestBytes(bytes[0 .. encoded.len + 1])));
     var changed = record;
     changed.enrollment.parent.handle += 1;
     try std.testing.expect(!std.mem.eql(u8, &(try changed.digest()), &trusted));

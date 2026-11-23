@@ -21,56 +21,17 @@ const kernel_memory = if (builtin.target.os.tag == .freestanding)
 else
     struct {};
 
-pub const MAX_INSTALLED_BUNDLES = model.MAX_INSTALLED_BUNDLES;
-pub const MAX_LABEL_BYTES = model.MAX_LABEL_BYTES;
 pub const MAX_COMPONENTS_PER_BUNDLE = model.MAX_COMPONENTS_PER_BUNDLE;
 pub const MAX_ASSETS_PER_BUNDLE = model.MAX_ASSETS_PER_BUNDLE;
-pub const MAX_COMPONENT_ID_BYTES = model.MAX_COMPONENT_ID_BYTES;
-pub const MAX_COMPONENT_ENTRY_BYTES = model.MAX_COMPONENT_ENTRY_BYTES;
-pub const MAX_ASSET_PATH_BYTES = model.MAX_ASSET_PATH_BYTES;
-pub const MAX_CONTENT_TYPE_BYTES = model.MAX_CONTENT_TYPE_BYTES;
-pub const MAX_INTERFACES_PER_BUNDLE = model.MAX_INTERFACES_PER_BUNDLE;
-pub const MAX_INTERFACE_NAME_BYTES = model.MAX_INTERFACE_NAME_BYTES;
 pub const MAX_PERMISSIONS_PER_BUNDLE = model.MAX_PERMISSIONS_PER_BUNDLE;
-pub const MAX_PERMISSION_RESOURCE_BYTES = model.MAX_PERMISSION_RESOURCE_BYTES;
-pub const MAX_PERMISSION_TEXT_BYTES_PER_REVISION = model.MAX_PERMISSION_TEXT_BYTES_PER_REVISION;
-pub const MAX_BACKGROUND_TASKS_PER_BUNDLE = model.MAX_BACKGROUND_TASKS_PER_BUNDLE;
-pub const MAX_BACKGROUND_TASK_ID_BYTES = model.MAX_BACKGROUND_TASK_ID_BYTES;
-pub const MAX_MODEL_FAMILY_BYTES = model.MAX_MODEL_FAMILY_BYTES;
-pub const MAX_SIGNATURE_FORMAT_BYTES = model.MAX_SIGNATURE_FORMAT_BYTES;
-pub const MAX_SIGNATURE_SIGNER_BYTES = model.MAX_SIGNATURE_SIGNER_BYTES;
 pub const MAX_INSTALL_SOURCE_BYTES = model.MAX_INSTALL_SOURCE_BYTES;
-pub const DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS = model.DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS;
-pub const COMPACT_PACKAGE_RESULT_METADATA = model.COMPACT_PACKAGE_RESULT_METADATA;
-pub const REMOVE_RESULT_SIZE_CEILING_BYTES = model.REMOVE_RESULT_SIZE_CEILING_BYTES;
-pub const OFFBOARD_RESULT_SIZE_CEILING_BYTES = model.OFFBOARD_RESULT_SIZE_CEILING_BYTES;
-pub const PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES = model.PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES;
-pub const LAUNCH_PLAN_SIZE_CEILING_BYTES = model.LAUNCH_PLAN_SIZE_CEILING_BYTES;
-pub const STORED_PERMISSION_SIZE_CEILING_BYTES = model.STORED_PERMISSION_SIZE_CEILING_BYTES;
-pub const BUNDLE_REVISION_SIZE_CEILING_BYTES = model.BUNDLE_REVISION_SIZE_CEILING_BYTES;
-pub const INSTALLED_BUNDLE_SIZE_CEILING_BYTES = model.INSTALLED_BUNDLE_SIZE_CEILING_BYTES;
-pub const REUSES_REVISION_METADATA_BACKING = bundle_ops.REUSES_REVISION_METADATA_BACKING;
 pub const InstallRequest = model.InstallRequest;
 pub const InstallResult = model.InstallResult;
 pub const RemoveResult = model.RemoveResult;
 pub const OffboardResult = model.OffboardResult;
-pub const ReleaseTransparencyEvidence = model.ReleaseTransparencyEvidence;
 pub const StoredComponent = model.StoredComponent;
-pub const StoredAsset = model.StoredAsset;
-pub const LaunchPlan = model.LaunchPlan;
 pub const PackageLaunchProvenance = model.PackageLaunchProvenance;
-pub const StoredInterface = model.StoredInterface;
-pub const StoredPermission = model.StoredPermission;
-pub const StoredBackgroundTask = model.StoredBackgroundTask;
-pub const StoredAiMetadata = model.StoredAiMetadata;
-pub const StoredDataRights = model.StoredDataRights;
-pub const StoredSupplyChain = model.StoredSupplyChain;
-pub const StoredSignature = model.StoredSignature;
-pub const StoredObjectResilience = model.StoredObjectResilience;
-pub const StoredSemanticIndex = model.StoredSemanticIndex;
 pub const ResolvedManifest = model.ResolvedManifest;
-pub const BundleRevision = model.BundleRevision;
-pub const InstalledBundle = model.InstalledBundle;
 pub const AuthorityContext = service_authority.Context;
 pub const AuthorityError = service_authority.Error;
 pub const Digest = bundle_digest.Digest;
@@ -126,8 +87,8 @@ pub const RemoveRequest = struct {
 };
 
 const BundleSlot = model.BundleSlot;
-const BUNDLE_INDEX_CAPACITY: usize = MAX_INSTALLED_BUNDLES * 2;
-pub const BundleArena = indexed_arena.IndexedArenaWithKey(u64, BundleSlot, MAX_INSTALLED_BUNDLES, BUNDLE_INDEX_CAPACITY, bundleSlotKey);
+const BUNDLE_INDEX_CAPACITY: usize = model.MAX_INSTALLED_BUNDLES * 2;
+pub const BundleArena = indexed_arena.IndexedArenaWithKey(u64, BundleSlot, model.MAX_INSTALLED_BUNDLES, BUNDLE_INDEX_CAPACITY, bundleSlotKey);
 const heap_backed_bundle_arena = builtin.target.os.tag == .freestanding;
 const BundleArenaBacking = if (heap_backed_bundle_arena) ?*BundleArena else BundleArena;
 const zeroBundle = model.zeroBundle;
@@ -235,18 +196,12 @@ pub const Service = struct {
         try validateInstallRequestShape(request);
         try manifest.validate(request.bundle);
         try manifest.validateApplicationPackaging(request.bundle);
-        try bundle_ops.validateInstallStorageShape(InstalledBundle, request.bundle);
+        try bundle_ops.validateInstallStorageShape(request.bundle);
         const digest = bundle_digest.digestBundle(request.bundle);
         if (!signing.verifyWithDefaultRegistry(request.bundle.signature, &digest)) {
             return error.InvalidManifestSignature;
         }
-        const trusted = self.trust_store.trustedPublisherSignature(request.bundle.publisher, request.bundle.signature);
-        if (!trusted) {
-            if (publisherKeyWasRevoked(&self.trust_store, request.bundle.publisher, request.bundle.signature)) {
-                return error.PublisherKeyRevoked;
-            }
-            return error.UntrustedManifestSigner;
-        }
+        try requireTrustedSigner(&self.trust_store, request.bundle.publisher, request.bundle.signature);
         try requirePolicy(policies.installSourceDecision(subjects, request.source_identity), error.InstallSourceDenied);
         try requirePolicy(policies.packageProvenanceDecision(subjects, .{
             .sbom_present = request.bundle.supply_chain.sbom_digest.len != 0,
@@ -317,7 +272,7 @@ pub const Service = struct {
         const bundle = self.find(request.bundle_id) orelse return error.BundleNotFound;
         try requireActiveRevisionDigest(bundle, request.expected_active_digest);
         const rollback_revision = bundle.rollbackRevision() orelse return error.NoRollbackVersion;
-        try self.validateRollbackRevisionTrusted(rollback_revision);
+        try self.validateRevisionTrusted(rollback_revision);
         const active_revision = bundle.activeRevision();
         const permissions_changed = !std.mem.eql(u8, &active_revision.permission_digest, &rollback_revision.permission_digest);
         bundle_ops.rollback(bundle);
@@ -330,18 +285,8 @@ pub const Service = struct {
         };
     }
 
-    fn validateRollbackRevisionTrusted(self: *const Service, revision: *const BundleRevision) Error!void {
-        return self.validateRevisionTrusted(revision);
-    }
-
-    fn validateRevisionTrusted(self: *const Service, revision: *const BundleRevision) Error!void {
-        const signature = revision.signature.toManifest();
-        if (!self.trust_store.trustedPublisherSignature(revision.publisherSlice(), signature)) {
-            if (publisherKeyWasRevoked(&self.trust_store, revision.publisherSlice(), signature)) {
-                return error.PublisherKeyRevoked;
-            }
-            return error.UntrustedManifestSigner;
-        }
+    fn validateRevisionTrusted(self: *const Service, revision: *const model.BundleRevision) Error!void {
+        try requireTrustedSigner(&self.trust_store, revision.publisherSlice(), revision.signature.toManifest());
         if (publicStoreSource(revision.sourceIdentitySlice()) and !revision.release_transparency.present()) {
             return error.StoreTransparencyMissing;
         }
@@ -350,8 +295,12 @@ pub const Service = struct {
     fn remove(self: *Service, request: RemoveRequest) Error!RemoveResult {
         const bundle = self.find(request.bundle_id) orelse return error.BundleNotFound;
         try requireActiveRevisionDigest(bundle, request.expected_active_digest);
+        return self.removeBundle(bundle);
+    }
+
+    fn removeBundle(self: *Service, bundle: *const model.InstalledBundle) RemoveResult {
         const removed_revision_count = bundle.revisionCount();
-        _ = self.bundleArena().?.remove(bundleKey(request.bundle_id));
+        _ = self.bundleArena().?.remove(bundleKey(bundle.bundleIdSlice()));
         return .{
             .removed_existing = true,
             .removed_revision_count = removed_revision_count,
@@ -366,7 +315,6 @@ pub const Service = struct {
         ledger: ?*event_ledger.Ledger,
     ) (Error || event_ledger.Error)!OffboardResult {
         const target = self.find(request.bundle_id) orelse return error.BundleNotFound;
-        const expected_active_digest = activeRevisionDigest(target);
         const removed_bundle_digest = offboardRemovedBundleDigest(target);
         const decision = policies.dataRightsDecision(subjects, .{
             .operation = .delete,
@@ -379,10 +327,7 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const removed = try self.remove(.{
-            .bundle_id = request.bundle_id,
-            .expected_active_digest = expected_active_digest,
-        });
+        const removed = self.removeBundle(target);
         try recordOffboard(ledger, request, true);
         return .{
             .removed_existing = removed.removed_existing,
@@ -392,7 +337,7 @@ pub const Service = struct {
         };
     }
 
-    pub fn find(self: *Service, bundle_id: []const u8) ?*InstalledBundle {
+    pub fn find(self: *Service, bundle_id: []const u8) ?*model.InstalledBundle {
         const slots = self.bundleArena() orelse return null;
         const slot = slots.get(bundleKey(bundle_id)) orelse return null;
         if (!std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return null;
@@ -404,7 +349,7 @@ pub const Service = struct {
         slots.rebuildPrimaryIndex();
     }
 
-    pub fn buildLaunchPlan(self: *const Service, bundle_id: []const u8) Error!LaunchPlan {
+    pub fn buildLaunchPlan(self: *const Service, bundle_id: []const u8) Error!model.LaunchPlan {
         const bundle = self.findConst(bundle_id) orelse return error.BundleNotFound;
         const active_revision = bundle.activeRevision();
         try self.validateRevisionTrusted(active_revision);
@@ -425,7 +370,7 @@ pub const Service = struct {
         return bundle_ops.resolveActiveManifest(bundle, resolved);
     }
 
-    fn findConst(self: *const Service, bundle_id: []const u8) ?*const InstalledBundle {
+    fn findConst(self: *const Service, bundle_id: []const u8) ?*const model.InstalledBundle {
         const slots = self.bundleArenaConst() orelse return null;
         const slot = slots.getConst(bundleKey(bundle_id)) orelse return null;
         if (!std.mem.eql(u8, slot.bundle.bundleIdSlice(), bundle_id)) return null;
@@ -435,7 +380,7 @@ pub const Service = struct {
 
 fn initializeBundleArena(slots: *BundleArena) void {
     @memset(std.mem.asBytes(slots), 0);
-    const free_no_index = indexed_arena.reusableNoIndex(MAX_INSTALLED_BUNDLES);
+    const free_no_index = indexed_arena.reusableNoIndex(model.MAX_INSTALLED_BUNDLES);
     @memset(slots.free_next[0..], free_no_index);
     slots.free_head = free_no_index;
 }
@@ -578,7 +523,7 @@ fn validateInstallRequestShape(request: InstallRequest) Error!void {
 }
 
 fn validateRevisionTransition(
-    active_revision: *const BundleRevision,
+    active_revision: *const model.BundleRevision,
     incoming: manifest.BundleManifest,
     incoming_schema_version: u32,
 ) Error!void {
@@ -602,7 +547,7 @@ fn validateRevisionTransition(
 }
 
 fn validateTransparencyTransition(
-    installed: *const InstalledBundle,
+    installed: *const model.InstalledBundle,
     request: InstallRequest,
 ) Error!void {
     if (!publicStoreSource(request.source_identity)) return;
@@ -615,8 +560,8 @@ fn validateTransparencyTransition(
 }
 
 fn launchProvenance(
-    bundle: *const InstalledBundle,
-    revision: *const BundleRevision,
+    bundle: *const model.InstalledBundle,
+    revision: *const model.BundleRevision,
 ) PackageLaunchProvenance {
     const signature = revision.signature.toManifest();
     return .{
@@ -637,29 +582,29 @@ fn launchProvenance(
     };
 }
 
-pub fn activeRevisionDigest(bundle: *const InstalledBundle) Digest {
+pub fn activeRevisionDigest(bundle: *const model.InstalledBundle) Digest {
     return installedBundleRevisionDigest(bundle, "zigos.package.active-revision");
 }
 
-pub fn rollbackRequestForActive(bundle: *const InstalledBundle) RollbackRequest {
+pub fn rollbackRequestForActive(bundle: *const model.InstalledBundle) RollbackRequest {
     return .{
         .bundle_id = bundle.bundleIdSlice(),
         .expected_active_digest = activeRevisionDigest(bundle),
     };
 }
 
-pub fn removeRequestForActive(bundle: *const InstalledBundle) RemoveRequest {
+pub fn removeRequestForActive(bundle: *const model.InstalledBundle) RemoveRequest {
     return .{
         .bundle_id = bundle.bundleIdSlice(),
         .expected_active_digest = activeRevisionDigest(bundle),
     };
 }
 
-pub fn offboardRemovedBundleDigest(bundle: *const InstalledBundle) Digest {
+pub fn offboardRemovedBundleDigest(bundle: *const model.InstalledBundle) Digest {
     return installedBundleRevisionDigest(bundle, "zigos.package.offboard.removed-bundle");
 }
 
-fn installedBundleRevisionDigest(bundle: *const InstalledBundle, schema: []const u8) Digest {
+fn installedBundleRevisionDigest(bundle: *const model.InstalledBundle, schema: []const u8) Digest {
     const revision = bundle.activeRevision();
     const signature = revision.signature.toManifest();
     var hasher = crypto_hash.init();
@@ -796,7 +741,7 @@ fn installedBundleRevisionDigest(bundle: *const InstalledBundle, schema: []const
     return crypto_hash.finalize(&hasher);
 }
 
-fn requireActiveRevisionDigest(bundle: *const InstalledBundle, expected: Digest) Error!void {
+fn requireActiveRevisionDigest(bundle: *const model.InstalledBundle, expected: Digest) Error!void {
     const actual = activeRevisionDigest(bundle);
     if (!std.mem.eql(u8, &actual, &expected)) return error.PackageActiveRevisionMismatch;
 }
@@ -805,12 +750,14 @@ fn publicStoreSource(source_identity: []const u8) bool {
     return std.mem.startsWith(u8, source_identity, "store:zigos/public");
 }
 
-fn publisherKeyWasRevoked(
+fn requireTrustedSigner(
     trust_store: *const principal.Keyring,
     publisher: []const u8,
     signature: manifest.Signature,
-) bool {
-    return trust_store.revokedPublisherSignature(publisher, signature);
+) Error!void {
+    if (trust_store.trustedPublisherSignature(publisher, signature)) return;
+    if (trust_store.revokedPublisherSignature(publisher, signature)) return error.PublisherKeyRevoked;
+    return error.UntrustedManifestSigner;
 }
 
 fn bundleKey(bundle_id: []const u8) u64 {
@@ -884,7 +831,7 @@ fn signTestReleaseBundle(identity: signing.SignerIdentity, bundle: manifest.Bund
     );
 }
 
-fn publicStoreTransparency(sequence: u64, root_byte: u8, log_head_byte: u8) ReleaseTransparencyEvidence {
+fn publicStoreTransparency(sequence: u64, root_byte: u8, log_head_byte: u8) model.ReleaseTransparencyEvidence {
     return .{
         .sequence = sequence,
         .root = crypto_hash.digestFromByte(root_byte),
@@ -1849,7 +1796,7 @@ test "package service rejects oversized manifests instead of truncating stored m
         .seed = signing.seedFromByte(0x36),
     };
     try trustTestPublisher(&service, signer_identity, "Example Software");
-    const long_bundle_id = @as([MAX_LABEL_BYTES + 1]u8, @splat('b'));
+    const long_bundle_id = @as([model.MAX_LABEL_BYTES + 1]u8, @splat('b'));
     const interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
         .{ .name = "zigos.object.workspace" },
@@ -2491,7 +2438,7 @@ test "package revisions pool permission text and preserve rollback values" {
 
     const recycled_revision = bundle.activeRevision();
     const recycled_permission_text_len: usize = recycled_revision.permission_text_len;
-    const zero_permission_text = @as([MAX_PERMISSION_TEXT_BYTES_PER_REVISION]u8, @splat(0));
+    const zero_permission_text = @as([model.MAX_PERMISSION_TEXT_BYTES_PER_REVISION]u8, @splat(0));
     try std.testing.expect(recycled_permission_text_len < previous_permission_text_len);
     try std.testing.expectEqualSlices(
         u8,
@@ -2503,9 +2450,9 @@ test "package revisions pool permission text and preserve rollback values" {
 }
 
 test "package permission text storage enforces individual and revision budgets" {
-    const full_resource = @as([MAX_PERMISSION_RESOURCE_BYTES]u8, @splat('r'));
+    const full_resource = @as([model.MAX_PERMISSION_RESOURCE_BYTES]u8, @splat('r'));
     const full_reason = @as([model.MAX_PERMISSION_REASON_BYTES]u8, @splat('q'));
-    var resources = @as([7][MAX_PERMISSION_RESOURCE_BYTES]u8, @splat(full_resource));
+    var resources = @as([7][model.MAX_PERMISSION_RESOURCE_BYTES]u8, @splat(full_resource));
     var permissions: [resources.len]manifest.PermissionRequest = undefined;
     for (&permissions, 0..) |*permission, index| {
         resources[index][0] = @intCast(index + 1);
@@ -2537,7 +2484,7 @@ test "package permission text storage enforces individual and revision budgets" 
     );
     try std.testing.expectEqual(@as(u8, 0), bundle.revisionCount());
 
-    const oversized_resource = @as([MAX_PERMISSION_RESOURCE_BYTES + 1]u8, @splat('r'));
+    const oversized_resource = @as([model.MAX_PERMISSION_RESOURCE_BYTES + 1]u8, @splat('r'));
     const oversized_permission = [_]manifest.PermissionRequest{.{
         .kind = .object_access,
         .resource = oversized_resource[0..],

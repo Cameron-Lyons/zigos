@@ -32,8 +32,6 @@ pub const MAX_SIGNATURE_FORMAT_BYTES: usize = 16;
 pub const MAX_SIGNATURE_SIGNER_BYTES: usize = 64;
 pub const MAX_INSTALL_SOURCE_BYTES: usize = 96;
 pub const MAX_REVISIONS_PER_BUNDLE: usize = 2;
-pub const DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS = true;
-pub const COMPACT_PACKAGE_RESULT_METADATA = true;
 pub const STORED_PERMISSION_SIZE_CEILING_BYTES: usize = 56;
 pub const BUNDLE_REVISION_SIZE_CEILING_BYTES: usize = 10_272;
 pub const INSTALLED_BUNDLE_SIZE_CEILING_BYTES: usize = 20_616;
@@ -631,7 +629,6 @@ test "permission text references preserve the full pooled offset range" {
 }
 
 test "package catalog uses capacity-sized resident metadata" {
-    try std.testing.expect(DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS);
     try std.testing.expect(!@hasField(InstalledBundle, "revision_count"));
     try std.testing.expect(!@hasField(InstalledBundle, "next_revision_id"));
     try std.testing.expectEqual(@as(usize, 114), @sizeOf(StoredComponent));
@@ -643,7 +640,6 @@ test "package catalog uses capacity-sized resident metadata" {
 }
 
 test "package results use compact bounded metadata" {
-    try std.testing.expect(COMPACT_PACKAGE_RESULT_METADATA);
     try std.testing.expectEqual(u8, @FieldType(RemoveResult, "removed_revision_count"));
     try std.testing.expectEqual(u8, @FieldType(OffboardResult, "removed_revision_count"));
     try std.testing.expectEqual(u8, @FieldType(PackageLaunchProvenance, "signature_public_key_len"));

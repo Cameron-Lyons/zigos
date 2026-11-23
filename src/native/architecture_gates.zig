@@ -4,7 +4,6 @@ const cpu_baseline = @import("../arch/cpu_baseline.zig");
 const endpoint = @import("kernel_api/endpoint.zig");
 const event_wake = @import("../kernel/event_wake.zig");
 const ipc_ring = @import("kernel_api/ipc_ring.zig");
-const service_catalog = @import("session/service_catalog.zig");
 const shared_memory = @import("kernel_api/shared_memory.zig");
 const storage_driver_task = @import("drivers/storage_driver_task.zig");
 const operation_metadata = @import("kernel_api/operation_metadata.zig");
@@ -13,7 +12,6 @@ const sync_service_test = @import("sync/sync_service_test.zig");
 const sync_transport = @import("sync/sync_transport.zig");
 const table_backing = @import("core/table_backing.zig");
 const transient_sync_service = @import("sync/transient_service.zig");
-const userspace_launch = @import("task/userspace_launch.zig");
 const xhci_driver_task = @import("drivers/xhci_driver_task.zig");
 
 pub const generated_from_typed_idl = contract_2026.generated_from_typed_idl;
@@ -49,8 +47,6 @@ pub const native_2026 = .{
     .userspace_nvme_dataplane = storage_driver_task.USERSPACE_NVME_DATAPLANE and
         storage_driver_task.KERNEL_LATCHES_ONLY and
         storage_driver_task.DISPATCHES_FROM_BOUND_TASK,
-    .single_bootstrap_launch_mode = service_catalog.SINGLE_BOOTSTRAP_LAUNCH_MODE and
-        userspace_launch.SINGLE_KERNEL_CONTRACT_LAUNCH,
     .demand_pages_user_objects = shared_memory.REGISTERS_DEMAND_PAGED_MAPPINGS,
     .canonical_47_bit_user = contract_2026.floor.canonical_47_bit_user,
     .u64_user_stacks = contract_2026.floor.u64_user_stacks,

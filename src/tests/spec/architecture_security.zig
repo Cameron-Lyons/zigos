@@ -266,12 +266,11 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expectEqual(@as(usize, 23), @typeInfo(abi.NativeOperation).@"enum".field_names.len);
     try std.testing.expectEqual(@as(u16, 0x116), abi.opcode(.surface_present));
     try std.testing.expect(std.enums.fromInt(abi.NativeOperation, 0x117) == null);
-    const storage_interface_id = typed_component_abi.interfaceIdForService(.storage_object);
+    const storage_interface_id = typed_component_abi.interfaceId(.object_workspace);
     try registry.register(55, 101, 201, storage_interface_id, service_registry.REQUIRED_BINDING_FLAGS);
     const connection = try registry.connect(storage_interface_id);
     try std.testing.expectEqual(@as(u64, 55), connection.service_id);
     try std.testing.expectEqual(@as(u64, 101), connection.endpoint_id);
-    try std.testing.expect(service_registry.AUTHENTICATED_BINDINGS_ONLY);
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(@TypeOf(connection)));
     try std.testing.expectError(service_registry.Error.InterfaceNotFound, registry.connect(.task_runtime));
 
@@ -698,13 +697,12 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         123,
         service_endpoint.endpoint.endpoint_id,
         service_endpoint.capability_id,
-        typed_component_abi.interfaceIdForService(.storage_object),
+        typed_component_abi.interfaceId(.object_workspace),
         kernel_descriptors.serviceBindingFlags(launched_record),
     );
 
-    const connection = try service_directory.connect(typed_component_abi.interfaceIdForService(.storage_object));
+    const connection = try service_directory.connect(typed_component_abi.interfaceId(.object_workspace));
     try std.testing.expectEqual(@as(u64, 123), connection.service_id);
-    try std.testing.expect(service_registry.AUTHENTICATED_BINDINGS_ONLY);
 }
 
 pub fn modeledKernelClaimsHaveHardEnforcementProofs() !void {

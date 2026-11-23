@@ -510,14 +510,6 @@ pub const Launch = struct {
     }
 };
 
-pub const layout = .{
-    .handle_bytes = @sizeOf(Launch),
-    .state_bytes = @sizeOf(State),
-    .view_bytes = @sizeOf(document_view.View),
-    .grant_bytes = @sizeOf(Grant),
-    .ledger_bytes = @sizeOf([MAX_ACTIVE_GRANTS]?Grant),
-};
-
 comptime {
     if (@sizeOf(Launch) > 16) @compileError("owned document launch exceeds its lazy native handle");
     if (@sizeOf(State) > 4096) @compileError("owned document launch exceeds one bounded state page");

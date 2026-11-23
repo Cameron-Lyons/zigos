@@ -3,14 +3,6 @@ const abi = @import("../core/abi.zig");
 const typed_component_abi = @import("typed_component_abi.zig");
 
 pub const MAX_BINDINGS: usize = typed_component_abi.INTERFACE_COUNT;
-pub const DERIVES_STATIC_CONTRACT_METADATA = true;
-pub const COMPACT_BINDING_METADATA = true;
-pub const DIRECT_INTERFACE_BINDINGS = true;
-pub const DERIVES_BINDING_COUNT_FROM_SLOTS = true;
-pub const DERIVES_OWNER_FROM_ENDPOINT_CAPABILITY = true;
-pub const COMPACT_BOOTSTRAP_VALIDATION_STATE = true;
-pub const TYPED_ID_ONLY_API = true;
-pub const AUTHENTICATED_BINDINGS_ONLY = true;
 pub const REQUIRED_BINDING_FLAGS: u16 = abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER | abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE;
 pub const BINDING_SIZE_CEILING_BYTES: usize = 24;
 pub const REGISTRY_SIZE_CEILING_BYTES: usize = 744;
@@ -177,7 +169,6 @@ fn zeroBinding() Binding {
 }
 
 test "service registry stores one direct slot per typed interface" {
-    try std.testing.expect(DIRECT_INTERFACE_BINDINGS);
     try std.testing.expectEqual(typed_component_abi.INTERFACE_COUNT, MAX_BINDINGS);
     try std.testing.expectEqual(REGISTRY_SIZE_CEILING_BYTES, @sizeOf(Registry));
     try std.testing.expectEqual(SERVICE_SIZE_CEILING_BYTES, @sizeOf(Service));

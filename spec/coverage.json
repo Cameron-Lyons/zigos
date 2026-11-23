@@ -1157,7 +1157,7 @@
       "negative_tests": [
         {
           "file": "src/native/platform/measured_boot.zig",
-          "name": "measurement snapshot rejects unsigned manifests and tampered startup artifacts"
+          "name": "measurement snapshot rejects tampered manifests and startup artifacts"
         },
         {
           "file": "src/native/platform/measured_boot.zig",
@@ -1428,7 +1428,7 @@
         "src/native/task/userspace_executor.zig",
         "src/native/kernel_api/native_kernel_access.zig",
         "src/native/kernel_api/syscall_surface.zig",
-        "src/native/session/runtime_negative_proofs.zig",
+        "src/native/session/proofs/runtime_negative_proofs.zig",
         "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
@@ -1449,7 +1449,7 @@
           "name": "syscall surface denies task creation without signed userspace launch provenance"
         },
         {
-          "file": "src/native/session/runtime_negative_proofs.zig",
+          "file": "src/native/session/proofs/runtime_negative_proofs.zig",
           "name": "runtime negative proofs reject modeled bypasses"
         },
         {
@@ -1470,7 +1470,7 @@
       "negative_tests": [
         {
           "file": "src/native/services/component_abi_schema.zig",
-          "name": "component ABI schema emits manifest interfaces and service catalog bindings"
+          "name": "component ABI schema emits manifest interfaces and interface contracts"
         },
         {
           "file": "src/native/services/typed_component_abi.zig",
@@ -1556,7 +1556,7 @@
         "src/native/task/process_isolation.zig",
         "src/native/task/userspace_executor.zig",
         "src/native/kernel_api/syscall_surface.zig",
-        "src/native/session/runtime_negative_proofs.zig",
+        "src/native/session/proofs/runtime_negative_proofs.zig",
         "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
@@ -1569,7 +1569,7 @@
           "name": "booted userspace service paths prove process isolation visible-entitlement gates"
         },
         {
-          "file": "src/native/session/runtime_negative_proofs.zig",
+          "file": "src/native/session/proofs/runtime_negative_proofs.zig",
           "name": "runtime negative proofs reject modeled bypasses"
         }
       ]
@@ -1912,7 +1912,7 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/services/media_print_service.zig",
+          "file": "src/kernel/boot/benchmark/models/media_print_service.zig",
           "name": "media print service rejects remote printing and hidden jobs stay silent"
         }
       ]

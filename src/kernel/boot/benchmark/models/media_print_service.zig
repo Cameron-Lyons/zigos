@@ -1,17 +1,13 @@
 const std = @import("std");
-const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
-const indexed_arena = @import("../core/indexed_arena.zig");
-const native_util = @import("../core/util.zig");
-const notification_center = @import("notification_center.zig");
-const principal = @import("../core/principal.zig");
-const units = @import("../core/units.zig");
+const accelerator_scheduler = @import("../../../../native/task/accelerator_scheduler.zig");
+const indexed_arena = @import("../../../../native/core/indexed_arena.zig");
+const native_util = @import("../../../../native/core/util.zig");
+const notification_center = @import("../../../../native/services/notification_center.zig");
+const principal = @import("../../../../native/core/principal.zig");
+const units = @import("../../../../native/core/units.zig");
 
 pub const MAX_JOBS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 64;
-pub const BOUNDED_JOB_SCAN = true;
-pub const DIRECT_JOB_LOOKUP = true;
-pub const COMPACT_COMPLETION_QUEUE = true;
-pub const COMPACT_JOB_TEXT_METADATA = true;
 pub const JOB_RECORD_SIZE_CEILING_BYTES: usize = 208;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 3_352;
 
