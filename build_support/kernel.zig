@@ -122,7 +122,7 @@ pub fn addNativeCryptoCheck(
 ) *std.Build.Step {
     const target = b.resolveTargetQuery(codegen_target.query());
     const module = b.createModule(.{
-        .root_source_file = b.path("src/arch/x86_64/native_crypto_probe.zig"),
+        .root_source_file = b.path("src/probes/native_crypto_probe.zig"),
         .target = target,
         .optimize = optimize,
         .strip = true,
@@ -140,7 +140,7 @@ pub fn addNativeCryptoCheck(
         .optimize = optimize,
         .red_zone = false,
     }));
-    module.addAssemblyFile(b.path("src/arch/x86_64/native_crypto_entry.S"));
+    module.addAssemblyFile(b.path("src/probes/native_crypto_entry.S"));
     module.addImport("volume_checksum", b.createModule(.{
         .root_source_file = b.path("src/native/storage/volume/checksum.zig"),
         .target = target,
@@ -235,7 +235,7 @@ const upper_half_probe_assembly = [_][]const u8{
     "src/arch/x86/invpcid.S",
     "src/kernel/interrupts/gdt_flush64.S",
     "src/kernel/smp/ap_trampoline.S",
-    "src/arch/x86_64/high_half_ipi_probe.S",
+    "src/probes/high_half_ipi_probe.S",
     // Execute the unchanged kernel-origin ISR on the selected guarded stack.
     // The entry object supplies its real initial kernel xstate and continuation
     // symbols; this CPL0 fixture never takes the native userspace branches.
@@ -253,7 +253,7 @@ fn addUpperHalfProbeImage(b: *std.Build, optimize: std.lang.Optimize, kind: Uppe
     };
     const elf = switch (kind) {
         .entry => addProbeElf(b, optimize, "high-half-entry-probe", "src/high_half_entry.zig", &upper_half_probe_assembly),
-        .mapping_xstate => addProbeElf(b, optimize, "mapping-xstate-probe", "src/mapping_xstate_entry.zig", &(upper_half_probe_assembly ++ [_][]const u8{"src/arch/x86_64/mapping_xstate_probe.S"})),
+        .mapping_xstate => addProbeElf(b, optimize, "mapping-xstate-probe", "src/mapping_xstate_entry.zig", &(upper_half_probe_assembly ++ [_][]const u8{"src/probes/mapping_xstate_probe.S"})),
     };
     return .{ .elf = elf, .boot = addBootImage(b, name, elf, b.path(shared.qemu_cmdline_path)) };
 }
@@ -282,7 +282,7 @@ pub fn addApCacheRejectionCheck(b: *std.Build, optimize: std.lang.Optimize) *std
 
 pub fn addSmpCacheEnabledMatchCheck(b: *std.Build, optimize: std.lang.Optimize) *std.Build.Step {
     const name = "smp-cache-enabled-match";
-    const elf = addProbeElf(b, optimize, name, "src/smp_cache_enabled_entry.zig", &(ap_cache_probe_assembly ++ [_][]const u8{"src/arch/x86_64/smp_cache_enabled_probe.S"}));
+    const elf = addProbeElf(b, optimize, name, "src/smp_cache_enabled_entry.zig", &(ap_cache_probe_assembly ++ [_][]const u8{"src/probes/smp_cache_enabled_probe.S"}));
     const image = addBootImage(b, name, elf, b.path(shared.qemu_cmdline_path));
     const run = host_tools.addRun(b, "run-smp-cache-enabled-match-smoke");
     run.addFileArg(image.iso);

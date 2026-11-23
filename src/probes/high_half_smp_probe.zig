@@ -4,46 +4,46 @@
 // FRED, LASS, userspace entry or native trap ownership. The separate Mapping
 // xstate root adds an explicitly admitted CPL0 compact-instruction phase.
 const std = @import("std");
-const x86 = @import("../x86.zig");
-const address = @import("../kernel_address.zig");
-const cpu_identity = @import("../../kernel/cpu_identity.zig");
-const native_entry = @import("native_entry_state.zig");
-const native_executor = @import("../../native/task/userspace_executor.zig");
-const native_scheduler = @import("../../native/task/userspace_scheduler.zig");
-const task_runtime = @import("../../native/task/task_runtime.zig");
-const abi = @import("../../native/core/abi.zig");
-const object_ids = @import("../../native/core/ids.zig");
-const capability = @import("../../native/kernel_api/capability.zig");
-const component_port = @import("../../native/kernel_api/component_port.zig");
-const endpoint = @import("../../native/kernel_api/endpoint.zig");
-const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
-const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
-const syscall_broker = @import("../../native/kernel_api/syscall_broker.zig");
-const event_wake = @import("../../kernel/event_wake.zig");
-const dispatch_ownership = @import("../../native/task/dispatch_ownership.zig");
-const dispatch_transport = @import("../../native/task/dispatch_transport.zig");
-const table_backing = @import("../../native/core/table_backing.zig");
-const features = @import("../cpu_features.zig");
-const gdt = @import("../../kernel/interrupts/gdt64.zig");
-const syscall64 = @import("../../kernel/interrupts/syscall64.zig");
-const idt = @import("../../kernel/interrupts/idt64.zig");
-const isr = @import("../../kernel/interrupts/isr.zig");
-const interrupt_context = @import("../../kernel/interrupts/context.zig");
-const x2apic = @import("../../kernel/interrupts/x2apic.zig");
-const paging = @import("../../kernel/memory/paging64.zig");
-const paging_info = @import("../../boot/paging_info.zig");
-const handoff = @import("../../kernel/boot/handoff.zig");
-const early_console = @import("../../kernel/utils/console.zig");
-const numfmt = @import("../../kernel/utils/numfmt.zig");
-const table = @import("../../kernel/memory/page_table64.zig");
-const layout = @import("../../kernel/memory/virtual_layout.zig");
-const smp = @import("../../kernel/smp.zig");
-const model = @import("../xstate_roundtrip_model.zig");
-const xstate = @import("../xstate.zig");
-const cache_policy = @import("../cache_policy.zig");
-const bridge = @import("../../kernel/smp/trampoline.zig");
-const tsc_clock = @import("../../kernel/timer/tsc_clock.zig");
-const timer = @import("../../kernel/timer/timer.zig");
+const x86 = @import("../arch/x86.zig");
+const address = @import("../arch/kernel_address.zig");
+const cpu_identity = @import("../kernel/cpu_identity.zig");
+const native_entry = @import("../arch/x86_64/native_entry_state.zig");
+const native_executor = @import("../native/task/userspace_executor.zig");
+const native_scheduler = @import("../native/task/userspace_scheduler.zig");
+const task_runtime = @import("../native/task/task_runtime.zig");
+const abi = @import("../native/core/abi.zig");
+const object_ids = @import("../native/core/ids.zig");
+const capability = @import("../native/kernel_api/capability.zig");
+const component_port = @import("../native/kernel_api/component_port.zig");
+const endpoint = @import("../native/kernel_api/endpoint.zig");
+const native_kernel = @import("../native/kernel_api/native_kernel.zig");
+const shared_memory = @import("../native/kernel_api/shared_memory.zig");
+const syscall_broker = @import("../native/kernel_api/syscall_broker.zig");
+const event_wake = @import("../kernel/event_wake.zig");
+const dispatch_ownership = @import("../native/task/dispatch_ownership.zig");
+const dispatch_transport = @import("../native/task/dispatch_transport.zig");
+const table_backing = @import("../native/core/table_backing.zig");
+const features = @import("../arch/cpu_features.zig");
+const gdt = @import("../kernel/interrupts/gdt64.zig");
+const syscall64 = @import("../kernel/interrupts/syscall64.zig");
+const idt = @import("../kernel/interrupts/idt64.zig");
+const isr = @import("../kernel/interrupts/isr.zig");
+const interrupt_context = @import("../kernel/interrupts/context.zig");
+const x2apic = @import("../kernel/interrupts/x2apic.zig");
+const paging = @import("../kernel/memory/paging64.zig");
+const paging_info = @import("../boot/paging_info.zig");
+const handoff = @import("../kernel/boot/handoff.zig");
+const early_console = @import("../kernel/utils/console.zig");
+const numfmt = @import("../kernel/utils/numfmt.zig");
+const table = @import("../kernel/memory/page_table64.zig");
+const layout = @import("../kernel/memory/virtual_layout.zig");
+const smp = @import("../kernel/smp.zig");
+const model = @import("../arch/xstate_roundtrip_model.zig");
+const xstate = @import("../arch/xstate.zig");
+const cache_policy = @import("../arch/cache_policy.zig");
+const bridge = @import("../kernel/smp/trampoline.zig");
+const tsc_clock = @import("../kernel/timer/tsc_clock.zig");
+const timer = @import("../kernel/timer/timer.zig");
 const proof = @import("high_half_probe.zig");
 
 const PAGE_BYTES: usize = 4096;
@@ -645,7 +645,7 @@ fn verifyTrapStackGeometry() void {
     var physical_count: usize = 0;
     for (&cpus, 0..) |*cpu, index| {
         const top = cpu.trap_stack_top;
-        if (!@import("../cpu_baseline.zig").isCanonicalUpperHalf(top) or
+        if (!@import("../arch/cpu_baseline.zig").isCanonicalUpperHalf(top) or
             top % PAGE_BYTES != 0 or top % x86.FRED_STACK_ALIGNMENT != 0) proof.fail("SMP trap stack top geometry");
         const guard = top - native_executor.TRAP_STACK_TOTAL_BYTES;
         if (paging.currentPagePermissions(guard) != null or
@@ -1462,7 +1462,7 @@ fn provePreparedOwner(runtime: *task_runtime.Runtime) void {
     // Reuse that cached continuation in the next prepared epoch.
     prepared_owner_expectation.user_context.rax = 1;
     prepared_owner_expectation.user_context.rdx = returned.ui_revision;
-    prepared_owner_expectation.user_context.rsi = @backingInt(@import("../../native/task/userspace_bootstrap_mailbox.zig").YieldDisposition.runnable);
+    prepared_owner_expectation.user_context.rsi = @backingInt(@import("../native/task/userspace_bootstrap_mailbox.zig").YieldDisposition.runnable);
     prepared_owner_expectation.user_context.instruction_pointer += 4;
     prepared_owner_expectation.receipt = .{
         .outcome = .faulted,
@@ -1764,7 +1764,7 @@ fn provePreparedTransport(runtime: *task_runtime.Runtime) void {
     // cancellation paths never entered user-context preparation or the root.
     prepared_owner_expectation.user_context.rax = 1;
     prepared_owner_expectation.user_context.rdx = returned.ui_revision;
-    prepared_owner_expectation.user_context.rsi = @backingInt(@import("../../native/task/userspace_bootstrap_mailbox.zig").YieldDisposition.runnable);
+    prepared_owner_expectation.user_context.rsi = @backingInt(@import("../native/task/userspace_bootstrap_mailbox.zig").YieldDisposition.runnable);
     prepared_owner_expectation.user_context.instruction_pointer += 4;
     prepared_owner_expectation.receipt = .{
         .outcome = .faulted,
@@ -2037,7 +2037,7 @@ fn provePromptedPreparedTransport(runtime: *task_runtime.Runtime) void {
 
     prepared_owner_expectation.user_context.rax = 1;
     prepared_owner_expectation.user_context.rdx = returned.ui_revision;
-    prepared_owner_expectation.user_context.rsi = @backingInt(@import("../../native/task/userspace_bootstrap_mailbox.zig").YieldDisposition.runnable);
+    prepared_owner_expectation.user_context.rsi = @backingInt(@import("../native/task/userspace_bootstrap_mailbox.zig").YieldDisposition.runnable);
     prepared_owner_expectation.user_context.instruction_pointer += 4;
     prepared_owner_expectation.receipt = .{
         .outcome = .faulted,
@@ -3553,14 +3553,14 @@ fn observe(index: u8, entry_cr4: usize) ?Observation {
     const selector = asm volatile ("str %[selector]"
         : [selector] "=r" (-> u16),
     );
-    if (selector != gdt.TSS_SEG or gdtr.limit != 55 or !@import("../cpu_baseline.zig").isCanonicalUpperHalf(gdtr.base)) return null;
+    if (selector != gdt.TSS_SEG or gdtr.limit != 55 or !@import("../arch/cpu_baseline.zig").isCanonicalUpperHalf(gdtr.base)) return null;
     const descriptors: *const [7]u64 = @ptrFromInt(gdtr.base);
     const low = descriptors[5];
     const high = descriptors[6];
     const tss_base = ((low >> 16) & 0xFF_FFFF) | ((low >> 32) & 0xFF00_0000) | (high << 32);
     if ((low >> 40) & 0xFF != 0x8B or high >> 32 != 0 or
         (low & 0xFFFF) | ((low >> 32) & 0xF0000) != @sizeOf(gdt.Tss) - 1 or
-        !@import("../cpu_baseline.zig").isCanonicalUpperHalf(tss_base)) return null;
+        !@import("../arch/cpu_baseline.zig").isCanonicalUpperHalf(tss_base)) return null;
     const tss: *const gdt.Tss = @ptrFromInt(tss_base);
     if (tss.iomap_base != @sizeOf(gdt.Tss)) return null;
     const instruction = asm volatile ("lea 0(%%rip), %[value]"

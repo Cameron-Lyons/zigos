@@ -1,12 +1,12 @@
 const std = @import("std");
-const x86 = @import("../x86.zig");
-const address = @import("../kernel_address.zig");
-const paging = @import("../../kernel/memory/paging64.zig");
-const memory = @import("../../kernel/memory/memory.zig");
-const handoff = @import("../../kernel/boot/handoff.zig");
-const gdt = @import("../../kernel/interrupts/gdt64.zig");
-const idt = @import("../../kernel/interrupts/idt64.zig");
-const cpu_identity = @import("../../kernel/cpu_identity.zig");
+const x86 = @import("../arch/x86.zig");
+const address = @import("../arch/kernel_address.zig");
+const paging = @import("../kernel/memory/paging64.zig");
+const memory = @import("../kernel/memory/memory.zig");
+const handoff = @import("../kernel/boot/handoff.zig");
+const gdt = @import("../kernel/interrupts/gdt64.zig");
+const idt = @import("../kernel/interrupts/idt64.zig");
+const cpu_identity = @import("../kernel/cpu_identity.zig");
 
 const SERIAL_BASE: u16 = 0x3F8;
 const QEMU_EXIT_PORT: u16 = 0xF4;
@@ -24,9 +24,9 @@ pub fn panic(_: []const u8, _: ?*std.lang.StackTrace, _: ?usize) noreturn {
 }
 
 pub export fn kernel_main() callconv(.c) noreturn {
-    @import("../../kernel/utils/console.zig").init();
+    @import("../kernel/utils/console.zig").init();
     if (comptime @import("mapping_xstate_probe.zig").enabled) @import("mapping_xstate_probe.zig").preflightBsp();
-    @import("../cpu_features.zig").initializeNativeCachePolicy() catch fail("cache policy admission");
+    @import("../arch/cpu_features.zig").initializeNativeCachePolicy() catch fail("cache policy admission");
     const instruction = asm volatile ("lea 0(%%rip), %[value]"
         : [value] "=r" (-> usize),
     );
@@ -77,7 +77,7 @@ pub export fn kernel_main() callconv(.c) noreturn {
     if (x87_control != 0x037F or mxcsr != 0x1F80) fail("FP controls");
     pass("FP_CONTROLS");
 
-    if (!@import("../cpu_features.zig").detect().smap) fail("SMAP support");
+    if (!@import("../arch/cpu_features.zig").detect().smap) fail("SMAP support");
     x86.writeCr4(x86.readCr4() | x86.CR4_SMAP);
     if (!x86.supervisorAccessPreventionEnabled()) fail("SMAP enabled");
     x86.allowSupervisorUserMemory();

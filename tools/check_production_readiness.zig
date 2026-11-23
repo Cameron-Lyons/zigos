@@ -542,7 +542,7 @@ const RETIRED_SOURCES = [_]SourceBan{
         .reason = "the image builder must install the native EFI stub instead of driving firmware boot services itself",
     },
     .{
-        .paths = &.{ "src/kernel/drivers/xhci.zig", "src/kernel/drivers/xhci_hw.zig" },
+        .paths = &.{ "src/kernel/drivers/xhci.zig", "src/kernel/drivers/xhci/", "src/kernel/drivers/xhci_hw.zig" },
         .snippets = &.{ "ports: [256]?PortProtocol", "var ports: [256]PortRuntimeState" },
         .reason = "xHCI port state must remain sized to reported hardware capacity",
     },

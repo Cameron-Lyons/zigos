@@ -914,7 +914,8 @@
       "verification_commands": [
         "zig build sync-two-node-qemu-test",
         "zig build host-tests",
-        "zig build spec-conformance"
+        "zig build spec-conformance",
+        "zig build zigos-native-smoke-test"
       ]
     },
     {
@@ -1060,7 +1061,8 @@
       ],
       "verification_commands": [
         "zig build driver-restart-qemu-test",
-        "zig build spec-conformance"
+        "zig build spec-conformance",
+        "zig build zigos-native-smoke-test"
       ]
     },
     {
@@ -1089,7 +1091,7 @@
         "src/native/kernel_api/syscall_failure_test.zig",
         "src/kernel/memory/demand_paging.zig",
         "src/kernel/memory/paging64.zig",
-        "src/arch/x86_64/high_half_shared_probe.zig",
+        "src/probes/high_half_shared_probe.zig",
         "src/kernel/boot/benchmark/models/media_print_service.zig",
         "src/native/session/proofs/service_path_proofs.zig",
         "src/kernel/boot/benchmark/suite.zig",
@@ -1100,7 +1102,7 @@
         "tools/check_kernel_benchmarks.zig",
         "src/native/task/dispatch_ownership.zig",
         "src/native/task/task_runtime.zig",
-        "src/arch/x86_64/high_half_smp_probe.zig"
+        "src/probes/high_half_smp_probe.zig"
       ],
       "current_evidence": [
         "The real ISR dispatcher invokes one runtime handoff after a registered timer handler or matching latched network, NVMe or xHCI handler, only for user-origin frames. Unsupported vectors return before any latch read; eligible device vectors perform at most one atomic peek and retain the event for deferred service. The executor validates the exact active task, live generational mapping and owned xstate before shared once-only context capture and kernel continuation. Kernel-origin work and the finite timer watchdog are unchanged. IRQ tables and hook remain within the existing 320-byte ceiling. Actual ISR and shared FRED host regressions cover context, stale mappings, prior containment, duplicate handoff and watchdog behavior in Debug and ReleaseFast. The NVMe worker now yields through its bounded completion path; admin and non-Worker waits remain synchronous. No physical interrupt-latency claim is made.",

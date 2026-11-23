@@ -32,7 +32,6 @@ pub const bootloader_source_path = "src/boot/efi_stub.zig";
 pub const qemu_cmdline_path = "src/boot/cmdline-qemu.txt";
 pub const native_store_image_path = "build/native-store.img";
 pub const native_store_smoke_image_path = "build/native-store-smoke.img";
-pub const native_store_spec_image_path = "build/native-store-spec.img";
 pub const native_store_size_mib = "8";
 
 pub fn addEfiIsoEpochArg(b: *std.Build, command: *std.Build.Step.Run) void {

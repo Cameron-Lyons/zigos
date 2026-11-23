@@ -5,7 +5,7 @@
 .Lnative_crypto_stack_top:
 
 .section .text.boot,"ax",@progbits
-#include "codegen_preflight.inc"
+#include "../arch/x86_64/codegen_preflight.inc"
 .code64
 .global zigos_efi_entry
 .type zigos_efi_entry, @function

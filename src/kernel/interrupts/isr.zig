@@ -6,7 +6,7 @@ const io = @import("../utils/io.zig");
 const console = @import("../utils/console.zig");
 const numfmt = @import("../utils/numfmt.zig");
 const timer = @import("../timer/timer.zig");
-const intel_i225_hw = @import("../drivers/intel_i225_hw.zig");
+const network_hw = @import("../drivers/network_hw.zig");
 const nvme_hw = @import("../drivers/nvme_hw.zig");
 const xhci_hw = @import("../drivers/xhci_hw.zig");
 const smp = @import("../smp.zig");
@@ -215,7 +215,7 @@ pub fn setRuntimePreemption(handler: InterruptHandler) void {
 
 fn deviceWorkPending(vector: usize) bool {
     return switch (vector) {
-        intel_i225_hw.INTERRUPT_VECTOR => event_wake.peek().network,
+        network_hw.INTERRUPT_VECTOR => event_wake.peek().network,
         // NVMe also raises a deferred-work latch. Preserve the same owner
         // boundary without processing completions in this interrupt hook.
         nvme_hw.INTERRUPT_VECTOR => event_wake.peek().nvme,
@@ -241,7 +241,7 @@ pub fn withTestHandlers(context: anytype, callback: anytype) !void {
 
 const external_handler_vectors = [_]u8{
     timer.INTERRUPT_VECTOR,
-    intel_i225_hw.INTERRUPT_VECTOR,
+    network_hw.INTERRUPT_VECTOR,
     nvme_hw.INTERRUPT_VECTOR,
     xhci_hw.INTERRUPT_VECTOR,
     smp.TLB_IPI_VECTOR,
@@ -299,8 +299,8 @@ pub fn init() void {
     disableLegacyPic();
     setKernelGate(timer.INTERRUPT_VECTOR, &isr64);
     registerHandler(timer.INTERRUPT_VECTOR, timerInterrupt);
-    setKernelGate(intel_i225_hw.INTERRUPT_VECTOR, &isr65);
-    registerHandler(intel_i225_hw.INTERRUPT_VECTOR, i225Interrupt);
+    setKernelGate(network_hw.INTERRUPT_VECTOR, &isr65);
+    registerHandler(network_hw.INTERRUPT_VECTOR, networkInterrupt);
     setKernelGate(nvme_hw.INTERRUPT_VECTOR, &isr66);
     registerHandler(nvme_hw.INTERRUPT_VECTOR, nvmeInterrupt);
     setKernelGate(xhci_hw.INTERRUPT_VECTOR, &isr67);
@@ -344,13 +344,8 @@ fn timerInterrupt(_: *InterruptFrame) void {
     }
 }
 
-fn i225Interrupt(_: *InterruptFrame) void {
-    const virtio_net_hw = @import("../drivers/virtio_net_hw.zig");
-    if (virtio_net_hw.isolationDomain() != null) {
-        virtio_net_hw.handleInterrupt();
-    } else {
-        intel_i225_hw.handleInterrupt();
-    }
+fn networkInterrupt(_: *InterruptFrame) void {
+    network_hw.handleInterrupt();
     event_wake.raise(.network);
 }
 

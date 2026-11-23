@@ -249,19 +249,9 @@ pub fn build(b: *std.Build) void {
 
     const check_steps = checks_build.addCheckSteps(b, test_optimize, test_artifacts);
     check_steps.host_tests.dependOn(&release_tool_fixture_cmd.step);
-    const spec_smoke_cmd = qemu_build.addNativeSmokeCommand(
-        b,
-        kernels.zigos_native_verification,
-        userspace_images,
-        "build/zigos-native-spec.log",
-        shared.native_store_spec_image_path,
-        .full,
-    );
-    spec_smoke_cmd.step.dependOn(check_steps.spec_tests);
-    const spec_conformance_step = b.step("spec-conformance", "Validate spec coverage, run native spec tests, and verify the freestanding smoke path");
-    spec_conformance_step.dependOn(&spec_smoke_cmd.step);
-    dependOnRunCommands(spec_conformance_step, &negative_smoke_cmds);
-    spec_conformance_step.dependOn(&recovery_qemu_cmd.step);
+    const spec_conformance_step = b.step("spec-conformance", "Validate spec coverage, run native spec tests and the recovery QEMU proof");
+    spec_conformance_step.dependOn(check_steps.spec_tests);
+    spec_conformance_step.dependOn(recovery_qemu_step);
 
     const benchmark_cmd = qemu_build.addBenchmarkCommand(b, kernels.benchmark, userspace_images);
     const benchmark_gate = benchmarks_build.addBenchmarkGate(b, test_optimize, benchmark_cmd);

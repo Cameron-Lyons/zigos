@@ -23,8 +23,7 @@ const STATUS_DRIVER_OK: u8 = 4;
 const STATUS_FEATURES_OK: u8 = 8;
 const STATUS_FAILED: u8 = 128;
 const READY_STATUS = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK;
-// One selected network device owns the NIC vector.
-pub const INTERRUPT_VECTOR = @import("intel_i225_irq.zig").INTERRUPT_VECTOR;
+const INTERRUPT_VECTOR = @import("network_hw.zig").INTERRUPT_VECTOR;
 
 const Queue = struct {
     state: virtqueue.Queue,
@@ -306,24 +305,37 @@ pub fn sendPayload(destination: [6]u8, payload: []const u8) bool {
     return true;
 }
 
-pub const ReceiveResult = @import("intel_i225_hw.zig").ReceiveResult;
-
-pub fn pollReceive(output: []u8) ReceiveResult {
-    if (!service()) return .{ .status = .failed };
+/// Services the device once, then drains at most one ring of receive
+/// completions into `sink` (see `network_hw.receive`), reposting each buffer
+/// and notifying the device once for the batch.
+pub fn pollReceiveBatch(sink: anytype) void {
+    if (!service()) return sink.fail();
     defer rearm();
-    const completion = (controller.rx.state.complete(controller.rx.memory()) catch |err| {
-        contain(@errorName(err));
-        return .{ .status = .failed };
-    }) orelse return .{ .status = .empty };
-    defer {
-        controller.rx.submit(completion.id, virtqueue.BUFFER_BYTES) catch |err| contain(@errorName(err));
-        if (attached()) controller.rx.notify(0);
+    var reposted = false;
+    defer if (reposted and attached()) controller.rx.notify(0);
+    for (0..virtqueue.CAPACITY) |_| {
+        const completion = (controller.rx.state.complete(controller.rx.memory()) catch |err| {
+            contain(@errorName(err));
+            return sink.fail();
+        }) orelse return;
+        const length = receivedPayload(completion, sink.buffer());
+        controller.rx.submit(completion.id, virtqueue.BUFFER_BYTES) catch |err| {
+            contain(@errorName(err));
+            return sink.fail();
+        };
+        reposted = true;
+        if (!sink.accept(if (length) |payload_len| .{ .status = .frame, .length = payload_len } else .{ .status = .dropped })) return;
     }
-    const frame = virtqueue.receivedFrame(controller.rx.buffer(completion.id)[0..completion.length]) catch return .{ .status = .dropped };
-    const view = ethernet.parseEthernetFrame(frame, controller.mac) catch return .{ .status = .dropped };
-    if (view.payload.len > output.len) return .{ .status = .dropped };
+}
+
+/// Copies a completed buffer's Ethernet payload into `output`, or returns
+/// null when the frame must be dropped.
+fn receivedPayload(completion: virtqueue.Completion, output: []u8) ?u16 {
+    const frame = virtqueue.receivedFrame(controller.rx.buffer(completion.id)[0..completion.length]) catch return null;
+    const view = ethernet.parseEthernetFrame(frame, controller.mac) catch return null;
+    if (view.payload.len > output.len) return null;
     @memcpy(output[0..view.payload.len], view.payload);
-    return .{ .status = .frame, .length = view.payload.len };
+    return @intCast(view.payload.len);
 }
 
 pub fn workPending() bool {

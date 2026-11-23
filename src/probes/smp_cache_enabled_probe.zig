@@ -1,7 +1,7 @@
 // Isolated PG0 cache bootstrap evidence, not production AP runtime admission.
 const std = @import("std");
-const cache = @import("../cache_policy.zig");
-const x86 = @import("../x86.zig");
+const cache = @import("../arch/cache_policy.zig");
+const x86 = @import("../arch/x86.zig");
 const support = @import("ap_cache_probe_support.zig");
 
 const ControlRecord = extern struct {

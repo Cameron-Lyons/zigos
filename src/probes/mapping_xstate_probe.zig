@@ -2,21 +2,21 @@
 // exits before the ordinary high-half fixture starts; it is never a PASS.
 const std = @import("std");
 const root = @import("root");
-const x86 = @import("../x86.zig");
-const address = @import("../kernel_address.zig");
-const xstate = @import("../xstate.zig");
+const x86 = @import("../arch/x86.zig");
+const address = @import("../arch/kernel_address.zig");
+const xstate = @import("../arch/xstate.zig");
 const model = @import("mapping_xstate_probe_model.zig");
-const native_entry = @import("native_entry_state.zig");
-const cpu_identity = @import("../../kernel/cpu_identity.zig");
-const executor = @import("../../native/task/userspace_executor.zig");
-const scheduler_module = @import("../../native/task/userspace_scheduler.zig");
-const task_runtime = @import("../../native/task/task_runtime.zig");
-const ownership = @import("../../native/task/dispatch_ownership.zig");
-const transport = @import("../../native/task/dispatch_transport.zig");
-const table_backing = @import("../../native/core/table_backing.zig");
-const paging = @import("../../kernel/memory/paging64.zig");
-const clock = @import("../../kernel/timer/tsc_clock.zig");
-const console = @import("../../kernel/utils/console.zig");
+const native_entry = @import("../arch/x86_64/native_entry_state.zig");
+const cpu_identity = @import("../kernel/cpu_identity.zig");
+const executor = @import("../native/task/userspace_executor.zig");
+const scheduler_module = @import("../native/task/userspace_scheduler.zig");
+const task_runtime = @import("../native/task/task_runtime.zig");
+const ownership = @import("../native/task/dispatch_ownership.zig");
+const transport = @import("../native/task/dispatch_transport.zig");
+const table_backing = @import("../native/core/table_backing.zig");
+const paging = @import("../kernel/memory/paging64.zig");
+const clock = @import("../kernel/timer/tsc_clock.zig");
+const console = @import("../kernel/utils/console.zig");
 const proof = @import("high_half_probe.zig");
 
 pub const enabled = @hasDecl(root, "MAPPING_XSTATE_PROOF") and root.MAPPING_XSTATE_PROOF;

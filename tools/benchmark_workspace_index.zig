@@ -1,5 +1,5 @@
 const std = @import("std");
-const index_module = @import("workspace_index");
+const index_module = @import("host_benchmarks").workspace_index;
 const index = index_module.workspace_index;
 const id_index = index_module.id_index;
 

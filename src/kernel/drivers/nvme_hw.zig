@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const console = @import("../utils/console.zig");
 const spin = @import("../utils/spin.zig");
 const x86 = @import("../../arch/x86.zig");
@@ -520,13 +519,21 @@ fn runtimeIoPermitted() bool {
     if (!dataplane_handoff.allowsKernelRuntimeIo(device_id)) return false;
     // An accepted command still drains after revocation. Only refill and new
     // operations consult the immutable submit snapshot's live broker authority.
-    return if (builtin.os.tag == .freestanding and dataplane_handoff.claimed(device_id))
-        zigosStorageOwnedSubmitAuthorityCurrent(device_id)
-    else
-        true;
+    return !dataplane_handoff.claimed(device_id) or owned_submit_authority(device_id);
 }
 
-extern fn zigosStorageOwnedSubmitAuthorityCurrent(device_id: u64) callconv(.c) bool;
+/// Reports whether the owner's current submission still holds live broker
+/// authority for a claimed controller. Claimed I/O is refused until the
+/// storage driver port installs its check.
+var owned_submit_authority: *const fn (device_id: u64) bool = denyOwnedSubmit;
+
+fn denyOwnedSubmit(_: u64) bool {
+    return false;
+}
+
+pub fn bindOwnedSubmitAuthority(check: *const fn (device_id: u64) bool) void {
+    owned_submit_authority = check;
+}
 
 /// Route the I/O completion queue's single interrupt. MSI-X entry 0 is
 /// preferred when its table lies in the admitted BAR0 aperture; MSI is the
@@ -719,9 +726,9 @@ pub fn attachAsBackend(dev: pci.PCIDevice) !?intel_vtd.FaultRecord {
     return fault_proof;
 }
 
-pub fn backendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+pub fn backendRead(start_lba: u64, buffer: []u8) bool {
     const identity = operationIdentity() catch return false;
-    var io = BackendOperation{ .kind = .read, .start_lba = start_lba, .read_buffer = buffer_ptr, .buffer_len = buffer_len };
+    var io = BackendOperation{ .kind = .read, .start_lba = start_lba, .read_buffer = buffer.ptr, .buffer_len = buffer.len };
     return operation_lease.execute(identity, &io);
 }
 
@@ -730,9 +737,9 @@ fn pipelineRead(start_lba: u64, buffer_ptr: [*]u8, total_sectors: usize) Error!v
     try nvme_pipeline.transfer(OutstandingCommand, &io, total_sectors, BOUNCE_SECTORS, SECTOR_BYTES);
 }
 
-pub fn backendWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+pub fn backendWrite(start_lba: u64, buffer: []const u8) bool {
     const identity = operationIdentity() catch return false;
-    var io = BackendOperation{ .kind = .write, .start_lba = start_lba, .write_buffer = buffer_ptr, .buffer_len = buffer_len };
+    var io = BackendOperation{ .kind = .write, .start_lba = start_lba, .write_buffer = buffer.ptr, .buffer_len = buffer.len };
     return operation_lease.execute(identity, &io);
 }
 
@@ -797,7 +804,7 @@ fn validateBackendTransfer(start_lba: u64, buffer_len: usize) ?usize {
     return total_sectors;
 }
 
-pub fn backendFlush() callconv(.c) bool {
+pub fn backendFlush() bool {
     const identity = operationIdentity() catch return false;
     var io = BackendOperation{ .kind = .flush };
     return operation_lease.execute(identity, &io);
@@ -851,43 +858,16 @@ fn backendErrorRequiresContainment(err: anyerror) bool {
         err == error.CompletionOwnershipMismatch;
 }
 
-export fn zigosStorageBootstrapNvmeAttached() callconv(.c) bool {
-    return active_present;
-}
-
-export fn zigosStorageBootstrapNvmeSectorCount() callconv(.c) u64 {
+pub fn sectorCount() u64 {
     if (!active_present) return 0;
     return active_controller.namespace_sectors;
 }
 
-export fn zigosStorageBootstrapNvmeRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
-    return backendRead(start_lba, buffer_ptr, buffer_len);
-}
-
-export fn zigosStorageBootstrapNvmeWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
-    return backendWrite(start_lba, buffer_ptr, buffer_len);
-}
-
-export fn zigosStorageBootstrapNvmeFlush() callconv(.c) bool {
-    return backendFlush();
-}
-
-/// Report the windows VT-d enforces for the attached controller, so the
-/// device broker publishes the same isolation domain.
-export fn zigosStorageBootstrapNvmeDmaWindow(
-    index: u32,
-    base_out: *u64,
-    length_out: *u64,
-    device_readable_out: *bool,
-    device_writable_out: *bool,
-) callconv(.c) bool {
-    if (!active_present or index >= DMA_WINDOW_COUNT) return false;
-    const window = dma_windows[index];
-    base_out.* = window.base;
-    length_out.* = window.length;
-    device_readable_out.* = window.device_readable;
-    device_writable_out.* = window.device_writable;
-    return true;
+/// The windows VT-d enforces for the attached controller, so the device
+/// broker publishes the same isolation domain.
+pub fn dmaWindows() []const intel_vtd.DmaWindow {
+    if (!active_present) return &.{};
+    return &dma_windows;
 }
 
 pub fn probeAndReport(dev: pci.PCIDevice) !?intel_vtd.FaultRecord {

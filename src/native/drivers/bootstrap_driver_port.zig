@@ -27,29 +27,19 @@ else
         }
     };
 const kernel_network_claim = @import("../../kernel/net/link_port.zig");
-const nvme_dma_bridge = if (builtin.target.os.tag == .freestanding)
-    struct {
-        extern fn zigosStorageBootstrapNvmeDmaWindow(
-            index: u32,
-            base_out: *u64,
-            length_out: *u64,
-            device_readable_out: *bool,
-            device_writable_out: *bool,
-        ) callconv(.c) bool;
-
-        pub fn window(index: u32, base_out: *u64, length_out: *u64, device_readable_out: *bool, device_writable_out: *bool) bool {
-            return zigosStorageBootstrapNvmeDmaWindow(index, base_out, length_out, device_readable_out, device_writable_out);
-        }
-    }
+const nvme_hw = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/drivers/nvme_hw.zig")
 else
     struct {
-        pub fn window(_: u32, _: *u64, _: *u64, _: *bool, _: *bool) bool {
-            return false;
+        const DmaWindow = struct { base: u32, length: u32, device_readable: bool, device_writable: bool };
+        pub fn dmaWindows() []const DmaWindow {
+            return &.{};
         }
+        pub fn bindOwnedSubmitAuthority(_: *const fn (device_id: u64) bool) void {}
     };
 
 pub const NetworkDevice = network_driver_task.NetworkDevice;
-pub const ReceiveResult = network_driver_task.ReceiveResult;
+pub const ReceiveSink = network_driver_task.ReceiveSink;
 pub const noNetworkFrame = network_driver_task.noNetworkFrame;
 pub const EgressRequest = network_driver_task.EgressRequest;
 pub const EgressDecision = network_driver_task.EgressDecision;
@@ -559,19 +549,16 @@ fn programStorageDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
     var windows: [device_broker.MAX_DMA_WINDOWS]device_broker.DmaWindow = undefined;
     windows[0] = device_broker.defaultBrokeredDmaWindow(device_id);
     var count: usize = 1;
-    while (count < windows.len) : (count += 1) {
-        var base: u64 = 0;
-        var length: u64 = 0;
-        var device_readable = false;
-        var device_writable = false;
-        if (!nvme_dma_bridge.window(@intCast(count - 1), &base, &length, &device_readable, &device_writable)) break;
+    for (nvme_hw.dmaWindows()) |window| {
+        if (count == windows.len) break;
         windows[count] = .{
-            .base = base,
-            .length = length,
-            .readable_by_device = device_readable,
-            .writable_by_device = device_writable,
+            .base = window.base,
+            .length = window.length,
+            .readable_by_device = window.device_readable,
+            .writable_by_device = window.device_writable,
             .executable = false,
         };
+        count += 1;
     }
     if (count == 1) {
         _ = device_broker.programBrokeredDmaIsolation(device_id, dma_domain_id) catch return false;
@@ -588,6 +575,7 @@ fn attachOwnedStorageBackend(publication: *const StoragePublication, backend: st
     const owner_task_id = if (session) |bound| bound.task_id else 0;
     const process_generation = if (session) |bound| bound.process_generation else 0;
     const already_claimed = dataplane_handoff.claimed(publication.device_id);
+    nvme_hw.bindOwnedSubmitAuthority(storageOwnedSubmitAuthorityCurrent);
     dataplane_handoff.claim(publication.device_id, owner_task_id, process_generation) catch return false;
     if (!attachSealedPublishedStorageBackend(publication, .{
         .sector_count = backend.sector_count,
@@ -616,12 +604,8 @@ const StorageSubmission = struct {
 };
 var active_storage_submission: ?*const StorageSubmission = null;
 
-comptime {
-    if (builtin.target.os.tag == .freestanding)
-        @export(&storageOwnedSubmitAuthorityCurrent, .{ .name = "zigosStorageOwnedSubmitAuthorityCurrent" });
-}
-
-pub fn storageOwnedSubmitAuthorityCurrent(device_id: u64) callconv(.c) bool {
+/// The NVMe driver's refill check for a claimed controller.
+pub fn storageOwnedSubmitAuthorityCurrent(device_id: u64) bool {
     const submission = active_storage_submission orelse return false;
     if (submission.lease.device_id != device_id or !dataplane_handoff.leaseCurrent(submission.lease)) return false;
     return storageAuthorityCurrent(&submission.controller_session, storageAuthorityTicks());

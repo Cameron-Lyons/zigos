@@ -87,25 +87,13 @@ comptime {
     if (i225_irq.MAX_TX_COMPLETIONS_PER_SERVICE != i225_tx.CAPACITY) {
         @compileError("I225 interrupt TX service bound diverged from ring capacity");
     }
-    if (i225_irq.MAX_RX_FRAMES_PER_SERVICE != 1) {
-        @compileError("I225 receive service must remain one frame per pass");
+    if (i225_irq.MAX_RX_FRAMES_PER_SERVICE > i225_rx.DESCRIPTOR_COUNT - 1) {
+        @compileError("I225 receive batch exceeds the descriptors hardware can own");
     }
 }
 
 pub const MAX_PAYLOAD_BYTES = i225_frame.MAX_PAYLOAD_BYTES;
-pub const INTERRUPT_VECTOR = i225_irq.INTERRUPT_VECTOR;
-
-pub const ReceiveStatus = enum(u8) {
-    empty = 0,
-    frame = 1,
-    dropped = 2,
-    failed = 3,
-};
-
-pub const ReceiveResult = struct {
-    status: ReceiveStatus,
-    length: usize = 0,
-};
+const INTERRUPT_VECTOR = @import("network_hw.zig").INTERRUPT_VECTOR;
 
 const DmaAddress = struct {
     physical: u32 = 0,
@@ -379,33 +367,45 @@ pub fn sendPayload(destination: [6]u8, payload: []const u8) bool {
     return true;
 }
 
-pub fn pollReceive(output: []u8) ReceiveResult {
-    if (!controllerActive() or pollDmaFault()) return .{ .status = .failed };
+/// Services the controller once, then drains at most
+/// `MAX_RX_FRAMES_PER_SERVICE` completed descriptors into `sink` (see
+/// `network_hw.receive`) and returns them to hardware with one tail write.
+pub fn pollReceiveBatch(sink: anytype) void {
+    if (!controllerActive() or pollDmaFault()) return sink.fail();
     timer.synchronize();
-    if (!serviceTransmitQueue(timer.getTicks())) return .{ .status = .failed };
+    if (!serviceTransmitQueue(timer.getTicks())) return sink.fail();
     defer rearmMaskedQueueInterrupts();
-    if (!controller.linkUp()) return .{ .status = .empty };
+    if (!controller.linkUp()) return;
 
-    const descriptor_index = controller.rx_head;
-    const descriptor: *volatile i225_rx.Descriptor = rxDescriptor(descriptor_index);
-    var writeback = descriptor.header_or_writeback;
-    if (!i225_rx.decodeCompletion(writeback).done) {
-        return .{ .status = .empty };
+    var recycled: ?u32 = null;
+    defer if (recycled) |index| {
+        publishDescriptor();
+        controller.writeReg32(REG_RDT0, index);
+    };
+    for (0..i225_irq.MAX_RX_FRAMES_PER_SERVICE) |_| {
+        const index = controller.rx_head;
+        const descriptor: *volatile i225_rx.Descriptor = rxDescriptor(index);
+        if (!i225_rx.decodeCompletion(descriptor.header_or_writeback).done) return;
+        acquireDescriptor();
+        const length = receivedPayload(index, descriptor.header_or_writeback, sink.buffer());
+        descriptor.* = i225_rx.availableDescriptor(rxBufferAddress(index).physical);
+        controller.rx_head = i225_rx.nextIndex(index);
+        recycled = index;
+        if (!sink.accept(if (length) |payload_len| .{ .status = .frame, .length = payload_len } else .{ .status = .dropped })) return;
     }
-    acquireDescriptor();
-    writeback = descriptor.header_or_writeback;
-    defer recycleRxDescriptor(descriptor_index, descriptor);
+}
 
+/// Copies a completed descriptor's Ethernet payload into `output`, or
+/// returns null when the frame must be dropped.
+fn receivedPayload(index: u32, writeback: u64, output: []u8) ?u16 {
     const completion = observeReceiveCompletion(writeback);
     const frame_len: usize = completion.length;
-    if (!completion.validSingleBuffer() or frame_len < i225_frame.ETHERNET_HEADER_BYTES) return .{ .status = .dropped };
-
-    const buffer_address = rxBufferAddress(descriptor_index);
-    const frame = @as([*]const u8, @ptrFromInt(buffer_address.alias))[0..frame_len];
-    const view = i225_frame.parseEthernetFrame(frame, controller.mac) catch return .{ .status = .dropped };
-    if (view.payload.len > output.len) return .{ .status = .dropped };
+    if (!completion.validSingleBuffer() or frame_len < i225_frame.ETHERNET_HEADER_BYTES) return null;
+    const frame = @as([*]const u8, @ptrFromInt(rxBufferAddress(index).alias))[0..frame_len];
+    const view = i225_frame.parseEthernetFrame(frame, controller.mac) catch return null;
+    if (view.payload.len > output.len) return null;
     @memcpy(output[0..view.payload.len], view.payload);
-    return .{ .status = .frame, .length = view.payload.len };
+    return @intCast(view.payload.len);
 }
 
 fn configureTransmitQueue(pending: *Controller) Error!void {
@@ -586,13 +586,6 @@ fn txBufferAddress(index: u32) DmaAddress {
 
 fn rxBufferAddress(index: u32) DmaAddress {
     return controller.rx_buffer.offset(index * i225_rx.BUFFER_BYTES);
-}
-
-fn recycleRxDescriptor(index: u32, descriptor: *volatile i225_rx.Descriptor) void {
-    descriptor.* = i225_rx.availableDescriptor(rxBufferAddress(index).physical);
-    publishDescriptor();
-    controller.rx_head = i225_rx.nextIndex(index);
-    controller.writeReg32(REG_RDT0, index);
 }
 
 fn pollDmaFault() bool {

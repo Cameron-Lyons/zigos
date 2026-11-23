@@ -1,5 +1,5 @@
 const std = @import("std");
-const preflight = @import("response_preflight");
+const preflight = @import("host_benchmarks").response_preflight;
 
 const ITERATIONS = 500_000;
 const Workload = enum { load_segment_1, load_segment_4, load_segment_8, terminal_stack };

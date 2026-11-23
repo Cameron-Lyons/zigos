@@ -1,5 +1,5 @@
 const std = @import("std");
-const graphics = @import("text_scanout");
+const graphics = @import("host_benchmarks").text_scanout;
 const scanout = graphics.scanout;
 
 const WIDTH = 1280;

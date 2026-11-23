@@ -1,4 +1,4 @@
-#include "../xstate64.inc"
+#include "../arch/xstate64.inc"
 
 // The independent oracle always writes standard format, without reusing the
 // compact production macro under test or a host-test preprocessor definition.

@@ -15,9 +15,7 @@ pub const ReceiveResult = struct {
     length: u16 = 0,
 };
 
-pub fn noNetworkFrame(_: []u8) ReceiveResult {
-    return .{ .status = .empty };
-}
+pub fn noNetworkFrame(_: *ReceiveSink) void {}
 
 pub fn noNetworkWorkPending() bool {
     return false;
@@ -29,7 +27,8 @@ pub fn noNetworkWake() ?u64 {
 
 pub const NetworkDevice = struct {
     send: *const fn (destination: [6]u8, data: []const u8) bool,
-    receive: *const fn (output: []u8) ReceiveResult,
+    /// Drains one bounded batch of completions into the sink.
+    receive: *const fn (sink: *ReceiveSink) void,
     workPending: *const fn () bool = noNetworkWorkPending,
     nextWake: *const fn () ?u64 = noNetworkWake,
     getMacAddress: *const fn () [6]u8,
@@ -356,47 +355,53 @@ pub fn hasQueuedFrame() bool {
 pub fn servicePendingReceiveFrames(budget: usize) ReceiveServiceResult {
     const device = active_device orelse return .{};
     if (budget == 0 or !device.workPending()) return .{};
-    const prefix = receive_prefix orelse return drainReceiveFrames(device, budget);
-    const queue = receiveQueue() orelse return .{ .failed = true };
-    return queueReceiveFrames(device, queue, &prefix, budget);
+    var sink = ReceiveSink{ .budget = budget };
+    if (receive_prefix != null) sink.queue = receiveQueue() orelse return .{ .failed = true };
+    device.receive(&sink);
+    return sink.service;
 }
 
-fn drainReceiveFrames(device: *const NetworkDevice, budget: usize) ReceiveServiceResult {
-    var service = ReceiveServiceResult{};
+/// One budgeted receive pass. The device copies each completion's payload
+/// into `buffer()`, reports it to `accept` and stops when `accept` returns
+/// false or its ring is empty; `fail` ends the pass on a device failure.
+pub const ReceiveSink = struct {
+    budget: usize,
+    /// The consumer queue, absent while no receive prefix is registered.
+    queue: ?*ReceiveQueue = null,
+    service: ReceiveServiceResult = .{},
+
     var empty_output: [0]u8 = .{};
-    while (service.polls < budget) {
-        const result = device.receive(&empty_output);
-        service.polls += 1;
-        if (!countReceiveResult(&service, result, 0)) return service;
-        if (result.status == .frame) service.dropped += 1;
+
+    /// The free queue tail, or an empty buffer that drains the frame uncopied.
+    pub fn buffer(self: *const ReceiveSink) []u8 {
+        const queue = self.queue orelse return &empty_output;
+        if (receive_queue_count == RECEIVE_QUEUE_CAPACITY) return &empty_output;
+        return &queue[queueTail()].bytes;
     }
-    return service;
-}
 
-fn queueReceiveFrames(device: *const NetworkDevice, queue: *ReceiveQueue, prefix: []const u8, budget: usize) ReceiveServiceResult {
-    var service = ReceiveServiceResult{};
-    var empty_output: [0]u8 = .{};
-    while (service.polls < budget) {
-        const tail_index = (@as(usize, receive_queue_head) + receive_queue_count) % RECEIVE_QUEUE_CAPACITY;
-        const tail: ?*QueuedReceiveFrame = if (receive_queue_count < RECEIVE_QUEUE_CAPACITY) &queue[tail_index] else null;
-        const output: []u8 = if (tail) |frame| &frame.bytes else &empty_output;
-        const result = device.receive(output);
-        service.polls += 1;
-        if (!countReceiveResult(&service, result, output.len)) return service;
-        if (result.status != .frame) continue;
-        const frame = tail orelse {
-            service.dropped += 1;
-            continue;
-        };
-        if (!std.mem.startsWith(u8, frame.bytes[0..result.length], prefix)) {
-            service.dropped += 1;
-            continue;
+    pub fn accept(self: *ReceiveSink, result: ReceiveResult) bool {
+        self.service.polls += 1;
+        const output = self.buffer();
+        if (!countReceiveResult(&self.service, result, output.len)) return false;
+        if (result.status == .frame) {
+            if (output.len != 0 and std.mem.startsWith(u8, output[0..result.length], &receive_prefix.?)) {
+                self.queue.?[queueTail()].length = result.length;
+                receive_queue_count += 1;
+                self.service.frames_queued += 1;
+            } else {
+                self.service.dropped += 1;
+            }
         }
-        frame.length = result.length;
-        receive_queue_count += 1;
-        service.frames_queued += 1;
+        return self.service.polls < self.budget;
     }
-    return service;
+
+    pub fn fail(self: *ReceiveSink) void {
+        _ = self.accept(.{ .status = .failed });
+    }
+};
+
+fn queueTail() usize {
+    return (@as(usize, receive_queue_head) + receive_queue_count) % RECEIVE_QUEUE_CAPACITY;
 }
 
 // Returns false when polling must stop: the device is empty or violated its
@@ -453,14 +458,18 @@ const ReceiveHarness = struct {
         return next < frames.len;
     }
 
-    fn receive(output: []u8) ReceiveResult {
-        if (!pending()) return .{ .status = .empty };
-        const bytes = frames[next];
-        next += 1;
-        if (output.len == 0) empty_output_drains += 1;
-        if (output.len < bytes.len) return .{ .status = .dropped };
-        @memcpy(output[0..bytes.len], bytes);
-        return .{ .status = .frame, .length = @intCast(bytes.len) };
+    fn receive(sink: *ReceiveSink) void {
+        while (pending()) {
+            const bytes = frames[next];
+            next += 1;
+            const output = sink.buffer();
+            if (output.len == 0) empty_output_drains += 1;
+            const result: ReceiveResult = if (output.len < bytes.len) .{ .status = .dropped } else result: {
+                @memcpy(output[0..bytes.len], bytes);
+                break :result .{ .status = .frame, .length = @intCast(bytes.len) };
+            };
+            if (!sink.accept(result)) return;
+        }
     }
 
     const device = NetworkDevice{
@@ -614,17 +623,21 @@ test "network receive polling distinguishes empty drop failure and owned frame" 
             return true;
         }
 
-        fn receive(output: []u8) ReceiveResult {
-            return switch (mode) {
-                .empty => .{ .status = .empty },
-                .frame => result: {
-                    @memcpy(output[0..8], "ZGNPrecv");
-                    break :result .{ .status = .frame, .length = 8 };
-                },
-                .dropped => .{ .status = .dropped },
-                .failed => .{ .status = .failed },
-                .malformed => .{ .status = .frame, .length = @intCast(output.len + 1) },
-            };
+        fn receive(sink: *ReceiveSink) void {
+            while (mode != .empty) {
+                const output = sink.buffer();
+                const result: ReceiveResult = switch (mode) {
+                    .empty => unreachable,
+                    .frame => result: {
+                        @memcpy(output[0..8], "ZGNPrecv");
+                        break :result .{ .status = .frame, .length = 8 };
+                    },
+                    .dropped => .{ .status = .dropped },
+                    .failed => .{ .status = .failed },
+                    .malformed => .{ .status = .frame, .length = @intCast(output.len + 1) },
+                };
+                if (!sink.accept(result)) return;
+            }
         }
 
         fn workPending() bool {
@@ -650,7 +663,7 @@ test "network receive polling distinguishes empty drop failure and owned frame" 
     var output: [32]u8 = undefined;
 
     const empty = servicePendingReceiveFrames(4);
-    try std.testing.expectEqual(@as(usize, 1), empty.polls);
+    try std.testing.expectEqual(@as(usize, 0), empty.polls);
     try std.testing.expect(!empty.failed);
     try std.testing.expectEqual(ReceiveStatus.empty, receiveQueuedFrame(&output).status);
 

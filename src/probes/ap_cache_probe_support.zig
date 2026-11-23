@@ -1,15 +1,15 @@
 // Shared boot-only support for isolated cache-admission guest evidence.
 // No AP runs generated code until the production transition admits it.
-const x86 = @import("../x86.zig");
-const features = @import("../cpu_features.zig");
-const identity = @import("../../kernel/cpu_identity.zig");
-const memory = @import("../../kernel/memory/memory.zig");
-const paging = @import("../../kernel/memory/paging64.zig");
-const gdt = @import("../../kernel/interrupts/gdt64.zig");
-const idt = @import("../../kernel/interrupts/idt64.zig");
-const x2apic = @import("../../kernel/interrupts/x2apic.zig");
-const bridge = @import("../../kernel/smp/trampoline.zig");
-const clock = @import("../../kernel/timer/tsc_clock.zig");
+const x86 = @import("../arch/x86.zig");
+const features = @import("../arch/cpu_features.zig");
+const identity = @import("../kernel/cpu_identity.zig");
+const memory = @import("../kernel/memory/memory.zig");
+const paging = @import("../kernel/memory/paging64.zig");
+const gdt = @import("../kernel/interrupts/gdt64.zig");
+const idt = @import("../kernel/interrupts/idt64.zig");
+const x2apic = @import("../kernel/interrupts/x2apic.zig");
+const bridge = @import("../kernel/smp/trampoline.zig");
+const clock = @import("../kernel/timer/tsc_clock.zig");
 
 pub const SipiPage = struct { physical: u32, bytes: []align(4096) u8 };
 const PAGE_BYTES: usize = 4096;
@@ -19,7 +19,7 @@ const PROOF_TSC_FREQUENCY_HZ: u64 = 2_400_000_000;
 extern var stack_top: u8;
 
 pub fn initializeBsp() void {
-    @import("../../kernel/utils/console.zig").init();
+    @import("../kernel/utils/console.zig").init();
     if (x86.interruptsEnabled()) fail("BSP_INTERRUPTS");
     features.initializeNativeCachePolicy() catch fail("BSP_CACHE_ADMISSION");
     identity.initialize(0);

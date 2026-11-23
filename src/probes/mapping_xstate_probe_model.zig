@@ -1,6 +1,6 @@
 const std = @import("std");
-const xstate = @import("../xstate.zig");
-const seeds = @import("../xstate_roundtrip_model.zig");
+const xstate = @import("../arch/xstate.zig");
+const seeds = @import("../arch/xstate_roundtrip_model.zig");
 
 pub const Image = seeds.Image;
 pub const Result = extern struct { initial: Image, restored: Image };

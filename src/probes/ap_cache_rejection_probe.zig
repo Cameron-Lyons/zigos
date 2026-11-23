@@ -1,9 +1,9 @@
 const std = @import("std");
-const x86 = @import("../x86.zig");
-const cache_policy = @import("../cache_policy.zig");
-const cpu_features = @import("../cpu_features.zig");
-const bridge = @import("../../kernel/smp/trampoline.zig");
-const handoff = @import("../../kernel/boot/handoff.zig");
+const x86 = @import("../arch/x86.zig");
+const cache_policy = @import("../arch/cache_policy.zig");
+const cpu_features = @import("../arch/cpu_features.zig");
+const bridge = @import("../kernel/smp/trampoline.zig");
+const handoff = @import("../kernel/boot/handoff.zig");
 const support = @import("ap_cache_probe_support.zig");
 
 const PAGE_BYTES: usize = 4096;

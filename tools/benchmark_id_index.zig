@@ -1,5 +1,5 @@
 const std = @import("std");
-const id_index = @import("id_index");
+const id_index = @import("host_benchmarks").id_index;
 
 const CAPACITY = 512;
 const LIVE_KEYS = 128;

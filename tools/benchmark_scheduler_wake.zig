@@ -1,5 +1,5 @@
 const std = @import("std");
-const native = @import("scheduler");
+const native = @import("host_benchmarks").scheduler;
 
 const SAMPLE_COUNT = 9;
 const ITERATIONS: usize = 2_000_000;

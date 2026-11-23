@@ -1,5 +1,5 @@
 const std = @import("std");
-const ring = @import("ipc_ring");
+const ring = @import("host_benchmarks").ipc_ring;
 
 const SLOTS = 8;
 const ITERATIONS = 200_000;

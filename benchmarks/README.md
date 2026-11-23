@@ -196,10 +196,10 @@ and optimization settings, then run the resulting executable:
 
 ```sh
 zig build-exe -O ReleaseFast -target x86_64-macos \
-  -mcpu x86_64_v3+aes+pclmul+sha --dep text_layout \
+  -mcpu x86_64_v3+aes+pclmul+sha --dep host_benchmarks \
   -Mroot=tools/benchmark_text_layout.zig \
   -O ReleaseFast -target x86_64-macos -mcpu x86_64_v3+aes+pclmul+sha \
-  -Mtext_layout=src/text_layout_benchmark.zig \
+  -Mhost_benchmarks=src/host_benchmarks.zig \
   -femit-bin=/tmp/zigos-text-boundaries-amd64
 /tmp/zigos-text-boundaries-amd64 --boundaries-only
 ```
@@ -228,7 +228,8 @@ It measures small-allocation reuse, successful and exhausted searches through
 a permutation. The batch checks live payload bytes before release and exercises
 allocation-start lookup and adjacent-span coalescing. Results report the median
 of five samples and allocator array metadata, excluding scalar globals.
-The same tool can import an earlier `heap_benchmark.zig` for comparison.
+Pointing `heap` in `src/host_benchmarks.zig` at an earlier allocator compares
+it with the same tool.
 
 The large-span cases hold 1,024 separated eight-KiB holes behind live guards
 and reserve one 32-KiB candidate. `large_fragmented_fit` frees that candidate
@@ -344,10 +345,10 @@ run this SHA workload under the available Rosetta runtime; the production floor
 remains unchanged. To run only hash comparisons on the native host:
 
 ```sh
-zig run -O ReleaseFast --dep object_chunks \
+zig run -O ReleaseFast --dep host_benchmarks \
   -Mroot=tools/benchmark_object_chunks.zig \
   -O ReleaseFast --dep binary_cursor \
-  -Mobject_chunks=src/object_chunk_benchmark.zig \
+  -Mhost_benchmarks=src/host_benchmarks.zig \
   -O ReleaseFast -Mbinary_cursor=src/native/core/binary_cursor.zig -- --hashes-only
 ```
 

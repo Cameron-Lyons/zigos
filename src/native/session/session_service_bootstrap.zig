@@ -27,71 +27,16 @@ const nvme_device_lba_bytes: usize = 512;
 pub const storage_restart_scratch_lba: u64 = storage_volume_mod.required_device_sectors + 16;
 
 comptime {
-    if (builtin.target.os.tag == .freestanding) {
-        const nvme_hw = @import("../../kernel/drivers/nvme_hw.zig");
-        if (nvme_hw.SECTOR_BYTES != nvme_device_lba_bytes) {
-            @compileError("boot storage plane must translate NVMe LBAs from the volume block size");
-        }
+    if (builtin.target.os.tag == .freestanding and nvme_hw.SECTOR_BYTES != nvme_device_lba_bytes) {
+        @compileError("boot storage plane must translate NVMe LBAs from the volume block size");
     }
 }
 const storage_restart_probe_sectors: u64 = 2;
 const booted_storage_sector_count: u64 = storage_restart_scratch_lba + storage_restart_probe_sectors;
 const booted_storage_image_bytes: usize = @as(usize, @intCast(booted_storage_sector_count)) * storage_volume_mod.sector_size;
 
-const network_bridge = if (builtin.target.os.tag == .freestanding)
-    struct {
-        extern fn zigosNetworkBootstrapAttached() callconv(.c) bool;
-        extern fn zigosNetworkBootstrapSend(
-            destination_ptr: [*]const u8,
-            payload_ptr: [*]const u8,
-            payload_len: usize,
-        ) callconv(.c) bool;
-        extern fn zigosNetworkBootstrapReceive(
-            output_ptr: [*]u8,
-            output_capacity: usize,
-            output_len: *usize,
-        ) callconv(.c) u8;
-        extern fn zigosNetworkBootstrapWorkPending() callconv(.c) bool;
-        extern fn zigosNetworkBootstrapNextWake(deadline: *u64) callconv(.c) bool;
-        extern fn zigosNetworkBootstrapMac(output: [*]u8) callconv(.c) bool;
-
-        pub fn attached() bool {
-            return zigosNetworkBootstrapAttached();
-        }
-
-        pub fn send(destination: [6]u8, payload: []const u8) bool {
-            return zigosNetworkBootstrapSend(&destination, payload.ptr, payload.len);
-        }
-
-        pub fn receive(output: []u8) bootstrap_driver_port.ReceiveResult {
-            var length: usize = 0;
-            const status = zigosNetworkBootstrapReceive(output.ptr, output.len, &length);
-            return .{
-                .status = switch (status) {
-                    0 => .empty,
-                    1 => .frame,
-                    2 => .dropped,
-                    else => .failed,
-                },
-                .length = std.math.cast(u16, length) orelse std.math.maxInt(u16),
-            };
-        }
-
-        pub fn workPending() bool {
-            return zigosNetworkBootstrapWorkPending();
-        }
-
-        pub fn nextWake() ?u64 {
-            var deadline: u64 = 0;
-            return if (zigosNetworkBootstrapNextWake(&deadline)) deadline else null;
-        }
-
-        pub fn mac() ?[6]u8 {
-            var address: [6]u8 = undefined;
-            if (!zigosNetworkBootstrapMac(&address)) return null;
-            return address;
-        }
-    }
+const network_hw = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/drivers/network_hw.zig")
 else
     struct {
         pub fn attached() bool {
@@ -102,9 +47,7 @@ else
             return false;
         }
 
-        pub fn receive(_: []u8) bootstrap_driver_port.ReceiveResult {
-            return .{ .status = .empty };
-        }
+        pub fn receive(_: *bootstrap_driver_port.ReceiveSink) void {}
 
         pub fn workPending() bool {
             return false;
@@ -114,35 +57,33 @@ else
             return null;
         }
 
-        pub fn mac() ?[6]u8 {
+        pub fn macAddress() ?[6]u8 {
             return null;
         }
     };
 
 const BootedNetworkDataPlane = struct {
     fn send(destination: [6]u8, data: []const u8) bool {
-        if (network_bridge.attached()) return network_bridge.send(destination, data);
+        if (network_hw.attached()) return network_hw.send(destination, data);
         return builtin.target.os.tag != .freestanding or device_inventory.modelDeviceInventoryEnabled();
     }
 
-    fn receive(output: []u8) bootstrap_driver_port.ReceiveResult {
-        if (network_bridge.attached()) return network_bridge.receive(output);
-        if (builtin.target.os.tag != .freestanding or device_inventory.modelDeviceInventoryEnabled()) {
-            return .{ .status = .empty };
-        }
-        return .{ .status = .failed };
+    fn receive(sink: *bootstrap_driver_port.ReceiveSink) void {
+        if (network_hw.attached()) return network_hw.receive(sink);
+        if (builtin.target.os.tag != .freestanding or device_inventory.modelDeviceInventoryEnabled()) return;
+        sink.fail();
     }
 
     fn workPending() bool {
-        return network_bridge.attached() and network_bridge.workPending();
+        return network_hw.attached() and network_hw.workPending();
     }
 
     fn nextWake() ?u64 {
-        return network_bridge.nextWake();
+        return network_hw.nextWake();
     }
 
     fn getMacAddress() [6]u8 {
-        if (network_bridge.mac()) |address| return address;
+        if (network_hw.macAddress()) |address| return address;
         return .{ 0x02, 0x5A, 0x47, 0x00, 0x00, 0x01 };
     }
 
@@ -157,41 +98,32 @@ const BootedNetworkDataPlane = struct {
     // Retain hardware callbacks after containment. Losing attachment must not
     // turn a failed real-device send into a successful model-inventory send.
     const hardware_device = bootstrap_driver_port.NetworkDevice{
-        .send = network_bridge.send,
-        .receive = network_bridge.receive,
-        .workPending = network_bridge.workPending,
-        .nextWake = network_bridge.nextWake,
+        .send = network_hw.send,
+        .receive = hardwareReceive,
+        .workPending = network_hw.workPending,
+        .nextWake = network_hw.nextWake,
         .getMacAddress = hardwareMacAddress,
     };
 
+    fn hardwareReceive(sink: *bootstrap_driver_port.ReceiveSink) void {
+        network_hw.receive(sink);
+    }
+
     fn hardwareMacAddress() [6]u8 {
-        return network_bridge.mac() orelse @as([6]u8, @splat(0));
+        return network_hw.macAddress() orelse @as([6]u8, @splat(0));
     }
 
     fn activate(device_id: u64) ?*const bootstrap_driver_port.NetworkDevice {
         if (device_id != device_inventory.deviceIdForClass(.network_adapter)) return null;
-        if (network_bridge.attached()) return &hardware_device;
+        if (network_hw.attached()) return &hardware_device;
         if (builtin.target.os.tag == .freestanding and
-            !network_bridge.attached() and
             !device_inventory.modelDeviceInventoryEnabled()) return null;
         return &device;
     }
 };
 
-const nvme_bridge = if (builtin.target.os.tag == .freestanding)
-    struct {
-        extern fn zigosStorageBootstrapNvmeAttached() callconv(.c) bool;
-        extern fn zigosStorageBootstrapNvmeSectorCount() callconv(.c) u64;
-        pub extern fn zigosStorageBootstrapNvmeRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool;
-        pub extern fn zigosStorageBootstrapNvmeWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool;
-        pub extern fn zigosStorageBootstrapNvmeFlush() callconv(.c) bool;
-        pub fn attached() bool {
-            return zigosStorageBootstrapNvmeAttached();
-        }
-        pub fn sectorCount() u64 {
-            return zigosStorageBootstrapNvmeSectorCount();
-        }
-    }
+const nvme_hw = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/drivers/nvme_hw.zig")
 else
     struct {
         pub fn attached() bool {
@@ -200,13 +132,13 @@ else
         pub fn sectorCount() u64 {
             return 0;
         }
-        pub fn zigosStorageBootstrapNvmeRead(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
+        pub fn backendRead(_: u64, _: []u8) bool {
             return false;
         }
-        pub fn zigosStorageBootstrapNvmeWrite(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+        pub fn backendWrite(_: u64, _: []const u8) bool {
             return false;
         }
-        pub fn zigosStorageBootstrapNvmeFlush() callconv(.c) bool {
+        pub fn backendFlush() bool {
             return false;
         }
     };
@@ -249,7 +181,7 @@ fn readNvmeVolumeBlocks(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) ca
         buffer_len,
         nvme_device_lba_bytes,
     ) orelse return false;
-    return nvme_bridge.zigosStorageBootstrapNvmeRead(device_lba, buffer_ptr, buffer_len);
+    return nvme_hw.backendRead(device_lba, buffer_ptr[0..buffer_len]);
 }
 
 fn writeNvmeVolumeBlocks(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
@@ -258,7 +190,11 @@ fn writeNvmeVolumeBlocks(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: us
         buffer_len,
         nvme_device_lba_bytes,
     ) orelse return false;
-    return nvme_bridge.zigosStorageBootstrapNvmeWrite(device_lba, buffer_ptr, buffer_len);
+    return nvme_hw.backendWrite(device_lba, buffer_ptr[0..buffer_len]);
+}
+
+fn flushNvme() callconv(.c) bool {
+    return nvme_hw.backendFlush();
 }
 
 const BootedStorageDataPlane = struct {
@@ -270,8 +206,8 @@ const BootedStorageDataPlane = struct {
 
     fn activate(device_id: u64) ?storage_volume_mod.Backend {
         if (device_id != device_inventory.deviceIdForClass(.storage_controller)) return null;
-        if (nvme_bridge.attached()) {
-            const device_sectors = nvme_bridge.sectorCount();
+        if (nvme_hw.attached()) {
+            const device_sectors = nvme_hw.sectorCount();
             const volume_sectors = storage_volume_mod.volumeSectorsFromDeviceSectors(
                 device_sectors,
                 nvme_device_lba_bytes,
@@ -281,7 +217,7 @@ const BootedStorageDataPlane = struct {
                 .sector_count = volume_sectors,
                 .read = readNvmeVolumeBlocks,
                 .write = writeNvmeVolumeBlocks,
-                .flush = nvme_bridge.zigosStorageBootstrapNvmeFlush,
+                .flush = flushNvme,
             };
         }
         if (comptime builtin.target.os.tag == .freestanding) {

@@ -98,7 +98,7 @@ test "session network watchdog wakes silent transmits without polling or repeate
             return true;
         }
 
-        fn receive(_: []u8) network.ReceiveResult {
+        fn receive(sink: *network.ReceiveSink) void {
             polls += 1;
             if (completion_pending) {
                 _ = queue.reclaimCompleted(1);
@@ -107,9 +107,8 @@ test "session network watchdog wakes silent transmits without polling or repeate
             if (queue.oldestSubmissionExpired(now, 100)) {
                 active = false;
                 contained += 1;
-                return .{ .status = .failed };
+                sink.fail();
             }
-            return .{ .status = .empty };
         }
 
         fn pending() bool {

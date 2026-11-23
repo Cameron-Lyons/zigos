@@ -1,8 +1,8 @@
 /* Isolated CPL0 interrupt evidence. Standard XSAVE, XCR0=7 and dormant per-CPU
  * GS canaries do not publish nativeReady or establish native trap ownership,
  * userspace, FRED or production XSAVES admission. */
-#include "../xstate64.inc"
-#include "../../kernel/interrupts/idt_return64.inc"
+#include "../arch/xstate64.inc"
+#include "../kernel/interrupts/idt_return64.inc"
 .section .text
 .code64
 

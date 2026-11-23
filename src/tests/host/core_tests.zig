@@ -29,7 +29,7 @@ const x2apic = @import("../../kernel/interrupts/x2apic.zig");
 test "core host tests import native core modules" {
     std.testing.refAllDecls(cpu_baseline);
     std.testing.refAllDecls(@import("../../arch/cache_policy.zig"));
-    std.testing.refAllDecls(@import("../../arch/x86_64/mapping_xstate_probe_model.zig"));
+    std.testing.refAllDecls(@import("../../probes/mapping_xstate_probe_model.zig"));
     std.testing.refAllDecls(@import("../../kernel/smp/cache_rendezvous.zig"));
     std.testing.refAllDecls(codegen_target);
     std.testing.refAllDecls(native_entry_state);
@@ -47,7 +47,7 @@ test "core host tests import native core modules" {
     std.testing.refAllDecls(@import("../../boot/efi_paging.zig"));
     std.testing.refAllDecls(@import("../../boot/paging_info.zig"));
     std.testing.refAllDecls(@import("../../arch/sparse_physical_map.zig"));
-    _ = @import("../../arch/x86_64/smp_cache_enabled_probe.zig");
+    _ = @import("../../probes/smp_cache_enabled_probe.zig");
     std.testing.refAllDecls(@import("../../boot/efi_elf.zig"));
     std.testing.refAllDecls(virtual_layout);
     std.testing.refAllDecls(tsc_deadline);

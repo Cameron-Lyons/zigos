@@ -301,27 +301,7 @@ pub fn run(ctx: *common.Context, command: []const u8, input: []const []const u8)
         harness.boot_iso = args[1];
         args = args[2..];
     }
-    if (std.mem.eql(u8, command, "run-with-qemu-boot-iso")) {
-        try require(args, 2);
-        const wrapped = try ctx.allocator.alloc([]const u8, args.len);
-        wrapped[0] = "--boot-iso";
-        wrapped[1] = args[0];
-        @memcpy(wrapped[2..], args[2..]);
-        const basename = std.fs.path.basename(args[1]);
-        const name = if (std.mem.endsWith(u8, basename, ".sh")) basename[0 .. basename.len - 3] else basename;
-        return run(ctx, name, wrapped);
-    }
     if (std.mem.eql(u8, command, "qemu-harness")) return runHarness(harness, args);
-    if (std.mem.eql(u8, command, "run-headless-qemu")) {
-        try require(args, 1);
-        const argv = try harness.kernel(arg(args, 1, harness.profileMemory()), arg(args, 2, env(ctx, "QEMU_SERIAL_TARGET", "stdio")), true, false);
-        const status = try process.run(ctx, argv.items, null);
-        if (status != 0 and status != success_exit) {
-            failure_exit_code = @intCast(@min(status, 255));
-            return error.QemuFailed;
-        }
-        return;
-    }
     if (std.mem.eql(u8, command, "run-uefi-boot-test")) return uefiBoot(harness, args);
     if (std.mem.eql(u8, command, "run-native-crypto-smoke")) return nativeCryptoSmoke(harness, args);
     if (std.mem.eql(u8, command, "run-high-half-smoke")) return highHalfSmoke(harness, args);
@@ -338,21 +318,16 @@ pub fn run(ctx: *common.Context, command: []const u8, input: []const []const u8)
     return error.UnknownCommand;
 }
 
+/// `qemu-harness native-store KERNEL STORE [SERIAL [MEMORY [OUTPUT [QEMU_ARGS...]]]]`
+/// boots the kernel interactively with its native store attached.
 fn runHarness(h: Harness, args: []const []const u8) !void {
-    try require(args, 1);
+    try require(args, 3);
+    if (!std.mem.eql(u8, args[0], "native-store")) return error.InvalidArguments;
     const ctx = h.ctx;
-    if (std.mem.eql(u8, args[0], "uefi-cdrom")) {
-        try require(args, 4);
-        return h.forSeconds(args[1], args[2], try std.fmt.parseInt(u32, args[3], 10), arg(args, 4, h.memory()));
-    }
-    const store = std.mem.eql(u8, args[0], "native-store");
-    if (!store and !std.mem.eql(u8, args[0], "kernel")) return error.InvalidArguments;
-    try require(args, if (store) 3 else 2);
-    const offset: usize = if (store) 3 else 2;
-    var command = try h.kernel(arg(args, offset + 1, if (store) h.memory() else h.profileMemory()), arg(args, offset, "stdio"), !store, store);
-    if (store) try h.appendStore(&command, args[2]);
-    if (args.len > offset + 3) try command.appendSlice(ctx.allocator, args[offset + 3 ..]);
-    const output = arg(args, offset + 2, "");
+    var command = try h.kernel(arg(args, 4, h.memory()), arg(args, 3, "stdio"), false, true);
+    try h.appendStore(&command, args[2]);
+    if (args.len > 6) try command.appendSlice(ctx.allocator, args[6..]);
+    const output = arg(args, 5, "");
     const status = try process.run(ctx, command.items, if (output.len > 0) output else null);
     if (status != 0 and status != success_exit) {
         failure_exit_code = @intCast(@min(status, 255));

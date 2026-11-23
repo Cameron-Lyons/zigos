@@ -1,7 +1,7 @@
 // Isolated offline AP evidence. One actual bootstrap expansion is called twice
 // before paging, with no reset or external MTRR writer between the calls.
-#include "cache_policy.inc"
-#include "mtrr_bootstrap.inc"
+#include "../arch/x86_64/cache_policy.inc"
+#include "../arch/x86_64/mtrr_bootstrap.inc"
 
 #define PROOF_FIRST_OFFSET 0
 #define PROOF_SECOND_OFFSET 24

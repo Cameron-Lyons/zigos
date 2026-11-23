@@ -51,7 +51,7 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Spec Conformance
-      command: zig build spec-tests && zig build -Doptimize=fast recovery-qemu-test
+      command: zig build -Doptimize=fast spec-conformance
 
   host-tests:
     needs: zig-toolchain

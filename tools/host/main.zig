@@ -20,12 +20,11 @@ const usage =
     \\Source:   fmt-check, lint-zig, lint-actions, generate-unicode
     \\Host:     setup-deps, ci-verify-toolchain, ci-init-jj, ci-enable-kvm,
     \\          ci-setup-efi-tools, ci-install-linters, ci-render-summary
-    \\QEMU:     qemu-harness, qemu-peer-relay, run-headless-qemu, run-with-qemu-boot-iso,
-    \\          run-zigos-native-smoke, run-uefi-boot-test, run-native-crypto-smoke,
-    \\          run-high-half-smoke, run-mapping-xstate-smoke, run-ap-cache-rejection-smoke,
-    \\          run-smp-cache-enabled-match-smoke, run-storage-durability-qemu,
-    \\          run-sync-two-node-qemu, run-tpm2-qemu, run-unified-efi-qemu,
-    \\          run-kernel-recovery, capture-kernel-benchmark
+    \\QEMU:     qemu-harness, qemu-peer-relay, run-zigos-native-smoke, run-uefi-boot-test,
+    \\          run-native-crypto-smoke, run-high-half-smoke, run-mapping-xstate-smoke,
+    \\          run-ap-cache-rejection-smoke, run-smp-cache-enabled-match-smoke,
+    \\          run-storage-durability-qemu, run-sync-two-node-qemu, run-tpm2-qemu,
+    \\          run-unified-efi-qemu, run-kernel-recovery, capture-kernel-benchmark
     \\Release:  generate-release-sbom-provenance, check-reproducible-build,
     \\          finalize-release-manifest, verify-release-bundle
     \\Hardware: prepare-nuc15crsu7-hardware-proof, write-nuc15crsu7-capture-statement,

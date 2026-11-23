@@ -2,14 +2,14 @@
 // resolution, supervisor copy helpers and endpoint handlers are invoked directly;
 // native user fault and syscall trap admission require separate evidence.
 const probe = @import("high_half_probe.zig");
-const x86 = @import("../x86.zig");
-const paging = @import("../../kernel/memory/paging64.zig");
-const page_table = @import("../../kernel/memory/page_table64.zig");
-const demand = @import("../../kernel/memory/demand_paging.zig");
-const shared = @import("../../native/kernel_api/shared_memory.zig");
-const executor = @import("../../native/task/userspace_executor.zig");
-const ids = @import("../../native/core/ids.zig");
-const cpu_identity = @import("../../kernel/cpu_identity.zig");
+const x86 = @import("../arch/x86.zig");
+const paging = @import("../kernel/memory/paging64.zig");
+const page_table = @import("../kernel/memory/page_table64.zig");
+const demand = @import("../kernel/memory/demand_paging.zig");
+const shared = @import("../native/kernel_api/shared_memory.zig");
+const executor = @import("../native/task/userspace_executor.zig");
+const ids = @import("../native/core/ids.zig");
+const cpu_identity = @import("../kernel/cpu_identity.zig");
 
 const PAGE_BYTES = shared.PAGE_SIZE;
 const SHARED_WORD: u64 = 0x7165_7275_6f2d_6465;
