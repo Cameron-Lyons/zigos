@@ -1099,7 +1099,7 @@
         },
         {
           "file": "src/native/kernel_api/syscall_surface.zig",
-          "name": "syscall surface binds the caller from the trap, not the request header"
+          "name": "syscall surface rejects request headers whose subject is not the trap caller"
         }
       ]
     },
@@ -1473,7 +1473,7 @@
         "src/native/services/component_abi_schema.zig",
         "src/native/services/typed_component_abi.zig",
         "src/native/session/service_catalog.zig",
-        "src/native/task/userspace_contract_registry.zig",
+        "src/native/task/userspace_verification_registry.zig",
         "src/native/services/userspace_service_ipc.zig"
       ],
       "negative_tests": [

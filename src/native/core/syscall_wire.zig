@@ -2,6 +2,14 @@ const std = @import("std");
 const Header = @import("request_header_wire.zig").RequestHeader;
 
 pub const TaskTerminateWireRequest = extern struct { header: Header, task_capability_id: u64 };
+// EndpointCreateWireRequest.flags; every other bit is reserved and rejected.
+pub const EndpointFlags = packed struct(u16) {
+    local_only: bool = false,
+    service_port: bool = false,
+    carries_capability: bool = false,
+    _reserved: u13 = 0,
+};
+pub const ENDPOINT_CREATE_KNOWN_FLAGS: u16 = @bitCast(EndpointFlags{ .local_only = true, .service_port = true, .carries_capability = true });
 pub const EndpointCreateWireRequest = extern struct {
     header: Header,
     authority_capability_id: u64,

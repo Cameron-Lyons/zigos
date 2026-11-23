@@ -379,7 +379,6 @@ test "runtime uses the activation tick when claiming storage authority" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 30,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.storage-driver",
         },

@@ -10,22 +10,10 @@ pub const MAX_CAPABILITIES: usize = 128;
 pub const MAX_TARGET_GENERATIONS: usize = 128;
 pub const TARGET_GENERATION_INDEX_CAPACITY: usize = MAX_TARGET_GENERATIONS * 2;
 pub const MAX_GRANT_PLAN_ENTRIES: usize = 16;
-pub const MINT_IS_FREE_LIST_POP = true;
 pub const CapabilitySlotIndex = indexed_arena.ReusableIndex(MAX_CAPABILITIES);
-pub const COMPACT_GRANT_METADATA = true;
-pub const TARGET_GENERATION_OWNS_CAPABILITY_CHAINS = true;
-pub const CACHES_RECENT_TARGET_GENERATION = true;
-pub const OVERWRITES_RESERVED_CAPABILITY_SLOTS = true;
-pub const AVOIDS_REDUNDANT_HOLDER_INDEX = true;
 pub const ZERO_CAPABILITY_ID_RESERVED = true;
-pub const SINGLE_GRANT_AVOIDS_BATCH_PLAN = true;
 pub const GRANT_RESERVATION_SIZE_CEILING_BYTES: usize = 312;
 pub const CAPABILITY_TABLE_SIZE_CEILING_BYTES: usize = 31_784;
-pub const CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_QUERY: u8 = 0;
-pub const CAPABILITY_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
-pub const PASS_SOURCE_REMOVAL_INDEX_RELOOKUPS: u8 = 0;
-pub const DELEGATION_SOURCE_INDEX_RELOOKUPS: u8 = 0;
-pub const TARGET_REVOCATION_INDEX_RELOOKUPS: u8 = 0;
 pub const RESOLVED_CAPABILITY_SIZE_CEILING_BYTES: usize = 16;
 
 comptime {
@@ -56,7 +44,6 @@ pub const CapabilityTarget = capability_rights.CapabilityTarget;
 pub const CapabilityRight = capability_rights.CapabilityRight;
 pub const isKernelRight = capability_rights.isKernelRight;
 pub const CapabilityRights = capability_rights.CapabilityRights;
-pub const DIRECT_RIGHT_MASKS = capability_rights.DIRECT_RIGHT_MASKS;
 pub const bitsContainRight = capability_rights.bitsContainRight;
 pub const CapabilityScope = capability_record.CapabilityScope;
 pub const CapabilityLease = capability_record.CapabilityLease;
@@ -1160,8 +1147,6 @@ test "single-entry grant transactions match batch publication and failure atomic
 }
 
 test "single grants avoid batch plans and retain transactional rollback" {
-    try std.testing.expect(SINGLE_GRANT_AVOIDS_BATCH_PLAN);
-
     var table = CapabilityTable.init();
     const minted = try table.mintSingle(emptyGrantPlanEntry().request);
     try std.testing.expectEqual(@as(usize, 1), table.activeCount());

@@ -1,7 +1,6 @@
 const std = @import("std");
 pub const text_layout = @import("text_layout.zig");
 
-pub const ABI_VERSION: u16 = 23;
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
@@ -88,7 +87,6 @@ pub const SyscallStatus = enum(u32) {
     invalid_response_buffer,
     buffer_too_small,
     unsupported_operation,
-    unsupported_abi_version,
     denied,
     not_found,
     conflict,
@@ -132,6 +130,8 @@ pub const ScopeFlags = packed struct(u32) {
 pub const RequestHeader = @import("request_header_wire.zig").RequestHeader;
 pub const syscall_wire = @import("syscall_wire.zig");
 pub const TaskTerminateWireRequest = syscall_wire.TaskTerminateWireRequest;
+pub const EndpointFlags = syscall_wire.EndpointFlags;
+pub const ENDPOINT_CREATE_KNOWN_FLAGS = syscall_wire.ENDPOINT_CREATE_KNOWN_FLAGS;
 pub const EndpointCreateWireRequest = syscall_wire.EndpointCreateWireRequest;
 pub const EndpointConnectWireRequest = syscall_wire.EndpointConnectWireRequest;
 pub const EndpointCloseWireRequest = syscall_wire.EndpointCloseWireRequest;
@@ -171,7 +171,7 @@ pub const EndpointSendWireRequest = extern struct {
     attached_capability_id: u64 = 0,
 
     pub inline fn validEncoding(self: @This()) bool {
-        return self.header.operation == opcode(.endpoint_send) and self.header.flags == 0 and self.header.reserved == 0 and
+        return self.header.admits(opcode(.endpoint_send)) and
             self.header.subject_task_id != 0 and self.flags & ~ENDPOINT_SEND_MOVE_ATTACHMENT == 0 and
             self.reserved == 0 and self.payload_bytes <= ENDPOINT_INLINE_BYTES and
             (self.flags & ENDPOINT_SEND_MOVE_ATTACHMENT == 0 or self.attached_capability_id != 0);
@@ -188,7 +188,7 @@ pub const EndpointRecvWireRequest = extern struct {
     attached_capability_address: u64,
 
     pub inline fn validEncoding(self: @This()) bool {
-        return self.header.operation == opcode(.endpoint_recv) and self.header.flags == 0 and self.header.reserved == 0 and
+        return self.header.admits(opcode(.endpoint_recv)) and
             self.header.subject_task_id != 0 and self.reserved == 0 and self.payload_capacity <= ENDPOINT_INLINE_BYTES;
     }
 };
@@ -496,7 +496,7 @@ pub fn isCanonicalSurfacePresentation(presentation: *const SurfacePresentation) 
     return presentation.surface_id != 0 and presentation.revision != 0 and presentation.presentsByHandle();
 }
 
-test "native ABI23 keeps all 23 retained opcodes and rejects the removed wait opcode" {
+test "native ABI keeps all 23 retained opcodes and rejects the removed wait opcode" {
     const expected = [_]struct { operation: NativeOperation, opcode: u16 }{
         .{ .operation = .task_create, .opcode = 0x100 },
         .{ .operation = .task_terminate, .opcode = 0x101 },
@@ -523,7 +523,6 @@ test "native ABI23 keeps all 23 retained opcodes and rejects the removed wait op
         .{ .operation = .surface_present, .opcode = 0x116 },
     };
     try std.testing.expectEqual(@as(usize, 23), @typeInfo(NativeOperation).@"enum".field_names.len);
-    try std.testing.expectEqual(@as(u16, 23), ABI_VERSION);
     for (expected) |entry| {
         try std.testing.expectEqual(entry.opcode, opcode(entry.operation));
         try std.testing.expectEqual(entry.operation, std.enums.fromInt(NativeOperation, entry.opcode).?);
@@ -535,7 +534,6 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 23), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expectEqual(@as(usize, 88), ENDPOINT_INLINE_BYTES);
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));

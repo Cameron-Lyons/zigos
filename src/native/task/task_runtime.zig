@@ -25,7 +25,6 @@ const x86 = if (builtin.target.os.tag == .freestanding) @import("../../arch/x86.
 pub const MAX_TASKS = model.MAX_TASKS;
 pub const MAX_TASK_CAPABILITIES = model.MAX_TASK_CAPABILITIES;
 pub const TASK_CAPABILITY_SCAN_BOUND = model.TASK_CAPABILITY_SCAN_BOUND;
-pub const TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION = model.TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION;
 pub const MAX_TASK_COMPONENTS = model.MAX_TASK_COMPONENTS;
 pub const MAX_AUDIT_EVENTS = model.MAX_AUDIT_EVENTS;
 pub const MAX_TASK_PROVENANCE_EVENTS = model.MAX_TASK_PROVENANCE_EVENTS;
@@ -34,24 +33,12 @@ pub const MAX_TASK_SOURCE_IDENTITY_BYTES = model.MAX_TASK_SOURCE_IDENTITY_BYTES;
 pub const MAX_COMPONENT_LABEL_BYTES = model.MAX_COMPONENT_LABEL_BYTES;
 pub const MAX_COMPONENT_ENTRY_BYTES = model.MAX_COMPONENT_ENTRY_BYTES;
 pub const MAX_EXECUTABLE_SEGMENTS = model.MAX_EXECUTABLE_SEGMENTS;
-pub const ORDERED_EXECUTABLE_SEGMENTS = model.ORDERED_EXECUTABLE_SEGMENTS;
 pub const MAX_IMAGE_HASH_BYTES = model.MAX_IMAGE_HASH_BYTES;
 pub const DEFAULT_USER_STACK_TOP = model.DEFAULT_USER_STACK_TOP;
 pub const DEFAULT_USER_STACK_SIZE_BYTES = model.DEFAULT_USER_STACK_SIZE_BYTES;
 pub const DEFAULT_SYNTHETIC_ENTRY_POINT = model.DEFAULT_SYNTHETIC_ENTRY_POINT;
 pub const DEFAULT_SYNTHETIC_IMAGE_BYTES = model.DEFAULT_SYNTHETIC_IMAGE_BYTES;
 pub const TaskStateCount = u8;
-pub const COMPACT_LIFECYCLE_METADATA = true;
-pub const SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING = true;
-pub const IN_PLACE_RUNTIME_STATE_INITIALIZATION = true;
-pub const TERMINATION_TASK_INDEX_RELOOKUPS: u8 = 0;
-pub const TERMINATION_TASK_SLOT_LOOKUPS: u8 = 1;
-pub const RESOLVED_TERMINATION_SLOT_RELOOKUPS: u8 = 0;
-pub const RESOLVED_TERMINATION_HANDLE_DERIVATIONS: u8 = 0;
-pub const RESOLVED_TASK_HANDLE_INDEX_LOOKUPS: u8 = 0;
-pub const RESOLVED_TASK_HANDLE_SLOT_LOOKUPS: u8 = 0;
-pub const RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS: u8 = 0;
-pub const RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS: u8 = 0;
 // Sixteen lease-bound syscall mailboxes add exactly 64 bytes per isolated
 // CPU slot. Keep this explicit layout allowance rather than a loose budget.
 pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 608_680;
@@ -84,7 +71,6 @@ pub const ResourceBudget = model.ResourceBudget;
 pub const AuditEventKind = model.AuditEventKind;
 pub const AuditEvent = model.AuditEvent;
 pub const ProvenanceRecord = model.ProvenanceRecord;
-pub const TaskProvenanceRecord = model.TaskProvenanceRecord;
 pub const LaunchProvenanceSpec = model.LaunchProvenanceSpec;
 pub const LaunchProvenanceRecord = model.LaunchProvenanceRecord;
 pub const TaskCreateRequest = model.TaskCreateRequest;
@@ -295,7 +281,6 @@ const TASK_LABEL_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 const TaskInitialComponentLabelIndex = indexed_arena.MultimapIndex(MAX_TASKS, MAX_TASKS, TASK_LABEL_INDEX_CAPACITY);
 const heap_backed_task_cold = builtin.target.os.tag == .freestanding;
 pub const HEAP_BACKED_ADDRESS_SPACE_ARENA_ON_FREESTANDING = true;
-pub const BULK_TASK_COLD_MEMORY_OPS = true;
 const heap_backed_address_spaces = builtin.target.os.tag == .freestanding and HEAP_BACKED_ADDRESS_SPACE_ARENA_ON_FREESTANDING;
 const TaskColdRecords = [MAX_TASKS]TaskColdRecord;
 const TaskColdBacking = if (heap_backed_task_cold) ?*TaskColdRecords else TaskColdRecords;
@@ -774,7 +759,7 @@ pub const Runtime = struct {
             .cold_state = &task_cold[slot_index],
         };
         task_cold[slot_index].execution_components[0] = initial_component;
-        appendProvenanceToTask(&slot.task, debug_contract.launchProvenance(
+        if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(&slot.task, debug_contract.launchProvenance(
             task_id,
             0,
             request.launch.image_id,
@@ -1321,7 +1306,7 @@ pub const Runtime = struct {
         task.process_class = host.process_class;
         task.namespace_class = host.namespace_class;
         task.process_generation += 1;
-        appendProvenanceToTask(task, debug_contract.launchProvenance(
+        if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(task, debug_contract.launchProvenance(
             task_id,
             tick,
             task.launch.image_id,
@@ -1384,7 +1369,7 @@ pub const Runtime = struct {
 
     pub fn recordProvenance(self: *Runtime, task_id: u64, event: ProvenanceRecord) Error!void {
         const task = self.find(task_id) orelse return error.TaskNotFound;
-        appendProvenanceToTask(task, event);
+        if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(task, event);
     }
 
     pub fn recordCrashReportForResolved(
@@ -1398,7 +1383,7 @@ pub const Runtime = struct {
         redacted: bool,
     ) void {
         if (builtin.mode == .debug) _ = self.taskHandleForResolved(task);
-        appendProvenanceToTask(task, debug_contract.crashReportProvenance(
+        if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(task, debug_contract.crashReportProvenance(
             task.id,
             service_id,
             tick,
@@ -1407,15 +1392,6 @@ pub const Runtime = struct {
             reason_fingerprint,
             redacted,
         ));
-    }
-
-    pub fn canReserveBackgroundWork(
-        self: *const Runtime,
-        task_id: u64,
-        budget: manifest.BackgroundResourceBudget,
-    ) bool {
-        const task = self.findConst(task_id) orelse return false;
-        return planBackgroundCapacity(task, budget) != null;
     }
 
     pub fn reserveBackgroundWork(
@@ -1579,7 +1555,7 @@ pub fn grantCapabilityToTask(task: *TaskRecord, capability_id: u64) Error!void {
     cold.dense_of_stable[stable] = dense;
     task.capability_count += 1;
     advanceTaskCapabilityGeneration(task);
-    appendProvenanceToTask(task, debug_contract.capabilityGrantProvenance(task.id, capability_id, 0));
+    if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(task, debug_contract.capabilityGrantProvenance(task.id, capability_id, 0));
 }
 
 pub fn revokeCapabilityFromTask(task: *TaskRecord, capability_id: u64) bool {
@@ -1599,7 +1575,7 @@ pub fn revokeCapabilityFromTask(task: *TaskRecord, capability_id: u64) bool {
     cold.stable_slot_of_dense[task.capability_count] = model.CSPACE_SLOT_EMPTY;
     if (revoked_stable != model.CSPACE_SLOT_EMPTY) cold.dense_of_stable[revoked_stable] = model.CSPACE_SLOT_EMPTY;
     advanceTaskCapabilityGeneration(task);
-    appendProvenanceToTask(task, debug_contract.capabilityRevokeProvenance(task.id, capability_id, 0));
+    if (comptime model.RETAINS_TASK_PROVENANCE) appendProvenanceToTask(task, debug_contract.capabilityRevokeProvenance(task.id, capability_id, 0));
     return true;
 }
 
@@ -1650,15 +1626,16 @@ fn preferTaskLookupMatch(candidate: *const TaskRecord, current: *const TaskRecor
 }
 
 fn appendProvenanceToTask(task: *TaskRecord, event: ProvenanceRecord) void {
+    if (comptime !model.RETAINS_TASK_PROVENANCE) return;
     const cold = taskCold(task);
     if (task.provenance_count < MAX_TASK_PROVENANCE_EVENTS) {
         const slot_index = (task.provenance_start + task.provenance_count) % MAX_TASK_PROVENANCE_EVENTS;
-        cold.provenance_trail[slot_index] = TaskProvenanceRecord.from(event);
+        cold.provenance_trail[slot_index] = event;
         task.provenance_count += 1;
         return;
     }
 
-    cold.provenance_trail[task.provenance_start] = TaskProvenanceRecord.from(event);
+    cold.provenance_trail[task.provenance_start] = event;
     task.provenance_start = @intCast((task.provenance_start + 1) % MAX_TASK_PROVENANCE_EVENTS);
 }
 
@@ -2122,7 +2099,6 @@ test "task runtime records redacted crash report provenance" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 51,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.crash-provenance",
         },
@@ -2432,7 +2408,6 @@ test "userspace launch provenance is recorded for explicit image launches" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 44,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.notes",
             .source_identity = "store:zigos/public",
@@ -2489,7 +2464,6 @@ test "userspace tasks materialize executable mappings in their address spaces" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 45,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.storage-object",
         },
@@ -2653,7 +2627,6 @@ test "rehosting a restored userspace task clones authoritative mapped state" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 46,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.sync-service",
         },
@@ -3167,7 +3140,7 @@ test "task reclamation keeps recent history and clears every reused index and co
     try std.testing.expect(std.mem.allEqual(u64, &taskCold(replacement).capability_ids, 0));
     try std.testing.expect(std.mem.allEqual(u8, &taskCold(replacement).dense_of_stable, model.CSPACE_SLOT_EMPTY));
     try std.testing.expect(std.meta.eql(AuditEvent{ .kind = .created }, taskCold(replacement).audit_trail[0]));
-    try std.testing.expect(std.meta.eql(TaskProvenanceRecord{}, taskCold(replacement).provenance_trail[1]));
+    try std.testing.expect(std.meta.eql(ProvenanceRecord{}, taskCold(replacement).provenance_trail[1]));
     runtime.debugAssertIndexIntegrity();
     try std.testing.expect(runtime.terminateResolvedTask(replacement, 1001));
     for (0..MAX_TASKS * 3) |index| {

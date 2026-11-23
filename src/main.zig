@@ -14,10 +14,8 @@ const component_port = @import("native/kernel_api/component_port.zig");
 const crypto_hash = @import("native/core/crypto_hash.zig");
 const config = @import("kernel/config.zig");
 const embedded_userspace_archive = @import("userspace_archive");
-const syscall_cpu = @import("kernel/interrupts/syscall64.zig");
 const cpu_identity = @import("kernel/cpu_identity.zig");
 const native_entry = @import("arch/x86_64/native_entry_state.zig");
-const endpoint_syscalls = @import("native/kernel_api/endpoint_syscalls.zig");
 const syscall_surface = @import("native/kernel_api/syscall_surface.zig");
 const userspace_executor = @import("native/task/userspace_executor.zig");
 const timer = @import("kernel/timer/timer.zig");
@@ -26,18 +24,6 @@ pub const includes_verification_evidence = config.includesVerificationEvidence()
 
 extern const __kernel_measure_start: u8;
 extern const __kernel_measure_end: u8;
-
-pub fn publishKernelPort(port: anytype) void {
-    syscall_cpu.setKernelPort(@intFromPtr(port));
-}
-
-pub fn clearKernelPort() void {
-    syscall_cpu.clearKernelPort();
-}
-
-pub fn publishUserspaceActiveTaskId(task_id: u64) void {
-    syscall_cpu.setActiveTaskId(task_id);
-}
 
 pub fn bootDescriptorDigest() [32]u8 {
     var hasher = crypto_hash.init();
@@ -89,31 +75,16 @@ export fn syscall_handler(context: *anyopaque) callconv(.c) void {
     // ownership check, the published kernel port and the caller task.
     const cpu = cpu_identity.currentIndex();
     if (cpu != @import("kernel/smp.zig").runtimeOwnerCpu()) {
-        if (!userspace_executor.remoteSyscall(frame)) {
-            frame.eax = @backingInt(abi.SyscallStatus.unavailable);
-            frame.edx = 0;
-            frame.r10 = @backingInt(abi.DenialReason.none);
-        }
+        if (!userspace_executor.remoteSyscall(frame)) replyUnavailable(frame);
         return;
     }
     const entry = native_entry.stateForCpu(cpu);
     const port_addr = entry.kernel_port;
-    if (port_addr == 0) {
-        frame.eax = @backingInt(abi.SyscallStatus.unavailable);
-        frame.edx = 0;
-        frame.r10 = @backingInt(abi.DenialReason.none);
-        return;
-    }
-    const port: *component_port.KernelPort = @ptrFromInt(port_addr);
-    const caller_task_id = blk: {
-        const published = entry.active_task_id;
-        if (published != 0) break :blk published;
-        break :blk userspace_executor.activeTaskId();
-    };
-
+    if (port_addr == 0) return replyUnavailable(frame);
+    // The executor publishes the active task with its mapping; zero is denied.
     const result = syscall_surface.dispatch(
-        port,
-        caller_task_id,
+        @as(*component_port.KernelPort, @ptrFromInt(port_addr)),
+        entry.active_task_id,
         timer.getTicks(),
         @truncate(frame.eax),
         frame.edi,
@@ -123,6 +94,12 @@ export fn syscall_handler(context: *anyopaque) callconv(.c) void {
     frame.eax = @backingInt(result.status);
     frame.edx = result.bytes_written;
     frame.r10 = @backingInt(result.denial_reason);
+}
+
+fn replyUnavailable(frame: *isr.Registers) void {
+    frame.eax = @backingInt(abi.SyscallStatus.unavailable);
+    frame.edx = 0;
+    frame.r10 = @backingInt(abi.DenialReason.none);
 }
 
 comptime {

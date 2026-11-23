@@ -12,8 +12,6 @@ pub const MAX_MESSAGE_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
 pub const MAX_ENDPOINT_LABEL_BYTES: usize = 48;
 const ENDPOINT_INDEX_CAPACITY: usize = MAX_ENDPOINTS * 2;
 const MAX_ENDPOINT_LABEL_PAYLOAD_BYTES: usize = MAX_ENDPOINT_LABEL_BYTES - 1;
-pub const ENDPOINT_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
-pub const ENDPOINT_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
 pub const FREESTANDING_TABLE_SIZE_CEILING_BYTES: usize = 12_000;
 
 comptime {
@@ -30,12 +28,7 @@ comptime {
     }
 }
 
-pub const EndpointFlags = packed struct(u16) {
-    local_only: bool = false,
-    service_port: bool = false,
-    carries_capability: bool = false,
-    _reserved: u13 = 0,
-};
+pub const EndpointFlags = abi.EndpointFlags;
 
 pub const Message = struct {
     sender_endpoint_id: ids.EndpointId,
@@ -49,11 +42,6 @@ pub const Message = struct {
 
     pub fn payload(self: *const Message) []const u8 {
         return self.bytes[0..self.len];
-    }
-
-    pub fn attachedCapabilityId(self: *const Message) ?ids.CapabilityId {
-        if (self.attached_capability_id.isZero()) return null;
-        return self.attached_capability_id;
     }
 };
 
@@ -468,8 +456,8 @@ pub const Table = struct {
             for (0..queued) |_| {
                 const record = ipc_ring.popRecord(slot.endpoint.data_ring) catch
                     native_util.impossibleByInvariant("endpoint retirement requires a live slot and an exact sealed queue ledger");
-                if (record.move_attached != 0 and record.attached_capability_id != 0) {
-                    sink.release(sink.context, ids.capability(record.attached_capability_id));
+                if (record.header.move_attached != 0 and record.header.attached_capability_id != 0) {
+                    sink.release(sink.context, ids.capability(record.header.attached_capability_id));
                 }
             }
             if (slot.endpoint.data_ring.len != 0) {
@@ -745,7 +733,7 @@ test "endpoint retirement validates the complete queue ledger before draining" {
 
     // A second well-formed record is still corruption when the Table owns
     // only one record; validation must not consume either ownership receipt.
-    try ipc_ring.pushRecord(ring, .{ .attached_capability_id = 88, .move_attached = 1 });
+    try ipc_ring.pushRecord(ring, .{ .header = .{ .attached_capability_id = 88, .move_attached = 1 } });
     const extra = try std.testing.allocator.dupe(u8, ring);
     defer std.testing.allocator.free(extra);
     try std.testing.expectError(error.RingCorrupt, Table.retirementQueueLength(owned));
@@ -877,11 +865,6 @@ test "retiring task endpoints clears queues and surviving peer links" {
     try std.testing.expectEqual(@as(u64, 0), (try table.descriptor(client_a.id)).peer_endpoint_id);
     try std.testing.expectEqual(@as(u64, 0), (try table.descriptor(client_b.id)).peer_endpoint_id);
     try std.testing.expectError(error.PeerClosed, table.send(client_a.id, ids.task(10), 3, "stale", null, false));
-}
-
-test "endpoint identity paths avoid primary indexes and collision probes" {
-    try std.testing.expectEqual(@as(u8, 0), ENDPOINT_PRIMARY_INDEX_LOOKUPS_PER_OPERATION);
-    try std.testing.expectEqual(@as(u8, 0), ENDPOINT_ID_COLLISION_PROBES_PER_INSERT);
 }
 
 test "service ports accept multiple client connections without blocking later binds" {

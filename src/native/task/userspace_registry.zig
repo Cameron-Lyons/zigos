@@ -21,18 +21,8 @@ pub const FLAG_MMU_PROOF_PROBE = userspace_flags.FLAG_MMU_PROOF_PROBE;
 pub const FLAG_NX_PROOF_PROBE = userspace_flags.FLAG_NX_PROOF_PROBE;
 pub const FLAG_GP_PROOF_PROBE = userspace_flags.FLAG_GP_PROOF_PROBE;
 
-pub const DIRECT_SERVICE_CLASS_SLOTS = true;
-pub const SERVICE_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
 pub const SERVICE_CLASS_COUNT: usize = @typeInfo(contract.ServiceClass).@"enum".field_names.len;
 pub const ServiceClassSlotIndex = u8;
-pub const RUNTIME_IMAGE_DESCRIPTORS_EXCLUDE_BUILD_METADATA = true;
-pub const SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION = true;
-pub const RUNTIME_IMAGE_DESCRIPTORS_OMIT_BUILD_LOOKUP_METADATA = true;
-pub const COMPACT_RUNTIME_IMAGE_CONTRACT_METADATA = true;
-pub const RUNTIME_IMAGE_DESCRIPTORS_USE_COMPACT_PUBLISHERS = true;
-pub const RUNTIME_IMAGE_DESCRIPTORS_USE_OPTIONAL_MANIFEST_DECLS = true;
-pub const RUNTIME_IMAGE_DESCRIPTORS_USE_SENTINEL_BOOT_STRINGS = true;
-pub const RUNTIME_IMAGE_DESCRIPTORS_USE_PACKED_METADATA = true;
 pub const RuntimeBundleIdLength = u6;
 pub const RuntimeRoleTag = u16;
 pub const RuntimeHeartbeatIncrement = u5;
@@ -428,13 +418,6 @@ const production_bundle_index = buildBundleIndex(
 const ServiceClassSlots = [SERVICE_CLASS_COUNT]ServiceClassSlotIndex;
 const service_class_slots = buildServiceClassSlots();
 
-pub const userspace_registry_indexing = .{
-    .uses_bundle_id_index = @TypeOf(production_bundle_index) == id_index.Table(PRODUCTION_BUNDLE_INDEX_CAPACITY),
-    .uses_service_class_slots = @TypeOf(service_class_slots) == ServiceClassSlots,
-    .service_class_hash_probes_per_query = SERVICE_CLASS_HASH_PROBES_PER_QUERY,
-    .service_class_slot_bytes = @sizeOf(ServiceClassSlots),
-};
-
 pub fn findProduction(bundle_id: []const u8) ?*const ImageSpec {
     const spec_index = indexInCatalog(
         PRODUCTION_BUNDLE_INDEX_CAPACITY,
@@ -476,11 +459,6 @@ fn indexInCatalog(
         native_util.impossibleByInvariant("boot bundle id index points at the wrong registry spec");
     }
     return spec_index;
-}
-
-pub fn productionContractFor(bundle_id: []const u8) ?ContractSpec {
-    const spec = findProduction(bundle_id) orelse return null;
-    return contractForSpec(spec);
 }
 
 pub fn addressSpaceGroupForServiceClass(class: contract.ServiceClass) ?AddressSpaceGroup {
@@ -658,37 +636,27 @@ fn buildImageByServiceClass(class: contract.ServiceClass) ?*const BuildImageSpec
 }
 
 test "userspace registry definitions stay unique and keep typed contract metadata attached" {
-    try std.testing.expect(DIRECT_SERVICE_CLASS_SLOTS);
-    try std.testing.expectEqual(@as(u8, 0), SERVICE_CLASS_HASH_PROBES_PER_QUERY);
-    try std.testing.expectEqual(@as(usize, SERVICE_CLASS_COUNT), userspace_registry_indexing.service_class_slot_bytes);
-    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_EXCLUDE_BUILD_METADATA);
+    try std.testing.expectEqual(@as(usize, SERVICE_CLASS_COUNT), @sizeOf(ServiceClassSlots));
     try std.testing.expect(!@hasField(ImageSpec, "artifact_name"));
     try std.testing.expect(!@hasField(ImageSpec, "source_path"));
-    try std.testing.expect(SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION);
     try std.testing.expect(!@hasField(ImageSpec, "components"));
-    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_OMIT_BUILD_LOOKUP_METADATA);
     try std.testing.expect(!@hasField(ImageSpec, "service_class"));
     try std.testing.expect(!@hasField(ImageSpec, "service_kind"));
-    try std.testing.expect(COMPACT_RUNTIME_IMAGE_CONTRACT_METADATA);
     try std.testing.expectEqual(RuntimeRoleTag, @FieldType(RuntimeImageMetadata, "role_tag"));
     try std.testing.expectEqual(RuntimeHeartbeatIncrement, @FieldType(RuntimeImageMetadata, "heartbeat_increment"));
     try std.testing.expectEqual(RuntimeContractFlags, @FieldType(RuntimeImageMetadata, "contract_flags"));
-    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_USE_COMPACT_PUBLISHERS);
     try std.testing.expectEqual(RuntimePublisher, @FieldType(RuntimeImageMetadata, "publisher"));
     try std.testing.expectEqual(Publisher.system, Publisher.fromName("zigos.system").?);
     try std.testing.expectEqual(Publisher.development, Publisher.fromName("zigos.dev").?);
     try std.testing.expect(Publisher.fromName("zigos.unknown") == null);
     try std.testing.expectEqualStrings("zigos.system", Publisher.system.name());
     try std.testing.expectEqualStrings("zigos.dev", Publisher.development.name());
-    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_USE_OPTIONAL_MANIFEST_DECLS);
     try std.testing.expectEqual(?*const [1]manifest.InterfaceDecl, @FieldType(ImageSpec, "provided_interface"));
     try std.testing.expectEqual(?*const [1]manifest.InterfaceDecl, @FieldType(ImageSpec, "consumed_interface"));
     try std.testing.expectEqual(?*const [1]manifest.AssetDecl, @FieldType(ImageSpec, "asset"));
-    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_USE_SENTINEL_BOOT_STRINGS);
     try std.testing.expectEqual([*:0]const u8, @FieldType(ImageSpec, "display_name"));
     try std.testing.expectEqual([*:0]const u8, @FieldType(ImageSpec, "label"));
     try std.testing.expectEqual([*:0]const u8, @FieldType(ImageSpec, "entry"));
-    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_USE_PACKED_METADATA);
     try std.testing.expectEqual(@as(usize, @sizeOf(u64)), @sizeOf(RuntimeImageMetadata));
     try std.testing.expectEqual([*]const u8, @FieldType(ImageSpec, "bundle_id"));
     try std.testing.expectEqual(RuntimeImageMetadata, @FieldType(ImageSpec, "metadata"));

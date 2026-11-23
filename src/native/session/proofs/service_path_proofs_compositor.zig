@@ -70,7 +70,6 @@ pub fn proveBootedCompositorServicePath(
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 82_001,
-            .component_abi_version = abi.ABI_VERSION,
             .signed = true,
             .bundle_id = "app.trip",
         },

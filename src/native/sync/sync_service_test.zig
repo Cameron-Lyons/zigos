@@ -1179,7 +1179,6 @@ fn createSyncServiceTask(
         .launch = .{
             .boundary = .userspace_process,
             .image_id = image_id,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = bundle_id,
         },

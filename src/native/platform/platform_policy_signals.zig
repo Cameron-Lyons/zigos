@@ -1220,7 +1220,6 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 91_001,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.viewer",
         },
@@ -1245,7 +1244,6 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 91_002,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.viewer",
         },

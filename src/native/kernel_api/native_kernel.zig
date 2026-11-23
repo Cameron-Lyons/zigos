@@ -74,25 +74,7 @@ pub const KernelCallContext = struct {
     presented_capability_id: u64,
     target: KernelTarget,
 };
-pub const TYPED_METHOD_DERIVES_KERNEL_OPERATION = true;
 pub const KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES: usize = 32;
-pub const AUTHORIZATION_TASK_INDEX_LOOKUPS_PER_CALL: usize = 1;
-pub const RESOLVED_TASK_BUDGET_RELOOKUPS_PER_CALL: usize = 0;
-pub const GRANT_PLAN_TASK_INDEX_LOOKUPS_PER_UNIQUE_TASK: usize = 1;
-pub const GRANT_ATTACHMENT_TASK_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
-pub const RESOLVED_TASK_REVOCATION_INDEX_LOOKUPS_PER_ENTRY: usize = 0;
-pub const SUBJECT_TASK_INDEX_RELOOKUPS_PER_CALL: usize = 0;
-pub const SINGLE_AUTO_GRANT_TASK_INDEX_RELOOKUPS: usize = 0;
-pub const SCOPED_MINT_TASK_INDEX_RELOOKUPS: usize = 0;
-pub const CAPABILITY_PASS_QUERY_RELOOKUPS: usize = 0;
-pub const TASK_CREATE_AUDIT_INDEX_RELOOKUPS: usize = 0;
-pub const SELF_TARGET_TASK_INDEX_RELOOKUPS_PER_CALL: usize = 0;
-pub const CAPABILITY_MUTATION_SELF_TASK_INDEX_RELOOKUPS: usize = 0;
-pub const CAPABILITY_PASS_SOURCE_TASK_INDEX_RELOOKUPS: usize = 0;
-pub const ATTACHED_CAPABILITY_TASK_INDEX_RELOOKUPS_PER_SEND: usize = 0;
-pub const MOVED_CAPABILITY_RECEIVE_TASK_INDEX_RELOOKUPS: usize = 0;
-pub const TASK_TERMINATE_PREVIEW_SLOT_LOOKUPS: usize = 0;
-pub const TASK_TERMINATE_HANDLE_DERIVATIONS: usize = 0;
 
 comptime {
     if (@sizeOf(KernelCallContext) > KERNEL_CALL_CONTEXT_SIZE_CEILING_BYTES) {
@@ -2124,9 +2106,8 @@ test "capability derivation is bound to its authorized source" {
 
 test "capability scalar derive uses trusted syscall time and preserves grants attachments and output on denial" {
     const scalar = @import("capability_wire.zig");
-    const handlers = @import("capability_syscalls.zig");
     const port_module = @import("component_port.zig");
-    const dispatch = @import("syscall_dispatch.zig");
+    const surface = @import("syscall_surface.zig");
     var harness = TestKernelHarness{};
     var kernel: Kernel = undefined;
     harness.initKernel(&kernel);
@@ -2158,7 +2139,6 @@ test "capability scalar derive uses trusted syscall time and preserves grants at
     scalar.deriveToWireInto(port_module.makeHeader(.capability_derive, source.id), request, &encoded);
     var port = port_module.KernelPort.init(&kernel);
     port.syscall_caller_task_id = 999;
-    const memory = dispatch.UserMemoryContext{ .address_space = null, .caller_task_id = source.id };
     var output: abi.CapabilityDescriptor = undefined;
     @memset(std.mem.asBytes(&output), 0xa5);
     const output_before = std.mem.toBytes(output);
@@ -2166,7 +2146,7 @@ test "capability scalar derive uses trusted syscall time and preserves grants at
     const source_before = source.*;
     const receiver_before = receiver.*;
     for ([_]u64{ 9, 51, 100 }) |now_ticks| {
-        const result = handlers.dispatchCapabilityDerive(&port, memory, now_ticks, @intFromPtr(&encoded), @intFromPtr(&output), @sizeOf(@TypeOf(output)));
+        const result = surface.dispatch(&port, source.id, now_ticks, abi.opcode(.capability_derive), @intFromPtr(&encoded), @intFromPtr(&output), @sizeOf(@TypeOf(output)));
         try std.testing.expectEqual(abi.SyscallStatus.denied, result.status);
         try std.testing.expectEqual(abi.DenialReason.capability_revoked, result.denial_reason);
         try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
@@ -2176,7 +2156,7 @@ test "capability scalar derive uses trusted syscall time and preserves grants at
         try std.testing.expectEqualSlices(u8, &output_before, std.mem.asBytes(&output));
         try std.testing.expectEqual(@as(u64, 999), port.syscall_caller_task_id);
     }
-    const result = handlers.dispatchCapabilityDerive(&port, memory, 20, @intFromPtr(&encoded), @intFromPtr(&output), @sizeOf(@TypeOf(output)));
+    const result = surface.dispatch(&port, source.id, 20, abi.opcode(.capability_derive), @intFromPtr(&encoded), @intFromPtr(&output), @sizeOf(@TypeOf(output)));
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
     try std.testing.expectEqual(@as(u32, @sizeOf(abi.CapabilityDescriptor)), result.bytes_written);
     try std.testing.expect(receiver.hasCapability(output.capability_id));
@@ -2286,7 +2266,6 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 10,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.service.object-store",
         },
@@ -2306,7 +2285,6 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 11,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.example.client",
         },
@@ -2499,7 +2477,6 @@ test "native kernel rejects app and service launches without signed userspace im
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 0,
-            .component_abi_version = 1,
             .signed = true,
         },
     }, 6));
@@ -2516,7 +2493,6 @@ test "native kernel rejects app and service launches without signed userspace im
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 16,
-            .component_abi_version = 1,
             .signed = false,
             .bundle_id = "app.unsigned",
         },
@@ -2535,7 +2511,6 @@ test "native kernel rejects app and service launches without signed userspace im
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 17,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "",
         },
@@ -3053,7 +3028,6 @@ test "native kernel brokers device metadata and port io through device capabilit
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 40,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.storage-driver",
         },

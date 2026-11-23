@@ -12,10 +12,6 @@ const mebibytes = units.mebibytes;
 
 pub const MAX_RECORDS: usize = 16;
 pub const MAX_TASK_ID_BYTES: usize = 48;
-pub const BOUNDED_RECORD_SCAN = true;
-pub const COMPACT_DISPATCH_METADATA = true;
-pub const DERIVES_LATEST_RECORD_ID_FROM_ALLOCATION_CURSOR = true;
-pub const EXPIRATION_TASK_ID_LOOKUPS_PER_RECORD: u8 = 1;
 pub const DISPATCH_RECORD_SIZE_CEILING_BYTES: usize = 120;
 pub const CONTROLLER_SIZE_CEILING_BYTES: usize = 2_048;
 
@@ -165,11 +161,6 @@ pub const Controller = struct {
     ) void {
         self.policy_directory = directory;
         self.policy_subjects = subjects;
-    }
-
-    pub fn clearPolicy(self: *Controller) void {
-        self.policy_directory = null;
-        self.policy_subjects = .{};
     }
 
     pub fn dispatch(
@@ -533,7 +524,6 @@ fn zeroRecord() DispatchRecord {
 }
 
 test "allocated background dispatch controller initializes reusable log state" {
-    try std.testing.expect(DERIVES_LATEST_RECORD_ID_FROM_ALLOCATION_CURSOR);
     try std.testing.expect(!@hasField(Controller, "latest_record_id"));
     try std.testing.expectEqual(@as(usize, CONTROLLER_SIZE_CEILING_BYTES), @sizeOf(Controller));
 

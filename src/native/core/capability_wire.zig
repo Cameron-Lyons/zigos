@@ -1,4 +1,5 @@
 const header = @import("request_header_wire.zig");
+const syscall_wire = @import("syscall_wire.zig");
 
 pub const SCOPE_TASK_PRESENT: u16 = 1 << 0;
 pub const SCOPE_WORKSPACE_PRESENT: u16 = 1 << 1;
@@ -75,12 +76,5 @@ comptime {
         @sizeOf(CapabilityDeriveWireRequest) != 120 or @alignOf(CapabilityDeriveWireRequest) != 8 or
         @sizeOf(CapabilityPassWireRequest) != 40 or @alignOf(CapabilityPassWireRequest) != 8)
         @compileError("capability wire geometry changed");
-    for (.{ CapabilityMintWireRequest, CapabilityDeriveWireRequest, CapabilityPassWireRequest }) |T| {
-        var end: usize = 0;
-        for (@typeInfo(T).@"struct".field_names) |field| {
-            if (@offsetOf(T, field) != end) @compileError("capability wire contains implicit padding");
-            end += @sizeOf(@FieldType(T, field));
-        }
-        if (end != @sizeOf(T)) @compileError("capability wire contains implicit tail padding");
-    }
+    for (.{ CapabilityMintWireRequest, CapabilityDeriveWireRequest, CapabilityPassWireRequest }) |T| syscall_wire.requireScalarWire(T);
 }

@@ -11,7 +11,6 @@ else
 
 const heap_backed_checkpoints = builtin.target.os.tag == .freestanding;
 const SnapshotBacking = if (heap_backed_checkpoints) ?*task_runtime.Snapshot else task_runtime.Snapshot;
-pub const IN_PLACE_CHECKPOINT_RESET = true;
 
 pub const CheckpointStore = struct {
     checkpoint_state: SnapshotBacking = if (heap_backed_checkpoints) null else task_runtime.Runtime.initSnapshot(),

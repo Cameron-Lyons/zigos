@@ -248,13 +248,16 @@ test "capability scalar Surface mint rejects malformed encodings without grant o
         bad.header.operation = abi.opcode(.capability_pass);
         fixture.stage(bad);
         const wrong_operation = Snapshot.capture(fixture);
-        try std.testing.expectEqual(abi.SyscallStatus.unsupported_operation, fixture.invoke(.capability_mint, 0, 20).status);
+        try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, fixture.invoke(.capability_mint, 0, 20).status);
         try wrong_operation.expectPreserved(fixture);
     }
-    fixture.stage(valid);
+    var foreign = valid;
+    foreign.header.subject_task_id = fixture.tasks[2].id;
+    fixture.stage(foreign);
     const foreign_before = Snapshot.capture(fixture);
     try std.testing.expectEqual(abi.SyscallStatus.not_found, fixture.invoke(.capability_mint, 2, 20).status);
     try foreign_before.expectPreserved(fixture);
+    fixture.stage(valid);
     const count = fixture.capabilities.activeCount();
     const received_before = fixture.tasks[1].capability_count;
     const user_before = fixture.user;
@@ -322,10 +325,13 @@ test "capability scalar Surface pass rejects unknown flags and moves exactly onc
         try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, fixture.invoke(.capability_pass, 0, 20).status);
         try before.expectPreserved(fixture);
     }
-    fixture.stage(valid);
+    var foreign = valid;
+    foreign.header.subject_task_id = fixture.tasks[2].id;
+    fixture.stage(foreign);
     const foreign_before = Snapshot.capture(fixture);
     try std.testing.expectEqual(abi.SyscallStatus.not_found, fixture.invoke(.capability_pass, 2, 20).status);
     try foreign_before.expectPreserved(fixture);
+    fixture.stage(valid);
     const count = fixture.capabilities.activeCount();
     const user_before = fixture.user;
     try std.testing.expectEqual(abi.SyscallStatus.success, fixture.invoke(.capability_pass, 0, 20).status);
@@ -367,10 +373,13 @@ test "capability scalar Surface unscoped move retires every attachment and reuse
         try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, fixture.invoke(.capability_pass, 0, 20).status);
         try before.expectPreserved(fixture);
     }
-    fixture.stage(valid);
+    var foreign = valid;
+    foreign.header.subject_task_id = fixture.tasks[1].id;
+    fixture.stage(foreign);
     const foreign_before = Snapshot.capture(fixture);
     try std.testing.expectEqual(abi.SyscallStatus.not_found, fixture.invoke(.capability_pass, 1, 20).status);
     try foreign_before.expectPreserved(fixture);
+    fixture.stage(valid);
     var bad_receiver = valid;
     bad_receiver.receiver_task_id = std.math.maxInt(u64);
     fixture.stage(bad_receiver);
@@ -500,10 +509,13 @@ test "capability scalar Surface unscoped revoke detaches its exact ID while reta
     const malformed_before = Snapshot.capture(fixture);
     try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, fixture.invoke(.capability_revoke, 0, 20).status);
     try malformed_before.expectPreserved(fixture);
-    fixture.stage(valid);
+    var foreign = valid;
+    foreign.header.subject_task_id = fixture.tasks[1].id;
+    fixture.stage(foreign);
     const foreign_before = Snapshot.capture(fixture);
     try std.testing.expectEqual(abi.SyscallStatus.not_found, fixture.invoke(.capability_revoke, 1, 20).status);
     try foreign_before.expectPreserved(fixture);
+    fixture.stage(valid);
 
     fixture.stage(valid);
     const before = Snapshot.capture(fixture);

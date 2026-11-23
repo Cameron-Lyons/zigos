@@ -1,16 +1,17 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
-const capability = @import("capability.zig");
 const component_port = @import("component_port.zig");
 const debug_contract = @import("../security/debug_contract.zig");
+const endpoint = @import("endpoint.zig");
+const syscall_broker = @import("syscall_broker.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const userspace_layout = @import("../core/userspace_layout.zig");
 
 const user_memory = if (builtin.target.os.tag == .freestanding) @import("../task/userspace_executor.zig") else struct {};
 
-const USER_POINTER_FLOOR: usize = 0x10000;
-pub const SINGLE_PASS_ADDRESS_SPACE_RANGE_VALIDATION = true;
-pub const DIRECT_STACK_RANGE_VALIDATION = true;
+pub const USER_POINTER_FLOOR: usize = 0x10000;
+const USER_CANONICAL_END: usize = userspace_layout.user_canonical_end_exclusive;
 
 pub const DispatchResult = struct {
     status: abi.SyscallStatus,
@@ -32,12 +33,31 @@ comptime {
     if (@sizeOf(DispatchResult) != 12 or @alignOf(DispatchResult) != 4) {
         @compileError("ordinary syscall results must remain 12 bytes with 4-byte alignment");
     }
-    if (@sizeOf(DispatchDiagnostics) != 744 or @alignOf(DispatchDiagnostics) != 8) {
-        @compileError("explicit syscall diagnostics must remain 744 bytes with 8-byte alignment");
+    if (@sizeOf(DispatchDiagnostics) != 512 or @alignOf(DispatchDiagnostics) != 8) {
+        @compileError("explicit syscall diagnostics must remain 512 bytes with 8-byte alignment");
     }
-    if (@sizeOf(DetailedDispatchResult) != 760 or @alignOf(DetailedDispatchResult) != 8) {
-        @compileError("explicit detailed syscall results must remain 760 bytes with 8-byte alignment");
+    if (@sizeOf(DetailedDispatchResult) != 528 or @alignOf(DetailedDispatchResult) != 8) {
+        @compileError("explicit detailed syscall results must remain 528 bytes with 8-byte alignment");
     }
+}
+
+// Every handler receives the fixed request already copied once into kernel
+// storage and admitted by dispatch. Embedded buffers and outputs still go
+// through `memory`, the only path to caller bytes on the BSP trap and for a
+// brokered remote claim alike.
+pub const Handler = *const fn (
+    port: *component_port.KernelPort,
+    memory: UserMemoryContext,
+    now_ticks: u64,
+    request: []align(8) const u8,
+    response_addr: usize,
+    response_len: usize,
+) DispatchResult;
+
+pub inline fn decode(comptime T: type, request: []align(8) const u8) T {
+    comptime abi.syscall_wire.requireScalarWire(T);
+    std.debug.assert(request.len == @sizeOf(T));
+    return std.mem.bytesToValue(T, request[0..@sizeOf(T)]);
 }
 
 pub const UserMemoryAccess = enum {
@@ -45,9 +65,28 @@ pub const UserMemoryAccess = enum {
     write,
 };
 
+// Declared tails are checked as writable metadata, while only the required
+// prefix is materialized. No destination alias survives either step.
+pub const OutputRange = struct {
+    address: usize,
+    declared_bytes: usize,
+    prepared_bytes: usize,
+    alignment: usize,
+};
+
+// Every destination is resolved before the first byte is written. A failed
+// commit leaves all outputs untouched.
+pub const Output = struct { address: usize, bytes: []const u8 };
+pub const MAX_OUTPUTS: usize = 3;
+pub const MAX_OUTPUT_BYTES: usize = endpoint.MAX_MESSAGE_BYTES + @sizeOf(abi.CapabilityDescriptor) + @sizeOf(abi.EndpointRecvResponse);
+
 pub const UserMemoryContext = struct {
     address_space: ?*const task_runtime.AddressSpaceRecord,
     caller_task_id: u64 = 0,
+    // Set only while the BSP services a claimed remote request. Every copy
+    // then goes through the claim's session, which reauthenticates the claim
+    // around each callback instead of consulting the BSP's active mapping.
+    remote: ?*syscall_broker.ClaimCopy = null,
 
     pub fn init(port: *const component_port.KernelPort, caller_task_id: u64) UserMemoryContext {
         const runtime = port.kernel.runtime;
@@ -60,22 +99,73 @@ pub const UserMemoryContext = struct {
     }
 };
 
-pub fn readRequest(comptime T: type, memory: UserMemoryContext, request_addr: usize) ?T {
-    return readUserValue(T, memory, request_addr);
+// Overflow, floor, alignment and canonical-end admission of a user span,
+// before any metadata lookup. Empty spans grant nothing and are admitted.
+pub inline fn checkedSpan(address: usize, length: usize, alignment: usize) bool {
+    if (length == 0) return true;
+    const end = std.math.add(usize, address, length) catch return false;
+    return address >= USER_POINTER_FLOOR and address % alignment == 0 and end <= USER_CANONICAL_END;
+}
+
+// Both spans must already have passed checkedSpan.
+pub inline fn spansOverlap(first: usize, first_len: usize, second: usize, second_len: usize) bool {
+    if (first_len == 0 or second_len == 0) return false;
+    return first < second + second_len and second < first + first_len;
+}
+
+pub fn readUser(memory: UserMemoryContext, address: usize, destination: []u8, alignment: usize) bool {
+    if (!checkedSpan(address, destination.len, alignment)) return false;
+    if (destination.len == 0) return true;
+    if (memory.remote) |remote| return remote.read(address, destination);
+    if (!admitCopySpan(memory, address, destination.len, alignment, .read)) return false;
+    if (comptime builtin.target.os.tag == .freestanding) {
+        return user_memory.readUserMemory(memory.caller_task_id, address, destination);
+    }
+    @memcpy(destination, @as([*]const u8, @ptrFromInt(address))[0..destination.len]);
+    return true;
+}
+
+pub fn prepareOutput(memory: UserMemoryContext, range: OutputRange) bool {
+    if (range.prepared_bytes > range.declared_bytes or !checkedSpan(range.address, range.declared_bytes, range.alignment)) return false;
+    if (range.declared_bytes == 0) return true;
+    if (memory.remote) |remote| return remote.prepareOutput(range);
+    if (!validateUserRange(memory, range.address, range.declared_bytes, range.alignment, .write)) return false;
+    return prepareValidatedUserRange(memory, range.address, range.prepared_bytes, .write);
+}
+
+pub fn commitOutputs(memory: UserMemoryContext, outputs: []const Output) bool {
+    if (outputs.len > MAX_OUTPUTS) return false;
+    for (outputs, 0..) |output, index| {
+        if (!checkedSpan(output.address, output.bytes.len, 1)) return false;
+        for (outputs[0..index]) |previous| {
+            if (spansOverlap(output.address, output.bytes.len, previous.address, previous.bytes.len)) return false;
+        }
+    }
+    if (memory.remote) |remote| return remote.commitOutputs(outputs);
+    for (outputs) |output| {
+        if (output.bytes.len != 0 and !admitCopySpan(memory, output.address, output.bytes.len, 1, .write)) return false;
+    }
+    if (comptime builtin.target.os.tag == .freestanding) {
+        return user_memory.writeUserOutputs(memory.caller_task_id, outputs);
+    }
+    for (outputs) |output| @memcpy(@as([*]u8, @ptrFromInt(output.address))[0..output.bytes.len], output.bytes);
+    return true;
+}
+
+// Metadata admission for a span copied immediately afterwards. The copy
+// itself derives shared-window authority, so it is resolved once per span.
+inline fn admitCopySpan(memory: UserMemoryContext, address: usize, len: usize, alignment: usize, access: UserMemoryAccess) bool {
+    if (comptime builtin.target.os.tag == .freestanding) {
+        if (address >= userspace_layout.shared_start and address < userspace_layout.shared_end_exclusive) return memory.address_space != null;
+    }
+    return validateUserRange(memory, address, len, alignment, access);
 }
 
 pub fn readUserValue(comptime T: type, memory: UserMemoryContext, addr: usize) ?T {
     comptime abi.syscall_wire.requireScalarWire(T);
-    const end = std.math.add(usize, addr, @sizeOf(T)) catch return null;
-    if (end > 0x0000_8000_0000_0000) return null;
-    if (!validateUserRange(memory, addr, @sizeOf(T), @alignOf(T), .read)) return null;
-    if (comptime builtin.target.os.tag == .freestanding) {
-        var value: T = undefined;
-        if (!user_memory.readUserMemory(memory.caller_task_id, addr, std.mem.asBytes(&value))) return null;
-        return value;
-    }
-    const ptr: *const T = @ptrFromInt(addr);
-    return ptr.*;
+    var value: T = undefined;
+    if (!readUser(memory, addr, std.mem.asBytes(&value), @alignOf(T))) return null;
+    return value;
 }
 
 pub fn copyUserBytes(memory: UserMemoryContext, address: u64, length: u64, dest: []u8) ?[]const u8 {
@@ -83,13 +173,7 @@ pub fn copyUserBytes(memory: UserMemoryContext, address: u64, length: u64, dest:
     if (length == 0) return dest[0..0];
     const start = std.math.cast(usize, address) orelse return null;
     const count = std.math.cast(usize, length) orelse return null;
-    const end = std.math.add(usize, start, count) catch return null;
-    if (end > 0x0000_8000_0000_0000 or !validateUserRange(memory, start, count, 1, .read)) return null;
-    if (comptime builtin.target.os.tag == .freestanding) {
-        if (!user_memory.readUserMemory(memory.caller_task_id, start, dest[0..count])) return null;
-    } else {
-        @memcpy(dest[0..count], @as([*]const u8, @ptrFromInt(start))[0..count]);
-    }
+    if (!readUser(memory, start, dest[0..count], 1)) return null;
     return dest[0..count];
 }
 
@@ -111,38 +195,15 @@ test "scalar nested byte copies reject hostile geometry before forming pointers"
     try std.testing.expectEqualStrings(source, copyUserBytes(memory, @intFromPtr(source.ptr), source.len, &destination).?);
 }
 
-pub fn copyUserSlice(memory: UserMemoryContext, slice: []const u8, dest: []u8) ?[]const u8 {
-    if (slice.len > dest.len) return null;
-    if (slice.len == 0) return dest[0..0];
-    if (!validateUserRange(memory, @intFromPtr(slice.ptr), slice.len, 1, .read)) return null;
-    if (comptime builtin.target.os.tag == .freestanding) {
-        if (!user_memory.readUserMemory(memory.caller_task_id, @intFromPtr(slice.ptr), dest[0..slice.len])) return null;
-    } else {
-        @memcpy(dest[0..slice.len], slice);
-    }
-    return dest[0..slice.len];
-}
-
 pub fn copyToUser(memory: UserMemoryContext, destination: []u8, source: []const u8) bool {
     if (source.len > destination.len) return false;
-    if (source.len == 0) return true;
-    if (!validateUserRange(memory, @intFromPtr(destination.ptr), source.len, 1, .write)) return false;
-    if (comptime builtin.target.os.tag == .freestanding) {
-        return user_memory.writeUserMemory(memory.caller_task_id, @intFromPtr(destination.ptr), source);
-    }
-    @memcpy(destination[0..source.len], source);
-    return true;
+    return commitOutputs(memory, &.{.{ .address = @intFromPtr(destination.ptr), .bytes = source }});
 }
 
 pub fn writeUserValue(memory: UserMemoryContext, destination: usize, value: anytype) bool {
     const T = @TypeOf(value);
-    if (!validateUserRange(memory, destination, @sizeOf(T), @alignOf(T), .write)) return false;
-    if (comptime builtin.target.os.tag == .freestanding) {
-        return user_memory.writeUserMemory(memory.caller_task_id, destination, std.mem.asBytes(&value));
-    }
-    const ptr: *T = @ptrFromInt(destination);
-    ptr.* = value;
-    return true;
+    if (!checkedSpan(destination, @sizeOf(T), @alignOf(T))) return false;
+    return commitOutputs(memory, &.{.{ .address = destination, .bytes = std.mem.asBytes(&value) }});
 }
 
 pub inline fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usize, alignment: usize, access: UserMemoryAccess) bool {
@@ -154,8 +215,7 @@ pub inline fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usi
 
     if (memory.address_space) |address_space| {
         if (comptime builtin.target.os.tag == .freestanding) {
-            const layout = @import("../core/userspace_layout.zig");
-            if (addr >= layout.shared_start and addr < layout.shared_end_exclusive) {
+            if (addr >= userspace_layout.shared_start and addr < userspace_layout.shared_end_exclusive) {
                 return user_memory.validateSharedUserMemory(memory.caller_task_id, addr, len, access == .write);
             }
         }
@@ -230,13 +290,9 @@ pub fn preflightResponse(memory: UserMemoryContext, response_addr: usize, respon
     if (required_size == 0) return null;
     if (response_len < required_size) return .{ .status = .buffer_too_small };
     // Validate the declared span, including any tail beyond the wire response,
-    // consistently with the final write after the operation has completed.
-    if (!validateUserRange(memory, response_addr, response_len, 1, .write)) {
-        return .{ .status = .invalid_response_buffer };
-    }
-    // The required prefix fits the just-validated declared span. Page
-    // preparation still checks the current caller's active mapping ownership.
-    if (!prepareValidatedUserRange(memory, response_addr, required_size, .write)) {
+    // consistently with the final write after the operation has completed,
+    // and materialize only the required prefix.
+    if (!prepareOutput(memory, .{ .address = response_addr, .declared_bytes = response_len, .prepared_bytes = required_size, .alignment = 1 })) {
         return .{ .status = .invalid_response_buffer };
     }
     return null;
@@ -244,22 +300,22 @@ pub fn preflightResponse(memory: UserMemoryContext, response_addr: usize, respon
 
 pub fn writeResponse(memory: UserMemoryContext, response_addr: usize, response_len: usize, value: anytype) DispatchResult {
     const bytes = std.mem.asBytes(&value);
-    // The operation may have changed the caller's memory lifetime; never rely
-    // solely on dispatch's earlier preflight when writing the response.
-    if (preflightResponse(memory, response_addr, response_len, bytes.len)) |failure| return failure;
     if (bytes.len == 0) return success();
-    if (comptime builtin.target.os.tag == .freestanding) {
-        if (!user_memory.writeUserMemory(memory.caller_task_id, response_addr, bytes)) {
-            return .{ .status = .invalid_response_buffer };
-        }
-        return .{ .status = .success, .bytes_written = @intCast(bytes.len) };
+    if (response_len < bytes.len) return .{ .status = .buffer_too_small };
+    if (!admitDeclaredResponse(memory, response_addr, response_len, bytes.len) or
+        !commitOutputs(memory, &.{.{ .address = response_addr, .bytes = bytes }}))
+    {
+        return .{ .status = .invalid_response_buffer };
     }
-    const buffer: [*]u8 = @ptrFromInt(response_addr);
-    @memcpy(buffer[0..bytes.len], bytes);
-    return .{
-        .status = .success,
-        .bytes_written = @intCast(bytes.len),
-    };
+    return .{ .status = .success, .bytes_written = @intCast(bytes.len) };
+}
+
+// The operation may have changed the caller's memory lifetime, so a declared
+// response tail beyond the written bytes is admitted again after it. The
+// written prefix is admitted by the commit that publishes it.
+fn admitDeclaredResponse(memory: UserMemoryContext, response_addr: usize, response_len: usize, written: usize) bool {
+    if (response_len == written) return true;
+    return prepareOutput(memory, .{ .address = response_addr, .declared_bytes = response_len, .prepared_bytes = 0, .alignment = 1 });
 }
 
 pub fn success() DispatchResult {
@@ -270,20 +326,26 @@ pub fn invalidRequest() DispatchResult {
     return .{ .status = .invalid_request_pointer };
 }
 
+// Dispatch admits the header once: the trap opcode, no flags or reserved
+// bits, and the trap caller as subject. The header never selects identity.
+pub inline fn admitsHeader(header: abi.RequestHeader, opcode: u16, caller_task_id: u64) bool {
+    return header.admits(opcode) and header.subject_task_id == caller_task_id;
+}
+
 pub fn invokeAndWriteResponse(
     comptime operation: abi.NativeOperation,
     port: *component_port.KernelPort,
     memory: UserMemoryContext,
     now_ticks: u64,
-    request_addr: usize,
+    request: []align(8) const u8,
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    const request = readRequest(component_port.SyscallWireRequest(operation), memory, request_addr) orelse return invalidRequest();
-    if (comptime @hasField(@TypeOf(request), "reserved")) {
-        if (!std.mem.allEqual(u8, &request.reserved, 0)) return invalidRequest();
+    const wire = decode(component_port.SyscallWireRequest(operation), request);
+    if (comptime @hasField(@TypeOf(wire), "reserved")) {
+        if (!std.mem.allEqual(u8, &wire.reserved, 0)) return invalidRequest();
     }
-    const response = component_port.invokeGeneratedFromValidatedSyscall(operation, port, request, now_ticks) catch |err| return mapError(err);
+    const response = component_port.invokeGenerated(operation, port, wire, now_ticks) catch |err| return mapError(err);
     return writeResponse(memory, response_addr, response_len, response);
 }
 
@@ -292,14 +354,14 @@ pub fn invokeNoResponse(
     port: *component_port.KernelPort,
     memory: UserMemoryContext,
     now_ticks: u64,
-    request_addr: usize,
+    request: []align(8) const u8,
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
+    _ = memory;
     _ = response_addr;
     _ = response_len;
-    const request = readRequest(component_port.SyscallWireRequest(operation), memory, request_addr) orelse return invalidRequest();
-    _ = component_port.invokeGeneratedFromValidatedSyscall(operation, port, request, now_ticks) catch |err| return mapError(err);
+    _ = component_port.invokeGenerated(operation, port, decode(component_port.SyscallWireRequest(operation), request), now_ticks) catch |err| return mapError(err);
     return success();
 }
 
@@ -360,7 +422,6 @@ pub inline fn defaultDenialReasonForStatus(status: abi.SyscallStatus) abi.Denial
         .success => .none,
         .unavailable,
         .unsupported_operation,
-        .unsupported_abi_version,
         .internal_error,
         => .unsupported_operation,
         .invalid_request_pointer,
@@ -379,7 +440,6 @@ pub inline fn defaultDenialReasonForStatus(status: abi.SyscallStatus) abi.Denial
 pub fn mapError(err: anyerror) DispatchResult {
     if (err == error.InvalidRequestFlags) return invalidRequest();
     if (err == error.PeerClosed) return .{ .status = .peer_closed, .denial_reason = .invalid_target };
-    if (err == error.UnsupportedAbiVersion) return .{ .status = .unsupported_abi_version };
     if (err == error.ReceiveBufferTooSmall) return .{ .status = .buffer_too_small };
     if (err == error.UnexpectedOperation) return .{
         .status = .unsupported_operation,
@@ -487,18 +547,17 @@ test "user slice copies enforce source and destination bounds" {
     const memory = UserMemoryContext{ .address_space = null };
     const payload = "endpoint-payload";
     var copied_buffer: [32]u8 = undefined;
-    const copied = copyUserSlice(memory, payload, &copied_buffer).?;
+    const copied = copyUserBytes(memory, @intFromPtr(payload.ptr), payload.len, &copied_buffer).?;
 
     try std.testing.expectEqualStrings(payload, copied);
-    try std.testing.expect(copyUserSlice(memory, payload, copied_buffer[0 .. payload.len - 1]) == null);
+    try std.testing.expect(copyUserBytes(memory, @intFromPtr(payload.ptr), payload.len, copied_buffer[0 .. payload.len - 1]) == null);
 
     var destination: [32]u8 = undefined;
     try std.testing.expect(copyToUser(memory, &destination, payload));
     try std.testing.expectEqualStrings(payload, destination[0..payload.len]);
     try std.testing.expect(!copyToUser(memory, destination[0 .. payload.len - 1], payload));
 
-    const invalid_ptr: [*]const u8 = @ptrFromInt(0x1000);
-    try std.testing.expect(copyUserSlice(memory, invalid_ptr[0..1], &copied_buffer) == null);
+    try std.testing.expect(copyUserBytes(memory, 0x1000, 1, &copied_buffer) == null);
 }
 
 test "user range validation resolves the terminal stack mapping directly" {
@@ -590,7 +649,7 @@ test "response preflight validates unused tails and publication rechecks current
     try std.testing.expect(preflightResponse(memory, 0, 0, 0) == null);
 }
 
-test "compact syscall result normalization preserves all 13 status scalars" {
+test "compact syscall result normalization preserves all 12 status scalars" {
     const cases = [_]struct { status: abi.SyscallStatus, reason: abi.DenialReason }{
         .{ .status = .success, .reason = .none },
         .{ .status = .unavailable, .reason = .unsupported_operation },
@@ -598,7 +657,6 @@ test "compact syscall result normalization preserves all 13 status scalars" {
         .{ .status = .invalid_response_buffer, .reason = .invalid_target },
         .{ .status = .buffer_too_small, .reason = .budget_exhausted },
         .{ .status = .unsupported_operation, .reason = .unsupported_operation },
-        .{ .status = .unsupported_abi_version, .reason = .unsupported_operation },
         .{ .status = .denied, .reason = .policy_denied },
         .{ .status = .not_found, .reason = .invalid_target },
         .{ .status = .conflict, .reason = .budget_exhausted },
@@ -606,12 +664,12 @@ test "compact syscall result normalization preserves all 13 status scalars" {
         .{ .status = .would_block, .reason = .budget_exhausted },
         .{ .status = .peer_closed, .reason = .invalid_target },
     };
-    try std.testing.expectEqual(@as(usize, 13), cases.len);
+    try std.testing.expectEqual(@as(usize, 12), cases.len);
     try std.testing.expectEqual(cases.len, @typeInfo(abi.SyscallStatus).@"enum".field_names.len);
     try std.testing.expectEqual(@as(usize, 12), @sizeOf(DispatchResult));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(DispatchResult));
-    try std.testing.expectEqual(@as(usize, 744), @sizeOf(DispatchDiagnostics));
-    try std.testing.expectEqual(@as(usize, 760), @sizeOf(DetailedDispatchResult));
+    try std.testing.expectEqual(@as(usize, 512), @sizeOf(DispatchDiagnostics));
+    try std.testing.expectEqual(@as(usize, 528), @sizeOf(DetailedDispatchResult));
     for (cases, 0..) |case, index| {
         const bytes: u32 = std.math.maxInt(u32) - @as(u32, @intCast(index));
         const input = DispatchResult{ .status = case.status, .bytes_written = bytes };
@@ -634,7 +692,7 @@ test "compact syscall result normalization preserves all 13 status scalars" {
     }
 }
 
-test "compact syscall result retains all 42 error mappings and unknown fallback" {
+test "compact syscall result retains all 41 error mappings and unknown fallback" {
     const cases = [_]struct {
         err: anyerror,
         status: abi.SyscallStatus,
@@ -643,7 +701,6 @@ test "compact syscall result retains all 42 error mappings and unknown fallback"
     }{
         .{ .err = error.InvalidRequestFlags, .status = .invalid_request_pointer, .reason = .none, .normalized_reason = .invalid_target },
         .{ .err = error.PeerClosed, .status = .peer_closed, .reason = .invalid_target },
-        .{ .err = error.UnsupportedAbiVersion, .status = .unsupported_abi_version, .reason = .none, .normalized_reason = .unsupported_operation },
         .{ .err = error.ReceiveBufferTooSmall, .status = .buffer_too_small, .reason = .none, .normalized_reason = .budget_exhausted },
         .{ .err = error.UnexpectedOperation, .status = .unsupported_operation, .reason = .unsupported_operation },
         .{ .err = error.PermissionDenied, .status = .denied, .reason = .policy_denied },
@@ -684,7 +741,7 @@ test "compact syscall result retains all 42 error mappings and unknown fallback"
         .{ .err = error.PeerNotConnected, .status = .conflict, .reason = .budget_exhausted },
         .{ .err = error.VersionMismatch, .status = .conflict, .reason = .budget_exhausted },
     };
-    try std.testing.expectEqual(@as(usize, 42), cases.len);
+    try std.testing.expectEqual(@as(usize, 41), cases.len);
     for (cases) |case| {
         const actual = mapError(case.err);
         try std.testing.expectEqualDeep(DispatchResult{
@@ -880,7 +937,8 @@ test "compact syscall diagnostics match five frozen complete old results" {
             .operation = Text.bytes(debug_contract.MAX_LABEL_BYTES, golden.operation),
             .detail_len = @intCast(golden.required_authority.len),
             .detail = Text.bytes(debug_contract.MAX_DETAIL_BYTES, golden.required_authority),
-            .denial = expected_explanation,
+            .denial_reason = expected_explanation.reason,
+            .denial_fingerprint = expected_explanation.fingerprint,
         };
         // Seed nonempty fields so success and repeated calls must overwrite
         // caller storage, including all label tails and optional/default IDs.
@@ -891,7 +949,8 @@ test "compact syscall diagnostics match five frozen complete old results" {
         describeResultInto(result, golden.operation, golden.required_authority, golden.caller_task_id, golden.target_id, 19, &actual);
         try std.testing.expectEqualDeep(expected_explanation, actual.explanation);
         try std.testing.expectEqualDeep(expected_provenance, actual.provenance);
-        try std.testing.expectEqualDeep(actual.explanation, actual.provenance.denial);
+        try std.testing.expectEqual(actual.explanation.reason, actual.provenance.denial_reason);
+        try std.testing.expectEqual(actual.explanation.fingerprint, actual.provenance.denial_fingerprint);
         var explanation_render: [512]u8 = undefined;
         var provenance_render: [512]u8 = undefined;
         try std.testing.expectEqualStrings(golden.explanation_render, actual.explanation.render(&explanation_render));

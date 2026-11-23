@@ -13,13 +13,9 @@ const units = @import("../core/units.zig");
 pub const Error = native_kernel.Error || error{
     UnexpectedOperation,
     SubjectTaskRequired,
-    UnsupportedAbiVersion,
     InvalidRequestFlags,
 };
 const TEST_PORT_TASK_BYTES: usize = 512;
-pub const PREVALIDATED_SYSCALL_HEADER_RECHECKS: u8 = 0;
-pub const ATTACHED_CAPABILITY_PRECHECKS_PER_SEND: u8 = 0;
-pub const SUBJECT_TASK_PRECHECKS_PER_CALL: u8 = 0;
 
 pub const TaskCreateRequest = struct {
     header: abi.RequestHeader,
@@ -145,6 +141,9 @@ pub const DeviceMmioWindowRequest = abi.DeviceMmioWindowWireRequest;
 
 pub const KernelPort = struct {
     kernel: *native_kernel.Kernel,
+    // Set only on syscall dispatch's invocation-local copy: dispatch admitted
+    // the copied header against the trap opcode and caller, which then
+    // replaces the header subject as the calling identity.
     syscall_header_prevalidated: bool = false,
     syscall_caller_task_id: u64 = 0,
 
@@ -452,29 +451,11 @@ pub const KernelPort = struct {
     }
 };
 
-pub const GeneratedWrapper = struct {
-    operation: abi.NativeOperation,
-    request_type_name: []const u8,
-    response_type_name: []const u8,
-    port_method_name: []const u8,
-    port_invocation: operation_metadata.PortInvocation,
-    request_size: usize,
-    wire_response_size: usize,
-};
-
 fn requestTypeForName(comptime type_name: []const u8) type {
     if (!@hasDecl(@This(), type_name)) {
         @compileError("missing component-port request type " ++ type_name);
     }
     return @field(@This(), type_name);
-}
-
-fn wireResponseTypeForName(comptime type_name: []const u8) type {
-    if (std.mem.eql(u8, type_name, "void")) return void;
-    if (!@hasDecl(abi, type_name)) {
-        @compileError("missing syscall ABI response type " ++ type_name);
-    }
-    return @field(abi, type_name);
 }
 
 pub fn PortRequest(comptime operation: abi.NativeOperation) type {
@@ -510,11 +491,6 @@ pub fn SyscallWireRequest(comptime operation: abi.NativeOperation) type {
     };
     abi.syscall_wire.requireScalarWire(Wire);
     return Wire;
-}
-
-pub fn PortWireResponse(comptime operation: abi.NativeOperation) type {
-    const descriptor = comptime operation_metadata.declarationFor(operation);
-    return wireResponseTypeForName(descriptor.binding.response_type_name);
 }
 
 fn assertPortWrapperShape(comptime descriptor: operation_metadata.Descriptor) void {
@@ -562,52 +538,6 @@ pub fn invokeGenerated(
     };
 }
 
-pub fn invokeGeneratedFromValidatedSyscall(
-    comptime operation: abi.NativeOperation,
-    self: *KernelPort,
-    request: PortRequest(operation),
-    now_ticks: u64,
-) PortCallResult(operation) {
-    // Admit the complete copied header once for every generated syscall path.
-    // The trusted Port then skips this same check, without rereading user bytes.
-    try request_header.validateHeader(request.header, abi.opcode(operation));
-    var validated_port = self.*;
-    validated_port.syscall_header_prevalidated = true;
-    return invokeGenerated(operation, &validated_port, request, now_ticks);
-}
-
-fn generatedWrapperFromMetadata(comptime descriptor: operation_metadata.Descriptor) GeneratedWrapper {
-    assertPortWrapperShape(descriptor);
-    const Request = requestTypeForName(descriptor.binding.request_type_name);
-    const Response = wireResponseTypeForName(descriptor.binding.response_type_name);
-    return .{
-        .operation = descriptor.operation,
-        .request_type_name = descriptor.binding.request_type_name,
-        .response_type_name = descriptor.binding.response_type_name,
-        .port_method_name = descriptor.binding.port_method_name,
-        .port_invocation = descriptor.binding.port_invocation,
-        .request_size = @sizeOf(Request),
-        .wire_response_size = if (Response == void) 0 else @sizeOf(Response),
-    };
-}
-
-fn buildGeneratedWrappers() [operation_metadata.operations.len]GeneratedWrapper {
-    var table: [operation_metadata.operations.len]GeneratedWrapper = undefined;
-    inline for (operation_metadata.operations, 0..) |descriptor, index| {
-        table[index] = generatedWrapperFromMetadata(descriptor);
-    }
-    return table;
-}
-
-pub const generated_wrappers = buildGeneratedWrappers();
-
-pub fn generatedWrapperFor(comptime operation: abi.NativeOperation) GeneratedWrapper {
-    inline for (generated_wrappers) |wrapper| {
-        if (wrapper.operation == operation) return wrapper;
-    }
-    @compileError("missing generated KernelPort wrapper for " ++ @tagName(operation));
-}
-
 pub fn makeHeader(operation: abi.NativeOperation, subject_task_id: u64) abi.RequestHeader {
     return request_header.makeHeader(abi.opcode(operation), subject_task_id);
 }
@@ -616,22 +546,6 @@ fn validateHeader(header: abi.RequestHeader, comptime expected: abi.NativeOperat
     const descriptor = operation_metadata.declarationFor(expected);
     try request_header.validateHeader(header, abi.opcode(descriptor.operation));
     if (header.subject_task_id == 0) return error.SubjectTaskRequired;
-}
-
-test "kernel port generated wrappers cover operation metadata" {
-    try std.testing.expectEqual(operation_metadata.operations.len, generated_wrappers.len);
-    inline for (operation_metadata.operations) |descriptor| {
-        const wrapper = generatedWrapperFor(descriptor.operation);
-        try std.testing.expectEqual(descriptor.operation, wrapper.operation);
-        try std.testing.expectEqualStrings(descriptor.binding.request_type_name, wrapper.request_type_name);
-        try std.testing.expectEqualStrings(descriptor.binding.response_type_name, wrapper.response_type_name);
-        try std.testing.expectEqualStrings(descriptor.binding.port_method_name, wrapper.port_method_name);
-        try std.testing.expectEqual(descriptor.binding.port_invocation, wrapper.port_invocation);
-        try std.testing.expectEqual(@sizeOf(PortRequest(descriptor.operation)), wrapper.request_size);
-        const Response = PortWireResponse(descriptor.operation);
-        try std.testing.expectEqual(if (Response == void) @as(usize, 0) else @sizeOf(Response), wrapper.wire_response_size);
-    }
-    try std.testing.expectEqual(operation_metadata.PortInvocation.with_now_ticks, generatedWrapperFor(.capability_derive).port_invocation);
 }
 
 test "endpoint send wire decoding publishes only a validated local snapshot" {
@@ -788,7 +702,6 @@ test "kernel port enforces operation ids and forwards typed task create requests
             .launch = .{
                 .boundary = .userspace_process,
                 .image_id = 10,
-                .component_abi_version = 1,
                 .signed = true,
                 .bundle_id = "app.example.port-test",
             },
@@ -863,7 +776,6 @@ test "kernel port validates and forwards typed device broker requests" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 18,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.storage-driver",
         },

@@ -12,11 +12,9 @@ else
 
 pub const MAX_DEVICES: usize = 4;
 pub const MAX_DEVICE_MMIO_WINDOWS: usize = 4;
-pub const EXPOSES_REGISTERED_MMIO_WINDOWS = true;
 pub const MAX_DMA_WINDOWS: usize = 8;
 pub const MAX_DMA_PROGRAMS: usize = MAX_DEVICES * 2;
 pub const HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING = true;
-pub const COMPACT_DMA_WINDOW_COUNTS = true;
 pub const DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES: usize = 3_408;
 pub const DMA_PROGRAM_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 
@@ -1299,7 +1297,6 @@ test "DMA program state uses on-demand freestanding backing" {
     try std.testing.expect(HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING);
     try std.testing.expect(dma_program_backing_layout.heap_backs_state_on_freestanding);
     try std.testing.expectEqual(@as(usize, 8), dma_program_backing_layout.freestanding_handle_size_bytes);
-    try std.testing.expect(COMPACT_DMA_WINDOW_COUNTS);
     try std.testing.expectEqual(DmaWindowCount, @FieldType(DmaProgramSlot, "window_count"));
     try std.testing.expectEqual(DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES, dma_program_backing_layout.backing_size_bytes);
     try std.testing.expectEqual(

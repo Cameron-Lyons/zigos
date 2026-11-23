@@ -2359,7 +2359,6 @@ test "task-first compositor flow persists app-linked task views and audit state"
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 70_001,
-            .component_abi_version = abi.ABI_VERSION,
             .signed = true,
             .bundle_id = "app.viewer",
         },

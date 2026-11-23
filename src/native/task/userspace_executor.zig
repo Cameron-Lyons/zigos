@@ -71,6 +71,9 @@ else
     };
 const include_verification_evidence = kernel_config.includesVerificationEvidence();
 const NxProbeTarget = if (include_verification_evidence) u64 else void;
+// Only verification images consume the last user page-fault observation.
+const FaultObservationWord = if (include_verification_evidence) u64 else void;
+const FaultObservationCode = if (include_verification_evidence) u32 else void;
 
 // Keep resident invariant diagnostics in one immutable blob. Compile-time
 // concatenation preserves its address with the pinned compiler; independently
@@ -393,16 +396,6 @@ pub const TRAP_STACK_TOTAL_BYTES: usize = TRAP_STACK_GUARD_BYTES + TRAP_STACK_US
 
 const TRAP_STACK_PAINT_PATTERN: u32 = 0x57ACC0DE;
 const MAPPING_INDEX_CAPACITY: usize = task_runtime.MAX_TASKS * 2;
-pub const USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH: u8 = 1;
-pub const STATIC_HANDOFF_STACK_INSTALLS_PER_BIND: u8 = 1;
-pub const STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS: u8 = 0;
-pub const STEADY_MAPPING_INDEX_LOOKUPS_PER_DISPATCH: u8 = 0;
-pub const COLD_MAPPING_LINEAR_SLOT_SCANS: u8 = 0;
-pub const STEADY_RETIREMENT_SLOT_SCANS_PER_DISPATCH: u8 = 0;
-pub const RETIREMENT_MAPPING_HANDLE_RELOOKUPS: u8 = 0;
-pub const UNRELATED_CAPABILITY_MUTATION_AUTHORITY_SCANS: u8 = 0;
-pub const UNCHANGED_RESUME_KERNEL_MAILBOX_FIELD_WRITES_PER_DISPATCH: u8 = 0;
-pub const MAPPING_RELEASE_RESOLUTION_RELOOKUPS: u8 = 0;
 const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || freestanding.paging.UserMapError || freestanding.paging.UserWriteError || error{
     MappingTableFull,
     ImageExtentInvalid,
@@ -695,9 +688,6 @@ const MappingEntry = struct {
     user_context64: UserContext64 = .{},
     yield_count: u64 = 0,
     last_user_counter: u32 = 0,
-    page_fault_count: u64 = 0,
-    last_fault_address: u64 = 0,
-    last_fault_error_code: u32 = 0,
     mailbox_authority_cache: MailboxAuthorityCache = .{},
     mailbox_publication_cache: MailboxPublicationCache = .{},
     initial_mailbox_prepared: bool = false,
@@ -1125,13 +1115,13 @@ fn readSyscallCopy(context: *anyopaque, claim: *const dispatch_ownership.Claimed
     return true;
 }
 
-inline fn outputRangeGeometry(range: syscall_broker.OutputRange) bool {
-    if (range.prepared_bytes > range.declared_bytes or range.prepared_bytes > 88) return false;
+// The owned-output resolver materializes at most one inline message per
+// destination; larger outputs fail closed before any operation.
+inline fn outputRangeGeometry(range: syscall_dispatch.OutputRange) bool {
+    if (range.prepared_bytes > range.declared_bytes or range.prepared_bytes > @import("../core/abi.zig").ENDPOINT_INLINE_BYTES) return false;
     if (range.declared_bytes == 0) return true;
-    if (range.alignment == 0 or !std.math.isPowerOfTwo(range.alignment) or
-        range.address < 0x10000 or range.address % range.alignment != 0) return false;
-    const end = std.math.add(usize, range.address, range.declared_bytes) catch return false;
-    return end <= 0x0000_8000_0000_0000;
+    return range.alignment != 0 and std.math.isPowerOfTwo(range.alignment) and
+        syscall_dispatch.checkedSpan(range.address, range.declared_bytes, range.alignment);
 }
 
 inline fn privateCopyMetadata(executor: *Executor, claim: *const dispatch_ownership.ClaimedSyscall, address: usize, bytes: usize) bool {
@@ -1141,7 +1131,7 @@ inline fn privateCopyMetadata(executor: *Executor, claim: *const dispatch_owners
     return syscall_dispatch.validateUserRange(.{ .address_space = record, .caller_task_id = claim.bound.identity.task_id }, address, bytes, 1, .write);
 }
 
-fn prepareSyscallOutput(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, range: syscall_broker.OutputRange) bool {
+fn prepareSyscallOutput(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, range: syscall_dispatch.OutputRange) bool {
     const anchor: *Executor = @ptrCast(@alignCast(context));
     const enabled = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
     const kernel_active = if (comptime builtin.target.os.tag == .freestanding) freestanding.paging.kernelAddressSpaceActive() else true;
@@ -1181,29 +1171,25 @@ fn resolveSyscallOutputInto(anchor: *Executor, resolved: *const SyscallCopyMappi
     return if (builtin.is_test) SyscallCopyTesting.resolveInto(space, address, bytes, out, count) else false;
 }
 
-inline fn byteRangesOverlap(first: usize, first_len: usize, second: usize, second_len: usize) bool {
-    return first < second + second_len and second < first + first_len;
-}
-
-fn writeSyscallOutputs(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, outputs: []const syscall_broker.Output) bool {
+fn writeSyscallOutputs(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, outputs: []const syscall_dispatch.Output) bool {
     const anchor: *Executor = @ptrCast(@alignCast(context));
     const enabled = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
     const kernel_active = if (comptime builtin.target.os.tag == .freestanding) freestanding.paging.kernelAddressSpaceActive() else true;
     var resolved: SyscallCopyMapping = undefined;
-    if (!syscallCopyMappingInto(anchor, claim, enabled, kernel_active, &resolved) or outputs.len > syscall_broker.MAX_OUTPUTS) return false;
+    if (!syscallCopyMappingInto(anchor, claim, enabled, kernel_active, &resolved) or outputs.len > syscall_dispatch.MAX_OUTPUTS) return false;
     var total: usize = 0;
     // Reject all geometry before even preparing a shared absent leaf.
     for (outputs, 0..) |output, index| {
         if (!outputRangeGeometry(.{ .address = output.address, .declared_bytes = output.bytes.len, .prepared_bytes = output.bytes.len, .alignment = 1 })) return false;
         total += output.bytes.len;
-        if (total > syscall_broker.MAX_OUTPUT_BYTES) return false;
+        if (total > syscall_dispatch.MAX_OUTPUT_BYTES) return false;
         if (output.bytes.len == 0) continue;
         for (outputs[0..index]) |previous| {
-            if (previous.bytes.len != 0 and byteRangesOverlap(output.address, output.bytes.len, previous.address, previous.bytes.len)) return false;
+            if (syscall_dispatch.spansOverlap(output.address, output.bytes.len, previous.address, previous.bytes.len)) return false;
         }
     }
     const Commit = struct { address: usize, bytes: []const u8 };
-    var commits: [2 * syscall_broker.MAX_OUTPUTS]Commit = undefined;
+    var commits: [2 * syscall_dispatch.MAX_OUTPUTS]Commit = undefined;
     var count: usize = 0;
     for (outputs) |output| {
         if (output.bytes.len == 0) continue;
@@ -1213,7 +1199,7 @@ fn writeSyscallOutputs(context: *anyopaque, claim: *const dispatch_ownership.Cla
         var offset: usize = 0;
         for (segments[0..segment_count]) |segment| {
             for (commits[0..count]) |previous| {
-                if (byteRangesOverlap(segment.address, segment.bytes, previous.address, previous.bytes.len)) return false;
+                if (syscall_dispatch.spansOverlap(segment.address, segment.bytes, previous.address, previous.bytes.len)) return false;
             }
             commits[count] = .{ .address = segment.address, .bytes = output.bytes[offset..][0..segment.bytes] };
             count += 1;
@@ -1322,21 +1308,31 @@ pub fn readUserMemory(caller_task_id: u64, addr: usize, destination: []u8) bool 
     return true;
 }
 
-pub fn writeUserMemory(caller_task_id: u64, addr: usize, source: []const u8) bool {
+// Prepare every destination, including shared-window aliases, before the
+// first byte is written, so a failed output leaves the others untouched.
+pub fn writeUserOutputs(caller_task_id: u64, outputs: []const syscall_dispatch.Output) bool {
     if (comptime builtin.target.os.tag != .freestanding) return false;
-    if (sharedUserAddress(addr)) {
-        const executor = serializedSharedMemoryExecutor(x86.interruptsEnabled()) orelse return false;
-        const memory = sharedUserMemoryAuthority(executor, caller_task_id, addr, source.len, true) orelse return false;
-        const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, source.len, true) orelse return false;
-        const destination: [*]u8 = @ptrFromInt(alias);
-        @memcpy(destination[0..source.len], source);
-        return true;
-    }
+    if (outputs.len > syscall_dispatch.MAX_OUTPUTS) return false;
     const executor = currentRegisteredExecutor() orelse return false;
     const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return false;
     const space = &mapping.address_space.?;
-    if (!demand_paging.prepareUserRange(space, addr, source.len, true)) return false;
-    freestanding.paging.writeOwnedUserRange(space, addr, source) catch return false;
+    var shared_aliases: [syscall_dispatch.MAX_OUTPUTS]?usize = @splat(null);
+    for (outputs, 0..) |output, index| {
+        if (output.bytes.len == 0) continue;
+        if (sharedUserAddress(output.address)) {
+            const shared = serializedSharedMemoryExecutor(x86.interruptsEnabled()) orelse return false;
+            const memory = sharedUserMemoryAuthority(shared, caller_task_id, output.address, output.bytes.len, true) orelse return false;
+            shared_aliases[index] = demand_paging.prepareSharedUserRange(memory.space, memory.authority, output.address, output.bytes.len, true) orelse return false;
+        } else if (!demand_paging.prepareUserRange(space, output.address, output.bytes.len, true)) return false;
+    }
+    for (outputs, shared_aliases[0..outputs.len]) |output, shared_alias| {
+        if (output.bytes.len == 0) continue;
+        if (shared_alias) |alias| {
+            @memcpy(@as([*]u8, @ptrFromInt(alias))[0..output.bytes.len], output.bytes);
+        } else {
+            freestanding.paging.writeOwnedUserRange(space, output.address, output.bytes) catch return false;
+        }
+    }
     return true;
 }
 
@@ -1352,7 +1348,7 @@ pub fn proveSharedSyscallCopyPath() bool {
     const abi = @import("../core/abi.zig");
     const dispatch = @import("../kernel_api/syscall_dispatch.zig");
     const endpoint = @import("../kernel_api/endpoint.zig");
-    const endpoint_syscalls = @import("../kernel_api/endpoint_syscalls.zig");
+    const surface = @import("../kernel_api/syscall_surface.zig");
     const component_port = @import("../kernel_api/component_port.zig");
     const native_kernel = @import("../kernel_api/native_kernel.zig");
     const page_table = @import("../../kernel/memory/page_table64.zig");
@@ -1482,7 +1478,7 @@ pub fn proveSharedSyscallCopyPath() bool {
                 @atomicStore(page_table.Entry, forged_slot.?, forged, .release);
             }
             defer if (forged_slot) |slot| @atomicStore(page_table.Entry, slot, original, .release);
-            const result = endpoint_syscalls.dispatchEndpointRecv(self.port, memory, 12, self.aliases[1] + request_offset, response, response_len);
+            const result = surface.dispatchWith(self.port, memory, 12, abi.opcode(.endpoint_recv), self.aliases[1] + request_offset, response, response_len);
             const expected = if (which == .short_response or which == .short_payload)
                 abi.SyscallStatus.buffer_too_small
             else
@@ -1521,7 +1517,7 @@ pub fn proveSharedSyscallCopyPath() bool {
                 .flags = abi.ENDPOINT_SEND_MOVE_ATTACHMENT,
             };
             if (!dispatch.writeUserValue(sender_memory, self.aliases[0] + request_offset, request)) return fail("shared endpoint send request");
-            const sent = endpoint_syscalls.dispatchEndpointSend(self.port, sender_memory, 11, self.aliases[0] + request_offset, 0, 0);
+            const sent = surface.dispatchWith(self.port, sender_memory, 11, abi.opcode(.endpoint_send), self.aliases[0] + request_offset, 0, 0);
             self.port.syscall_caller_task_id = 0;
             if (sent.status != .success or sent.bytes_written != 0 or
                 self.tasks[0].hasCapability(self.gift_id) or self.capabilities.query(self.gift_id) == null or
@@ -1543,7 +1539,7 @@ pub fn proveSharedSyscallCopyPath() bool {
             @memcpy(self.saved, self.backing);
             const grants_before = self.capabilities.activeCount();
             const receiver_grants = self.tasks[1].capability_count;
-            const received = endpoint_syscalls.dispatchEndpointRecv(self.port, memory, 13, self.aliases[1] + request_offset, self.aliases[1] + response_offset, @sizeOf(abi.EndpointRecvResponse));
+            const received = surface.dispatchWith(self.port, memory, 13, abi.opcode(.endpoint_recv), self.aliases[1] + request_offset, self.aliases[1] + response_offset, @sizeOf(abi.EndpointRecvResponse));
             const response = dispatch.readUserValue(abi.EndpointRecvResponse, memory, self.aliases[1] + response_offset) orelse return false;
             const attached = dispatch.readUserValue(abi.CapabilityDescriptor, memory, self.aliases[1] + capability_offset) orelse return false;
             const copied = dispatch.readUserValue([payload_bytes]u8, memory, self.aliases[1] + payload_offset) orelse return false;
@@ -1568,7 +1564,7 @@ pub fn proveSharedSyscallCopyPath() bool {
             const generation = self.tasks[1].capabilityGeneration();
             const sender_generation = self.tasks[0].capabilityGeneration();
             const grant_generation = self.capabilities.mutationGeneration();
-            const empty = endpoint_syscalls.dispatchEndpointRecv(self.port, memory, 14, self.aliases[1] + request_offset, self.aliases[1] + response_offset, @sizeOf(abi.EndpointRecvResponse));
+            const empty = surface.dispatchWith(self.port, memory, 14, abi.opcode(.endpoint_recv), self.aliases[1] + request_offset, self.aliases[1] + response_offset, @sizeOf(abi.EndpointRecvResponse));
             const empty_response = dispatch.readUserValue(abi.EndpointRecvResponse, memory, self.aliases[1] + response_offset) orelse return false;
             if (empty.status != .success or empty.bytes_written != @sizeOf(abi.EndpointRecvResponse) or
                 !std.meta.eql(empty_response, std.mem.zeroes(abi.EndpointRecvResponse)) or
@@ -1604,7 +1600,7 @@ pub fn proveSharedSyscallCopyPath() bool {
                 .flags = abi.ENDPOINT_SEND_MOVE_ATTACHMENT,
             };
             if (!dispatch.writeUserValue(late_sender, self.aliases[0] + request_offset, late_request)) return false;
-            const late_sent = endpoint_syscalls.dispatchEndpointSend(self.port, late_sender, 20, self.aliases[0] + request_offset, 0, 0);
+            const late_sent = surface.dispatchWith(self.port, late_sender, 20, abi.opcode(.endpoint_send), self.aliases[0] + request_offset, 0, 0);
             if (late_sent.status != .success or self.tasks[0].hasCapability(expired.id) or
                 self.capabilities.query(expired.id) == null or !self.endpoints.hasPendingForTask(ids.task(self.tasks[1].id)) or
                 (self.endpoints.descriptor(self.destination) catch return false).queued_messages != 1)
@@ -1617,7 +1613,7 @@ pub fn proveSharedSyscallCopyPath() bool {
             @memcpy(before_ids[0..self.tasks[1].capability_count], self.tasks[1].capabilityIds());
             const before_generation = self.tasks[1].capabilityGeneration();
             const before_count = self.capabilities.activeCount();
-            const failed_transfer = endpoint_syscalls.dispatchEndpointRecv(self.port, late_receiver, 31, self.aliases[1] + request_offset, self.aliases[1] + response_offset, @sizeOf(abi.EndpointRecvResponse));
+            const failed_transfer = surface.dispatchWith(self.port, late_receiver, 31, abi.opcode(.endpoint_recv), self.aliases[1] + request_offset, self.aliases[1] + response_offset, @sizeOf(abi.EndpointRecvResponse));
             if (failed_transfer.status != .denied or failed_transfer.denial_reason != .capability_revoked or failed_transfer.bytes_written != 0 or
                 !std.mem.eql(u8, self.saved, self.backing) or self.capabilities.query(expired.id) != null or
                 self.capabilities.activeCount() != before_count - 1 or self.tasks[1].capability_count != receiver_grants + 1 or
@@ -1810,7 +1806,7 @@ pub fn proveSharedSyscallCopyPath() bool {
         if (dispatch.writeResponse(owner_context, owner_address, bytes.len, bytes).status != .invalid_response_buffer or
             dispatch.readUserValue([32]u8, owner_context, owner_address) != null) return false;
         const grants_after = capabilities.activeCount();
-        const stale = endpoint_syscalls.dispatchEndpointSend(&port, stale_memory, 32, aliases[0], 0, 0);
+        const stale = surface.dispatchWith(&port, stale_memory, 32, abi.opcode(.endpoint_send), aliases[0], 0, 0);
         port.syscall_caller_task_id = 0;
         if (stale.status != .invalid_request_pointer or stale.bytes_written != 0 or capabilities.activeCount() != grants_after or
             (endpoints.descriptor(target.id) catch return false).queued_messages != 0 or endpoints.hasPendingForTask(ids.task(tasks[1].id)))
@@ -1821,11 +1817,6 @@ pub fn proveSharedSyscallCopyPath() bool {
     executor.active_mapping = null;
     executor.reset();
     return freestanding.paging.frameStats().allocated == baseline and x86.readCr3() == kernel_cr3;
-}
-
-pub fn activeTaskId() u64 {
-    const executor = currentRegisteredExecutor() orelse return 0;
-    return executor.activeTaskId();
 }
 
 pub const Executor = struct {
@@ -1847,11 +1838,10 @@ pub const Executor = struct {
     last_yield_disposition: userspace_bootstrap_mailbox.YieldDisposition = .runnable,
     last_yield_ui_revision: u64 = 0,
     last_user_exception: ?UserException = null,
-    last_fault_task_id: u64 = 0,
-    last_fault_address_space_id: u64 = 0,
-    last_fault_address: u64 = 0,
-    last_fault_error_code: u32 = 0,
-    user_page_fault_count: u64 = 0,
+    last_fault_task_id: FaultObservationWord = if (include_verification_evidence) 0 else {},
+    last_fault_address_space_id: FaultObservationWord = if (include_verification_evidence) 0 else {},
+    last_fault_address: FaultObservationWord = if (include_verification_evidence) 0 else {},
+    last_fault_error_code: FaultObservationCode = if (include_verification_evidence) 0 else {},
     active_nx_probe_target: NxProbeTarget = if (include_verification_evidence) 0 else {},
     mappings: MappingArenaBacking = if (heap_backed_mappings) null else MappingArena.init(),
     group_spaces: [GROUP_SPACE_COUNT]?freestanding.paging.UserAddressSpace = @splat(null),
@@ -2147,8 +2137,8 @@ pub const Executor = struct {
         defer if (comptime builtin.target.os.tag == .freestanding) {
             if (restore_interrupts) x86.sti();
         };
-        if (self.last_fault_address_space_id == event.address_space_id) {
-            self.clearUserPageFaultObservation();
+        if (comptime include_verification_evidence) {
+            if (self.last_fault_address_space_id == event.address_space_id) self.clearUserPageFaultObservation();
         }
         const resolution = self.findMappingWithHandle(event.address_space_id) orelse return;
         const mapping = resolution.entry;
@@ -2216,11 +2206,7 @@ pub const Executor = struct {
         self.handoff_completed = false;
         self.last_trap_counter = 0;
         self.last_user_exception = null;
-        self.last_fault_task_id = 0;
-        self.last_fault_address_space_id = 0;
-        self.last_fault_address = 0;
-        self.last_fault_error_code = 0;
-        self.user_page_fault_count = 0;
+        self.clearUserPageFaultObservation();
         if (comptime include_verification_evidence) self.active_nx_probe_target = 0;
         if (self.registration_cpu) |cpu| {
             if (cpu == cpu_identity.currentIndex()) {
@@ -2236,26 +2222,13 @@ pub const Executor = struct {
         return self.active_task_id;
     }
 
-    pub fn consumeUserPageFault(
-        self: *Executor,
-        task_id: u64,
-        address_space_id: u64,
-        expected_fault_address: u64,
-    ) bool {
-        if (self.last_fault_task_id != task_id) return false;
-        if (self.last_fault_address_space_id != address_space_id) return false;
-        if (self.last_fault_address != expected_fault_address) return false;
-        if ((self.last_fault_error_code & 0x4) == 0) return false;
-        self.clearUserPageFaultObservation();
-        return true;
-    }
-
     pub fn consumeUserExecuteFault(
         self: *Executor,
         task_id: u64,
         address_space_id: u64,
         expected_fault_address: u64,
     ) bool {
+        if (comptime !include_verification_evidence) return false;
         const required = @as(u32, 0x1 | 0x4 | 0x10);
         const forbidden = @as(u32, 0x2);
         if (self.last_fault_task_id != task_id) return false;
@@ -2265,15 +2238,6 @@ pub const Executor = struct {
         if ((self.last_fault_error_code & forbidden) != 0) return false;
         self.clearUserPageFaultObservation();
         return true;
-    }
-
-    pub fn observedUserCounter(
-        self: *Executor,
-        address_space_id: u64,
-        expected_counter: u32,
-    ) bool {
-        const mapping = self.findMapping(address_space_id) orelse return false;
-        return mapping.last_user_counter == expected_counter;
     }
 
     pub fn lastUserException(self: *const Executor) ?UserException {
@@ -3066,6 +3030,7 @@ pub const Executor = struct {
     }
 
     fn clearUserPageFaultObservation(self: *Executor) void {
+        if (comptime !include_verification_evidence) return;
         self.last_fault_task_id = 0;
         self.last_fault_address_space_id = 0;
         self.last_fault_address = 0;
@@ -3632,6 +3597,9 @@ fn mappingDispatchMetadataCompatible(live: MappingDispatchMetadata, expected: Ma
     return std.meta.eql(normalized, expected);
 }
 
+// Only hosted tests observe how often a cache refreshes or revalidates.
+const CacheTestCounter = if (builtin.is_test) u64 else void;
+
 pub const MailboxAuthorityCache = struct {
     authorities: MailboxAuthorities = .{},
     task_id: u64 = 0,
@@ -3639,8 +3607,8 @@ pub const MailboxAuthorityCache = struct {
     table_mutation_generation: u64 = 0,
     resolved_at_ticks: u64 = 0,
     valid_until_ticks: u64 = 0,
-    refresh_count: u64 = 0,
-    revalidation_count: u64 = 0,
+    refresh_count: CacheTestCounter = if (builtin.is_test) 0 else {},
+    revalidation_count: CacheTestCounter = if (builtin.is_test) 0 else {},
     authority_generation: u64 = 0,
     initialized: bool = false,
 };
@@ -3675,12 +3643,12 @@ pub fn resolveMailboxAuthoritiesCached(
         if (cache.table_mutation_generation == table_mutation_generation) return cache.authorities;
         if (cachedMailboxAuthoritiesRemainValid(task, capability_table, now_ticks, cache.authorities)) {
             cache.table_mutation_generation = table_mutation_generation;
-            cache.revalidation_count +|= 1;
+            if (comptime builtin.is_test) cache.revalidation_count +|= 1;
             return cache.authorities;
         }
     }
 
-    const refresh_count = cache.refresh_count +| 1;
+    const refresh_count = if (comptime builtin.is_test) cache.refresh_count +| 1 else {};
     const revalidation_count = cache.revalidation_count;
     const resolution = scanMailboxAuthorities(task, capability_table, now_ticks);
     const authority_generation = if (cache.initialized and std.meta.eql(cache.authorities, resolution.authorities))
@@ -4059,10 +4027,6 @@ inline fn handleUserspacePageFaultWith(frame: *freestanding.isr.InterruptFrame, 
         error_code,
     });
 
-    mapping.page_fault_count += 1;
-    mapping.last_fault_address = faulting_address;
-    mapping.last_fault_error_code = error_code;
-
     if (runtime_owner and hardware.recover(executor, mapping, frame, faulting_address, error_code)) {
         mapping.resume_valid = true;
         captureUserContext64(mapping, frame);
@@ -4373,21 +4337,15 @@ fn captureUserContext64(mapping: *MappingEntry, frame: anytype) void {
 }
 
 fn recordUserPageFault(self: *Executor, task_id: u64, address_space_id: u64, faulting_address: u64, error_code: u32) void {
+    if (comptime !include_verification_evidence) return;
     self.last_fault_task_id = task_id;
     self.last_fault_address_space_id = address_space_id;
     self.last_fault_address = faulting_address;
     self.last_fault_error_code = error_code;
-    self.user_page_fault_count += 1;
 }
 
 fn publishRootActiveTaskId(task_id: u64) void {
-    if (builtin.target.os.tag != .freestanding) {
-        native_entry.current().active_task_id = task_id;
-        return;
-    }
-    if (@hasDecl(root, "publishUserspaceActiveTaskId")) {
-        root.publishUserspaceActiveTaskId(task_id);
-    }
+    native_entry.current().active_task_id = task_id;
 }
 
 fn installTestMappingAt(executor: *Executor, slot_index: usize, mapping: MappingEntry) MappingHandle {
@@ -4422,7 +4380,6 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
     try std.testing.expectEqual(MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES, @sizeOf(MappingDispatchMetadata));
     try std.testing.expect(@sizeOf(MappingEntry) <= MAPPING_ENTRY_SIZE_CEILING_BYTES);
     try std.testing.expect(@sizeOf(MappingArena) <= MAPPING_ARENA_SIZE_CEILING_BYTES);
-    try std.testing.expectEqual(@as(u8, 0), STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS);
     const empty_mapping = MappingEntry{};
     try std.testing.expect(!empty_mapping.mailbox_captured);
 
@@ -4638,7 +4595,6 @@ test "mailbox publication preserves resume state and resets first launch" {
     try std.testing.expectEqual(@as(u64, 108), mailbox.ui_surface_id);
 
     try std.testing.expect(prepareBootstrapMailboxUpdate(0, false, .app_component, 0, 1, 1, 0, .{}) == null);
-    try std.testing.expectEqual(@as(u8, 1), USER_ADDRESS_SPACE_ACTIVATIONS_PER_DISPATCH);
 }
 
 test "mailbox publication cache suppresses unchanged resumed kernel writes" {
@@ -4739,7 +4695,6 @@ test "mailbox publication cache suppresses unchanged resumed kernel writes" {
     try std.testing.expect(unchanged_refreshed_resume == null);
     writeBootstrapMailbox(unchanged_refreshed_resume);
     try std.testing.expectEqual(@as(u64, 2), cache.published_authority_generation);
-    try std.testing.expectEqual(@as(u8, 0), UNCHANGED_RESUME_KERNEL_MAILBOX_FIELD_WRITES_PER_DISPATCH);
 }
 
 test "executor separates service, input, and surface presentation authority" {
@@ -4886,7 +4841,6 @@ test "executor separates service, input, and surface presentation authority" {
     try std.testing.expectEqual(MailboxAuthorities{}, authorities);
     try std.testing.expectEqual(@as(u64, 6), cache.refresh_count);
     try std.testing.expectEqual(@as(u64, 5), cache.authority_generation);
-    try std.testing.expectEqual(@as(u8, 0), UNRELATED_CAPABILITY_MUTATION_AUTHORITY_SCANS);
     try std.testing.expectEqual(@as(u64, 1), nextMailboxAuthorityGeneration(std.math.maxInt(u64)));
 }
 
@@ -5247,7 +5201,6 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
     try std.testing.expect(!reused_handle.eql(retired_handle));
     try std.testing.expect(executor.findMappingByHandle(retired_handle, 42) == null);
     try std.testing.expect(executor.findMappingByHandle(reused_handle, 42) == reused_entry);
-    try std.testing.expectEqual(@as(u8, 0), STEADY_MAPPING_INDEX_LOOKUPS_PER_DISPATCH);
     executor.releaseRetiredMappingAfterHandoff(reused_handle, reused_entry);
     try std.testing.expectEqual(@as(usize, 1), executor.materializedCount());
 }
@@ -5277,7 +5230,6 @@ test "executor defers active address-space retirement until kernel handoff" {
     try std.testing.expectEqual(@as(usize, 0), executor.materializedCount());
     try std.testing.expect(executor.findMapping(42) == null);
     try std.testing.expect(executor.findMappingByHandle(active_handle, 42) == null);
-    try std.testing.expectEqual(@as(u8, 0), STEADY_RETIREMENT_SLOT_SCANS_PER_DISPATCH);
     executor.reset();
 }
 
@@ -5339,7 +5291,6 @@ test "foreign unregistered executor reset preserves metadata and every continuat
         .last_fault_address_space_id = 42,
         .last_fault_address = 0x2000,
         .last_fault_error_code = 7,
-        .user_page_fault_count = 11,
     };
     const expected = executor;
     for (1..cpu_identity.MAX_CPUS) |index| {
@@ -5530,7 +5481,6 @@ test "executor mapping arena enforces capacity and invalidates reused handles" {
     try std.testing.expect(!retired_handle.eql(replacement_handle));
     try std.testing.expect(executor.findMappingByHandle(retired_handle, replacement_address_space_id) == null);
     try std.testing.expect(executor.findMappingByHandle(replacement_handle, replacement_address_space_id) != null);
-    try std.testing.expectEqual(@as(u8, 0), COLD_MAPPING_LINEAR_SLOT_SCANS);
     try std.testing.expectEqual(task_runtime.MAX_TASKS, executor.materializedCount());
 
     executor.reset();
@@ -5542,17 +5492,17 @@ test "executor page-fault observations are scoped to an address-space incarnatio
     var executor = Executor{
         .last_fault_task_id = 7,
         .last_fault_address_space_id = 42,
-        .last_fault_address = 0x7000_0000,
-        .last_fault_error_code = 0x4,
+        .last_fault_address = 0x4000_3000,
+        .last_fault_error_code = 0x15,
     };
 
-    try std.testing.expect(!executor.consumeUserPageFault(7, 43, 0x7000_0000));
-    try std.testing.expect(executor.consumeUserPageFault(7, 42, 0x7000_0000));
+    try std.testing.expect(!executor.consumeUserExecuteFault(7, 43, 0x4000_3000));
+    try std.testing.expect(executor.consumeUserExecuteFault(7, 42, 0x4000_3000));
 
     executor.last_fault_task_id = 7;
     executor.last_fault_address_space_id = 42;
-    executor.last_fault_address = 0x7000_0000;
-    executor.last_fault_error_code = 0x4;
+    executor.last_fault_address = 0x4000_3000;
+    executor.last_fault_error_code = 0x15;
     executor.retireAddressSpace(.{ .address_space_id = 42, .reason = .snapshot_restore });
     try std.testing.expectEqual(@as(u64, 0), executor.last_fault_task_id);
     try std.testing.expectEqual(@as(u64, 0), executor.last_fault_address_space_id);
@@ -6075,7 +6025,7 @@ test "broker mapping domain routes all sixteen colliding handles and retains exa
         const first_payload: [88]u8 = @splat(0x31);
         const second_payload: [64]u8 = @splat(0x62);
         const third_payload: [56]u8 = @splat(0x93);
-        const outputs = [_]syscall_broker.Output{
+        const outputs = [_]syscall_dispatch.Output{
             .{ .address = private_base + PAGE_SIZE - 16, .bytes = &first_payload },
             .{ .address = private_base + PAGE_SIZE + 128, .bytes = &second_payload },
             .{ .address = private_base + 128, .bytes = &third_payload },
@@ -6098,12 +6048,12 @@ test "broker mapping domain routes all sixteen colliding handles and retains exa
         try std.testing.expect(!session.write_outputs(session.context, &claim, &.{ outputs[0], outputs[1], outputs[2], outputs[2] }));
         try std.testing.expect(!session.write_outputs(session.context, &claim, &.{ outputs[0], .{ .address = private_base + 512, .bytes = &first_payload }, .{ .address = private_base + 1024, .bytes = &first_payload } }));
         inline for (.{
-            syscall_broker.OutputRange{ .address = private_base + 1, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 8 },
-            syscall_broker.OutputRange{ .address = private_base, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 3 },
-            syscall_broker.OutputRange{ .address = private_base, .declared_bytes = 64, .prepared_bytes = 65, .alignment = 1 },
-            syscall_broker.OutputRange{ .address = private_base, .declared_bytes = 89, .prepared_bytes = 89, .alignment = 1 },
-            syscall_broker.OutputRange{ .address = std.math.maxInt(usize) - 7, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 1 },
-            syscall_broker.OutputRange{ .address = 0x0000_8000_0000_0000, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 1 },
+            syscall_dispatch.OutputRange{ .address = private_base + 1, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 8 },
+            syscall_dispatch.OutputRange{ .address = private_base, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 3 },
+            syscall_dispatch.OutputRange{ .address = private_base, .declared_bytes = 64, .prepared_bytes = 65, .alignment = 1 },
+            syscall_dispatch.OutputRange{ .address = private_base, .declared_bytes = 89, .prepared_bytes = 89, .alignment = 1 },
+            syscall_dispatch.OutputRange{ .address = std.math.maxInt(usize) - 7, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 1 },
+            syscall_dispatch.OutputRange{ .address = 0x0000_8000_0000_0000, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 1 },
         }) |range| try std.testing.expect(!session.prepare_output(session.context, &claim, range));
         try std.testing.expect(session.prepare_output(session.context, &claim, .{ .address = std.math.maxInt(usize), .declared_bytes = 0, .prepared_bytes = 0, .alignment = 0 }));
         pages.forced_alias_offset = 0;
@@ -6149,7 +6099,7 @@ test "broker mapping domain routes all sixteen colliding handles and retains exa
         try std.testing.expect(!session.prepare_output(session.context, &claim, .{ .address = shared_address, .declared_bytes = object.size_bytes + 1, .prepared_bytes = 16, .alignment = 1 }));
         try std.testing.expectEqual(shared_preparations, pages.preparations);
         const shared_payload: [32]u8 = @splat(0xC4);
-        const shared_outputs = [_]syscall_broker.Output{
+        const shared_outputs = [_]syscall_dispatch.Output{
             .{ .address = shared_address + PAGE_SIZE - 16, .bytes = &shared_payload },
             .{ .address = shared_address + 128, .bytes = &shared_payload },
         };
@@ -6690,7 +6640,7 @@ test "remote user page faults contain locally without registry COW or verificati
                 .state = .live,
                 .address_space_id = 43,
                 .dispatch_metadata = .{ .owner_task_id = 8, .image_id = 42 },
-                .page_fault_count = 11,
+                .yield_count = 11,
             });
             const neighbor = &fixture.executor.mappingArena().?.getByHandle(neighbor_handle).?.mapping;
             const neighbor_before = neighbor.*;
@@ -6710,14 +6660,10 @@ test "remote user page faults contain locally without registry COW or verificati
             try std.testing.expectEqualDeep(context_before, fixture.mapping.user_context64);
             try std.testing.expectEqualDeep(xstate_before, fixture.mapping.owned_xstate.?.*);
             try std.testing.expectEqualDeep(neighbor_before, neighbor.*);
-            try std.testing.expectEqual(@as(u64, 1), fixture.executor.user_page_fault_count);
             try std.testing.expectEqual(@as(u64, 7), fixture.executor.last_fault_task_id);
             try std.testing.expectEqual(@as(u64, 42), fixture.executor.last_fault_address_space_id);
             try std.testing.expectEqual(observer.address, fixture.executor.last_fault_address);
             try std.testing.expectEqual(code, fixture.executor.last_fault_error_code);
-            try std.testing.expectEqual(@as(u64, 1), fixture.mapping.page_fault_count);
-            try std.testing.expectEqual(observer.address, fixture.mapping.last_fault_address);
-            try std.testing.expectEqual(code, fixture.mapping.last_fault_error_code);
             try std.testing.expectEqualDeep(UserException{ .vector = PAGE_FAULT_VECTOR, .error_code = code, .instruction_pointer = frame_before.eip, .fault_address = observer.address }, fixture.executor.last_user_exception.?);
             try std.testing.expect(fixture.executor.handoff_completed);
             try std.testing.expect(!fixture.mapping.resume_valid);
@@ -6752,15 +6698,13 @@ test "user page fault BSP resolution recovery and containment retain their nativ
         if (mode == .resolved) {
             try std.testing.expectEqual(@as(usize, 0), observer.recovery_calls);
             try std.testing.expectEqual(@as(usize, 0), observer.kernel_switches);
-            try std.testing.expectEqual(@as(u64, 0), fixture.executor.user_page_fault_count);
-            try std.testing.expectEqual(@as(u64, 0), fixture.mapping.page_fault_count);
+            try std.testing.expectEqual(@as(u64, 0), fixture.executor.last_fault_task_id);
             try std.testing.expectEqualDeep(frame_before, fixture.frame);
             try fixture.expectNoResume();
         } else {
             try std.testing.expectEqual(@as(usize, 1), observer.recovery_calls);
             try std.testing.expectEqual(@as(usize, 1), observer.kernel_switches);
-            try std.testing.expectEqual(@as(u64, 1), fixture.executor.user_page_fault_count);
-            try std.testing.expectEqual(@as(u64, 1), fixture.mapping.page_fault_count);
+            try std.testing.expect(fixture.executor.last_fault_task_id != 0);
             try std.testing.expect(fixture.executor.handoff_completed);
             try std.testing.expectEqual(@as(u32, 1), native_entry.current().resume_requested);
             if (mode == .recovered) {
@@ -6806,8 +6750,7 @@ test "user page fault kernel fallback precedes local CR2 and owner state access"
             try std.testing.expectEqual(@as(usize, 0), observer.kernel_switches);
             try std.testing.expectEqualDeep(frame_before, fixture.frame);
             try std.testing.expectEqualDeep(entry_before, native_entry.current().*);
-            try std.testing.expectEqual(@as(u64, 0), fixture.executor.user_page_fault_count);
-            try std.testing.expectEqual(@as(u64, 0), fixture.mapping.page_fault_count);
+            try std.testing.expectEqual(@as(u64, 0), fixture.executor.last_fault_task_id);
             try fixture.expectNoResume();
         }
     }
@@ -7899,7 +7842,7 @@ const PreparedDispatchTestFixture = if (builtin.is_test) struct {
             .component_class = .app_component,
             .budget = .{ .cpu_time_ticks = 100, .memory_bytes = 8192, .endpoint_slots = 2, .shared_memory_bytes = 0 },
             .local_only = true,
-            .launch = .{ .boundary = .userspace_process, .image_id = 41, .component_abi_version = 1, .signed = true, .bundle_id = "app.notes" },
+            .launch = .{ .boundary = .userspace_process, .image_id = 41, .signed = true, .bundle_id = "app.notes" },
             .userspace_image = &image,
         });
         const storage = table_backing.alloc(xstate.Storage) orelse return error.OutOfMemory;

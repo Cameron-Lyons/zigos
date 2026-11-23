@@ -11,7 +11,6 @@ pub const Error = policy_mediation.Error || error{
     SubjectTaskRequired,
     SubjectTaskMismatch,
     UnexpectedOperation,
-    UnsupportedAbiVersion,
     InvalidRequestFlags,
 };
 

@@ -165,7 +165,7 @@ test "storage port requires authority context for protected mutations" {
     try std.testing.expectEqual(debug_contract.Decision.denied, read_only_trace.decision);
     try std.testing.expectEqualStrings("storage-put-version", read_only_trace.operationSlice());
     try std.testing.expectEqualStrings("object_write", read_only_trace.detailSlice());
-    try std.testing.expect(read_only_trace.denial.fingerprint != 0);
+    try std.testing.expect(read_only_trace.denial_fingerprint != 0);
 
     var allowed_trace = debug_contract.ProvenanceRecord{};
     const result = try port.putVersion(.{
@@ -193,7 +193,7 @@ test "storage port requires authority context for protected mutations" {
         .label = "denied-task",
     }));
     try std.testing.expectEqual(debug_contract.Decision.denied, scope_trace.decision);
-    try std.testing.expectEqualStrings("task-scope-policy", scope_trace.denial.blockingPolicySlice());
+    try std.testing.expectEqualStrings("task-scope-policy", @import("../../policy/denial_explanation.zig").policyLabel(scope_trace.denial_reason));
 }
 
 test "storage port object-target reads bind to the resolved entry without broadening writes" {
@@ -245,12 +245,12 @@ test "storage port object-target reads bind to the resolved entry without broade
     try std.testing.expectEqual(first.object_id, (try port.openEntry(authority, notes.id.raw(), "first.md", .read)).object_id);
     try std.testing.expectError(error.PermissionDenied, port.openEntry(authority, notes.id.raw(), "sibling.md", .read));
     try std.testing.expectEqual(debug_contract.Decision.denied, trace.decision);
-    try std.testing.expectEqual(@import("../../core/abi.zig").DenialReason.invalid_target, trace.denial.reason);
+    try std.testing.expectEqual(@import("../../core/abi.zig").DenialReason.invalid_target, trace.denial_reason);
     try std.testing.expectEqual(@as(?capability.CapabilityTargetKind, .object), trace.target_kind);
     try std.testing.expectEqual(grant.target.id, trace.target_id);
     try std.testing.expectEqualStrings("object_read", trace.detailSlice());
-    try std.testing.expectEqualStrings("target-routing-policy", trace.denial.blockingPolicySlice());
-    try std.testing.expect(trace.denial.fingerprint != 0);
+    try std.testing.expectEqualStrings("target-routing-policy", @import("../../policy/denial_explanation.zig").policyLabel(trace.denial_reason));
+    try std.testing.expect(trace.denial_fingerprint != 0);
     try std.testing.expectError(error.PermissionDenied, port.openEntry(authority, notes.id.raw(), "first.md", .write));
 
     // An old path binding cannot lend the grant to a replacement object.
@@ -350,7 +350,7 @@ const ObjectReadFixture = struct {
 
     fn expectTargetDenial(self: *const @This(), trace: debug_contract.ProvenanceRecord) !void {
         try std.testing.expectEqual(debug_contract.Decision.denied, trace.decision);
-        try std.testing.expectEqual(@import("../../core/abi.zig").DenialReason.invalid_target, trace.denial.reason);
+        try std.testing.expectEqual(@import("../../core/abi.zig").DenialReason.invalid_target, trace.denial_reason);
         try std.testing.expectEqual(self.first.object_id.raw(), trace.target_id);
         try std.testing.expectEqualStrings("object_read", trace.detailSlice());
     }

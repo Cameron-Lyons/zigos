@@ -57,13 +57,6 @@ pub const Workload = enum {
         };
     }
 
-    pub fn iterationsPerSample(self: Workload, requested: usize) usize {
-        // Hosted mapping metadata advances the ordinary virtual cursor even
-        // after unmap. A fresh fixture per sample stays within its 256 MiB
-        // aperture, including untimed verification and warmup, without resets.
-        return if (self == .shared_memory_map_unmap_pair) @min(requested, 50_000) else requested;
-    }
-
     fn capabilityLifecycle(self: Workload) bool {
         return self == .capability_mint_revoke_pair or self == .capability_mint_move_revoke_cycle;
     }
@@ -71,8 +64,8 @@ pub const Workload = enum {
 
 pub const Strategy = enum { compact, explicit_detailed };
 
-pub fn abiVersion() u16 {
-    return abi.ABI_VERSION;
+pub fn operationCount() usize {
+    return @typeInfo(abi.NativeOperation).@"enum".field_names.len;
 }
 
 const REQUEST_OFFSET = 0;
@@ -407,7 +400,7 @@ pub const Fixture = struct {
             surface.dispatch(port, caller, now_ticks, opcode, request_address, response_address, response_bytes)
         else blk: {
             surface.dispatchDetailedInto(port, caller, now_ticks, opcode, request_address, response_address, response_bytes, &self.detailed);
-            // Pointer+memory barrier: successful744B output remains observable.
+            // Pointer+memory barrier: successful 512 B output remains observable.
             std.mem.doNotOptimizeAway(&self.detailed);
             if (check_full and !std.meta.eql(self.detailed.diagnostics, surface.Diagnostics{})) return error.DiagnosticsMismatch;
             break :blk self.detailed.result;

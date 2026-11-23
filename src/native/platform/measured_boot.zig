@@ -810,7 +810,7 @@ fn removeBuildArtifactEntry(manifest: *BuildArtifactManifest, index: usize) Erro
     manifest.entries[manifest.entry_count] = zeroBuildArtifactEntry();
 }
 
-const CRITICAL_SERVICE_MEASUREMENT_PAYLOAD_BYTES: usize = 64;
+const CRITICAL_SERVICE_MEASUREMENT_PAYLOAD_BYTES: usize = 62;
 const CriticalServiceMeasurementPayload = [CRITICAL_SERVICE_MEASUREMENT_PAYLOAD_BYTES]u8;
 
 fn criticalServiceMeasurementPayload(
@@ -824,7 +824,6 @@ fn criticalServiceMeasurementPayload(
     std.mem.writeInt(u64, payload[48..56], @intCast(image.byte_len), .little);
     std.mem.writeInt(u16, payload[56..58], @backingInt(service.class), .little);
     std.mem.writeInt(u32, payload[58..62], image.contract_flags, .little);
-    std.mem.writeInt(u16, payload[62..64], image.component_abi_version, .little);
     return payload[0..];
 }
 

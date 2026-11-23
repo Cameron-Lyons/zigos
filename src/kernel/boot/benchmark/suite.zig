@@ -901,7 +901,6 @@ fn prepareTaskCheckpointFixture() void {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 44,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.sync",
         },
@@ -2655,7 +2654,6 @@ fn createLoadTask(
         .launch = .{
             .boundary = .userspace_process,
             .image_id = serial,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = bundle_id,
         },

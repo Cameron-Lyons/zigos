@@ -8,13 +8,6 @@ const document_editor = @import("document_editor.zig");
 
 pub const ServiceKind = mailbox.ServiceKind;
 
-const EndpointFlags = packed struct(u16) {
-    local_only: bool = false,
-    service_port: bool = false,
-    carries_capability: bool = false,
-    _reserved: u13 = 0,
-};
-
 pub fn closeEndpoint(endpoint_capability_id: u64) abi.SyscallStatus {
     var request = abi.EndpointCloseWireRequest{
         .header = makeHeader(.endpoint_close, zigos_userspace_bootstrap.task_id),
@@ -414,7 +407,7 @@ fn endpointCreate(
     authority_capability_id: u64,
     task_id: u64,
     label: []const u8,
-    flags: EndpointFlags,
+    flags: abi.EndpointFlags,
     failure_code: *u8,
 ) ?abi.EndpointCreateResponse {
     const label_bytes = std.math.cast(u32, label.len) orelse {
@@ -595,7 +588,6 @@ fn applyInputEvent(
     state.last_input_text = if (event.length > 1) event.bytes[1] else 0;
     state.last_input_port_id = event.port_id;
     state.last_input_slot_id = event.slot_id;
-    publishUiState(state, surface);
     return true;
 }
 
@@ -671,6 +663,7 @@ fn runSteadyState(ui: *UiRuntime, detail: mailbox.Detail, heartbeat_increment: u
     var probe: if (identity_probe) @import("identity_client_proof.zig").Probe else void = if (identity_probe) .{} else {};
     const increment: u16 = @truncate(if (heartbeat_increment == 0) 1 else heartbeat_increment);
     var pulse: u16 = 4;
+    var published_interaction_hash = ui.surface.interaction_hash;
     while (true) {
         const identity_work = if (comptime identity_probe) probe.step(&zigos_userspace_bootstrap, DocumentTransport{}) else false;
         const disposition: mailbox.YieldDisposition = if (comptime consumes_input) wait: {
@@ -681,7 +674,14 @@ fn runSteadyState(ui: *UiRuntime, detail: mailbox.Detail, heartbeat_increment: u
                 const pending = ui.document.step(zigos_userspace_bootstrap.documentBinding(), &ui.surface, DocumentTransport{});
                 break :work pending;
             } else false;
-            if (zigos_userspace_bootstrap.ui_state_revision != ui.surface.revision) publishUiState(&zigos_userspace_bootstrap, &ui.surface);
+            if (zigos_userspace_bootstrap.ui_state_revision != ui.surface.revision) {
+                publishUiState(&zigos_userspace_bootstrap, &ui.surface);
+            } else if (published_interaction_hash != ui.surface.interaction_hash) {
+                // Observed input such as copy, task switching or a move at a
+                // boundary advances the interaction hash without a revision.
+                zigos_userspace_bootstrap.ui_interaction_hash = ui.surface.interaction_hash;
+            }
+            published_interaction_hash = ui.surface.interaction_hash;
             _ = presentUiState(&zigos_userspace_bootstrap, &ui.surface);
             break :wait if (input.exhausted and !document_work and !clipboard_work and !launcher_work and !identity_work and !ui.launcher.hasUnsentDecision())
                 .wait_for_event
@@ -843,6 +843,7 @@ test "focused input telemetry rejects foreign events and records valid semantic 
         .bytes = abi.inputPacket(abi.InputByte.text, 'x'),
     };
     try std.testing.expect(applyInputEvent(&state, &surface, event, null));
+    publishUiState(&state, &surface);
     try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
     try std.testing.expectEqual(@as(u64, 7), state.last_input_sequence);
     try std.testing.expectEqual(@as(u8, 'x'), state.last_input_text);
@@ -910,6 +911,7 @@ test "compositor picker navigation publishes its selected row through the mailbo
     event.length = 2;
     event.bytes = abi.inputPacket(abi.InputByte.cursor_down, 0);
     try std.testing.expect(recordInputEvent(&ui, &state, event, false));
+    publishUiState(&state, &ui.surface);
     try std.testing.expectEqual(@as(u16, 5), state.ui_cursor);
     try std.testing.expectEqual(ui.surface.revision, state.ui_state_revision);
     try std.testing.expect(ui.surface.presentationText().isCanonical());

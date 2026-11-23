@@ -891,7 +891,6 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 821,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.service-client",
         },
@@ -911,7 +910,6 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 822,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.storage-driver",
         },
@@ -931,7 +929,6 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 823,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "app.viewer",
         },

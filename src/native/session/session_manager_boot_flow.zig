@@ -1588,18 +1588,12 @@ fn wakeEndpointReceiver(context: *anyopaque, receiver_task_id: u64, now_ticks: u
 
 fn publishRootKernelPort(port: anytype) void {
     if (builtin.target.os.tag != .freestanding) return;
-    const root = @import("root");
-    if (@hasDecl(root, "publishKernelPort")) {
-        root.publishKernelPort(port);
-    }
+    @import("../../kernel/interrupts/syscall64.zig").setKernelPort(@intFromPtr(port));
 }
 
 fn clearRootKernelPort() void {
     if (builtin.target.os.tag != .freestanding) return;
-    const root = @import("root");
-    if (@hasDecl(root, "clearKernelPort")) {
-        root.clearKernelPort();
-    }
+    @import("../../kernel/interrupts/syscall64.zig").clearKernelPort();
 }
 
 fn presentSurfaceForKernel(
@@ -1621,17 +1615,7 @@ fn presentSurfaceForKernel(
 
 pub fn printReadyBanner() void {
     console.print("Zigos native session manager online\n");
-    console.print("Native ABI: capability-ipc-v");
-    printNumber(abi.ABI_VERSION);
-    console.print("\n");
     console.print("Native-only platform ready\n");
-}
-
-fn printNumber(value: u64) void {
-    const DECIMAL_U64_BUFFER_BYTES: usize = 20;
-    var buffer: [DECIMAL_U64_BUFFER_BYTES]u8 = undefined;
-    const text = std.fmt.bufPrint(&buffer, "{d}", .{value}) catch return;
-    console.print(text);
 }
 
 fn bootFailureCode(err: anyerror) u32 {

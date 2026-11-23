@@ -3,7 +3,6 @@ const abi = @import("abi.zig");
 
 pub const HeaderError = error{
     UnexpectedOperation,
-    UnsupportedAbiVersion,
     InvalidRequestFlags,
 };
 
@@ -20,9 +19,9 @@ pub fn makeHeader(operation: u16, subject_task_id: u64) abi.RequestHeader {
 }
 
 pub fn validateHeader(header: abi.RequestHeader, expected_operation: u16) HeaderError!void {
+    if (header.admits(expected_operation)) return;
     if (header.operation != expected_operation) return error.UnexpectedOperation;
-    if (header.flags != 0) return error.InvalidRequestFlags;
-    if (header.reserved != 0) return error.InvalidRequestFlags;
+    return error.InvalidRequestFlags;
 }
 
 pub fn validateSubjectTask(header: abi.RequestHeader, task_id: u64) SubjectTaskError!void {

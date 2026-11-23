@@ -215,7 +215,7 @@ const TestFixture = if (@import("builtin").is_test) struct {
             .component_class = .app_component,
             .budget = .{ .cpu_time_ticks = 2000, .memory_bytes = units.mebibytes(2), .endpoint_slots = 4, .shared_memory_bytes = units.kibibytes(4) },
             .local_only = true,
-            .launch = .{ .boundary = .userspace_process, .image_id = 1, .component_abi_version = 1, .signed = true, .bundle_id = "app.notes", .source_identity = "store:zigos/public" },
+            .launch = .{ .boundary = .userspace_process, .image_id = 1, .signed = true, .bundle_id = "app.notes", .source_identity = "store:zigos/public" },
             .userspace_image = &image,
         });
     }

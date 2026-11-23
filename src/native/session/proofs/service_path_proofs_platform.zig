@@ -388,7 +388,6 @@ pub fn proveBootedSchedulerTelemetryProvider(
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 81_001,
-            .component_abi_version = abi.ABI_VERSION,
             .signed = true,
             .bundle_id = "app.service-path.telemetry-ui",
         },
@@ -464,7 +463,6 @@ pub fn proveBootedSchedulerTelemetryProvider(
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 81_002,
-            .component_abi_version = abi.ABI_VERSION,
             .signed = true,
             .bundle_id = "app.service-path.telemetry-media",
         },

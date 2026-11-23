@@ -58,25 +58,18 @@ pub const TaskCreateWireRequest = extern struct {
     component_label_bytes: u32 = 0,
     component_entry_bytes: u32 = 0,
     endpoint_slots: u16 = 0,
-    component_abi_version: u16 = 0,
     owner_kind: u8 = 0,
     component_class: u8 = 0,
     substrate: u8 = 0,
     launch_boundary: u8 = 0,
     flags: u16 = 0,
     resource_class: u8 = 0,
-    reserved: [5]u8 = @splat(0),
+    reserved: [7]u8 = @splat(0),
 };
 
 test "task create scalar wires have exact contiguous fixed-width geometry" {
-    @setEvalBranchQuota(4000);
     inline for (.{ ExecutableSegmentWireSpec, ExecutableImageWireSpec, TaskCreateWireRequest }) |T| {
-        var end: usize = 0;
-        inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |name, Field| {
-            try std.testing.expectEqual(end, @offsetOf(T, name));
-            end += @sizeOf(Field);
-        }
-        try std.testing.expectEqual(end, @sizeOf(T));
+        comptime @import("syscall_wire.zig").requireScalarWire(T);
         try std.testing.expectEqual(@as(usize, 8), @alignOf(T));
     }
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(ExecutableSegmentWireSpec));
@@ -84,5 +77,5 @@ test "task create scalar wires have exact contiguous fixed-width geometry" {
     try std.testing.expectEqual(@as(usize, 216), @sizeOf(TaskCreateWireRequest));
     try std.testing.expectEqual(@as(usize, 72), @offsetOf(ExecutableImageWireSpec, "segments"));
     try std.testing.expectEqual(@as(usize, 184), @offsetOf(TaskCreateWireRequest, "bundle_id_bytes"));
-    try std.testing.expectEqual(@as(usize, 208), @offsetOf(TaskCreateWireRequest, "flags"));
+    try std.testing.expectEqual(@as(usize, 206), @offsetOf(TaskCreateWireRequest, "flags"));
 }

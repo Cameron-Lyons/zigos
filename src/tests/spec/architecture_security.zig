@@ -13,13 +13,13 @@ const kernel_descriptors = @import("../../native/kernel_api/native_kernel_descri
 const generated_image_fixtures = @import("../../native/task/generated_image_fixtures.zig");
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
 const native_util = @import("../../native/core/util.zig");
+const operation_metadata = @import("../../native/kernel_api/operation_metadata.zig");
 const package_service = @import("../../native/services/package_service.zig");
 const policy_mediation = @import("../../native/policy/policy_mediation.zig");
 const policy_object = @import("../../native/policy/policy_object.zig");
 const principal = @import("../../native/core/principal.zig");
 const service_registry = @import("../../native/services/service_registry.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
-const syscall_abi = @import("../../native/kernel_api/syscall_abi.zig");
 const syscall_surface = @import("../../native/kernel_api/syscall_surface.zig");
 const task_runtime = @import("../../native/task/task_runtime.zig");
 const task_runtime_service = @import("../../native/task/task_runtime_service.zig");
@@ -262,7 +262,6 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(abi.opcode(.task_create) >= 0x100);
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 23), abi.ABI_VERSION);
     try std.testing.expectEqual(@as(usize, 23), @typeInfo(abi.NativeOperation).@"enum".field_names.len);
     try std.testing.expectEqual(@as(u16, 0x116), abi.opcode(.surface_present));
     try std.testing.expect(std.enums.fromInt(abi.NativeOperation, 0x117) == null);
@@ -757,33 +756,28 @@ fn mmuStyleAddressSpaceValidationRejectsCrossSpaceRanges() !void {
 }
 
 fn componentAbiDeclarationsCoverEveryTypedOperation() !void {
-    try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".field_names.len, syscall_abi.operations.len);
+    try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".field_names.len, operation_metadata.operations.len);
 
     inline for (@typeInfo(abi.NativeOperation).@"enum".field_values) |field| {
         const operation: abi.NativeOperation = @fromBackingInt(@intCast(field));
-        const declaration = syscall_abi.declarationFor(operation);
+        const declaration = comptime operation_metadata.declarationFor(operation);
         try std.testing.expectEqual(operation, declaration.operation);
-        try std.testing.expect(declaration.requestSize() >= @sizeOf(abi.RequestHeader));
-        if (declaration.responseSize() != 0) {
-            try std.testing.expect(declaration.responseSize() >= @sizeOf(u8));
-        }
+        try std.testing.expect(@sizeOf(component_port.SyscallWireRequest(operation)) >= @sizeOf(abi.RequestHeader));
     }
 
-    try std.testing.expectEqual(syscall_abi.Domain.task, syscall_abi.declarationFor(.task_create).domain);
-    try std.testing.expectEqual(syscall_abi.Domain.endpoint, syscall_abi.declarationFor(.endpoint_send).domain);
-    try std.testing.expectEqual(syscall_abi.Domain.capability, syscall_abi.declarationFor(.capability_derive).domain);
-    try std.testing.expectEqual(syscall_abi.Domain.shared_memory, syscall_abi.declarationFor(.shared_memory_map).domain);
-    try std.testing.expectEqual(syscall_abi.Domain.device, syscall_abi.declarationFor(.device_describe).domain);
-    try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscall_abi.declarationFor(.task_create).request_copy);
-    try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscall_abi.declarationFor(.endpoint_send).request_copy);
-    try std.testing.expectEqual(capability.CapabilityRight.task_create, syscall_abi.declarationFor(.task_create).required_right);
-    try std.testing.expectEqual(capability.CapabilityRight.device_use, syscall_abi.declarationFor(.device_describe).required_right);
-    try std.testing.expect(switch (syscall_abi.declarationFor(.shared_memory_map).target_kind) {
+    try std.testing.expectEqual(operation_metadata.Domain.task, operation_metadata.declarationFor(.task_create).domain);
+    try std.testing.expectEqual(operation_metadata.Domain.endpoint, operation_metadata.declarationFor(.endpoint_send).domain);
+    try std.testing.expectEqual(operation_metadata.Domain.capability, operation_metadata.declarationFor(.capability_derive).domain);
+    try std.testing.expectEqual(operation_metadata.Domain.shared_memory, operation_metadata.declarationFor(.shared_memory_map).domain);
+    try std.testing.expectEqual(operation_metadata.Domain.device, operation_metadata.declarationFor(.device_describe).domain);
+    try std.testing.expectEqual(capability.CapabilityRight.task_create, operation_metadata.declarationFor(.task_create).required_right);
+    try std.testing.expectEqual(capability.CapabilityRight.device_use, operation_metadata.declarationFor(.device_describe).required_right);
+    try std.testing.expect(switch (operation_metadata.declarationFor(.shared_memory_map).target_kind) {
         .fixed => |kind| kind == .shared_memory,
         else => false,
     });
-    try std.testing.expect(syscall_abi.declarationFor(.endpoint_create).scope_rule.task_scope_matches_request_task);
-    try std.testing.expectEqual(@as(usize, 1), syscall_abi.declarationFor(.endpoint_create).auto_grants.len);
+    try std.testing.expect(operation_metadata.declarationFor(.endpoint_create).scope_rule.task_scope_matches_request_task);
+    try std.testing.expectEqual(@as(usize, 1), operation_metadata.declarationFor(.endpoint_create).auto_grants.len);
 }
 
 pub fn principalIdentityAndAdministrativeScopeStaySplit() !void {

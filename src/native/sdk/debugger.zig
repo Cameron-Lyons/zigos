@@ -164,7 +164,7 @@ pub const Session = struct {
                 provenance_record.trace_id,
                 provenance_record.task_id,
                 @tagName(provenance_record.decision),
-                @tagName(provenance_record.denial.reason),
+                @tagName(provenance_record.denial_reason),
             },
         ) catch return error.DebugOutputTooLong;
         try self.record(

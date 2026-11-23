@@ -170,3 +170,16 @@ test "verification registry keeps the ring-three exception containment proof" {
     try std.testing.expect((proof.contractFlags() & production_registry.FLAG_GP_PROOF_PROBE) != 0);
     try std.testing.expectEqual(production_registry.ComponentClass.app_component, proof.componentClass());
 }
+
+test "userspace contracts stay unique and cover every boot artifact" {
+    for (&verification_boot_image_specs, 0..) |*spec, index| {
+        const contract = production_registry.contractForSpec(spec);
+        try std.testing.expect(contract.role_tag != 0);
+        try std.testing.expect(contract.heartbeat_increment != 0);
+        for (verification_boot_image_specs[0..index]) |*previous| {
+            const earlier = production_registry.contractForSpec(previous);
+            try std.testing.expect(!std.mem.eql(u8, earlier.bundle_id, contract.bundle_id));
+            try std.testing.expect(earlier.role_tag != contract.role_tag);
+        }
+    }
+}

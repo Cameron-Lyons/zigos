@@ -1624,9 +1624,8 @@ test "syscall failure close rejects reserved header flags before queued authorit
                 const ring_before = try std.testing.allocator.dupe(u8, slot.endpoint.data_ring);
                 defer std.testing.allocator.free(ring_before);
                 const result = fixture.call(.endpoint_close, 12, request_addr, std.math.maxInt(usize), std.math.maxInt(usize));
-                const opcode_wrong = case == .opcode or case == .opcode_and_flags;
-                try std.testing.expectEqual(if (opcode_wrong) abi.SyscallStatus.unsupported_operation else abi.SyscallStatus.invalid_request_pointer, result.status);
-                try std.testing.expectEqual(if (opcode_wrong) abi.DenialReason.unsupported_operation else abi.DenialReason.invalid_target, result.denial_reason);
+                try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, result.status);
+                try std.testing.expectEqual(abi.DenialReason.invalid_target, result.denial_reason);
                 try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
                 try before.expectPreserved(fixture, queued);
                 const retained = fixture.endpoints.arena.getByHandle(.{ .value = queued.endpoint_id }).?;

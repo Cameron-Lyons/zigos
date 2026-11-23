@@ -142,8 +142,6 @@ pub const HardwareTelemetryEvidence = struct {
     }
 };
 
-pub const COMPACT_HARDWARE_TELEMETRY_EVIDENCE = true;
-
 pub const LivePlatformStatusFlags = packed struct(u8) {
     gpu_driver_online: bool = true,
     npu_driver_online: bool = true,
@@ -173,8 +171,6 @@ pub const LivePlatformCounters = struct {
         }
     }
 };
-
-pub const COMPACT_LIVE_PLATFORM_COUNTERS = true;
 
 pub const TelemetrySample = struct {
     pub const SIZE_BYTES: usize = 64;
@@ -1363,8 +1359,6 @@ test "accelerator scheduler rejects stale production telemetry observations" {
 }
 
 test "accelerator live platform counters stay compact" {
-    try std.testing.expect(COMPACT_LIVE_PLATFORM_COUNTERS);
-    try std.testing.expect(COMPACT_HARDWARE_TELEMETRY_EVIDENCE);
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(HardwareTelemetryObservationFlags));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(HardwareTelemetryEvidence));
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(LivePlatformStatusFlags));

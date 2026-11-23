@@ -10,7 +10,6 @@ const ids = @import("../core/ids.zig");
 const operation_metadata = @import("operation_metadata.zig");
 const native_kernel = @import("native_kernel.zig");
 const shared_memory = @import("shared_memory.zig");
-const syscall_abi = @import("syscall_abi.zig");
 const syscall_dispatch = @import("syscall_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_create_wire = @import("task_create_wire.zig");
@@ -23,53 +22,58 @@ pub const UserMemoryAccess = syscall_dispatch.UserMemoryAccess;
 pub const validateAddressSpaceRange = syscall_dispatch.validateAddressSpaceRange;
 pub const REGISTER_FRED_SYSCALLS = true;
 
-const DispatchHandler = *const fn (
-    port: *component_port.KernelPort,
-    memory: syscall_dispatch.UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult;
-
 const SyscallDescriptor = struct {
     operation: abi.NativeOperation,
     request_size: usize,
     request_alignment: usize,
     response_size: usize,
-    domain: syscall_abi.Domain,
-    request_copy: syscall_abi.RequestCopyRule,
     required_right: capability.CapabilityRight,
-    target_kind: operation_metadata.TargetKindRule,
-    scope_rule: operation_metadata.ScopeRule,
-    auto_grant_count: usize,
-    handler: DispatchHandler,
+    handler: syscall_dispatch.Handler,
 };
 
-fn syscallDescriptor(
-    comptime declaration: syscall_abi.Operation,
-) SyscallDescriptor {
-    return .{
-        .operation = declaration.operation,
-        .request_size = declaration.requestSize(),
-        .request_alignment = @alignOf(declaration.Request),
-        .response_size = declaration.responseSize(),
-        .domain = declaration.domain,
-        .request_copy = declaration.request_copy,
-        .required_right = declaration.required_right,
-        .target_kind = declaration.target_kind,
-        .scope_rule = declaration.scope_rule,
-        .auto_grant_count = declaration.auto_grants.len,
-        .handler = declaration.handler,
+fn handlerFor(comptime declaration: operation_metadata.Descriptor) syscall_dispatch.Handler {
+    const module = switch (declaration.domain) {
+        .task => @import("task_syscalls.zig"),
+        .endpoint => @import("endpoint_syscalls.zig"),
+        .capability => @import("capability_syscalls.zig"),
+        .shared_memory => @import("shared_memory_syscalls.zig"),
+        .device => @import("device_syscalls.zig"),
     };
+    if (!@hasDecl(module, declaration.binding.handler_name)) {
+        @compileError("missing syscall dispatch handler " ++ declaration.binding.handler_name);
+    }
+    return @field(module, declaration.binding.handler_name);
 }
 
-fn buildSyscallTable() [syscall_abi.operations.len]SyscallDescriptor {
-    var table: [syscall_abi.operations.len]SyscallDescriptor = undefined;
-    inline for (syscall_abi.operations, 0..) |declaration, index| {
-        table[index] = syscallDescriptor(declaration);
+fn responseSize(comptime type_name: []const u8) usize {
+    if (std.mem.eql(u8, type_name, "void")) return 0;
+    if (!@hasDecl(abi, type_name)) @compileError("missing syscall ABI response type " ++ type_name);
+    return @sizeOf(@field(abi, type_name));
+}
+
+fn buildSyscallTable() [operation_metadata.operations.len]SyscallDescriptor {
+    var table: [operation_metadata.operations.len]SyscallDescriptor = undefined;
+    inline for (operation_metadata.operations, 0..) |declaration, index| {
+        const Request = component_port.SyscallWireRequest(declaration.operation);
+        table[index] = .{
+            .operation = declaration.operation,
+            .request_size = @sizeOf(Request),
+            .request_alignment = @alignOf(Request),
+            .response_size = responseSize(declaration.binding.response_type_name),
+            .required_right = declaration.required_right,
+            .handler = handlerFor(declaration),
+        };
     }
     return table;
+}
+
+fn maxRequestSize() usize {
+    var size: usize = 0;
+    for (syscall_table) |descriptor| {
+        if (descriptor.request_alignment > 8) @compileError("syscall requests are staged with 8-byte alignment");
+        size = @max(size, descriptor.request_size);
+    }
+    return size;
 }
 
 const syscall_table = buildSyscallTable();
@@ -77,6 +81,7 @@ const opcode_index = buildOpcodeIndex();
 const native_opcode_base: u16 = abi.opcode(.task_create);
 const native_opcode_count: usize = @typeInfo(abi.NativeOperation).@"enum".field_names.len;
 const missing_opcode_index = std.math.maxInt(usize);
+const MAX_REQUEST_BYTES = maxRequestSize();
 
 pub fn dispatch(
     port: *component_port.KernelPort,
@@ -87,32 +92,47 @@ pub fn dispatch(
     response_addr: usize,
     response_len: usize,
 ) DispatchResult {
-    if (caller_task_id == 0) return .{ .status = .denied, .denial_reason = .scope_violation };
-    // Caller admission is local to this invocation, including nested calls.
-    var local_port = port.*;
-    local_port.syscall_caller_task_id = caller_task_id;
-    const memory = syscall_dispatch.UserMemoryContext.init(&local_port, caller_task_id);
+    return dispatchWith(port, .init(port, caller_task_id), now_ticks, opcode, request_addr, response_addr, response_len);
+}
+
+// The single syscall implementation for the BSP trap and for a brokered
+// remote claim; only `memory`'s copy backend differs between them.
+pub fn dispatchWith(
+    port: *const component_port.KernelPort,
+    memory: syscall_dispatch.UserMemoryContext,
+    now_ticks: u64,
+    opcode: u16,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) DispatchResult {
+    if (memory.caller_task_id == 0) return .{ .status = .denied, .denial_reason = .scope_violation };
     const descriptor = syscallDescriptorFromOpcode(opcode) orelse return .{ .status = .unsupported_operation, .denial_reason = .unsupported_operation };
 
-    // Check fixed request storage before outputs, then reject unusable outputs
-    // before a handler can consume input or publish resources. Embedded request
-    // buffers and operation authority remain the handler's responsibility.
-    const result = if (!syscall_dispatch.prepareUserRange(
-        memory,
-        request_addr,
-        descriptor.request_size,
-        descriptor.request_alignment,
-        .read,
-    ))
-        syscall_dispatch.invalidRequest()
-    else if (descriptor.operation == .endpoint_recv)
-        // Receive admits the copied scalar subject/receiver before preparing
-        // any outputs, then preflights every declared output before dequeue.
-        descriptor.handler(&local_port, memory, now_ticks, request_addr, response_addr, response_len)
+    // Copy the fixed request once and admit its header before any output is
+    // touched. Handlers decode only this kernel copy; embedded request buffers
+    // and operation authority remain the handler's responsibility.
+    var request_storage: [MAX_REQUEST_BYTES]u8 align(8) = undefined;
+    const request = request_storage[0..descriptor.request_size];
+    if (!syscall_dispatch.readUser(memory, request_addr, request, descriptor.request_alignment) or
+        !syscall_dispatch.admitsHeader(std.mem.bytesToValue(abi.RequestHeader, request[0..@sizeOf(abi.RequestHeader)]), opcode, memory.caller_task_id))
+    {
+        return syscall_dispatch.normalizeResult(syscall_dispatch.invalidRequest());
+    }
+
+    // Caller admission is local to this invocation, including nested calls.
+    var local_port = port.*;
+    local_port.syscall_caller_task_id = memory.caller_task_id;
+    local_port.syscall_header_prevalidated = true;
+    // Reject unusable outputs before a handler can consume input or publish
+    // resources. Receive admits its copied scalars first, then preflights
+    // every declared output itself before dequeue.
+    const result = if (descriptor.operation == .endpoint_recv)
+        descriptor.handler(&local_port, memory, now_ticks, request, response_addr, response_len)
     else if (syscall_dispatch.preflightResponse(memory, response_addr, response_len, descriptor.response_size)) |failure|
         failure
     else
-        descriptor.handler(&local_port, memory, now_ticks, request_addr, response_addr, response_len);
+        descriptor.handler(&local_port, memory, now_ticks, request, response_addr, response_len);
 
     return syscall_dispatch.normalizeResult(result);
 }
@@ -151,68 +171,6 @@ pub fn dispatchDetailedInto(
     explainDispatchInto(result, caller_task_id, now_ticks, opcode, &out.diagnostics);
 }
 
-// The BSP broker has already copied the complete fixed request. Use ordinary
-// header validation rather than the generated prevalidated syscall path, and
-// never dereference caller memory after an operation that can retire it.
-pub fn dispatchCopiedTaskTerminateInto(
-    port: *const component_port.KernelPort,
-    caller_task_id: u64,
-    now_ticks: u64,
-    request: component_port.TaskTerminateRequest,
-    out: *DispatchResult,
-) void {
-    var local_port = port.*;
-    local_port.syscall_caller_task_id = caller_task_id;
-    local_port.syscall_header_prevalidated = false;
-    const result: DispatchResult = if (caller_task_id == 0)
-        .{ .status = .denied, .denial_reason = .scope_violation }
-    else result: {
-        _ = local_port.taskTerminate(request, now_ticks) catch |err| break :result syscall_dispatch.mapError(err);
-        break :result syscall_dispatch.success();
-    };
-    out.* = syscall_dispatch.normalizeResult(result);
-}
-
-// Every byte in this slice belongs to BSP staging storage. Decode scalar wire
-// metadata only after that complete copy, then keep ordinary header/authority
-// validation local to this invocation, including synchronous endpoint wakes.
-pub fn dispatchCopiedEndpointSendInto(
-    port: *const component_port.KernelPort,
-    caller_task_id: u64,
-    now_ticks: u64,
-    wire: abi.EndpointSendWireRequest,
-    payload: []const u8,
-    out: *DispatchResult,
-) void {
-    var local_port = port.*;
-    local_port.syscall_caller_task_id = caller_task_id;
-    local_port.syscall_header_prevalidated = false;
-    const result: DispatchResult = if (caller_task_id == 0)
-        .{ .status = .denied, .denial_reason = .scope_violation }
-    else result: {
-        var request: component_port.EndpointSendRequest = undefined;
-        if (wire.header.subject_task_id != caller_task_id or !component_port.endpointSendFromWireInto(wire, payload, &request)) break :result syscall_dispatch.invalidRequest();
-        local_port.endpointSend(request, now_ticks) catch |err| break :result syscall_dispatch.mapError(err);
-        break :result syscall_dispatch.success();
-    };
-    out.* = syscall_dispatch.normalizeResult(result);
-}
-
-fn dispatchRequest(
-    port: *component_port.KernelPort,
-    caller_task_id: u64,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) DispatchResult {
-    const opcode = if (request_addr < 0x10000)
-        abi.opcode(.time_query)
-    else
-        @as(*const abi.RequestHeader, @ptrFromInt(request_addr)).operation;
-    return dispatch(port, caller_task_id, now_ticks, opcode, request_addr, response_addr, response_len);
-}
-
 fn syscallDescriptorFromOpcode(opcode: u16) ?*const SyscallDescriptor {
     if (opcode < native_opcode_base) return null;
     const offset = opcode - native_opcode_base;
@@ -235,6 +193,23 @@ fn buildOpcodeIndex() [native_opcode_count]usize {
     return index;
 }
 
+// Hosted tests read the opcode from the staged header, as userspace derives
+// rax from it.
+fn dispatchRequest(
+    port: *component_port.KernelPort,
+    caller_task_id: u64,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) DispatchResult {
+    const opcode = if (request_addr < syscall_dispatch.USER_POINTER_FLOOR)
+        abi.opcode(.time_query)
+    else
+        @as(*const abi.RequestHeader, @ptrFromInt(request_addr)).operation;
+    return dispatch(port, caller_task_id, now_ticks, opcode, request_addr, response_addr, response_len);
+}
+
 test "syscall descriptor table covers every native operation with ABI metadata" {
     try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".field_names.len, syscall_table.len);
 
@@ -243,26 +218,45 @@ test "syscall descriptor table covers every native operation with ABI metadata" 
         const descriptor = syscallDescriptorFor(operation) orelse return error.MissingSyscallDescriptor;
         try std.testing.expectEqual(operation, descriptor.operation);
         try std.testing.expect(descriptor.request_size >= @sizeOf(abi.RequestHeader));
+        try std.testing.expect(descriptor.request_size <= MAX_REQUEST_BYTES);
     }
 
     try std.testing.expectEqual(@sizeOf(abi.TaskCreateWireRequest), syscallDescriptorFor(.task_create).?.request_size);
     try std.testing.expectEqual(@sizeOf(abi.TaskDescriptor), syscallDescriptorFor(.task_create).?.response_size);
-    try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscallDescriptorFor(.task_create).?.request_copy);
     try std.testing.expectEqual(@as(usize, 0), syscallDescriptorFor(.endpoint_send).?.response_size);
-    try std.testing.expectEqual(syscall_abi.RequestCopyRule.embedded_user_buffers, syscallDescriptorFor(.endpoint_send).?.request_copy);
     try std.testing.expectEqual(capability.CapabilityRight.endpoint_send, syscallDescriptorFor(.endpoint_send).?.required_right);
-    try std.testing.expect(syscallDescriptorFor(.endpoint_create).?.scope_rule.task_scope_matches_request_task);
-    try std.testing.expectEqual(@as(usize, 1), syscallDescriptorFor(.shared_memory_create).?.auto_grant_count);
     try std.testing.expectEqual(@sizeOf(component_port.InputRecvRequest), syscallDescriptorFor(.input_recv).?.request_size);
     try std.testing.expectEqual(@sizeOf(abi.InputRecvResponse), syscallDescriptorFor(.input_recv).?.response_size);
     try std.testing.expectEqual(capability.CapabilityRight.input_recv, syscallDescriptorFor(.input_recv).?.required_right);
     try std.testing.expectEqual(@sizeOf(abi.SurfacePresentWireRequest), syscallDescriptorFor(.surface_present).?.request_size);
     try std.testing.expectEqual(@sizeOf(abi.BoolResponse), syscallDescriptorFor(.surface_present).?.response_size);
     try std.testing.expectEqual(capability.CapabilityRight.surface_present, syscallDescriptorFor(.surface_present).?.required_right);
-    try std.testing.expect(switch (syscallDescriptorFor(.device_describe).?.target_kind) {
-        .fixed => |kind| kind == .device,
-        else => false,
-    });
+}
+
+test "every syscall descriptor has a scalar wire and decoded operations keep distinct trusted Port requests" {
+    inline for (operation_metadata.operations) |declaration| {
+        const Wire = component_port.SyscallWireRequest(declaration.operation);
+        comptime abi.syscall_wire.requireScalarWire(Wire);
+        const needs_decoder = switch (declaration.operation) {
+            .task_create,
+            .endpoint_create,
+            .endpoint_send,
+            .endpoint_recv,
+            .capability_mint,
+            .capability_derive,
+            .capability_pass,
+            .surface_present,
+            => true,
+            else => false,
+        };
+        try std.testing.expectEqual(needs_decoder, Wire != component_port.PortRequest(declaration.operation));
+    }
+    try std.testing.expectEqual(@as(usize, 23), syscall_table.len);
+    try std.testing.expectEqual(@as(usize, 64), syscallDescriptorFor(.endpoint_send).?.request_size);
+    try std.testing.expectEqual(@as(usize, 8), syscallDescriptorFor(.endpoint_send).?.request_alignment);
+    try std.testing.expectEqual(@as(usize, 56), syscallDescriptorFor(.endpoint_recv).?.request_size);
+    try std.testing.expectEqual(@as(usize, 8), syscallDescriptorFor(.endpoint_recv).?.request_alignment);
+    try std.testing.expectEqual(@as(usize, 56), syscallDescriptorFor(.endpoint_recv).?.response_size);
 }
 
 const TestKernel = struct {
@@ -391,7 +385,6 @@ test "syscall surface dispatches typed task creation requests" {
             .launch = .{
                 .boundary = .userspace_process,
                 .image_id = 21,
-                .component_abi_version = 1,
                 .signed = true,
                 .bundle_id = "app.example.syscall",
                 .source_identity = "store://release/app.example.syscall/1",
@@ -532,7 +525,8 @@ test "syscall surface cold diagnostics match the frozen detailed result oracle" 
                     .operation = label(debug_contract.MAX_LABEL_BYTES, self.operation),
                     .detail_len = @intCast(self.authority.len),
                     .detail = label(debug_contract.MAX_DETAIL_BYTES, self.authority),
-                    .denial = explanation,
+                    .denial_reason = explanation.reason,
+                    .denial_fingerprint = explanation.fingerprint,
                 },
             };
         }
@@ -639,7 +633,6 @@ test "syscall surface validates compact endpoint receive outputs before dequeue"
             .launch = .{
                 .boundary = .userspace_process,
                 .image_id = 22,
-                .component_abi_version = 1,
                 .signed = true,
                 .bundle_id = "app.example.empty-queue",
             },
@@ -1293,7 +1286,6 @@ test "syscall surface denies task creation without signed userspace launch prove
             .launch = .{
                 .boundary = .userspace_process,
                 .image_id = 24,
-                .component_abi_version = 1,
                 .signed = false,
                 .bundle_id = "app.example.unsigned-syscall",
             },
@@ -1374,15 +1366,27 @@ test "syscall surface rejects removed wait opcode without accessing request or o
     }
 }
 
-test "syscall surface uses the published caller instead of the request header subject" {
+test "syscall surface rejects a request header subject other than the trap caller" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
     var request = component_port.TimeQueryRequest{
-        .header = component_port.makeHeader(.time_query, 1),
+        .header = component_port.makeHeader(.time_query, test_kernel.session_task_id + 1),
         .authority_capability_id = test_kernel.authority_capability_id,
     };
     var response = std.mem.zeroes(abi.TimeQueryResponse);
+    const spoofed = dispatchRequest(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        9,
+        @intFromPtr(&request),
+        @intFromPtr(&response),
+        @sizeOf(abi.TimeQueryResponse),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, spoofed.status);
+    try std.testing.expectEqual(@as(u64, 0), response.now_ticks);
+
+    request.header = component_port.makeHeader(.time_query, test_kernel.session_task_id);
     const result = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
@@ -1391,8 +1395,8 @@ test "syscall surface uses the published caller instead of the request header su
         @intFromPtr(&response),
         @sizeOf(abi.TimeQueryResponse),
     );
-
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
+    try std.testing.expectEqual(@as(u64, 9), response.now_ticks);
 }
 
 test "syscall surface rejects invalid request and response pointer ranges" {
@@ -1417,7 +1421,7 @@ test "syscall surface rejects invalid request and response pointer ranges" {
     try std.testing.expectEqual(abi.SyscallStatus.invalid_response_buffer, bad_response.status);
 }
 
-test "syscall surface binds the caller from the trap, not the request header" {
+test "syscall surface rejects request headers whose subject is not the trap caller" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
@@ -1439,7 +1443,6 @@ test "syscall surface binds the caller from the trap, not the request header" {
             .launch = .{
                 .boundary = .userspace_process,
                 .image_id = 23,
-                .component_abi_version = 1,
                 .signed = true,
                 .bundle_id = "app.example.spoofed-subject",
             },
@@ -1449,7 +1452,8 @@ test "syscall surface binds the caller from the trap, not the request header" {
     const spoofed_subject_image_wire = task_create_wire.executableImageToWire(spoofed_subject_image);
     const request = task_create_wire.taskCreateToWire(typed_request.header, typed_request.authority_capability_id, typed_request.request, @intFromPtr(&spoofed_subject_image_wire));
 
-    const result = dispatchRequest(
+    const task_count = test_kernel.runtime.taskCount();
+    const spoofed = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         10,
@@ -1457,9 +1461,9 @@ test "syscall surface binds the caller from the trap, not the request header" {
         @intFromPtr(&response),
         @sizeOf(abi.TaskDescriptor),
     );
-
-    try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
-    try std.testing.expect(response.task_id != 0);
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, spoofed.status);
+    try std.testing.expectEqual(@as(u64, 0), response.task_id);
+    try std.testing.expectEqual(task_count, test_kernel.runtime.taskCount());
 
     var zero_caller_response = std.mem.zeroes(abi.TaskDescriptor);
     const zero_caller_result = dispatchRequest(
@@ -1488,8 +1492,25 @@ test "syscall surface binds the caller from the trap, not the request header" {
         @intFromPtr(&zero_subject_response),
         @sizeOf(abi.TaskDescriptor),
     );
-    try std.testing.expectEqual(abi.SyscallStatus.success, zero_subject_result.status);
-    try std.testing.expect(zero_subject_response.task_id != 0);
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, zero_subject_result.status);
+    try std.testing.expectEqual(@as(u64, 0), zero_subject_response.task_id);
+
+    const typed_caller_request = component_port.TaskCreateRequest{
+        .header = component_port.makeHeader(.task_create, test_kernel.session_task_id),
+        .authority_capability_id = test_kernel.authority_capability_id,
+        .request = typed_request.request,
+    };
+    const caller_request = task_create_wire.taskCreateToWire(typed_caller_request.header, typed_caller_request.authority_capability_id, typed_caller_request.request, request.userspace_image_address);
+    const result = dispatchRequest(
+        &test_kernel.port,
+        test_kernel.session_task_id,
+        10,
+        @intFromPtr(&caller_request),
+        @intFromPtr(&response),
+        @sizeOf(abi.TaskDescriptor),
+    );
+    try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
+    try std.testing.expect(response.task_id != 0);
 }
 
 test "syscall surface validates and bounds embedded user buffers" {
@@ -1543,7 +1564,6 @@ test "syscall surface validates and bounds embedded user buffers" {
             .launch = .{
                 .boundary = .userspace_process,
                 .image_id = 25,
-                .component_abi_version = 1,
                 .signed = true,
                 .bundle_id = "app.example.invalid-source",
                 .source_identity = invalid_source_ptr[0..1],

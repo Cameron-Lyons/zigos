@@ -48,6 +48,13 @@ pub fn artifactFor(bundle_id: []const u8) ?GeneratedArtifact {
     return archive.artifacts[artifact_index];
 }
 
+// Whether `file` is exactly the generated artifact this kernel image embeds
+// for `bundle_id`, not merely equal bytes from elsewhere.
+pub fn holdsFile(bundle_id: []const u8, file: embedded_file.File) bool {
+    const artifact = artifactFor(bundle_id) orelse return false;
+    return std.meta.eql(file, embedded_file.File.fromChunkedArtifact(artifact));
+}
+
 test "userspace archive index resolves every generated artifact bundle" {
     try std.testing.expect(archive.artifacts.len > 0);
     for (role_registry.role_boot_image_specs, 0..) |spec, artifact_index| {
@@ -58,6 +65,19 @@ test "userspace archive index resolves every generated artifact bundle" {
         try std.testing.expectEqualSlices(embedded_file.ChunkIndex, artifact.data.chunk_indices, indexed.data.chunk_indices);
     }
     try std.testing.expect(artifactFor("zigos.system.missing-artifact") == null);
+}
+
+test "userspace archive index holds only its own artifact file for each bundle" {
+    const first = role_registry.role_boot_image_specs[0].bundleId();
+    const second = role_registry.role_boot_image_specs[1].bundleId();
+    const archived = embedded_file.File.fromChunkedArtifact(archive.artifacts[0]);
+    try std.testing.expect(holdsFile(first, archived));
+    try std.testing.expect(!holdsFile(second, archived));
+    try std.testing.expect(!holdsFile("zigos.system.missing-artifact", archived));
+    const copied = try std.testing.allocator.alloc(u8, archived.byteLength());
+    defer std.testing.allocator.free(copied);
+    try std.testing.expect(archived.reader().?.readInto(0, copied));
+    try std.testing.expect(!holdsFile(first, embedded_file.File.fromBytes(copied)));
 }
 
 test "userspace archive shares identical image chunks" {

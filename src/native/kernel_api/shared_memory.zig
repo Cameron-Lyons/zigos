@@ -21,11 +21,8 @@ pub const MAX_MAPPINGS_PER_OBJECT: usize = 8;
 pub const PAGE_SIZE: usize = 4096;
 pub const OBJECT_SIZE_CEILING_BYTES: usize = 128;
 const SHARED_MEMORY_INDEX_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * 2;
-pub const SHARED_MEMORY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
-pub const SHARED_MEMORY_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
 pub const OBJECT_TASK_MAPPING_SCAN_BOUND: usize = MAX_MAPPINGS_PER_OBJECT;
-pub const MMU_OBJECT_MAPPING_SCAN_BOUND: usize = MAX_MAPPINGS_PER_OBJECT + 3;
-pub const MMU_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
+pub const MMU_OBJECT_MAPPING_SCAN_BOUND: usize = MAX_MAPPINGS_PER_OBJECT + ACCELERATOR_DOMAINS_PER_OBJECT;
 pub const SEALS_IPC_RINGS = true;
 pub const REGISTERS_DEMAND_PAGED_MAPPINGS = true;
 // A nonzero token binds a registration to its original address-space lifetime.
@@ -80,6 +77,8 @@ const TASK_SHARED_VIRTUAL_BASE: u64 = userspace_layout.shared_start;
 const TASK_SHARED_VIRTUAL_END_EXCLUSIVE: u64 = userspace_layout.shared_end_exclusive;
 const ACCELERATOR_APERTURE_BASE: u64 = userspace_layout.accelerator_start;
 const ACCELERATOR_APERTURE_END_EXCLUSIVE: u64 = userspace_layout.accelerator_end_exclusive;
+// Every compute target except the CPU is a separate accelerator domain.
+const ACCELERATOR_DOMAINS_PER_OBJECT: usize = @typeInfo(ComputeTarget).@"enum".field_names.len - 1;
 
 comptime {
     if (MMU_MAPPING_CAPACITY >= no_mmu_mapping) {
@@ -308,12 +307,84 @@ fn eraseAndReleaseFrames(backend: anytype, base: u64, count: usize) void {
     backend.release(base, frames);
 }
 
+// Page runs reserved in one virtual window, sorted by base page; page 0 is a
+// leading guard. Allocation is next fit from the previous run and wraps once,
+// so a freed run is reused only after the cursor has passed it and a retired
+// descriptor rarely names a newer incarnation.
+fn VirtualWindow(comptime base: u64, comptime end_exclusive: u64, comptime capacity: usize, comptime Owner: type) type {
+    return struct {
+        const Self = @This();
+        const Extent = struct { base_page: u32, page_count: u32, owner: Owner };
+        const window_pages: u32 = @intCast((end_exclusive - base) / PAGE_SIZE);
+
+        extents: [capacity]Extent = undefined,
+        count: u16 = 0,
+        next_page: u32 = 1,
+
+        fn allocate(self: *Self, page_count: usize, owner: Owner) Error!u64 {
+            const pages = std.math.cast(u32, page_count) orelse return error.TableFull;
+            const count: usize = self.count;
+            if (count == capacity) return error.TableFull;
+            const fit = self.fitFrom(self.next_page, pages) orelse
+                self.fitFrom(1, pages) orelse return error.TableFull;
+            std.mem.copyBackwards(Extent, self.extents[fit.index + 1 .. count + 1], self.extents[fit.index..count]);
+            self.extents[fit.index] = .{ .base_page = fit.base_page, .page_count = pages, .owner = owner };
+            self.count += 1;
+            self.next_page = fit.base_page + pages;
+            return base + @as(u64, fit.base_page) * PAGE_SIZE;
+        }
+
+        // The first free run of `pages` at or after `start`, with the index
+        // that keeps the extents sorted.
+        fn fitFrom(self: *const Self, start: u32, pages: u32) ?struct { base_page: u32, index: usize } {
+            var base_page = start;
+            for (self.extents[0..self.count], 0..) |extent, index| {
+                const extent_end = extent.base_page + extent.page_count;
+                if (extent_end <= base_page) continue;
+                if (extent.base_page >= base_page and extent.base_page - base_page >= pages) return .{ .base_page = base_page, .index = index };
+                base_page = extent_end;
+            }
+            if (@as(u64, base_page) + pages > window_pages) return null;
+            return .{ .base_page = base_page, .index = self.count };
+        }
+
+        fn release(self: *Self, virtual_base: u64) void {
+            const base_page = (virtual_base - base) / PAGE_SIZE;
+            const count: usize = self.count;
+            for (self.extents[0..count], 0..) |extent, index| {
+                if (extent.base_page != base_page) continue;
+                std.mem.copyForwards(Extent, self.extents[index .. count - 1], self.extents[index + 1 .. count]);
+                self.count -= 1;
+                return;
+            }
+            native_util.impossibleByInvariant("removed shared-memory mapping owns its window extent");
+        }
+
+        fn releaseOwnedBy(self: *Self, owner: Owner) void {
+            var kept: u16 = 0;
+            for (self.extents[0..self.count]) |extent| {
+                if (extent.owner == owner) continue;
+                self.extents[kept] = extent;
+                kept += 1;
+            }
+            self.count = kept;
+        }
+    };
+}
+
 pub const FreestandingMmu = struct {
     // This cursor describes hosted metadata fixtures only; never physical RAM.
     next_physical_frame: u64 = 1,
     hosted_physical_backing: if (heap_backed_table) void else ?HostedPhysicalBacking = if (heap_backed_table) {} else null,
-    next_task_virtual_page: u64 = 1,
-    next_accelerator_virtual_page: u64 = 1,
+    // Group address spaces share one page table, so task windows are unique
+    // across every task. A task run becomes reusable when its mapping is
+    // removed, after its demand registration is gone.
+    task_window: VirtualWindow(TASK_SHARED_VIRTUAL_BASE, TASK_SHARED_VIRTUAL_END_EXCLUSIVE, MMU_MAPPING_CAPACITY, void) = .{},
+    // Aperture runs stay unique across every domain and are owned by their
+    // object. Detach returns a run only after the caller established device
+    // completion; a revoked object pinned by attachments keeps its runs until
+    // its slot is released, so in-flight DMA never aliases a newer object.
+    accelerator_window: VirtualWindow(ACCELERATOR_APERTURE_BASE, ACCELERATOR_APERTURE_END_EXCLUSIVE, MAX_SHARED_MEMORY_OBJECTS * ACCELERATOR_DOMAINS_PER_OBJECT, u64) = .{},
     mappings: MmuMappingArena = MmuMappingArena.init(),
 
     pub fn init() FreestandingMmu {
@@ -359,7 +430,7 @@ pub const FreestandingMmu = struct {
         if (self.findIndex(object, .task, task_id.raw()) != null) return error.AlreadyMapped;
         if (object.mmu_mapping_count >= MMU_OBJECT_MAPPING_SCAN_BOUND) return error.TableFull;
         const slot_index = self.mappings.reserveIndex() orelse return error.TableFull;
-        const virtual_base = self.allocateTaskVirtual(object.page_count) catch |err| {
+        const virtual_base = self.task_window.allocate(object.page_count, {}) catch |err| {
             _ = self.mappings.removeIndex(slot_index);
             return err;
         };
@@ -383,7 +454,7 @@ pub const FreestandingMmu = struct {
         if (self.findIndex(object, .accelerator, domain_id) != null) return error.AcceleratorAlreadyAttached;
         if (object.mmu_mapping_count >= MMU_OBJECT_MAPPING_SCAN_BOUND) return error.TableFull;
         const slot_index = self.mappings.reserveIndex() orelse return error.TableFull;
-        const virtual_base = self.allocateAcceleratorVirtual(object.page_count) catch |err| {
+        const virtual_base = self.accelerator_window.allocate(object.page_count, object.id.raw()) catch |err| {
             _ = self.mappings.removeIndex(slot_index);
             return err;
         };
@@ -414,6 +485,7 @@ pub const FreestandingMmu = struct {
                 native_util.impossibleByInvariant("shared-memory MMU object list points at the wrong live mapping");
             }
             self.unlinkObjectMapping(object, slot_index);
+            if (mapping.kind == .task) self.task_window.release(mapping.virtual_base);
             if (!self.mappings.removeIndex(slot_index)) {
                 native_util.impossibleByInvariant("shared-memory MMU revoke removes every linked mapping");
             }
@@ -443,30 +515,6 @@ pub const FreestandingMmu = struct {
 
     fn activeMappingsForObject(_: *const FreestandingMmu, object: *const Object) usize {
         return object.mmu_mapping_count;
-    }
-
-    fn allocateTaskVirtual(self: *FreestandingMmu, page_count: usize) Error!u64 {
-        const base_page = self.next_task_virtual_page;
-        const next_page = std.math.add(u64, base_page, @intCast(page_count)) catch return error.TableFull;
-        const page_offset = std.math.mul(u64, base_page, PAGE_SIZE) catch return error.TableFull;
-        const byte_count = std.math.mul(u64, @as(u64, @intCast(page_count)), PAGE_SIZE) catch return error.TableFull;
-        const virtual_base = std.math.add(u64, TASK_SHARED_VIRTUAL_BASE, page_offset) catch return error.TableFull;
-        const virtual_end = std.math.add(u64, virtual_base, byte_count) catch return error.TableFull;
-        if (virtual_end > TASK_SHARED_VIRTUAL_END_EXCLUSIVE) return error.TableFull;
-        self.next_task_virtual_page = next_page;
-        return virtual_base;
-    }
-
-    fn allocateAcceleratorVirtual(self: *FreestandingMmu, page_count: usize) Error!u64 {
-        const base_page = self.next_accelerator_virtual_page;
-        const next_page = std.math.add(u64, base_page, @intCast(page_count)) catch return error.TableFull;
-        const page_offset = std.math.mul(u64, base_page, PAGE_SIZE) catch return error.TableFull;
-        const byte_count = std.math.mul(u64, @as(u64, @intCast(page_count)), PAGE_SIZE) catch return error.TableFull;
-        const virtual_base = std.math.add(u64, ACCELERATOR_APERTURE_BASE, page_offset) catch return error.TableFull;
-        const virtual_end = std.math.add(u64, virtual_base, byte_count) catch return error.TableFull;
-        if (virtual_end > ACCELERATOR_APERTURE_END_EXCLUSIVE) return error.TableFull;
-        self.next_accelerator_virtual_page = next_page;
-        return virtual_base;
     }
 
     fn findAny(
@@ -520,6 +568,11 @@ pub const FreestandingMmu = struct {
 
     fn removeResolvedMapping(self: *FreestandingMmu, object: *Object, slot_index: usize) void {
         self.unlinkObjectMapping(object, slot_index);
+        const mapping = &self.mappings.slots[slot_index];
+        switch (mapping.kind) {
+            .task => self.task_window.release(mapping.virtual_base),
+            .accelerator => self.accelerator_window.release(mapping.virtual_base),
+        }
         if (!self.mappings.removeIndex(slot_index)) {
             native_util.impossibleByInvariant("shared-memory MMU unmap removes a live linked mapping");
         }
@@ -585,8 +638,8 @@ const TableBacking = struct {
     fn initializeAllocated(self: *TableBacking) void {
         @memset(std.mem.asBytes(self), 0);
         self.mmu.next_physical_frame = 1;
-        self.mmu.next_task_virtual_page = 1;
-        self.mmu.next_accelerator_virtual_page = 1;
+        self.mmu.task_window.next_page = 1;
+        self.mmu.accelerator_window.next_page = 1;
         self.mmu.mappings.free_head = indexed_arena.reusableNoIndex(MMU_MAPPING_CAPACITY);
         self.arena.free_head = indexed_arena.reusableNoIndex(MAX_SHARED_MEMORY_OBJECTS);
         initializeObjectOwnerIndex(&self.object_owner_index);
@@ -847,13 +900,14 @@ pub const Table = struct {
         errdefer if (!backing.mapping_index.remove(task_id.raw(), edge_index)) {
             native_util.impossibleByInvariant("failed shared-memory map releases its reserved task index edge");
         };
-        const previous_virtual_page = backing.mmu.next_task_virtual_page;
+        // A failed map returns its window and the allocation cursor.
+        const previous_virtual_page = backing.mmu.task_window.next_page;
         const mapping_descriptor = try backing.mmu.mapTask(object, task_id);
         errdefer {
             if (!(backing.mmu.unmapTask(object, task_id) catch false)) {
                 native_util.impossibleByInvariant("failed shared-memory map releases its reserved MMU mapping");
             }
-            backing.mmu.next_task_virtual_page = previous_virtual_page;
+            backing.mmu.task_window.next_page = previous_virtual_page;
         }
         const mapping_index = backing.mmu.findIndex(object, .task, task_id.raw()) orelse
             native_util.impossibleByInvariant("reserved shared-memory mapping remains linked until publication");
@@ -954,6 +1008,7 @@ pub const Table = struct {
             native_util.impossibleByInvariant("shared-memory release retains its owned object slot");
         std.debug.assert(slot.object.mapping_count == 0 and slot.object.mmu_mapping_count == 0);
         std.debug.assert(!hasAttachedAccelerators(&slot.object));
+        backing.mmu.accelerator_window.releaseOwnedBy(slot.object.id.raw());
         backing.mmu.releasePhysicalFrames(slot.object.page_base, slot.object.page_count);
         if (slot.retired) backing.retired_count -= 1;
         if (!backing.arena.removeHandle(handle)) {
@@ -961,8 +1016,8 @@ pub const Table = struct {
         }
         if (backing.arena.countInUse() == 0 and backing.mmu.mappings.countInUse() == 0) {
             backing.mmu.next_physical_frame = 1;
-            backing.mmu.next_task_virtual_page = 1;
-            backing.mmu.next_accelerator_virtual_page = 1;
+            backing.mmu.task_window.next_page = 1;
+            backing.mmu.accelerator_window.next_page = 1;
         }
     }
 
@@ -1261,11 +1316,6 @@ pub const Table = struct {
     pub fn activeFreestandingMappings(self: *const Table, object_id: ids.SharedMemoryId) usize {
         const object = self.findConst(object_id) orelse return 0;
         return self.backingConst().?.mmu.activeMappingsForObject(object);
-    }
-
-    pub fn allowsAccelerator(self: *const Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
-        const object = self.findConst(object_id) orelse return error.SharedMemoryNotFound;
-        return object.allowsCompute(target);
     }
 
     pub fn isAcceleratorAttached(self: *const Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
@@ -1640,8 +1690,79 @@ test "revoking the final shared memory object reclaims descriptor cursors" {
 
     const mmu = table.mmuForTests();
     try std.testing.expectEqual(@as(u64, 1), mmu.next_physical_frame);
-    try std.testing.expectEqual(@as(u64, 1), mmu.next_task_virtual_page);
-    try std.testing.expectEqual(@as(u64, 1), mmu.next_accelerator_virtual_page);
+    try std.testing.expectEqual(@as(u16, 0), mmu.task_window.count);
+    try std.testing.expectEqual(@as(u32, 1), mmu.task_window.next_page);
+    try std.testing.expectEqual(@as(u16, 0), mmu.accelerator_window.count);
+    try std.testing.expectEqual(@as(u32, 1), mmu.accelerator_window.next_page);
+}
+
+test "shared memory task windows are reused across map churn while another object stays live" {
+    var table = Table.init();
+    const pinned = try table.create(ids.task(7), PAGE_SIZE);
+    try table.map(pinned.id, ids.task(7));
+    const window_bytes = TASK_SHARED_VIRTUAL_END_EXCLUSIVE - TASK_SHARED_VIRTUAL_BASE;
+    const churned = try table.create(ids.task(7), window_bytes / 4);
+    for (0..16) |_| {
+        try table.map(churned.id, ids.task(8));
+        const descriptor = try table.mmuForTests().taskMappingDescriptor(table.find(churned.id).?, ids.task(8));
+        try std.testing.expect(descriptor.virtual_base + descriptor.size_bytes <= TASK_SHARED_VIRTUAL_END_EXCLUSIVE);
+        try std.testing.expect(try table.unmap(churned.id, ids.task(8)));
+    }
+    try std.testing.expectEqual(@as(u16, 1), table.mmuForTests().task_window.count);
+}
+
+test "shared memory accelerator apertures are reused across attach churn while another object stays attached" {
+    var table = Table.init();
+    const pinned = try table.createLabeledWithAccess(ids.task(7), PAGE_SIZE, "pinned", .{ .gpu = true });
+    try table.attachAccelerator(pinned.id, .gpu);
+    const aperture_bytes = ACCELERATOR_APERTURE_END_EXCLUSIVE - ACCELERATOR_APERTURE_BASE;
+    const churned = try table.createLabeledWithAccess(ids.task(7), aperture_bytes / 4, "churned", .{ .gpu = true, .npu = true });
+    for (0..16) |_| {
+        try table.attachAccelerator(churned.id, .npu);
+        const descriptor = try table.mmuForTests().acceleratorMappingDescriptor(table.find(churned.id).?, .npu);
+        try std.testing.expect(descriptor.virtual_base + descriptor.size_bytes <= ACCELERATOR_APERTURE_END_EXCLUSIVE);
+        try std.testing.expect(try table.detachAccelerator(churned.id, .npu));
+    }
+    try std.testing.expectEqual(@as(u16, 1), table.mmuForTests().accelerator_window.count);
+}
+
+test "a revoked object pinned by an attachment keeps its aperture run until detach" {
+    var table = Table.init();
+    const half_aperture = (ACCELERATOR_APERTURE_END_EXCLUSIVE - ACCELERATOR_APERTURE_BASE) / 2;
+    const pinned = try table.createLabeledWithAccess(ids.task(7), half_aperture, "pinned", .{ .gpu = true });
+    try table.attachAccelerator(pinned.id, .gpu);
+    _ = try table.revoke(pinned.id);
+    try std.testing.expectEqual(@as(u16, 1), table.mmuForTests().accelerator_window.count);
+
+    const replacement = try table.createLabeledWithAccess(ids.task(8), half_aperture, "replacement", .{ .gpu = true });
+    try std.testing.expectError(error.TableFull, table.attachAccelerator(replacement.id, .gpu));
+    try std.testing.expect(!(try table.isAcceleratorAttached(replacement.id, .gpu)));
+
+    try std.testing.expect(try table.detachAccelerator(pinned.id, .gpu));
+    try std.testing.expectEqual(@as(u16, 0), table.mmuForTests().accelerator_window.count);
+    try table.attachAccelerator(replacement.id, .gpu);
+}
+
+test "shared memory task windows never overlap across tasks that may share a page table" {
+    var table = Table.init();
+    const first = try table.create(ids.task(7), PAGE_SIZE * 3);
+    const second = try table.create(ids.task(7), PAGE_SIZE * 2);
+    try table.map(first.id, ids.task(20));
+    try table.map(second.id, ids.task(21));
+    try table.map(first.id, ids.task(21));
+    try std.testing.expect(try table.unmap(first.id, ids.task(20)));
+    try table.map(second.id, ids.task(20));
+    var spans: [3]FreestandingMappingDescriptor = undefined;
+    spans[0] = try table.mmuForTests().taskMappingDescriptor(table.find(second.id).?, ids.task(21));
+    spans[1] = try table.mmuForTests().taskMappingDescriptor(table.find(first.id).?, ids.task(21));
+    spans[2] = try table.mmuForTests().taskMappingDescriptor(table.find(second.id).?, ids.task(20));
+    for (spans, 0..) |span, index| {
+        try std.testing.expect(span.virtual_base > TASK_SHARED_VIRTUAL_BASE);
+        for (spans[0..index]) |previous| {
+            try std.testing.expect(span.virtual_base + span.page_count * PAGE_SIZE <= previous.virtual_base or
+                previous.virtual_base + previous.page_count * PAGE_SIZE <= span.virtual_base);
+        }
+    }
 }
 
 test "bounded object task scans preserve compacted mappings" {
@@ -1871,11 +1992,6 @@ test "shared memory oversized creation leaves live objects and reusable capacity
     for (1..MAX_SHARED_MEMORY_OBJECTS) |_| _ = try table.create(owner, PAGE_SIZE);
     try std.testing.expectEqual(MAX_SHARED_MEMORY_OBJECTS, table.activeCount());
     try std.testing.expectEqual(@as(usize, MAX_SHARED_MEMORY_OBJECTS * PAGE_SIZE), table.liveOwnedBytesForTask(owner));
-}
-
-test "shared memory identity paths avoid primary indexes and collision probes" {
-    try std.testing.expectEqual(@as(u8, 0), SHARED_MEMORY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION);
-    try std.testing.expectEqual(@as(u8, 0), SHARED_MEMORY_ID_COLLISION_PROBES_PER_INSERT);
 }
 
 test "shared memory objects label accelerator access and explicit zero-copy attachments" {

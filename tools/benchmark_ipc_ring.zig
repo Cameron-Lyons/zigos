@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
         for (&samples) |*sample| {
             var storage: [ring.minimumBytes(SLOTS)]u8 align(ring.STORAGE_ALIGNMENT) = undefined;
             _ = try ring.init(&storage, SLOTS * ring.SLOT_BYTES);
-            const record = ring.Record{ .payload_len = ring.PAYLOAD_BYTES, .bytes = @splat('x'), .correlation_id = 17 };
+            const record = ring.Record{ .header = .{ .payload_len = ring.PAYLOAD_BYTES, .correlation_id = 17 }, .bytes = @splat('x') };
             if (workload == .full_queue) {
                 for (0..SLOTS) |_| try ring.pushRecord(&storage, record);
             }
@@ -81,10 +81,10 @@ fn iteration(comptime workload: Workload, storage: []u8, record: ring.Record) !u
         try ring.receive(storage, &out)
     else split: {
         const pending = try ring.peekRecord(storage);
-        if (pending.payload_len > out.len) return error.PayloadTooLarge;
+        if (pending.header.payload_len > out.len) return error.PayloadTooLarge;
         const received = try ring.popRecord(storage);
-        @memcpy(out[0..received.payload_len], received.bytes[0..received.payload_len]);
-        break :split received;
+        @memcpy(out[0..received.header.payload_len], received.bytes[0..received.header.payload_len]);
+        break :split received.header;
     };
     std.mem.doNotOptimizeAway(&out);
     return received.correlation_id + out[received.payload_len - 1];
@@ -93,10 +93,7 @@ fn iteration(comptime workload: Workload, storage: []u8, record: ring.Record) !u
 noinline fn enqueueIteration(comptime enqueue: Enqueue, storage: []u8, header: ring.RecordHeader, payload: []const u8) !u64 {
     std.mem.doNotOptimizeAway(storage);
     if (enqueue == .record) {
-        var record = ring.Record{};
-        inline for (@typeInfo(ring.RecordHeader).@"struct".field_names) |field_name| {
-            @field(record, field_name) = @field(header, field_name);
-        }
+        var record = ring.Record{ .header = header };
         if (payload.len != 0) @memcpy(record.bytes[0..payload.len], payload);
         try ring.pushRecord(storage, record);
     } else {

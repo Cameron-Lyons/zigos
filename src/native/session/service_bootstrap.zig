@@ -229,7 +229,7 @@ pub fn launchDriverTask(
     now_ticks: u64,
 ) Error!abi.TaskDescriptor {
     if (controller_task_id == 0) {
-        const task = try userspace_launch.launchRegisteredDirect(
+        const task = try userspace_launch.launchFromKernel(
             catalog,
             kernel_port.kernel.runtime,
             bundle_id,

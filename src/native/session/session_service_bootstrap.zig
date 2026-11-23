@@ -845,7 +845,7 @@ pub fn connectClient(
     kernel_port: *component_port.KernelPort,
     service_bindings: *const support.ServiceBindings,
 ) bool {
-    const service_client_task = userspace_launch.launchRegisteredDirect(
+    const service_client_task = userspace_launch.launchFromKernel(
         env.userspace_catalog,
         env.runtime,
         "zigos.system.service-client",

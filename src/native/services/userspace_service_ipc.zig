@@ -361,7 +361,6 @@ const Harness = struct {
                 .launch = .{
                     .boundary = .userspace_process,
                     .image_id = serviceSerial(kind),
-                    .component_abi_version = abi.ABI_VERSION,
                     .signed = true,
                     .bundle_id = serviceBundle(kind),
                 },

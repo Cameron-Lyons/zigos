@@ -10,7 +10,7 @@ const ipc_ring = @import("kernel_api/ipc_ring.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const shared_memory = @import("kernel_api/shared_memory.zig");
 const storage_driver_task = @import("drivers/storage_driver_task.zig");
-const syscall_abi = @import("kernel_api/syscall_abi.zig");
+const operation_metadata = @import("kernel_api/operation_metadata.zig");
 const sync_service = @import("sync/sync_service.zig");
 const sync_service_test = @import("sync/sync_service_test.zig");
 const sync_transport = @import("sync/sync_transport.zig");
@@ -20,7 +20,7 @@ const userspace_launch = @import("task/userspace_launch.zig");
 const xhci_driver_task = @import("drivers/xhci_driver_task.zig");
 
 pub const generated_from_typed_idl = contract_2026.generated_from_typed_idl;
-pub const generated_syscall_operations = syscall_abi.operations.len;
+pub const generated_syscall_operations = operation_metadata.operations.len;
 
 pub const sync_private_overlay = .{
     .native_transport = .{

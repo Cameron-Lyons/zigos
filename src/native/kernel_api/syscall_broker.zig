@@ -23,24 +23,9 @@ pub const CopySession = struct {
     key: dispatch_ownership.RequestKey,
     bound: dispatch_ownership.BoundIdentity,
     read: *const fn (*anyopaque, *const dispatch_ownership.ClaimedSyscall, usize, []u8) bool,
-    prepare_output: *const fn (*anyopaque, *const dispatch_ownership.ClaimedSyscall, OutputRange) bool,
-    write_outputs: *const fn (*anyopaque, *const dispatch_ownership.ClaimedSyscall, []const Output) bool,
+    prepare_output: *const fn (*anyopaque, *const dispatch_ownership.ClaimedSyscall, syscall_dispatch.OutputRange) bool,
+    write_outputs: *const fn (*anyopaque, *const dispatch_ownership.ClaimedSyscall, []const syscall_dispatch.Output) bool,
 };
-
-// Declared tails are checked as writable metadata, while only the required
-// prefix is materialized. No destination alias may survive either callback.
-pub const OutputRange = struct {
-    address: usize,
-    declared_bytes: usize,
-    prepared_bytes: usize,
-    alignment: usize,
-};
-
-// The adapter resolves every destination before the first write. A false
-// return leaves all outputs untouched; commit cannot yield or call out.
-pub const Output = struct { address: usize, bytes: []const u8 };
-pub const MAX_OUTPUTS: usize = 3;
-pub const MAX_OUTPUT_BYTES: usize = endpoint.MAX_MESSAGE_BYTES + @sizeOf(abi.CapabilityDescriptor) + @sizeOf(abi.EndpointRecvResponse);
 
 // Runtime and Kernel mutation have one BSP owner. Architecture interrupt
 // handlers only latch/ack work; they never recursively drain this service.
@@ -71,54 +56,71 @@ fn serviceClaimWith(
     defer servicing = false;
     var reply = dispatch_ownership.Reply{ .status = @intCast(@backingInt(abi.SyscallStatus.unavailable)), .denial_reason = @intCast(@backingInt(abi.DenialReason.none)), .bytes_written = 0 };
     if (admitted) {
-        const caller = claim.bound.identity.task_id;
-        if (claim.envelope.opcode == abi.opcode(.task_terminate)) {
-            var request: abi.TaskTerminateWireRequest = undefined;
-            const read = try readStaged(port, claim, copy, claim.envelope.request_addr, @alignOf(@TypeOf(request)), std.mem.asBytes(&request));
-            if (read != .stopped) {
-                var result: syscall_dispatch.DispatchResult = undefined;
-                if (read == .read) {
-                    syscall_surface.dispatchCopiedTaskTerminateInto(port, caller, now_ticks, request, &result);
-                } else {
-                    result = syscall_dispatch.normalizeResult(syscall_dispatch.invalidRequest());
-                }
-                reply = .{ .status = @intCast(@backingInt(result.status)), .denial_reason = @intCast(@backingInt(result.denial_reason)), .bytes_written = result.bytes_written };
-            }
-        } else if (claim.envelope.opcode == abi.opcode(.endpoint_send)) {
-            var wire: abi.EndpointSendWireRequest = undefined;
-            const fixed = try readStaged(port, claim, copy, claim.envelope.request_addr, @alignOf(@TypeOf(wire)), std.mem.asBytes(&wire));
-            if (fixed != .stopped) {
-                var payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
-                const encoding_valid = fixed == .read and wire.validEncoding() and wire.header.subject_task_id == caller;
-                const staged: Read = if (!encoding_valid)
-                    .invalid
-                else if (wire.payload_bytes == 0)
-                    if (try copyAdmission(port, claim, copy)) .read else .stopped
-                else
-                    try readStaged(port, claim, copy, @intCast(wire.payload_address), 1, payload[0..wire.payload_bytes]);
-                if (staged != .stopped) {
-                    var result: syscall_dispatch.DispatchResult = undefined;
-                    if (staged == .read) {
-                        syscall_surface.dispatchCopiedEndpointSendInto(port, caller, now_ticks, wire, payload[0..wire.payload_bytes], &result);
-                    } else {
-                        result = syscall_dispatch.normalizeResult(syscall_dispatch.invalidRequest());
-                    }
-                    reply = .{ .status = @intCast(@backingInt(result.status)), .denial_reason = @intCast(@backingInt(result.denial_reason)), .bytes_written = result.bytes_written };
-                }
-            }
-        } else if (claim.envelope.opcode == abi.opcode(.endpoint_recv)) {
-            try receiveClaimInto(port, claim, copy, now_ticks, &reply);
-        } else if (claim.envelope.opcode == abi.opcode(.endpoint_close)) {
-            try closeClaimInto(port, claim, copy, now_ticks, &reply);
-        } else {
-            reply.status = @intCast(@backingInt(abi.SyscallStatus.unsupported_operation));
-            reply.denial_reason = @intCast(@backingInt(abi.DenialReason.unsupported_operation));
-        }
+        // The remote caller gets exactly the BSP syscall surface; only the copy
+        // backend differs. STOP observed around any copy leaves the reply
+        // unavailable, and no caller byte is read or written after it.
+        var session = ClaimCopy{ .port = port, .claim = claim, .copy = copy };
+        const result = syscall_surface.dispatchWith(
+            port,
+            .{ .address_space = null, .caller_task_id = claim.bound.identity.task_id, .remote = &session },
+            now_ticks,
+            claim.envelope.opcode,
+            claim.envelope.request_addr,
+            claim.envelope.response_addr,
+            claim.envelope.response_len,
+        );
+        if (session.failure) |err| return err;
+        if (!session.stopped) reply = .{
+            .status = @intCast(@backingInt(result.status)),
+            .denial_reason = @intCast(@backingInt(result.denial_reason)),
+            .bytes_written = result.bytes_written,
+        };
     }
     // Self termination can publish STOP here. Finish this claimed request once
     // without inspecting caller bytes again; return ACK remains the AP's job.
     try port.kernel.runtime.execution.completeSyscall(claim.key, reply);
 }
+
+// One claim's view of caller memory for a single service call. Every
+// callback is bracketed by claim reauthentication; after STOP or a broken
+// invariant is observed, no further callback runs.
+pub const ClaimCopy = struct {
+    port: *const component_port.KernelPort,
+    claim: *const dispatch_ownership.ClaimedSyscall,
+    copy: *const CopySession,
+    stopped: bool = false,
+    failure: ?Error = null,
+
+    fn admit(self: *ClaimCopy) bool {
+        if (self.stopped or self.failure != null) return false;
+        const admitted = copyAdmission(self.port, self.claim, self.copy) catch |err| {
+            self.failure = err;
+            return false;
+        };
+        self.stopped = !admitted;
+        return admitted;
+    }
+
+    // A trusted adapter may observe STOP or a synchronous lifecycle callback.
+    // Reauthenticate before another copy or any operation can publish effects.
+    pub fn read(self: *ClaimCopy, address: usize, destination: []u8) bool {
+        if (!self.admit()) return false;
+        const readable = self.copy.read(self.copy.context, self.claim, address, destination);
+        return self.admit() and readable;
+    }
+
+    pub fn prepareOutput(self: *ClaimCopy, range: syscall_dispatch.OutputRange) bool {
+        if (!self.admit()) return false;
+        const prepared = self.copy.prepare_output(self.copy.context, self.claim, range);
+        return self.admit() and prepared;
+    }
+
+    pub fn commitOutputs(self: *ClaimCopy, outputs: []const syscall_dispatch.Output) bool {
+        if (!self.admit()) return false;
+        const written = self.copy.write_outputs(self.copy.context, self.claim, outputs);
+        return self.admit() and written;
+    }
+};
 
 fn copyAdmission(port: *const component_port.KernelPort, claim: *const dispatch_ownership.ClaimedSyscall, copy: *const CopySession) Error!bool {
     const runtime = port.kernel.runtime;
@@ -133,149 +135,6 @@ fn copyAdmission(port: *const component_port.KernelPort, claim: *const dispatch_
         task.process_generation != identity.process_generation or task.address_space_id != identity.address_space_id)
         return error.InvalidIdentity;
     return !stopped and task.state == .active;
-}
-
-const Read = enum { read, invalid, stopped };
-
-inline fn replyFromResult(result: syscall_dispatch.DispatchResult) dispatch_ownership.Reply {
-    return replyFromStatus(result.status, result.denial_reason, result.bytes_written);
-}
-
-// The mailbox carries only these scalars. Reuse the ordinary denial mapping
-// without building explanation/provenance records that cannot be returned.
-inline fn replyFromStatus(status: abi.SyscallStatus, denial_reason: abi.DenialReason, bytes_written: u32) dispatch_ownership.Reply {
-    const reason = if (denial_reason == .none) syscall_dispatch.defaultDenialReasonForStatus(status) else denial_reason;
-    return .{ .status = @intCast(@backingInt(status)), .denial_reason = @intCast(@backingInt(reason)), .bytes_written = bytes_written };
-}
-
-fn closeClaimInto(port: *const component_port.KernelPort, claim: *const dispatch_ownership.ClaimedSyscall, copy: *const CopySession, now_ticks: u64, out: *dispatch_ownership.Reply) Error!void {
-    var request: abi.EndpointCloseWireRequest = undefined;
-    const fixed = try readStaged(port, claim, copy, claim.envelope.request_addr, @alignOf(@TypeOf(request)), std.mem.asBytes(&request));
-    if (fixed == .stopped) return;
-    const caller = claim.bound.identity.task_id;
-    if (fixed != .read or request.header.subject_task_id != caller) {
-        out.* = replyFromStatus(.invalid_request_pointer, .none, 0);
-        return;
-    }
-    var local_port = port.*;
-    local_port.syscall_caller_task_id = caller;
-    local_port.syscall_header_prevalidated = false;
-    local_port.endpointClose(request, now_ticks) catch |err| {
-        out.* = replyFromResult(syscall_dispatch.mapError(err));
-        return;
-    };
-    // Retirement and peer wakeups have committed. A wake may publish STOP;
-    // preserve success without reading caller bytes or touching output memory.
-    out.* = replyFromStatus(.success, .none, 0);
-}
-
-fn receiveClaimInto(port: *const component_port.KernelPort, claim: *const dispatch_ownership.ClaimedSyscall, copy: *const CopySession, now_ticks: u64, out: *dispatch_ownership.Reply) Error!void {
-    const caller = claim.bound.identity.task_id;
-    var wire: abi.EndpointRecvWireRequest = undefined;
-    const fixed = try readStaged(port, claim, copy, claim.envelope.request_addr, @alignOf(@TypeOf(wire)), std.mem.asBytes(&wire));
-    if (fixed == .stopped) return;
-    var result: dispatch_ownership.Reply = undefined;
-    if (fixed != .read or !wire.validEncoding() or wire.header.subject_task_id != caller or wire.receiver_task_id != caller) {
-        result = replyFromStatus(.invalid_request_pointer, .none, 0);
-    } else if (claim.envelope.response_len < @sizeOf(abi.EndpointRecvResponse)) {
-        result = replyFromStatus(.buffer_too_small, .none, 0);
-    } else {
-        const response = OutputRange{ .address = claim.envelope.response_addr, .declared_bytes = claim.envelope.response_len, .prepared_bytes = @sizeOf(abi.EndpointRecvResponse), .alignment = 1 };
-        const payload = OutputRange{ .address = @intCast(wire.payload_address), .declared_bytes = wire.payload_capacity, .prepared_bytes = wire.payload_capacity, .alignment = 1 };
-        const capability = OutputRange{ .address = @intCast(wire.attached_capability_address), .declared_bytes = @sizeOf(abi.CapabilityDescriptor), .prepared_bytes = @sizeOf(abi.CapabilityDescriptor), .alignment = @alignOf(abi.CapabilityDescriptor) };
-        if (!validOutputRange(response) or !validOutputRange(payload) or !validOutputRange(capability) or
-            outputRangesOverlap(response, payload) or outputRangesOverlap(response, capability) or outputRangesOverlap(payload, capability))
-        {
-            result = replyFromStatus(.invalid_response_buffer, .none, 0);
-        } else {
-            for ([_]OutputRange{ response, payload, capability }) |range| {
-                const prepared = try prepareOutput(port, claim, copy, range);
-                if (prepared == .stopped) return;
-                if (prepared == .invalid) {
-                    out.* = replyFromStatus(.invalid_response_buffer, .none, 0);
-                    return;
-                }
-            }
-            if (!try copyAdmission(port, claim, copy)) return;
-            var staged_payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
-            var staged_capability: abi.CapabilityDescriptor = undefined;
-            var request: component_port.EndpointRecvRequest = undefined;
-            if (!component_port.endpointRecvFromWireInto(wire, staged_payload[0..wire.payload_capacity], &staged_capability, &request)) unreachable;
-            var local_port = port.*;
-            local_port.syscall_caller_task_id = caller;
-            local_port.syscall_header_prevalidated = false;
-            const received = local_port.endpointRecv(request, now_ticks) catch |err| {
-                out.* = replyFromResult(syscall_dispatch.mapError(err));
-                return;
-            };
-            // Dequeue and capability transfer now belong to this request once.
-            // STOP or failed output cannot retry or recreate those effects.
-            if (!try copyAdmission(port, claim, copy)) return;
-            var staged_response = std.mem.zeroes(abi.EndpointRecvResponse);
-            var outputs: [MAX_OUTPUTS]Output = undefined;
-            var count: usize = 0;
-            if (received) |message| {
-                staged_response.present = 1;
-                staged_response.has_attached_capability = @intFromBool(message.attached_capability != null);
-                staged_response.message = message.message;
-                if (message.message.payload_len != 0) {
-                    outputs[count] = .{ .address = payload.address, .bytes = staged_payload[0..message.message.payload_len] };
-                    count += 1;
-                }
-                if (message.attached_capability != null) {
-                    outputs[count] = .{ .address = capability.address, .bytes = std.mem.asBytes(&staged_capability) };
-                    count += 1;
-                }
-            }
-            outputs[count] = .{ .address = response.address, .bytes = std.mem.asBytes(&staged_response) };
-            count += 1;
-            const written = copy.write_outputs(copy.context, claim, outputs[0..count]);
-            if (!try copyAdmission(port, claim, copy)) return;
-            result = replyFromStatus(if (written) .success else .invalid_response_buffer, .none, if (written) @sizeOf(abi.EndpointRecvResponse) else 0);
-        }
-    }
-    out.* = result;
-}
-
-inline fn validOutputRange(range: OutputRange) bool {
-    if (range.prepared_bytes > range.declared_bytes or range.prepared_bytes > endpoint.MAX_MESSAGE_BYTES or
-        range.alignment == 0 or !std.math.isPowerOfTwo(range.alignment)) return false;
-    if (range.declared_bytes == 0) return true;
-    const end = std.math.add(usize, range.address, range.declared_bytes) catch return false;
-    return range.address >= 0x10000 and range.address % range.alignment == 0 and end > range.address and end <= 0x0000_8000_0000_0000;
-}
-
-inline fn outputRangesOverlap(first: OutputRange, second: OutputRange) bool {
-    if (first.declared_bytes == 0 or second.declared_bytes == 0) return false;
-    // Called only after both complete extents passed overflow admission.
-    return first.address < second.address + second.declared_bytes and second.address < first.address + first.declared_bytes;
-}
-
-inline fn prepareOutput(port: *const component_port.KernelPort, claim: *const dispatch_ownership.ClaimedSyscall, copy: *const CopySession, range: OutputRange) Error!Read {
-    if (!try copyAdmission(port, claim, copy)) return .stopped;
-    if (range.declared_bytes == 0) return .read;
-    const prepared = copy.prepare_output(copy.context, claim, range);
-    if (!try copyAdmission(port, claim, copy)) return .stopped;
-    return if (prepared) .read else .invalid;
-}
-
-fn rejectOutput(_: *anyopaque, _: *const dispatch_ownership.ClaimedSyscall, _: OutputRange) bool {
-    return false;
-}
-
-fn rejectOutputs(_: *anyopaque, _: *const dispatch_ownership.ClaimedSyscall, _: []const Output) bool {
-    return false;
-}
-
-fn readStaged(port: *const component_port.KernelPort, claim: *const dispatch_ownership.ClaimedSyscall, copy: *const CopySession, address: usize, alignment: usize, destination: []u8) Error!Read {
-    if (!try copyAdmission(port, claim, copy)) return .stopped;
-    const end = std.math.add(usize, address, destination.len) catch return .invalid;
-    if (address < 0x10000 or address % alignment != 0 or end <= address or end > 0x0000_8000_0000_0000) return .invalid;
-    const readable = copy.read(copy.context, claim, address, destination);
-    // A trusted adapter may observe STOP or a synchronous lifecycle callback.
-    // Reauthenticate before another read or any operation can publish effects.
-    if (!try copyAdmission(port, claim, copy)) return .stopped;
-    return if (readable) .read else .invalid;
 }
 
 const TestFixture = if (builtin.is_test) struct {
@@ -395,7 +254,15 @@ const TestFixture = if (builtin.is_test) struct {
     }
 
     fn session(self: *@This(), claim: *const dispatch_ownership.ClaimedSyscall) CopySession {
-        return .{ .context = self, .key = claim.key, .bound = claim.bound, .read = read, .prepare_output = rejectOutput, .write_outputs = rejectOutputs };
+        return .{ .context = self, .key = claim.key, .bound = claim.bound, .read = read, .prepare_output = TestFixture.rejectOutput, .write_outputs = TestFixture.rejectOutputs };
+    }
+
+    fn rejectOutput(_: *anyopaque, _: *const dispatch_ownership.ClaimedSyscall, _: syscall_dispatch.OutputRange) bool {
+        return false;
+    }
+
+    fn rejectOutputs(_: *anyopaque, _: *const dispatch_ownership.ClaimedSyscall, _: []const syscall_dispatch.Output) bool {
+        return false;
     }
 
     fn read(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, address: usize, destination: []u8) bool {
@@ -521,7 +388,7 @@ const EndpointFixture = if (builtin.is_test) struct {
     }
 
     fn session(self: *@This(), claim: *const dispatch_ownership.ClaimedSyscall) CopySession {
-        return .{ .context = self, .key = claim.key, .bound = claim.bound, .read = read, .prepare_output = rejectOutput, .write_outputs = rejectOutputs };
+        return .{ .context = self, .key = claim.key, .bound = claim.bound, .read = read, .prepare_output = TestFixture.rejectOutput, .write_outputs = TestFixture.rejectOutputs };
     }
 
     fn submit(self: *@This(), address: usize) !dispatch_ownership.RequestKey {
@@ -777,13 +644,13 @@ const CloseFixture = if (builtin.is_test) struct {
         return true;
     }
 
-    fn prepare(context: *anyopaque, _: *const dispatch_ownership.ClaimedSyscall, _: OutputRange) bool {
+    fn prepare(context: *anyopaque, _: *const dispatch_ownership.ClaimedSyscall, _: syscall_dispatch.OutputRange) bool {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.outputs += 1;
         return false;
     }
 
-    fn write(context: *anyopaque, _: *const dispatch_ownership.ClaimedSyscall, _: []const Output) bool {
+    fn write(context: *anyopaque, _: *const dispatch_ownership.ClaimedSyscall, _: []const syscall_dispatch.Output) bool {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.outputs += 1;
         return false;
@@ -923,11 +790,7 @@ test "syscall broker close malformed staging and denied authority preserve compl
             .partial => fixture.behavior = .partial,
             .absent_subject => fixture.request.header.subject_task_id = 0,
             .foreign_subject => fixture.request.header.subject_task_id = base.tasks[EndpointFixture.sender_cpu].?.id,
-            .opcode => {
-                fixture.request.header.operation = abi.opcode(.endpoint_send);
-                status = .unsupported_operation;
-                reason = .unsupported_operation;
-            },
+            .opcode => fixture.request.header.operation = abi.opcode(.endpoint_send),
             .flags => fixture.request.header.flags = 1,
             .missing, .foreign_capability => {
                 fixture.request.endpoint_capability_id = if (case == .missing) std.math.maxInt(u64) else endpoint_fixture.send_capability;
@@ -1061,6 +924,8 @@ const ReceiveFixture = if (builtin.is_test) struct {
     output: [512]u8 align(8) = @splat(0xa5),
     response_len: usize = @sizeOf(abi.EndpointRecvResponse),
     request_address: usize = 0,
+    // Another operation's fixed request, read in place of the receive wire.
+    request_bytes: []const u8 = &.{},
     behavior: Behavior = .copy,
     fault_prepare: usize = 3,
     reads: usize = 0,
@@ -1132,6 +997,12 @@ const ReceiveFixture = if (builtin.is_test) struct {
 
     fn read(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, address: usize, destination: []u8) bool {
         const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.request_bytes.len != 0) {
+            if (address != @intFromPtr(self.request_bytes.ptr) or destination.len != self.request_bytes.len) return false;
+            self.reads += 1;
+            @memcpy(destination, self.request_bytes);
+            return true;
+        }
         if (address != self.request_address or destination.len != @sizeOf(abi.EndpointRecvWireRequest)) return false;
         self.reads += 1;
         const source = if (address == @intFromPtr(&self.wire)) std.mem.asBytes(&self.wire) else self.output[0..@sizeOf(abi.EndpointRecvWireRequest)];
@@ -1153,7 +1024,7 @@ const ReceiveFixture = if (builtin.is_test) struct {
         return offset;
     }
 
-    fn prepare(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, range: OutputRange) bool {
+    fn prepare(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, range: syscall_dispatch.OutputRange) bool {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.prepares += 1;
         if (range.address == @intFromPtr(&self.output)) {
@@ -1167,7 +1038,7 @@ const ReceiveFixture = if (builtin.is_test) struct {
         return self.outputOffset(range.address, range.declared_bytes) != null and range.prepared_bytes <= range.declared_bytes;
     }
 
-    fn write(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, outputs: []const Output) bool {
+    fn write(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, outputs: []const syscall_dispatch.Output) bool {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.writes += 1;
         if (self.behavior == .fail_write) return false;
@@ -1537,7 +1408,7 @@ test "syscall broker malformed copied headers denied capabilities and unsupporte
         }
         if (case == .reenter) fixture.behavior = .reenter;
         const before_reads = fixture.reads;
-        const key = try fixture.submit(3, abi.opcode(if (case == .unsupported) .time_query else .task_terminate));
+        const key = try fixture.submit(3, if (case == .unsupported) std.math.maxInt(u16) else abi.opcode(.task_terminate));
         var claim: dispatch_ownership.ClaimedSyscall = undefined;
         try fixture.claimInto(3, &claim);
         const copy = fixture.session(&claim);
@@ -1545,18 +1416,17 @@ test "syscall broker malformed copied headers denied capabilities and unsupporte
         var reply: dispatch_ownership.Reply = undefined;
         try fixture.consume(key, &reply);
         const expected: abi.SyscallStatus = switch (case) {
-            .unsupported, .header_operation => .unsupported_operation,
-            .header_subject, .denied_right => .denied,
+            .unsupported => .unsupported_operation,
+            .denied_right => .denied,
             .foreign_capability, .missing_capability, .reenter => .not_found,
-            .partial_copy => .invalid_request_pointer,
+            .header_operation, .header_subject, .partial_copy => .invalid_request_pointer,
         };
         try std.testing.expectEqual(@as(u16, @intCast(@backingInt(expected))), reply.status);
         const reason: abi.DenialReason = switch (case) {
-            .unsupported, .header_operation => .unsupported_operation,
-            .header_subject => .scope_violation,
+            .unsupported => .unsupported_operation,
             .denied_right => .policy_denied,
             .foreign_capability, .missing_capability, .reenter => .capability_missing,
-            .partial_copy => .invalid_target,
+            .header_operation, .header_subject, .partial_copy => .invalid_target,
         };
         try std.testing.expectEqual(@as(u16, @intCast(@backingInt(reason))), reply.denial_reason);
         try std.testing.expectEqual(@as(u32, 0), reply.bytes_written);
@@ -1569,6 +1439,44 @@ test "syscall broker malformed copied headers denied capabilities and unsupporte
         try std.testing.expectEqual(@as(usize, 2), fixture.shared.activeCount());
     }
     try std.testing.expectEqual(@as(usize, 1), fixture.nested_rejections);
+}
+
+test "syscall broker serves an ordinary response through the shared dispatch surface" {
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    const fixture = try ReceiveFixture.create();
+    defer fixture.destroy();
+    const base = &fixture.endpoint_fixture.base;
+    const receiver = fixture.receiver();
+    const clock = try base.capabilities.mintBootRoot(.{
+        .holder = receiver.owner,
+        .issuer = base.kernel.policy_authority,
+        .target = .{ .kind = .service, .id = 902 },
+        .rights = .{ .service = .{ .time_query = true } },
+        .scope = .{ .task_id = receiver.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    try base.runtime.grantCapability(receiver.id, clock.id);
+    const query = abi.TimeQueryWireRequest{ .header = component_port.makeHeader(.time_query, receiver.id), .authority_capability_id = clock.id };
+    fixture.request_bytes = std.mem.asBytes(&query);
+    const key = try base.submitEnvelope(EndpointFixture.receiver_cpu, .{
+        .opcode = abi.opcode(.time_query),
+        .request_addr = @intFromPtr(&query),
+        .response_addr = @intFromPtr(&fixture.output[0]),
+        .response_len = @sizeOf(abi.TimeQueryResponse),
+    });
+    var claim: dispatch_ownership.ClaimedSyscall = undefined;
+    try base.claimInto(EndpointFixture.receiver_cpu, &claim);
+    const copy = fixture.session(&claim);
+    try serviceClaim(&base.port, &claim, &copy, 19);
+    var reply: dispatch_ownership.Reply = undefined;
+    try base.consume(key, &reply);
+    try std.testing.expectEqual(@as(u16, @intCast(@backingInt(abi.SyscallStatus.success))), reply.status);
+    try std.testing.expectEqual(@as(u32, @sizeOf(abi.TimeQueryResponse)), reply.bytes_written);
+    try std.testing.expectEqual(@as(u64, 19), std.mem.bytesToValue(abi.TimeQueryResponse, fixture.output[0..@sizeOf(abi.TimeQueryResponse)]).now_ticks);
+    try std.testing.expectEqual(@as(usize, 1), fixture.reads);
+    try std.testing.expectEqual(@as(usize, 1), fixture.writes);
 }
 
 test "syscall broker rejects fixed request geometry before its trusted copy callback" {

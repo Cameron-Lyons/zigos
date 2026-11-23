@@ -1099,7 +1099,7 @@ test "owned storage copied authority denies refill after broker process capabili
             .component_class = .service_component,
             .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 1024, .endpoint_slots = 4, .shared_memory_bytes = 1024 },
             .local_only = true,
-            .launch = .{ .boundary = .userspace_process, .image_id = 51, .component_abi_version = 1, .signed = true, .bundle_id = "zigos.system.storage-driver" },
+            .launch = .{ .boundary = .userspace_process, .image_id = 51, .signed = true, .bundle_id = "zigos.system.storage-driver" },
             .userspace_image = &image,
         });
         const authority = try driver_service.mintDriverAuthority(&capabilities, .{ .holder = owner, .task_id = task.id, .device_id = device_id, .device_class = .storage_controller, .issued_at_ticks = 100, .expires_at_ticks = 101 });
@@ -1336,7 +1336,6 @@ test "active nvme controller sessions reject stale broker generations" {
         .launch = .{
             .boundary = .userspace_process,
             .image_id = 51,
-            .component_abi_version = 1,
             .signed = true,
             .bundle_id = "zigos.system.storage-driver",
         },

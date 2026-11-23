@@ -326,7 +326,6 @@ pub const Simulator = struct {
             .launch = .{
                 .boundary = .direct_request,
                 .image_id = appImageId(bundle),
-                .component_abi_version = 1,
                 .signed = bundle.signature.isComplete(),
                 .bundle_id = bundle.bundle_id,
                 .source_identity = launch_plan.provenance.source_identity,

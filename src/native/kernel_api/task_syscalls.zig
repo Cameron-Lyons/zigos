@@ -17,22 +17,22 @@ pub fn dispatchTaskCreate(
     port: *component_port.KernelPort,
     memory: dispatch.UserMemoryContext,
     now_ticks: u64,
-    request_addr: usize,
+    request: []align(8) const u8,
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    const wire = dispatch.readRequest(abi.TaskCreateWireRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    const wire = dispatch.decode(abi.TaskCreateWireRequest, request);
     if (!task_create_wire.taskCreateWireValid(&wire)) return dispatch.invalidRequest();
     var scratch = TaskCreateScratch{};
-    var request = component_port.TaskCreateRequest{
+    var create = component_port.TaskCreateRequest{
         .header = wire.header,
         .authority_capability_id = wire.authority_capability_id,
         .request = undefined,
     };
-    if (!sanitizeTaskCreateRequest(memory, &wire, &scratch, &request.request)) return dispatch.invalidRequest();
+    if (!sanitizeTaskCreateRequest(memory, &wire, &scratch, &create.request)) return dispatch.invalidRequest();
     // Keep this single-operation decode and forwarding boundary together;
     // shared image validation and bounded byte copying remain outlined.
-    const task = @call(.always_inline, component_port.invokeGeneratedFromValidatedSyscall, .{ .task_create, port, request, now_ticks }) catch |err| return dispatch.mapError(err);
+    const task = @call(.always_inline, component_port.invokeGenerated, .{ .task_create, port, create, now_ticks }) catch |err| return dispatch.mapError(err);
     return @call(.always_inline, dispatch.writeResponse, .{ memory, response_addr, response_len, task });
 }
 
@@ -40,25 +40,24 @@ pub fn dispatchTaskTerminate(
     port: *component_port.KernelPort,
     memory: dispatch.UserMemoryContext,
     now_ticks: u64,
-    request_addr: usize,
+    request: []align(8) const u8,
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
     // Terminating the caller retires its address-space record during invocation.
     // Acknowledge through the syscall status without copying into retired memory.
-    return dispatch.invokeNoResponse(.task_terminate, port, memory, now_ticks, request_addr, response_addr, response_len);
+    return dispatch.invokeNoResponse(.task_terminate, port, memory, now_ticks, request, response_addr, response_len);
 }
 
 pub fn dispatchTimeQuery(
     port: *component_port.KernelPort,
     memory: dispatch.UserMemoryContext,
     now_ticks: u64,
-    request_addr: usize,
+    request: []align(8) const u8,
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    const request = dispatch.readRequest(component_port.TimeQueryRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const queried = component_port.invokeGeneratedFromValidatedSyscall(.time_query, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    const queried = component_port.invokeGenerated(.time_query, port, dispatch.decode(component_port.TimeQueryRequest, request), now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.TimeQueryResponse{
         .now_ticks = queried,
     });
@@ -68,34 +67,33 @@ pub fn dispatchResourceQuery(
     port: *component_port.KernelPort,
     memory: dispatch.UserMemoryContext,
     now_ticks: u64,
-    request_addr: usize,
+    request: []align(8) const u8,
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    return dispatch.invokeAndWriteResponse(.resource_query, port, memory, now_ticks, request_addr, response_addr, response_len);
+    return dispatch.invokeAndWriteResponse(.resource_query, port, memory, now_ticks, request, response_addr, response_len);
 }
 
 pub fn dispatchAccountingQuery(
     port: *component_port.KernelPort,
     memory: dispatch.UserMemoryContext,
     now_ticks: u64,
-    request_addr: usize,
+    request: []align(8) const u8,
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    return dispatch.invokeAndWriteResponse(.accounting_query, port, memory, now_ticks, request_addr, response_addr, response_len);
+    return dispatch.invokeAndWriteResponse(.accounting_query, port, memory, now_ticks, request, response_addr, response_len);
 }
 
 pub fn dispatchInputRecv(
     port: *component_port.KernelPort,
     memory: dispatch.UserMemoryContext,
     now_ticks: u64,
-    request_addr: usize,
+    request: []align(8) const u8,
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    const request = dispatch.readRequest(component_port.InputRecvRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const received = component_port.invokeGeneratedFromValidatedSyscall(.input_recv, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    const received = component_port.invokeGenerated(.input_recv, port, dispatch.decode(component_port.InputRecvRequest, request), now_ticks) catch |err| return dispatch.mapError(err);
     var response = @import("std").mem.zeroes(abi.InputRecvResponse);
     if (received) |event| {
         response.present = 1;
@@ -108,13 +106,12 @@ pub fn dispatchSurfacePresent(
     port: *component_port.KernelPort,
     memory: dispatch.UserMemoryContext,
     now_ticks: u64,
-    request_addr: usize,
+    request: []align(8) const u8,
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    const wire = dispatch.readRequest(abi.SurfacePresentWireRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    @import("../core/request_header.zig").validateHeader(wire.header, abi.opcode(.surface_present)) catch |err| return dispatch.mapError(err);
-    var request = component_port.SurfacePresentRequest{
+    const wire = dispatch.decode(abi.SurfacePresentWireRequest, request);
+    var present = component_port.SurfacePresentRequest{
         .header = wire.header,
         .presentation_capability_id = wire.presentation_capability_id,
         .presenter_task_id = wire.presenter_task_id,
@@ -135,9 +132,9 @@ pub fn dispatchSurfacePresent(
             .state = @bitCast(encoded.state),
             .text = encoded.text,
         };
-        request.text = &text;
+        present.text = &text;
     }
-    const presented = component_port.invokeGeneratedFromValidatedSyscall(.surface_present, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    const presented = component_port.invokeGenerated(.surface_present, port, present, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(presented));
 }
 

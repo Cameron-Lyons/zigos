@@ -152,7 +152,7 @@ const WakeTest = if (@import("builtin").is_test) struct {
             .component_class = .service_component,
             .budget = .{ .cpu_time_ticks = 2_000, .memory_bytes = 4_096, .endpoint_slots = 2, .shared_memory_bytes = 0 },
             .local_only = true,
-            .launch = .{ .boundary = .userspace_process, .image_id = 1, .component_abi_version = 1, .signed = true, .bundle_id = "svc.compositor-ui-session" },
+            .launch = .{ .boundary = .userspace_process, .image_id = 1, .signed = true, .bundle_id = "svc.compositor-ui-session" },
             .userspace_image = &image,
         });
         self.task_id = task.id;

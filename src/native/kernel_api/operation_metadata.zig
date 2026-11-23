@@ -10,11 +10,6 @@ pub const Domain = enum {
     device,
 };
 
-pub const RequestCopyRule = enum {
-    plain,
-    embedded_user_buffers,
-};
-
 pub const PortInvocation = enum {
     with_now_ticks,
     without_now_ticks,
@@ -62,7 +57,6 @@ pub const Descriptor = struct {
     operation: abi.NativeOperation,
     binding: AbiBinding,
     domain: Domain,
-    request_copy: RequestCopyRule = .plain,
     required_right: capability.CapabilityRight,
     target_kind: TargetKindRule = .none,
     scope_rule: ScopeRule = .{},
@@ -103,7 +97,6 @@ pub const operations = [_]Descriptor{
             .port_method_name = "taskCreate",
         },
         .domain = .task,
-        .request_copy = .embedded_user_buffers,
         .required_right = .task_create,
         .scope_rule = .{ .local_scope_requires_request_local = true },
     },
@@ -128,7 +121,6 @@ pub const operations = [_]Descriptor{
             .port_method_name = "endpointCreate",
         },
         .domain = .endpoint,
-        .request_copy = .embedded_user_buffers,
         .required_right = .endpoint_create,
         .scope_rule = .{
             .task_scope_matches_request_task = true,
@@ -157,7 +149,6 @@ pub const operations = [_]Descriptor{
             .port_method_name = "endpointSend",
         },
         .domain = .endpoint,
-        .request_copy = .embedded_user_buffers,
         .required_right = .endpoint_send,
         .target_kind = .{ .fixed = .endpoint },
     },
@@ -170,7 +161,6 @@ pub const operations = [_]Descriptor{
             .port_method_name = "endpointRecv",
         },
         .domain = .endpoint,
-        .request_copy = .embedded_user_buffers,
         .required_right = .endpoint_recv,
         .target_kind = .{ .fixed = .endpoint },
         .scope_rule = .{ .task_scope_matches_request_task = true },
@@ -355,7 +345,6 @@ pub const operations = [_]Descriptor{
             .port_method_name = "surfacePresent",
         },
         .domain = .task,
-        .request_copy = .embedded_user_buffers,
         .required_right = .surface_present,
         .target_kind = .{ .fixed = .task },
         .scope_rule = .{ .task_scope_matches_request_task = true },
@@ -422,9 +411,6 @@ test "native operation metadata covers every operation once" {
     }
 
     try std.testing.expectEqual(Domain.task, declarationFor(.task_create).domain);
-    try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, declarationFor(.task_create).request_copy);
-    try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, declarationFor(.endpoint_send).request_copy);
-    try std.testing.expectEqual(RequestCopyRule.embedded_user_buffers, declarationFor(.endpoint_recv).request_copy);
     try std.testing.expectEqual(capability.CapabilityRight.device_use, declarationFor(.device_describe).required_right);
     try std.testing.expect(switch (declarationFor(.capability_query).target_kind) {
         .same_as_target_capability => true,

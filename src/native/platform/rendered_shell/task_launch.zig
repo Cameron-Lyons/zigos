@@ -120,7 +120,6 @@ pub fn startConfiguredTaskWithPackageProvenance(
         .launch = .{
             .boundary = .userspace_process,
             .image_id = config.image_id,
-            .component_abi_version = abi.ABI_VERSION,
             .signed = true,
             .bundle_id = config.bundle_id,
             .source_identity = provenance.source_identity,

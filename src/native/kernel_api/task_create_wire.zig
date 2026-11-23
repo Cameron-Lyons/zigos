@@ -15,8 +15,7 @@ pub const StagedStrings = struct {
 
 // This scalar admission runs before any nested user address is followed.
 pub inline fn taskCreateWireValid(wire: *const abi.TaskCreateWireRequest) bool {
-    if (wire.header.operation != abi.opcode(.task_create) or wire.header.flags != 0 or
-        wire.header.reserved != 0 or
+    if (!wire.header.admits(abi.opcode(.task_create)) or
         wire.flags & ~wire_types.KNOWN_FLAGS != 0 or !std.mem.allEqual(u8, &wire.reserved, 0)) return false;
     if (std.enums.fromInt(principal.PrincipalKind, wire.owner_kind) == null or
         std.enums.fromInt(task_runtime.ComponentClass, wire.component_class) == null or
@@ -66,7 +65,6 @@ pub inline fn taskCreateFromWireInto(
         .launch = .{
             .boundary = boundary,
             .image_id = wire.image_id,
-            .component_abi_version = wire.component_abi_version,
             .signed = wire.flags & wire_types.SIGNED != 0,
             .bundle_id = staged.bundle_id,
             .source_identity = staged.source_identity,
@@ -138,7 +136,6 @@ pub fn taskCreateToWireInto(header: abi.RequestHeader, authority_capability_id: 
         .component_label_bytes = std.math.cast(u32, request.initial_component.label.len) orelse std.math.maxInt(u32),
         .component_entry_bytes = std.math.cast(u32, request.initial_component.entry.len) orelse std.math.maxInt(u32),
         .endpoint_slots = request.budget.endpoint_slots,
-        .component_abi_version = request.launch.component_abi_version,
         .owner_kind = @backingInt(request.owner.kind),
         .component_class = @backingInt(request.component_class),
         .substrate = @backingInt(request.initial_component.substrate),

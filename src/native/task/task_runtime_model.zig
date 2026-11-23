@@ -1,4 +1,5 @@
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
+const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
@@ -20,7 +21,10 @@ pub const MAX_TASK_CAPABILITIES: usize = 24;
 pub const MAX_TASK_COMPONENTS: usize = 8;
 pub const MAX_AUDIT_EVENTS: usize = 16;
 
-pub const MAX_TASK_PROVENANCE_EVENTS: usize = if (includesVerificationEvidence()) 24 else 8;
+// Only verification images and host tests read the per-task provenance
+// trail; production kernels neither build nor store its records.
+pub const RETAINS_TASK_PROVENANCE = includesVerificationEvidence() or builtin.is_test;
+pub const MAX_TASK_PROVENANCE_EVENTS: usize = if (includesVerificationEvidence()) 24 else if (RETAINS_TASK_PROVENANCE) 8 else 0;
 pub const MAX_TASK_BUNDLE_ID_BYTES: usize = 64;
 pub const MAX_TASK_SOURCE_IDENTITY_BYTES: usize = 96;
 pub const MAX_COMPONENT_LABEL_BYTES: usize = 48;
@@ -32,7 +36,6 @@ pub const UserStackByteLength = u64;
 pub const INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const TASK_OWNER_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const TASK_CAPABILITY_SCAN_BOUND: usize = MAX_TASK_CAPABILITIES;
-pub const TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
 pub const DEFAULT_USER_STACK_TOP: u64 = launch_helpers.DEFAULT_USER_STACK_TOP;
 pub const DEFAULT_USER_STACK_SIZE_BYTES: UserStackByteLength = launch_helpers.DEFAULT_USER_STACK_SIZE_BYTES;
 pub const USER_PAGE_SIZE: u64 = launch_helpers.USER_PAGE_SIZE;
@@ -40,7 +43,6 @@ pub const USER_VIRTUAL_ADDRESS_MIN: u64 = launch_helpers.USER_VIRTUAL_ADDRESS_MI
 pub const USER_IMAGE_ADDRESS_MAX_EXCLUSIVE: u64 = launch_helpers.USER_IMAGE_ADDRESS_MAX_EXCLUSIVE;
 pub const USER_STACK_ADDRESS_MIN: u64 = launch_helpers.USER_STACK_ADDRESS_MIN;
 pub const USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE: u64 = launch_helpers.USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE;
-pub const ORDERED_EXECUTABLE_SEGMENTS = launch_helpers.ORDERED_EXECUTABLE_SEGMENTS;
 pub const DEFAULT_SYNTHETIC_ENTRY_POINT: u64 = USER_VIRTUAL_ADDRESS_MIN;
 pub const DEFAULT_SYNTHETIC_IMAGE_BYTES: UserImageByteLength = units.kibibytes(8);
 
@@ -285,137 +287,9 @@ pub const AuditEvent = struct {
 
 pub const ProvenanceRecord = debug_contract.ProvenanceRecord;
 
-comptime {
-    if (debug_contract.MAX_LABEL_BYTES > std.math.maxInt(u8) or
-        debug_contract.MAX_DETAIL_BYTES > std.math.maxInt(u8))
-    {
-        @compileError("compact task provenance text lengths require wider counters");
-    }
-}
-
-pub const TaskProvenanceRecord = struct {
-    trace_id: u64 = 0,
-    parent_trace_id: u64 = 0,
-    task_id: u64 = 0,
-    artifact_id: u64 = 0,
-    service_id: u64 = 0,
-    capability_id: u64 = 0,
-    target_id: u64 = 0,
-    tick: u64 = 0,
-    source_identity_fingerprint: u64 = 0,
-    release_transparency_sequence: u64 = 0,
-    release_transparency_root_fingerprint: u64 = 0,
-    release_transparency_log_head_fingerprint: u64 = 0,
-    denial_fingerprint: u64 = 0,
-    operation: [debug_contract.MAX_LABEL_BYTES]u8 = @as([debug_contract.MAX_LABEL_BYTES]u8, @splat(0)),
-    detail: [debug_contract.MAX_DETAIL_BYTES]u8 = @as([debug_contract.MAX_DETAIL_BYTES]u8, @splat(0)),
-    kind: debug_contract.ProvenanceKind = .none,
-    decision: debug_contract.Decision = .allowed,
-    target_kind: ?capability.CapabilityTargetKind = null,
-    denial_reason: abi.DenialReason = .none,
-    operation_len: u8 = 0,
-    detail_len: u8 = 0,
-
-    pub fn from(record: ProvenanceRecord) TaskProvenanceRecord {
-        const operation_len = @min(record.operation_len, record.operation.len);
-        const detail_len = @min(record.detail_len, record.detail.len);
-        var compact = TaskProvenanceRecord{
-            .trace_id = record.trace_id,
-            .parent_trace_id = record.parent_trace_id,
-            .task_id = record.task_id,
-            .artifact_id = record.artifact_id,
-            .service_id = record.service_id,
-            .capability_id = record.capability_id,
-            .target_id = record.target_id,
-            .tick = record.tick,
-            .source_identity_fingerprint = record.source_identity_fingerprint,
-            .release_transparency_sequence = record.release_transparency_sequence,
-            .release_transparency_root_fingerprint = record.release_transparency_root_fingerprint,
-            .release_transparency_log_head_fingerprint = record.release_transparency_log_head_fingerprint,
-            .denial_fingerprint = record.denial.fingerprint,
-            .kind = record.kind,
-            .decision = record.decision,
-            .target_kind = record.target_kind,
-            .denial_reason = record.denial.reason,
-            .operation_len = @intCast(operation_len),
-            .detail_len = @intCast(detail_len),
-        };
-        @memcpy(compact.operation[0..operation_len], record.operation[0..operation_len]);
-        @memcpy(compact.detail[0..detail_len], record.detail[0..detail_len]);
-        return compact;
-    }
-
-    pub fn operationSlice(self: *const TaskProvenanceRecord) []const u8 {
-        return self.operation[0..self.operation_len];
-    }
-
-    pub fn detailSlice(self: *const TaskProvenanceRecord) []const u8 {
-        return self.detail[0..self.detail_len];
-    }
-
-    pub fn hasReleaseTransparency(self: *const TaskProvenanceRecord) bool {
-        return self.release_transparency_sequence != 0 and
-            self.release_transparency_root_fingerprint != 0 and
-            self.release_transparency_log_head_fingerprint != 0;
-    }
-};
-
-test "task provenance compacts recovery traces without losing diagnostic identity" {
-    const denial = debug_contract.explainDenied(
-        .policy_denied,
-        "open-camera",
-        "camera",
-        9,
-        17,
-        .device,
-        3,
-    );
-    const source = debug_contract.provenance(
-        .syscall,
-        .denied,
-        44,
-        9,
-        22,
-        17,
-        .device,
-        3,
-        "open-camera",
-        "redacted=yes",
-        denial,
-        0xA11CE,
-    );
-    const compact = TaskProvenanceRecord.from(source);
-
-    try std.testing.expect(@sizeOf(TaskProvenanceRecord) < @sizeOf(ProvenanceRecord));
-    try std.testing.expectEqual(source.trace_id, compact.trace_id);
-    try std.testing.expectEqual(source.parent_trace_id, compact.parent_trace_id);
-    try std.testing.expectEqual(source.kind, compact.kind);
-    try std.testing.expectEqual(source.decision, compact.decision);
-    try std.testing.expectEqual(source.target_kind, compact.target_kind);
-    try std.testing.expectEqual(source.denial.reason, compact.denial_reason);
-    try std.testing.expectEqual(source.denial.fingerprint, compact.denial_fingerprint);
-    try std.testing.expectEqualStrings(source.operationSlice(), compact.operationSlice());
-    try std.testing.expectEqualStrings(source.detailSlice(), compact.detailSlice());
-}
-
-test "task provenance clamps untrusted text lengths to compact storage" {
-    var source = ProvenanceRecord{};
-    @memset(&source.operation, 'o');
-    @memset(&source.detail, 'd');
-    source.operation_len = std.math.maxInt(u8);
-    source.detail_len = std.math.maxInt(u8);
-
-    const compact = TaskProvenanceRecord.from(source);
-    try std.testing.expectEqual(@as(usize, debug_contract.MAX_LABEL_BYTES), compact.operationSlice().len);
-    try std.testing.expectEqual(@as(usize, debug_contract.MAX_DETAIL_BYTES), compact.detailSlice().len);
-    try std.testing.expect(std.mem.allEqual(u8, compact.operationSlice(), 'o'));
-    try std.testing.expect(std.mem.allEqual(u8, compact.detailSlice(), 'd'));
-}
-
 pub const LaunchProvenanceSpec = struct {
     boundary: LaunchBoundary = .direct_request,
     image_id: u64 = 0,
-    component_abi_version: u16 = 0,
     signed: bool = false,
     bundle_id: []const u8 = "",
     source_identity: []const u8 = "",
@@ -427,7 +301,6 @@ pub const LaunchProvenanceSpec = struct {
 pub const LaunchProvenanceRecord = struct {
     boundary: LaunchBoundary,
     image_id: u64,
-    component_abi_version: u16,
     signed: bool,
     bundle_id_len: u8,
     bundle_id: [MAX_TASK_BUNDLE_ID_BYTES]u8,
@@ -474,7 +347,7 @@ pub const TaskColdRecord = struct {
     dense_of_stable: [MAX_TASK_CAPABILITIES]u8 = @as([MAX_TASK_CAPABILITIES]u8, @splat(CSPACE_SLOT_EMPTY)),
     capability_generation: u64 = 1,
     audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = @as([MAX_AUDIT_EVENTS]AuditEvent, @splat(AuditEvent{ .kind = .created })),
-    provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]TaskProvenanceRecord = @as([MAX_TASK_PROVENANCE_EVENTS]TaskProvenanceRecord, @splat(TaskProvenanceRecord{})),
+    provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]ProvenanceRecord = @splat(.{}),
 };
 
 pub const TaskRecord = struct {
@@ -580,12 +453,13 @@ pub const TaskRecord = struct {
         self.audit_start = @intCast((self.audit_start + 1) % MAX_AUDIT_EVENTS);
     }
 
-    pub fn provenanceEventAt(self: *const TaskRecord, index: usize) ?TaskProvenanceRecord {
+    pub fn provenanceEventAt(self: *const TaskRecord, index: usize) ?ProvenanceRecord {
+        if (comptime !RETAINS_TASK_PROVENANCE) return null;
         if (index >= self.provenance_count) return null;
         return taskColdConst(self).provenance_trail[(self.provenance_start + index) % MAX_TASK_PROVENANCE_EVENTS];
     }
 
-    pub fn latestProvenanceEvent(self: *const TaskRecord) ?TaskProvenanceRecord {
+    pub fn latestProvenanceEvent(self: *const TaskRecord) ?ProvenanceRecord {
         if (self.provenance_count == 0) return null;
         return self.provenanceEventAt(self.provenance_count - 1);
     }
@@ -656,7 +530,7 @@ test "task runtime uses capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 320), @sizeOf(AddressSpaceRecord));
     try std.testing.expectEqual(@as(usize, 328), @sizeOf(AddressSpaceSlot));
 
-    const expected_cold_bytes = 1_656 + MAX_TASK_PROVENANCE_EVENTS * @sizeOf(TaskProvenanceRecord);
+    const expected_cold_bytes = 1_656 + MAX_TASK_PROVENANCE_EVENTS * @sizeOf(ProvenanceRecord);
     try std.testing.expectEqual(expected_cold_bytes, @sizeOf(TaskColdRecord));
     const expected_snapshot_bytes = 48 + MAX_TASKS * (@sizeOf(TaskSlot) + expected_cold_bytes + @sizeOf(AddressSpaceSlot));
     try std.testing.expectEqual(expected_snapshot_bytes, @sizeOf(Snapshot));
@@ -779,6 +653,7 @@ fn copyAuditTrailForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task
 }
 
 fn copyProvenanceTrailForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
+    if (comptime !RETAINS_TASK_PROVENANCE) return;
     var index: usize = 0;
     while (index < task.provenance_count) : (index += 1) {
         const slot_index = (task.provenance_start + index) % MAX_TASK_PROVENANCE_EVENTS;
