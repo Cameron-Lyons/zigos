@@ -82,9 +82,10 @@ smp_protected_mode:
     # calls. No compiled code or firmware stack is used before the high stack.
     leal 4096(%esi), %esp
     ZIGOS_INITIALIZE_AP_MTRRS .Lap_cache_rejected, (smp_trampoline_cpu - smp_trampoline_start + 8), smp_trampoline_start
-    # PAT retains its firmware value. Require the complete native selector
-    # contract before loading CR3 or enabling any mapped alias.
+    # INIT preserves the firmware PAT. Require the complete power-on table,
+    # then install the native table before loading CR3 or any mapped alias.
     ZIGOS_REQUIRE_BOOTSTRAP_CACHE .Lap_cache_rejected, 32
+    ZIGOS_PROGRAM_NATIVE_PAT
     movl %esi, %ebx
 
     movl (smp_trampoline_cr3 - smp_trampoline_start)(%ebx), %eax

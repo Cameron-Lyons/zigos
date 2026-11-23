@@ -14,7 +14,6 @@ const userspace_mailbox = @import("task/userspace_bootstrap_mailbox.zig");
 const task_runtime = @import("task/task_runtime.zig");
 const storage_volume = @import("storage/storage_volume.zig");
 const cpu_baseline = @import("../arch/cpu_baseline.zig");
-const cpu_identity = @import("../kernel/cpu_identity.zig");
 
 pub const generated_from_typed_idl = true;
 
@@ -72,7 +71,7 @@ pub const floor: Floor = .{
         storage_volume.SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD and
         storage_volume.USES_CHECKPOINT_ONLY_COLD_LOAD and
         storage_volume.COMPACTS_IN_BACKGROUND,
-    .trusted_cpu_identity = cpu_baseline.REQUIRES_RDPID and cpu_identity.USES_RDPID,
+    .trusted_cpu_identity = cpu_baseline.REQUIRES_RDPID,
 };
 
 test "2026 contract floor is generated from typed flags" {

@@ -387,10 +387,9 @@ pub const KernelMappingAuthority = struct {
         const paging = self.info.paging;
         if (overlapsBytes(start, end, paging.transition_base, paging.transitionBytes()) or
             overlapsBytes(start, end, paging.final_base, paging.finalBytes())) return false;
-        var physical = start;
-        while (physical < @min(end, self.managed_bytes)) : (physical += 4096) {
-            if (!allocator.isReserved(physical) or allocator.isAllocated(physical)) return false;
-        }
+        // Reservation ranges exclude allocation; one range query covers the span.
+        const managed_end = @min(end, self.managed_bytes);
+        if (start < managed_end and !allocator.isRunReserved(.{ .base = start, .count = @intCast((managed_end - start) / 4096) })) return false;
         const framebuffer = device and self.framebufferSpanPermits(start, end);
         const pci_ecam = device and if (self.pci_ecam) |span| start >= span.start and end <= span.end else false;
         const memory_map = self.info.memoryMap();
@@ -415,6 +414,11 @@ pub const KernelMappingAuthority = struct {
             covered = next;
         }
         return true;
+    }
+
+    /// Write-combining authority covers exactly the firmware GOP framebuffer.
+    pub inline fn permitsFramebuffer(self: @This(), allocator: anytype, start: u64, end: u64) bool {
+        return self.framebufferSpanPermits(start, end) and self.permits(allocator, start, end, true);
     }
 
     inline fn framebufferSpanPermits(self: @This(), start: u64, end: u64) bool {

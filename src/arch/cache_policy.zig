@@ -1,8 +1,12 @@
 const std = @import("std");
 
 // Native mappings have one immutable interpretation on every logical CPU.
-// Admission retains this complete firmware table; changing a live PAT needs
-// a separate cache/TLB rendezvous and is deliberately outside this contract.
+// Admission requires the complete power-on table from firmware. Each CPU then
+// programs NATIVE_PAT once, before the kernel builds any mapping that selects
+// its only changed entry: an AP with paging off, the BSP through the SDM
+// no-fill, WBINVD and TLB-flush sequence around its loader's live tables.
+// Changing PAT after that needs an all-CPU rendezvous and stays outside this
+// contract.
 pub const PAT_MSR: u32 = 0x277;
 pub const CPUID_PAT: u32 = 1 << 16;
 pub const CR0_CD: usize = 1 << 30;
@@ -10,15 +14,20 @@ pub const CR0_NW: usize = 1 << 29;
 pub const CR0_PG: usize = 1 << 31;
 pub const CACHE_CONTROL_MASK = CR0_CD | CR0_NW;
 pub const BOOTSTRAP_PAT: u64 = 0x0007_0406_0007_0406;
+// PA4 becomes write-combining; every other entry keeps its power-on type.
+pub const NATIVE_PAT: u64 = 0x0007_0401_0007_0406;
 
-pub const CacheType = enum { write_back, uncacheable };
+pub const CacheType = enum { write_back, uncacheable, write_combining };
 pub const WRITE_BACK_SELECTOR: u64 = 0;
 pub const UNCACHEABLE_SELECTOR: u64 = (1 << 4) | (1 << 3);
+// A 4 KiB leaf selects PA4 with its PAT bit (bit 7) and PCD = PWT = 0.
+pub const WRITE_COMBINING_SELECTOR: u64 = 1 << 7;
 
 pub inline fn selector(cache_type: CacheType) u64 {
     return switch (cache_type) {
         .write_back => WRITE_BACK_SELECTOR,
         .uncacheable => UNCACHEABLE_SELECTOR,
+        .write_combining => WRITE_COMBINING_SELECTOR,
     };
 }
 
@@ -35,14 +44,24 @@ pub const AdmissionError = error{
     UnsupportedPatLayout,
 };
 
+/// Firmware admission: the power-on table before this CPU programs its own.
 pub inline fn validateBootstrap(state: BootstrapState) AdmissionError!void {
+    return validateLayout(state, BOOTSTRAP_PAT);
+}
+
+/// Runtime admission after the entry assembly programmed the native table.
+pub inline fn validateNative(state: BootstrapState) AdmissionError!void {
+    return validateLayout(state, NATIVE_PAT);
+}
+
+inline fn validateLayout(state: BootstrapState, expected: u64) AdmissionError!void {
     if (!state.pat_supported) return error.PatUnsupported;
     if (state.cr0 & CACHE_CONTROL_MASK != 0) return error.CacheDisabled;
     inline for (0..8) |index| {
         const entry: u8 = @truncate(state.pat >> (index * 8));
         if (entry > 7 or entry == 2 or entry == 3) return error.InvalidPatEncoding;
     }
-    if (state.pat != BOOTSTRAP_PAT) return error.UnsupportedPatLayout;
+    if (state.pat != expected) return error.UnsupportedPatLayout;
 }
 
 pub const MAX_VARIABLE_MTRRS: usize = 32;
@@ -678,16 +697,65 @@ test "bootstrap cache assembly constants match complete PAT controls and selecto
         .{ "ZIGOS_CACHE_CR0_CD", CR0_CD },
         .{ "ZIGOS_CACHE_CR0_NW", CR0_NW },
         .{ "ZIGOS_CACHE_CR0_PG", CR0_PG },
+        .{ "ZIGOS_CACHE_CR4_PGE", @as(u64, 1 << 7) },
         .{ "ZIGOS_CACHE_PAT_LOW", @as(u32, @truncate(BOOTSTRAP_PAT)) },
         .{ "ZIGOS_CACHE_PAT_HIGH", @as(u32, @truncate(BOOTSTRAP_PAT >> 32)) },
+        .{ "ZIGOS_CACHE_NATIVE_PAT_LOW", @as(u32, @truncate(NATIVE_PAT)) },
+        .{ "ZIGOS_CACHE_NATIVE_PAT_HIGH", @as(u32, @truncate(NATIVE_PAT >> 32)) },
         .{ "ZIGOS_CACHE_WB_SELECTOR", WRITE_BACK_SELECTOR },
         .{ "ZIGOS_CACHE_UC_SELECTOR", UNCACHEABLE_SELECTOR },
     }) |item| try std.testing.expectEqual(@as(u64, item[1]), try assemblyConstantFrom(@embedFile("x86_64/cache_policy.inc"), item[0]));
     try std.testing.expectEqual(WRITE_BACK_SELECTOR, selector(.write_back));
     try std.testing.expectEqual(UNCACHEABLE_SELECTOR, selector(.uncacheable));
-    // The three leaf selector bits select entry zero and strict UC entry three.
-    try std.testing.expectEqual(@as(u8, 6), @as(u8, @truncate(BOOTSTRAP_PAT)));
-    try std.testing.expectEqual(@as(u8, 0), @as(u8, @truncate(BOOTSTRAP_PAT >> 24)));
+    try std.testing.expectEqual(WRITE_COMBINING_SELECTOR, selector(.write_combining));
+    // The three leaf selector bits select entry zero, strict UC entry three and
+    // write-combining entry four.
+    for ([_]u64{ BOOTSTRAP_PAT, NATIVE_PAT }) |pat| {
+        try std.testing.expectEqual(@as(u8, 6), @as(u8, @truncate(pat)));
+        try std.testing.expectEqual(@as(u8, 0), @as(u8, @truncate(pat >> 24)));
+    }
+    try std.testing.expectEqual(@as(u8, 1), @as(u8, @truncate(NATIVE_PAT >> 32)));
+    // Only PA4 changes, and no admitted mapping selects PA4 before programming.
+    try std.testing.expectEqual(@as(u64, 0xff) << 32, BOOTSTRAP_PAT ^ NATIVE_PAT | @as(u64, 0xff) << 32);
+    try std.testing.expectEqual(BOOTSTRAP_PAT & ~(@as(u64, 0xff) << 32), NATIVE_PAT & ~(@as(u64, 0xff) << 32));
+}
+
+fn expectOrderedMacro(source: []const u8, header: []const u8, ordered: []const []const u8) ![]const u8 {
+    const start = std.mem.indexOf(u8, source, header) orelse return error.MissingNativePatMacro;
+    const body = source[start..][0 .. std.mem.indexOf(u8, source[start..], ".endm") orelse return error.MissingNativePatMacro];
+    var cursor: usize = 0;
+    for (ordered) |instruction| {
+        const position = std.mem.indexOf(u8, body[cursor..], instruction) orelse return error.MissingNativePatInstruction;
+        cursor += position + instruction.len;
+    }
+    return body;
+}
+
+test "native PAT programming writes the native table and the BSP flushes caches and TLBs around it" {
+    const source = @embedFile("x86_64/cache_policy.inc");
+    const bare = try expectOrderedMacro(source, ".macro ZIGOS_PROGRAM_NATIVE_PAT\n", &.{ "movl $ZIGOS_CACHE_PAT_MSR, %ecx", "movl $ZIGOS_CACHE_NATIVE_PAT_LOW, %eax", "movl $ZIGOS_CACHE_NATIVE_PAT_HIGH, %edx", "wrmsr" });
+    try std.testing.expect(std.mem.indexOf(u8, bare, "%cr0") == null);
+    // SDM MTRR/PAT update: no-fill, WBINVD, TLB flush, write, WBINVD, TLB flush, caching.
+    _ = try expectOrderedMacro(source, ".macro ZIGOS_PROGRAM_NATIVE_PAT_LIVE\n", &.{
+        "movq %cr0, %r8",
+        "orq $ZIGOS_CACHE_CR0_CD, %rax",
+        "movq %rax, %cr0",
+        "wbinvd",
+        "movq %cr4, %r9",
+        "xorq $ZIGOS_CACHE_CR4_PGE, %rax",
+        "movq %rax, %cr4",
+        "ZIGOS_PROGRAM_NATIVE_PAT\n",
+        "wbinvd",
+        "movq %r9, %cr4",
+        "movq %r8, %cr0",
+    });
+    const entry = @embedFile("../boot/boot_x86_64.S");
+    const admitted = std.mem.indexOf(u8, entry, "ZIGOS_REQUIRE_BOOTSTRAP_CACHE .Lcache_bsp_rejected, 64\n").?;
+    try std.testing.expect(std.mem.indexOf(u8, entry[admitted..], "    ZIGOS_PROGRAM_NATIVE_PAT_LIVE\n    ZIGOS_REQUIRE_NATIVE ") != null);
+    try validateNative(.{ .pat_supported = true, .cr0 = 0, .pat = NATIVE_PAT });
+    try std.testing.expectError(error.UnsupportedPatLayout, validateNative(.{ .pat_supported = true, .cr0 = 0, .pat = BOOTSTRAP_PAT }));
+    try std.testing.expectError(error.UnsupportedPatLayout, validateBootstrap(.{ .pat_supported = true, .cr0 = 0, .pat = NATIVE_PAT }));
+    try std.testing.expectError(error.CacheDisabled, validateNative(.{ .pat_supported = true, .cr0 = CR0_CD, .pat = NATIVE_PAT }));
 }
 
 test "actual AP cache macro flushes no-fill state before enabling caches without PAT writes" {

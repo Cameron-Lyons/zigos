@@ -153,6 +153,7 @@ const InvpcidDescriptor = extern struct {
 };
 
 extern fn x86_invalidate_pcid(descriptor: *const InvpcidDescriptor) callconv(.c) void;
+extern fn x86_invalidate_pcid_address(descriptor: *const InvpcidDescriptor) callconv(.c) void;
 extern fn x86_invalidate_all(descriptor: *const InvpcidDescriptor) callconv(.c) void;
 
 pub const EFER_MSR: u32 = 0xC000_0080;
@@ -328,6 +329,14 @@ pub inline fn invalidatePcid(pcid: u16) void {
     x86_invalidate_pcid(&descriptor);
 }
 
+pub inline fn invalidatePcidAddress(pcid: u16, address: usize) void {
+    const descriptor = InvpcidDescriptor{
+        .pcid = pcid,
+        .linear_address = address,
+    };
+    x86_invalidate_pcid_address(&descriptor);
+}
+
 pub inline fn invalidateAllTranslations() void {
     if (processContextIdentifiersEnabled()) {
         const descriptor = InvpcidDescriptor{ .pcid = 0, .linear_address = 0 };
@@ -425,19 +434,6 @@ pub inline fn rdpkru() u32 {
         : [value] "={eax}" (-> u32),
         : [ecx] "{ecx}" (@as(u32, 0)),
         : .{ .rdx = true });
-}
-
-pub fn pkruAllowKeys(key: u4) u32 {
-    var value: u32 = 0xFFFF_FFFC;
-    if (key != 0) {
-        const shift: u5 = @as(u5, key) * 2;
-        value &= ~(@as(u32, 0b11) << shift);
-    }
-    return value;
-}
-
-pub fn allowUserProtectionKey(key: u4) void {
-    wrpkru(pkruAllowKeys(key));
 }
 
 pub fn enablePku() void {

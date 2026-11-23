@@ -13,8 +13,10 @@ const gdt = @import("interrupts/gdt64.zig");
 const idt = @import("interrupts/idt64.zig");
 const trampoline_bridge = @import("smp/trampoline.zig");
 
-const INIT_HOLD_MILLISECONDS: u64 = 10;
-const STARTUP_HOLD_MILLISECONDS: u64 = 1;
+// The native baseline (Intel family 6+, AMD family 10h+) accepts STARTUP
+// right after INIT; only quiescing a late or rejected AP keeps the hold.
+const QUIESCE_HOLD_MILLISECONDS: u64 = 10;
+const STARTUP_RETRY_MILLISECONDS: u64 = 1;
 const AP_ONLINE_MILLISECONDS: u64 = 100;
 
 var bringup_cpus: *[smp.MAX_CPUS]smp.Cpu = undefined;
@@ -67,13 +69,9 @@ fn startOne(index: u8, trampoline: trampoline_bridge.Trampoline) void {
     const apic_id = bringup_cpus[index].apic_id;
     const vector: u8 = @intCast(trampoline.physical / 4096);
     x2apic.sendInit(apic_id);
-    waitMilliseconds(INIT_HOLD_MILLISECONDS);
     x2apic.sendStartup(apic_id, vector);
-    waitMilliseconds(STARTUP_HOLD_MILLISECONDS);
-    if (!cpuOnline(index)) {
-        x2apic.sendStartup(apic_id, vector);
-        waitMilliseconds(STARTUP_HOLD_MILLISECONDS);
-    }
+    // A second STARTUP is ignored by an AP that already left wait-for-SIPI.
+    if (!startupSettled(index, STARTUP_RETRY_MILLISECONDS)) x2apic.sendStartup(apic_id, vector);
 
     const deadline = tsc_clock.afterMilliseconds(AP_ONLINE_MILLISECONDS);
     while (!cpuOnline(index)) {
@@ -82,7 +80,7 @@ fn startOne(index: u8, trampoline: trampoline_bridge.Trampoline) void {
             // Quiesce a late AP before patching the shared bridge for another
             // CPU or retiring its identity mapping on the runtime owner.
             x2apic.sendInit(apic_id);
-            waitMilliseconds(INIT_HOLD_MILLISECONDS);
+            waitMilliseconds(QUIESCE_HOLD_MILLISECONDS);
             @atomicStore(bool, &bringup_cpus[index].online, false, .release);
             if (rejection != 0) {
                 console.print("AP CPU policy rejected: ");
@@ -109,6 +107,15 @@ fn startOne(index: u8, trampoline: trampoline_bridge.Trampoline) void {
 
 fn cpuOnline(index: u8) bool {
     return @atomicLoad(bool, &bringup_cpus[index].online, .acquire);
+}
+
+fn startupSettled(index: u8, milliseconds: u64) bool {
+    const deadline = tsc_clock.afterMilliseconds(milliseconds);
+    while (!deadline.expired()) {
+        if (cpuOnline(index) or @atomicLoad(u8, &rejection_reasons[index], .acquire) != 0) return true;
+        spin.hint();
+    }
+    return false;
 }
 
 fn waitMilliseconds(milliseconds: u64) void {

@@ -6,8 +6,11 @@
 #define ZIGOS_CACHE_CR0_CD 0x40000000
 #define ZIGOS_CACHE_CR0_NW 0x20000000
 #define ZIGOS_CACHE_CR0_PG 0x80000000
+#define ZIGOS_CACHE_CR4_PGE 0x80
 #define ZIGOS_CACHE_PAT_LOW 0x00070406
 #define ZIGOS_CACHE_PAT_HIGH 0x00070406
+#define ZIGOS_CACHE_NATIVE_PAT_LOW 0x00070406
+#define ZIGOS_CACHE_NATIVE_PAT_HIGH 0x00070401
 #define ZIGOS_CACHE_WB_SELECTOR 0
 #define ZIGOS_CACHE_UC_SELECTOR 0x18
 
@@ -33,6 +36,37 @@
     movl $4, %eax
     jmp \reject
 .Lcache_ap_enabled\@:
+.endm
+
+// Run only after ZIGOS_REQUIRE_BOOTSTRAP_CACHE admitted the power-on table.
+// This bare write serves an AP with paging still off: no translation exists,
+// so no live memory type changes and nothing needs a flush.
+.macro ZIGOS_PROGRAM_NATIVE_PAT
+    movl $ZIGOS_CACHE_PAT_MSR, %ecx
+    movl $ZIGOS_CACHE_NATIVE_PAT_LOW, %eax
+    movl $ZIGOS_CACHE_NATIVE_PAT_HIGH, %edx
+    wrmsr
+.endm
+
+// The BSP runs under the loader's live tables and any translation it inherited,
+// so it follows the SDM MTRR/PAT update sequence: no-fill mode, WBINVD and a
+// full TLB flush around the write, then normal caching. Each CR4.PGE change
+// flushes every translation, global ones included, in every PCID. Admission
+// already proved CD = NW = 0. Clobbers RAX, RCX, RDX, R8 and R9.
+.macro ZIGOS_PROGRAM_NATIVE_PAT_LIVE
+    movq %cr0, %r8
+    movq %r8, %rax
+    orq $ZIGOS_CACHE_CR0_CD, %rax
+    movq %rax, %cr0
+    wbinvd
+    movq %cr4, %r9
+    movq %r9, %rax
+    xorq $ZIGOS_CACHE_CR4_PGE, %rax
+    movq %rax, %cr4
+    ZIGOS_PROGRAM_NATIVE_PAT
+    wbinvd
+    movq %r9, %cr4
+    movq %r8, %cr0
 .endm
 
 // Baseline 32/64-bit instructions only; no stack or GS required. CPUID

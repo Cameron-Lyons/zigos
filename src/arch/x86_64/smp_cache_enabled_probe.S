@@ -100,6 +100,8 @@ zigos_arch_smp_cache_initialize:
     movl %edx, PROOF_DEFAULT_OFFSET+4(%edi)
     ret
 
+// The MTRR macro must leave the firmware PAT the production bridge admits
+// before it programs the native table; this probe never programs PAT.
 .Lproof_require_enabled:
     testl $(ZIGOS_CACHE_CR0_PG | ZIGOS_CACHE_CONTROL_MASK), PROOF_CR0_OFFSET(%edi)
     jnz .Lproof_invalid_controls

@@ -4,13 +4,11 @@ const cpu_baseline = @import("../arch/cpu_baseline.zig");
 const display_driver_task = @import("drivers/display_driver_task.zig");
 const display_hw = @import("../kernel/drivers/display_hw.zig");
 const compositor_session = @import("platform/compositor_session.zig");
-const demand_paging = @import("../kernel/memory/demand_paging.zig");
 const endpoint = @import("kernel_api/endpoint.zig");
 const event_wake = @import("../kernel/event_wake.zig");
 const ipc_ring = @import("kernel_api/ipc_ring.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const shared_memory = @import("kernel_api/shared_memory.zig");
-const smp = @import("../kernel/smp.zig");
 const storage_driver_task = @import("drivers/storage_driver_task.zig");
 const syscall_abi = @import("kernel_api/syscall_abi.zig");
 const sync_service = @import("sync/sync_service.zig");
@@ -45,8 +43,7 @@ pub const sync_private_overlay = .{
 };
 
 pub const native_2026 = .{
-    .interrupt_driven_idle = event_wake.INTERRUPT_DRIVEN_IDLE and event_wake.WAKES_RUNTIME_OWNER and
-        smp.SINGLE_RUNTIME_OWNER and smp.PINS_DEVICE_IRQS_TO_BSP,
+    .interrupt_driven_idle = event_wake.INTERRUPT_DRIVEN_IDLE and event_wake.WAKES_RUNTIME_OWNER,
     .unified_table_backing = table_backing.HEAP_BACKS_ON_ALL_TARGETS and table_backing.UNIFIED_ALLOCATOR,
     .ring_default_ipc = ipc_ring.DATA_PLANE_USES_SEALED_RINGS and endpoint.PREFERS_SEALED_RING_DATAPLANE and endpoint.AUTO_ATTACHES_DATA_RINGS and endpoint.RINGS_ONLY_DATAPLANE,
     .present_by_handle = compositor_session.PRESENTS_BY_HANDLE and display_driver_task.PRESENTS_BY_HANDLE and abi.SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE,
@@ -58,12 +55,7 @@ pub const native_2026 = .{
         storage_driver_task.DISPATCHES_FROM_BOUND_TASK,
     .single_bootstrap_launch_mode = service_catalog.SINGLE_BOOTSTRAP_LAUNCH_MODE and
         userspace_launch.SINGLE_KERNEL_CONTRACT_LAUNCH,
-    .demand_pages_user_objects = demand_paging.DEMAND_PAGES_USER_OBJECTS and
-        demand_paging.REGISTERS_MAPPED_OBJECTS and
-        demand_paging.COPIES_ON_WRITE and
-        demand_paging.ISOLATES_REGIONS_BY_SPACE and
-        demand_paging.RELEASES_REGIONS_WITH_SPACE and
-        shared_memory.REGISTERS_DEMAND_PAGED_MAPPINGS,
+    .demand_pages_user_objects = shared_memory.REGISTERS_DEMAND_PAGED_MAPPINGS,
     .arc_scanout_by_handle = display_hw.PROGRAMS_SCANOUT_HANDLE and display_driver_task.ARC_SCANOUT_PREFERRED,
     .drops_gop_copies = !display_hw.COPIES_GOP_PIXELS,
     .canonical_47_bit_user = contract_2026.floor.canonical_47_bit_user,

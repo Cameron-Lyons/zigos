@@ -2,21 +2,27 @@ const x86 = @import("x86.zig");
 pub const baseline = @import("cpu_baseline.zig");
 pub const cache_policy = @import("cache_policy.zig");
 
+// The loader requires the firmware's power-on PAT before handing off.
 pub inline fn validateBootstrapCache() cache_policy.AdmissionError!void {
     try cache_policy.validateBootstrap(x86.readBootstrapCacheState());
+}
+
+// The entry assembly admitted the firmware PAT and programmed the native one.
+pub inline fn validateNativeCache() cache_policy.AdmissionError!void {
+    try cache_policy.validateNative(x86.readBootstrapCacheState());
 }
 
 pub const CacheAdmissionError = cache_policy.CacheAdmissionError;
 
 pub inline fn initializeNativeCachePolicy() CacheAdmissionError!void {
-    try validateBootstrapCache();
+    try validateNativeCache();
     var state: cache_policy.MtrrState = undefined;
     try x86.readMtrrStateInto(&state);
     try cache_policy.initializeBsp(&state);
 }
 
 pub inline fn admitApplicationProcessorCache() CacheAdmissionError!void {
-    try validateBootstrapCache();
+    try validateNativeCache();
     var state: cache_policy.MtrrState = undefined;
     try x86.readMtrrStateInto(&state);
     try cache_policy.admitApplicationProcessor(&state);

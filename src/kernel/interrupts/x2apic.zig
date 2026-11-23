@@ -20,10 +20,10 @@ const X2APIC_ENABLE: u64 = 1 << 10;
 const X2APIC_SOFTWARE_ENABLE: u64 = 1 << 8;
 
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
-pub const STARTS_APPLICATION_PROCESSORS = true;
 
 pub const DeliveryMode = enum(u3) {
     fixed = 0,
+    nmi = 4,
     init = 5,
     startup = 6,
 };
@@ -104,7 +104,7 @@ pub fn enable() void {
 
 const std = @import("std");
 
-test "x2APIC ICR encodes INIT, SIPI, and TLB vectors" {
+test "x2APIC ICR encodes INIT, SIPI, NMI, and TLB vectors" {
     try std.testing.expectEqual(
         @as(u64, 0x0000_0002_0000_0500),
         icrValue(.{ .destination = 2, .delivery = .init }),
@@ -116,5 +116,10 @@ test "x2APIC ICR encodes INIT, SIPI, and TLB vectors" {
     try std.testing.expectEqual(
         @as(u64, 0x0000_0004_0000_0070),
         icrValue(.{ .destination = 4, .vector = 0x70, .delivery = .fixed }),
+    );
+    // A physical unicast NMI carries no vector and no destination shorthand.
+    try std.testing.expectEqual(
+        @as(u64, 0x0000_0005_0000_0400),
+        icrValue(.{ .destination = 5, .delivery = .nmi }),
     );
 }

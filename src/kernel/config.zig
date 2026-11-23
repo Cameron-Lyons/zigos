@@ -58,10 +58,6 @@ pub fn name() []const u8 {
     return @tagName(build_options.boot_profile);
 }
 
-pub fn shouldInitSmp() bool {
-    return true;
-}
-
 pub fn shouldExitOnCompletion() bool {
     return bootProfile() == .benchmark or bootProfile() == .recovery;
 }

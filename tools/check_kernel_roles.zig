@@ -78,7 +78,6 @@ const verification_orchestration_symbol_prefixes = [_][]const u8{
     "native.task.userspace_executor.proveSharedSyscallCopyPath",
     "native.task.userspace_executor.Executor.installPreparedMappingForArchitectureProof",
     "native.task.userspace_scheduler.ArchitectureProof",
-    "kernel.memory.paging64.drainFrameCachesForArchitectureProof",
 };
 const verification_only_signatures = [_][]const u8{
     "ZIGOS:RUNTIME_PROOF:PROCESS_ISOLATION:PASS",
@@ -2110,7 +2109,6 @@ test "ELF64 role analysis detects defined architecture proof symbols" {
         "native.task.userspace_executor.proveSharedSyscallCopyPath",
         "native.task.userspace_executor.Executor.installPreparedMappingForArchitectureProof",
         "native.task.userspace_scheduler.ArchitectureProof.bindDomain",
-        "kernel.memory.paging64.drainFrameCachesForArchitectureProof",
     }) |probe| {
         var storage: [4096]u8 = @splat(0);
         const bytes = buildTestElf(&storage);

@@ -51,7 +51,6 @@ else
 
         pub fn allowSupervisorUserMemory() void {}
         pub fn forbidSupervisorUserMemory() void {}
-        pub fn allowUserProtectionKey(_: u4) void {}
         pub fn wrpkru(_: u32) void {}
     };
 
@@ -280,7 +279,6 @@ else
                 executable: bool = false,
                 write_through: bool = false,
                 cache_disabled: bool = false,
-                protection_key: u4 = 0,
             };
             pub const UserAddressSpace = struct {
                 directory: *PageDirectory,
@@ -318,7 +316,6 @@ else
             }
 
             pub fn switchToUserAddressSpace(_: *const UserAddressSpace) void {}
-            pub fn activateUserDomain(_: *const UserAddressSpace, _: u4) void {}
             pub fn switchToKernelAddressSpace() void {}
             pub fn mapOwnedUserRange(_: *UserAddressSpace, _: usize, _: usize, _: UserPermissions) UserMapError!void {
                 return error.OutOfMemory;
@@ -653,10 +650,9 @@ const MappingState = enum(u8) {
     retire_pending,
 };
 
-const MappingLaunchPolicy = packed struct(u32) {
+const MappingLaunchPolicy = packed struct(u28) {
     contract_flags: u16 = 0,
     heartbeat_increment: u12 = 1,
-    protection_key: u4 = 0,
 };
 
 const MappingDispatchMetadata = struct {
@@ -673,10 +669,6 @@ const MappingDispatchMetadata = struct {
 
     fn heartbeatIncrement(self: MappingDispatchMetadata) u32 {
         return self.launch_policy.heartbeat_increment;
-    }
-
-    fn protectionKey(self: MappingDispatchMetadata) u4 {
-        return self.launch_policy.protection_key;
     }
 };
 
@@ -922,7 +914,7 @@ const RemoteSyscallHardware = struct {
         return freestanding.paging.kernelAddressSpaceActive();
     }
     inline fn restoreUser(_: @This(), mapping: *MappingEntry) void {
-        freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
+        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
     }
     inline fn notify(_: @This()) bool {
         return smp.notifySyscallRequest();
@@ -1059,7 +1051,7 @@ fn sharedMappingAuthority(executor: *Executor, mapping: *MappingEntry, handle: M
         .size_bytes = span.size_bytes,
     };
     const space = &mapping.address_space.?;
-    if (!demand_paging.validateSharedUserRangeRegistration(space, authority, addr, len, write, 0)) return null;
+    if (!demand_paging.validateSharedUserRangeRegistration(space, authority, addr, len, write)) return null;
     return .{ .space = space, .authority = authority };
 }
 
@@ -1115,7 +1107,7 @@ fn readSyscallCopy(context: *anyopaque, claim: *const dispatch_ownership.Claimed
         if (comptime builtin.target.os.tag != .freestanding) {
             return if (builtin.is_test) SyscallCopyTesting.read(memory.space, addr, destination) else false;
         }
-        const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, destination.len, false, 0) orelse return false;
+        const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, destination.len, false) orelse return false;
         @memcpy(destination, @as([*]const u8, @ptrFromInt(alias))[0..destination.len]);
         return true;
     }
@@ -1161,7 +1153,7 @@ fn prepareSyscallOutput(context: *anyopaque, claim: *const dispatch_ownership.Cl
         const memory = sharedMappingAuthority(resolved.executor, resolved.mapping, .{ .value = claim.bound.mapping_handle }, claim.bound.identity.task_id, range.address, range.declared_bytes, true) orelse return false;
         if (range.prepared_bytes == 0) return true;
         if (comptime builtin.target.os.tag == .freestanding)
-            return demand_paging.prepareSharedUserRange(memory.space, memory.authority, range.address, range.prepared_bytes, true, 0) != null;
+            return demand_paging.prepareSharedUserRange(memory.space, memory.authority, range.address, range.prepared_bytes, true) != null;
     } else {
         if (!privateCopyMetadata(anchor, claim, range.address, range.declared_bytes)) return false;
         if (range.prepared_bytes == 0) return true;
@@ -1176,7 +1168,7 @@ fn resolveSyscallOutputInto(anchor: *Executor, resolved: *const SyscallCopyMappi
     if (sharedUserAddress(address)) {
         const memory = sharedMappingAuthority(resolved.executor, resolved.mapping, .{ .value = claim.bound.mapping_handle }, claim.bound.identity.task_id, address, bytes, true) orelse return false;
         if (comptime builtin.target.os.tag == .freestanding) {
-            const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, address, bytes, true, 0) orelse return false;
+            const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, address, bytes, true) orelse return false;
             out[0] = .{ .address = alias, .bytes = bytes };
             count.* = 1;
             return true;
@@ -1305,7 +1297,7 @@ pub fn prepareUserMemory(caller_task_id: u64, addr: usize, len: usize, write: bo
     if (sharedUserAddress(addr)) {
         const executor = serializedSharedMemoryExecutor(x86.interruptsEnabled()) orelse return false;
         const memory = sharedUserMemoryAuthority(executor, caller_task_id, addr, len, write) orelse return false;
-        return demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, len, write, 0) != null;
+        return demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, len, write) != null;
     }
     const executor = currentRegisteredExecutor() orelse return false;
     const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return false;
@@ -1317,7 +1309,7 @@ pub fn readUserMemory(caller_task_id: u64, addr: usize, destination: []u8) bool 
     if (sharedUserAddress(addr)) {
         const executor = serializedSharedMemoryExecutor(x86.interruptsEnabled()) orelse return false;
         const memory = sharedUserMemoryAuthority(executor, caller_task_id, addr, destination.len, false) orelse return false;
-        const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, destination.len, false, 0) orelse return false;
+        const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, destination.len, false) orelse return false;
         const source: [*]const u8 = @ptrFromInt(alias);
         @memcpy(destination, source[0..destination.len]);
         return true;
@@ -1335,7 +1327,7 @@ pub fn writeUserMemory(caller_task_id: u64, addr: usize, source: []const u8) boo
     if (sharedUserAddress(addr)) {
         const executor = serializedSharedMemoryExecutor(x86.interruptsEnabled()) orelse return false;
         const memory = sharedUserMemoryAuthority(executor, caller_task_id, addr, source.len, true) orelse return false;
-        const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, source.len, true, 0) orelse return false;
+        const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, source.len, true) orelse return false;
         const destination: [*]u8 = @ptrFromInt(alias);
         @memcpy(destination[0..source.len], source);
         return true;
@@ -1640,7 +1632,6 @@ pub fn proveSharedSyscallCopyPath() bool {
         }
     };
     if (currentRegisteredExecutor() != null or !smp.isRuntimeOwner() or x86.interruptsEnabled()) return false;
-    freestanding.paging.drainFrameCachesForArchitectureProof();
     const baseline = freestanding.paging.frameStats().allocated;
     const kernel_cr3 = x86.readCr3();
     var executor = Executor{};
@@ -1829,7 +1820,6 @@ pub fn proveSharedSyscallCopyPath() bool {
     executor.active_task_id = 0;
     executor.active_mapping = null;
     executor.reset();
-    freestanding.paging.drainFrameCachesForArchitectureProof();
     return freestanding.paging.frameStats().allocated == baseline and x86.readCr3() == kernel_cr3;
 }
 
@@ -2707,7 +2697,7 @@ pub const Executor = struct {
         publishRootActiveTaskId(task_id);
         self.handoff_completed = false;
         native_entry.current().resume_requested = 0;
-        freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
+        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
 
         const rehosted = runtime.rehostTask(task_id, now_ticks) catch false;
         const deferred = rehosted and
@@ -2766,7 +2756,6 @@ pub const Executor = struct {
             image.bootstrap_mailbox_address,
             image.contract_flags,
             image.heartbeat_increment,
-            userspace_registry.protectionKeyForBundle(image.bundleIdSlice()),
         );
         if (self.findMappingWithHandle(address_space.id)) |resolution| {
             if (resolution.entry.state != .live) return error.AddressSpaceRetiring;
@@ -2810,7 +2799,7 @@ pub const Executor = struct {
                     const image_regions = entry.image_regions.?;
                     image_regions.ranges[image_regions.count] = .{ .start = @intCast(region.virtual_address), .size = region.size_bytes };
                     image_regions.count += 1;
-                    try mapLoadRegion(&entry.address_space.?, region, image.elf_file, dispatch_metadata.protectionKey());
+                    try mapLoadRegion(&entry.address_space.?, region, image.elf_file);
                 },
                 .stack => {
                     const mapped_base = try mapUniqueZeroedStack(
@@ -2818,7 +2807,6 @@ pub const Executor = struct {
                         region.virtual_address,
                         @as(usize, region.size_bytes),
                         region.access,
-                        dispatch_metadata.protectionKey(),
                     );
                     entry.image_regions.?.stack = .{ .start = @intCast(mapped_base), .size = region.size_bytes };
                     const runtime = self.bound_runtime orelse return error.AddressSpaceOwnerInvalid;
@@ -3101,7 +3089,6 @@ fn prepareMappingDispatchMetadata(
     bootstrap_mailbox_address: u64,
     contract_flags: u32,
     heartbeat_increment: u32,
-    protection_key: u4,
 ) MaterializationError!MappingDispatchMetadata {
     if (owner_task_id == 0) return error.AddressSpaceOwnerInvalid;
     if (image_id == 0 or address_space_image_id != image_id) return error.AddressSpaceImageMismatch;
@@ -3128,7 +3115,6 @@ fn prepareMappingDispatchMetadata(
         .launch_policy = .{
             .contract_flags = compact_contract_flags,
             .heartbeat_increment = compact_heartbeat_increment,
-            .protection_key = protection_key,
         },
     };
 }
@@ -3267,7 +3253,7 @@ const NativePreparedDispatch = struct {
         if (enabled) x86.sti();
     }
     inline fn activate(_: @This(), mapping: *MappingEntry) void {
-        freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
+        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
     }
     inline fn enter(_: @This(), executor: *Executor) void {
         _ = @call(.never_inline, enterUserspace, .{executor});
@@ -3373,7 +3359,7 @@ const ArchitecturePreparedBackend = if (architecture_smp_proof) struct {
         if (enabled) x86.sti();
     }
     fn activate(_: @This(), mapping: *MappingEntry) void {
-        freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
+        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
     }
     fn enter(self: @This(), executor: *Executor) void {
         _ = enterUserspaceWithClock(executor, timer, Entry{ .backend = self, .executor = executor });
@@ -4135,7 +4121,6 @@ fn mapLoadRegion(
     space: *freestanding.paging.UserAddressSpace,
     region: task_runtime.AddressSpaceRegionRecord,
     elf_file: embedded_file.File,
-    protection_key: u4,
 ) MaterializationError!void {
     const virtual_address = region.virtual_address;
     const size_bytes = region.size_bytes;
@@ -4147,7 +4132,6 @@ fn mapLoadRegion(
     try freestanding.paging.mapOwnedUserRange(space, @intCast(virtual_address), @intCast(size_bytes), .{
         .writable = region.access.write,
         .executable = region.access.execute,
-        .protection_key = protection_key,
     });
 
     var source_offset = start;
@@ -4167,7 +4151,6 @@ fn mapZeroedRegion(
     virtual_address_raw: u64,
     size_bytes_raw: usize,
     access: task_runtime.SegmentAccess,
-    protection_key: u4,
 ) MaterializationError!void {
     const virtual_address = virtual_address_raw;
     const size_bytes = size_bytes_raw;
@@ -4175,7 +4158,6 @@ fn mapZeroedRegion(
         try freestanding.paging.mapOwnedUserRange(space, @intCast(virtual_address), size_bytes, .{
             .writable = access.write,
             .executable = access.execute,
-            .protection_key = protection_key,
         });
         return;
     }
@@ -4185,7 +4167,6 @@ fn mapZeroedRegion(
         .virt_end_exclusive = region_end,
         .writable = access.write,
         .kind = .anonymous_zero,
-        .protection_key = protection_key,
     })) return error.OutOfMemory;
 }
 
@@ -4218,13 +4199,12 @@ fn mapUniqueZeroedStack(
     preferred_base: u64,
     size_bytes: usize,
     access: task_runtime.SegmentAccess,
-    protection_key: u4,
 ) MaterializationError!u64 {
     var attempt: usize = 0;
     while (attempt < SHARED_STACK_SLOT_ATTEMPTS) : (attempt += 1) {
         const base = uniqueStackBase(preferred_base, size_bytes, attempt) orelse continue;
         if (try userRangeOccupied(space, base, size_bytes)) continue;
-        try mapZeroedRegion(space, base, size_bytes, access, protection_key);
+        try mapZeroedRegion(space, base, size_bytes, access);
         return base;
     }
     return error.AlreadyMapped;
@@ -4431,7 +4411,6 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
         0x4000_3000,
         userspace_flags.FLAG_NX_PROOF_PROBE,
         9,
-        3,
     );
     try std.testing.expectEqual(@as(u64, 40), metadata.owner_task_id);
     try std.testing.expectEqual(@as(u64, 41), metadata.image_id);
@@ -4440,7 +4419,6 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
     try std.testing.expectEqual(@as(u32, 0x4000_3000), metadata.bootstrap_mailbox_address);
     try std.testing.expectEqual(userspace_flags.FLAG_NX_PROOF_PROBE, metadata.contractFlags());
     try std.testing.expectEqual(@as(u32, 9), metadata.heartbeatIncrement());
-    try std.testing.expectEqual(@as(u4, 3), metadata.protectionKey());
     try std.testing.expectEqual(MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES, @sizeOf(MappingDispatchMetadata));
     try std.testing.expect(@sizeOf(MappingEntry) <= MAPPING_ENTRY_SIZE_CEILING_BYTES);
     try std.testing.expect(@sizeOf(MappingArena) <= MAPPING_ARENA_SIZE_CEILING_BYTES);
@@ -4450,35 +4428,35 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
 
     try std.testing.expectError(
         error.AddressSpaceOwnerInvalid,
-        prepareMappingDispatchMetadata(0, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 1, 1),
+        prepareMappingDispatchMetadata(0, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 1),
     );
     try std.testing.expectError(
         error.AddressSpaceImageMismatch,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 42, 0x4000_3000, 0, 1, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 42, 0x4000_3000, 0, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 15, 41, 0x4000_3000, 0, 1, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 15, 41, 0x4000_3000, 0, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, @as(u64, std.math.maxInt(u32)) + 1, 0x7FFF_F000, 41, 0x4000_3000, 0, 1, 1),
+        prepareMappingDispatchMetadata(40, 41, @as(u64, std.math.maxInt(u32)) + 1, 0x7FFF_F000, 41, 0x4000_3000, 0, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, @as(u64, std.math.maxInt(u32)) + 1, 0, 1, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, @as(u64, std.math.maxInt(u32)) + 1, 0, 1),
     );
     try std.testing.expectError(
         error.LaunchPolicyInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, @as(u32, std.math.maxInt(u16)) + 1, 1, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, @as(u32, std.math.maxInt(u16)) + 1, 1),
     );
     try std.testing.expectError(
         error.LaunchPolicyInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 0, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 0),
     );
     try std.testing.expectError(
         error.LaunchPolicyInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, @as(u32, std.math.maxInt(u12)) + 1, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, @as(u32, std.math.maxInt(u12)) + 1),
     );
 }
 
@@ -4594,7 +4572,6 @@ test "materialized dispatch metadata may relocate a shared-group stack" {
         0x4000_3000,
         userspace_flags.FLAG_NX_PROOF_PROBE,
         9,
-        3,
     );
     var relocated = baseline;
     relocated.initial_stack_pointer = baseline.initial_stack_pointer - userspace_layout.STACK_SLOT_STRIDE;
@@ -5176,7 +5153,6 @@ test "shared copy authority isolates grouped peers and matches the current deman
         .{ .virt_start = owner.virtual_base, .virt_end_exclusive = owner_end, .writable = true, .kind = .anonymous_zero, .physical_base = owner.physical_base },
         .{ .virt_start = owner.virtual_base, .virt_end_exclusive = owner_end, .writable = true, .kind = .shared_ram, .physical_base = owner.physical_base + PAGE_SIZE },
         .{ .virt_start = owner.virtual_base, .virt_end_exclusive = owner_end, .writable = false, .kind = .shared_ram, .physical_base = owner.physical_base },
-        .{ .virt_start = owner.virtual_base, .virt_end_exclusive = owner_end, .writable = true, .kind = .shared_ram, .physical_base = owner.physical_base, .protection_key = 1 },
         .{ .virt_start = owner.virtual_base, .virt_end_exclusive = owner_end + 1, .writable = true, .kind = .shared_ram, .physical_base = owner.physical_base },
     };
     for (bad_regions) |region| {
@@ -5444,7 +5420,7 @@ test "executor leased group roots reject preparation before refs mappings and ma
     address_space.image_id = image.id;
     address_space.entry_point = 0x4000_1000;
     address_space.stack_pointer = 0x7fff_f000;
-    const metadata = try prepareMappingDispatchMetadata(7, image.id, address_space.entry_point, address_space.stack_pointer, image.id, image.bootstrap_mailbox_address, 0, 1, userspace_registry.protectionKeyForBundle("app.notes"));
+    const metadata = try prepareMappingDispatchMetadata(7, image.id, address_space.entry_point, address_space.stack_pointer, image.id, image.bootstrap_mailbox_address, 0, 1);
     const handle = installTestMappingAt(&executor, 0, .{
         .state = .live,
         .address_space_id = address_space.id,
@@ -7183,7 +7159,7 @@ test "IRQ continuation retry is consumed by runnable yields and retained by malf
 }
 
 test "device IRQ real ISR requires the matching latch and excludes other vectors" {
-    for ([_]u8{ 7, 13, 64, 112, 129, 255 }) |vector| {
+    for ([_]u8{ 7, 13, 64, 112, 129 }) |vector| {
         var fixture = DeviceInterruptFixture{};
         try fixture.init();
         defer fixture.deinit();

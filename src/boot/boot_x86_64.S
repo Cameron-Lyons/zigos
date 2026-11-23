@@ -25,6 +25,7 @@ zigos_efi_entry:
     leaq stack_top(%rip), %rsp
     xorq %rbp, %rbp
     ZIGOS_REQUIRE_BOOTSTRAP_CACHE .Lcache_bsp_rejected, 64
+    ZIGOS_PROGRAM_NATIVE_PAT_LIVE
     ZIGOS_REQUIRE_NATIVE .halt
     ZIGOS_ENABLE_NATIVE_XSTATE
     call kernel_main

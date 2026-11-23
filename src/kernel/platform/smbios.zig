@@ -1,6 +1,5 @@
 const std = @import("std");
 const paging = @import("../memory/paging64.zig");
-const ascii = @import("../utils/ascii.zig");
 const endian = @import("../utils/endian.zig");
 const checksum = @import("../utils/checksum.zig");
 
@@ -47,8 +46,6 @@ const END_OF_TABLE_TYPE: u8 = 127;
 const STRING_SET_TERMINATOR_BYTES: usize = 2;
 
 pub const NUC15CRSU7_SKU = "RNUC15CRSU7";
-pub const REQUIRES_SMBIOS3 = true;
-pub const USES_EFI64_SYSTEM_TABLE_HANDOFF = true;
 
 const Error = error{
     TooSmall,
@@ -376,7 +373,7 @@ pub fn tableContainsTargetSku(table: []const u8, target: []const u8) bool {
         const end = structureEnd(table, offset + formatted_length) orelse return false;
         const structure = table[offset..end];
         if ((structure_type == SYSTEM_INFORMATION_TYPE or structure_type == BASEBOARD_INFORMATION_TYPE) and
-            ascii.containsIgnoreCase(structure, target))
+            std.ascii.findIgnoreCase(structure, target) != null)
         {
             return true;
         }

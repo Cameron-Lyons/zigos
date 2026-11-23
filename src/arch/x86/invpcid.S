@@ -9,6 +9,15 @@ x86_invalidate_pcid:
     ret
 .size x86_invalidate_pcid, . - x86_invalidate_pcid
 
+.global x86_invalidate_pcid_address
+.type x86_invalidate_pcid_address, @function
+x86_invalidate_pcid_address:
+    # INVPCID type 0 retires one linear address in one process context.
+    xor %ecx, %ecx
+    .byte 0x66, 0x0f, 0x38, 0x82, 0x0f
+    ret
+.size x86_invalidate_pcid_address, . - x86_invalidate_pcid_address
+
 .global x86_invalidate_all
 .type x86_invalidate_all, @function
 x86_invalidate_all:

@@ -8,7 +8,6 @@ pub const DMAR_SIGNATURE = "DMAR";
 pub const DMAR_HEADER_LENGTH: usize = acpi.SDT_HEADER_LENGTH + 12;
 pub const MAX_REMAPPING_UNITS: usize = 16;
 pub const MIN_PRODUCTION_HOST_ADDRESS_WIDTH: u8 = 39;
-pub const COMPACT_SUMMARY_COUNT_METADATA = true;
 pub const SUMMARY_SIZE_CEILING_BYTES: usize = 408;
 
 const HOST_ADDRESS_WIDTH_OFFSET: usize = acpi.SDT_HEADER_LENGTH;
@@ -489,7 +488,6 @@ fn validDmar() [TEST_TABLE_BYTES]u8 {
 }
 
 test "DMAR summary uses capacity-sized discovery counts" {
-    try std.testing.expect(COMPACT_SUMMARY_COUNT_METADATA);
     try std.testing.expectEqual(u8, @FieldType(Summary, "remapping_unit_count"));
     try std.testing.expectEqual(u32, @FieldType(Summary, "reserved_memory_region_count"));
     try std.testing.expectEqual(u32, @FieldType(Summary, "reserved_memory_with_non_pci_scope_count"));

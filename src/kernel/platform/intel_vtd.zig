@@ -196,9 +196,7 @@ const ActiveUnit = struct {
     }
 };
 
-pub const COMPACT_ACTIVE_UNIT_STATE = true;
 pub const ACTIVE_UNIT_SIZE_CEILING_BYTES: usize = 24;
-pub const DERIVES_ACTIVE_REMAP_ADDRESSES_FROM_TABLE_BASE = true;
 pub const FULL_INVALIDATION_QUEUE_SCRUBS_PER_COMMAND: usize = 0;
 
 comptime {
@@ -1284,8 +1282,6 @@ test "VT-d interrupt table denies every interrupt and invalidation is completion
 test "VT-d active units stay compact and derive remapping addresses" {
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(UnitRegisters));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ActiveUnit));
-    try std.testing.expect(COMPACT_ACTIVE_UNIT_STATE);
-    try std.testing.expect(DERIVES_ACTIVE_REMAP_ADDRESSES_FROM_TABLE_BASE);
     try std.testing.expectEqual(@as(usize, 0), FULL_INVALIDATION_QUEUE_SCRUBS_PER_COMMAND);
     try std.testing.expectEqual(
         @as(u64, 0x0021_9000),

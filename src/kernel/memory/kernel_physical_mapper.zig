@@ -3,7 +3,9 @@ const table = @import("page_table64.zig");
 const layout = @import("virtual_layout.zig");
 const cache = @import("../../arch/cache_policy.zig");
 
-pub const Kind = enum { device, firmware };
+// Device and write-combining destinations both replace every overlapping WB
+// direct alias; only firmware tables keep their WB direct aliases.
+pub const Kind = enum { device, write_combining, firmware };
 pub const Error = error{
     WrongCpu,
     InterruptContext,
@@ -54,9 +56,16 @@ inline fn extentEnd(address: u64, shift: u6, limit: u64) u64 {
     return @min((address & ~(bytes - 1)) + bytes, limit);
 }
 
+inline fn cacheSelector(kind: Kind) u64 {
+    return cache.selector(switch (kind) {
+        .device => .uncacheable,
+        .write_combining => .write_combining,
+        .firmware => .write_back,
+    });
+}
+
 inline fn flags(kind: Kind, writable: bool) u64 {
-    return table.PRESENT | table.GLOBAL | table.NO_EXECUTE |
-        (if (kind == .device) cache.UNCACHEABLE_SELECTOR else cache.WRITE_BACK_SELECTOR) |
+    return table.PRESENT | table.GLOBAL | table.NO_EXECUTE | cacheSelector(kind) |
         (if (writable) table.WRITABLE else 0);
 }
 
@@ -68,7 +77,7 @@ inline fn validateDestination(old: u64, kind: Kind) Error!void {
     if (old == 0) return;
     if (!table.isPresent(old) or table.owner(old) != BORROWED or
         (old & (table.USER | table.NO_EXECUTE | table.GLOBAL)) != (table.NO_EXECUTE | table.GLOBAL) or
-        (old & CACHE_BITS) != (if (kind == .device) cache.UNCACHEABLE_SELECTOR else cache.WRITE_BACK_SELECTOR) or
+        (old & CACHE_BITS) != cacheSelector(kind) or
         (kind == .firmware and old & table.WRITABLE != 0)) return error.MappingCollision;
 }
 
@@ -206,7 +215,7 @@ pub fn map(backend: anytype, virtual: usize, physical: u64, bytes: usize, kind: 
     var translated_changed = false;
     const destination_tables = try countDestination(backend, virtual, physical, bytes, kind, writable, &changed, &translated_changed);
     var cache_changed = false;
-    const direct_tables = if (kind == .device) try countDirect(backend, physical, physical_end, &cache_changed) else 0;
+    const direct_tables = if (kind != .firmware) try countDirect(backend, physical, physical_end, &cache_changed) else 0;
     if (!changed and !cache_changed) return;
     try backend.validateTransition(cache_changed);
     const count = destination_tables + direct_tables;

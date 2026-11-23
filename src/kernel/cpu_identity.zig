@@ -2,7 +2,6 @@ const builtin = @import("builtin");
 const std = @import("std");
 
 pub const MAX_CPUS: usize = 16;
-pub const USES_RDPID = true;
 threadlocal var test_cpu_index: u8 = 0;
 
 pub fn indexFromSignature(signature: u32) ?u8 {

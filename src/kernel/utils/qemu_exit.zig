@@ -1,14 +1,10 @@
 const x86 = @import("../../arch/x86.zig");
+const idt64 = @import("../interrupts/idt64.zig");
 
 const debug_exit_port: u16 = 0xF4;
 const qemu_poweroff_port: u16 = 0x604;
 const bochs_poweroff_port: u16 = 0xB004;
 const acpi_poweroff_value: u16 = 0x2000;
-
-const IdtPtr = packed struct {
-    limit: u16 = 0,
-    base: usize = 0,
-};
 
 pub const success_status: u32 = 0x10;
 pub const failure_status: u32 = 0x11;
@@ -25,7 +21,7 @@ fn exitWithStatus(status: u32) noreturn {
 }
 
 fn forceTripleFault() noreturn {
-    const idt = IdtPtr{};
+    const idt = idt64.IdtPtr{ .limit = 0, .base = 0 };
     x86.cli();
     x86.loadIdt(&idt);
     asm volatile ("ud2");

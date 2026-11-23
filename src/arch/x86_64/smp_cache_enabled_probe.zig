@@ -67,6 +67,10 @@ fn checkedOffset(start: usize, end: usize, address: usize, bytes: usize, alignme
     return address - start;
 }
 
+// The probe stops where the production bridge admits firmware PAT: the MTRR
+// macro must leave the power-on table intact for ZIGOS_REQUIRE_BOOTSTRAP_CACHE,
+// which precedes ZIGOS_PROGRAM_NATIVE_PAT. Runtime AP admission separately
+// requires NATIVE_PAT, the table the BSP programmed for itself.
 fn enabledControls(record: ControlRecord, expected_default: u64) bool {
     return @as(usize, record.cr0) & (cache.CACHE_CONTROL_MASK | x86.CR0_PG) == 0 and
         record.flags & (1 << 9) == 0 and record.pat == cache.BOOTSTRAP_PAT and

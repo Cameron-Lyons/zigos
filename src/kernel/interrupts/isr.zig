@@ -19,6 +19,7 @@ const GateHandler = *const fn () callconv(.c) void;
 
 const IDT_INTERRUPT_GATE: u8 = 0x8E;
 const EXCEPTION_VECTOR_COUNT: u32 = 32;
+const NMI_VECTOR: u8 = 2;
 const DOUBLE_FAULT_VECTOR: u8 = 8;
 const PAGE_FAULT_VECTOR: u32 = 14;
 const USERSPACE_YIELD_VECTOR: u8 = 129;
@@ -245,7 +246,6 @@ const external_handler_vectors = [_]u8{
     xhci_hw.INTERRUPT_VECTOR,
     smp.TLB_IPI_VECTOR,
     USERSPACE_YIELD_VECTOR,
-    timer.SPURIOUS_VECTOR,
 };
 const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 320;
 
@@ -294,6 +294,7 @@ pub fn init() void {
         gdt.DOUBLE_FAULT_IST_INDEX,
     );
     registerHandler(DOUBLE_FAULT_VECTOR, doubleFaultInterrupt);
+    registerHandler(NMI_VECTOR, nmiInterrupt);
 
     disableLegacyPic();
     setKernelGate(timer.INTERRUPT_VECTOR, &isr64);
@@ -310,10 +311,19 @@ pub fn init() void {
     setKernelGate(smp.SYSCALL_REQUEST_IPI_VECTOR, &isr114);
     setKernelGate(smp.SYSCALL_COMPLETION_IPI_VECTOR, &isr115);
     setKernelGate(smp.PREPARED_EXECUTION_IPI_VECTOR, &isr116);
+    // Spurious vectors take no handler and no EOI.
     setKernelGate(timer.SPURIOUS_VECTOR, &isr255);
-    registerHandler(timer.SPURIOUS_VECTOR, spuriousInterrupt);
 
     idt.init();
+}
+
+// A panicking CPU stops every other CPU with an NMI; any other NMI stays fatal.
+fn nmiInterrupt(frame: *InterruptFrame) void {
+    if (@import("../utils/panic.zig").panicking()) {
+        asm volatile ("cli");
+        while (true) asm volatile ("hlt");
+    }
+    haltUnhandledException(frame);
 }
 
 fn doubleFaultInterrupt(frame: *InterruptFrame) void {
@@ -624,10 +634,6 @@ test "immutable broker vectors acknowledge once and wake only BSP user work" {
     Fixture.hooks = 0;
     Fixture.invalid_write = false;
     try withTestHandlers({}, Fixture.run);
-}
-
-fn spuriousInterrupt(_: *InterruptFrame) void {
-    timer.handleSpuriousInterrupt();
 }
 
 fn interruptVector(regs: *const Registers) usize {

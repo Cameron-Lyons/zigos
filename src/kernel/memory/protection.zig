@@ -37,13 +37,6 @@ fn nonEmptyLinkerRange(start_symbol: *const u8, end_symbol: *const u8) PageRange
     return range;
 }
 
-fn setRangeReadOnly(range: PageRange) void {
-    var addr = range.start;
-    while (addr < range.end) : (addr += PAGE_SIZE) {
-        paging.setPageReadOnly(addr);
-    }
-}
-
 fn verifyRange(
     range: PageRange,
     writable: bool,
@@ -73,13 +66,8 @@ pub fn protectKernelMemory() void {
     const data = nonEmptyLinkerRange(&__kernel_data_start, &__kernel_data_end);
     const bss = nonEmptyLinkerRange(&__kernel_bss_start, &__kernel_bss_end);
 
-    setRangeReadOnly(text);
-    setRangeReadOnly(rodata);
-    setRangeReadOnly(archive);
-    setRangeReadOnly(relro);
-
-    paging.enableWriteProtect();
-
+    // The boot hierarchy already maps text RX and immutable data RO/NX; this
+    // pass only proves those permissions and stops on any regression.
     verifyRange(text, false, true, null);
     verifyRange(rodata, false, false, null);
     verifyRange(archive, false, false, null);

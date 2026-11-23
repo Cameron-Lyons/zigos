@@ -579,11 +579,6 @@ pub fn stackTopForBundle(bundle_id: []const u8) u64 {
     return userspace_layout.stackTopForSlot(slot);
 }
 
-pub fn protectionKeyForBundle(bundle_id: []const u8) u4 {
-    _ = bundle_id;
-    return 0;
-}
-
 pub fn findByServiceClass(class: contract.ServiceClass) ?*const ImageSpec {
     const spec_index = publicServiceClassSlot(service_class_slots[serviceClassIndex(class)]) orelse return null;
     if (spec_index >= production_boot_image_specs.len) {
@@ -797,7 +792,6 @@ test "production userspace registry contains exactly the production boot catalog
         occupied[occupied_index] |= bit;
         try std.testing.expectEqual(userspace_layout.imageBaseForSlot(slot), imageBaseForBundle(bundle_id));
         try std.testing.expectEqual(userspace_layout.stackTopForSlot(slot), stackTopForBundle(bundle_id));
-        try std.testing.expectEqual(@as(u4, 0), protectionKeyForBundle(bundle_id));
     }
 
     for (production_boot_image_specs) |spec| {

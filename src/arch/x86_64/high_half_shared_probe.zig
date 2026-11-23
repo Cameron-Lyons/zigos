@@ -222,7 +222,6 @@ fn endWriteBatchObservation(expected_barriers: usize) void {
 
 fn provePrivateWriteBatch() void {
     requireCopyOwner();
-    paging.drainFrameCachesForArchitectureProof();
     const baseline = paging.frameStats().allocated;
     const kernel_cr3 = x86.readCr3();
     var space = paging.createUserAddressSpace() catch probe.fail("private batch user root");
@@ -287,7 +286,6 @@ fn provePrivateWriteBatch() void {
     paging.switchToKernelAddressSpace();
     demand.unregisterSpace(&space);
     paging.destroyUserAddressSpace(&space) catch probe.fail("private batch root retirement");
-    paging.drainFrameCachesForArchitectureProof();
     if (paging.frameStats().allocated != baseline or x86.readCr3() != kernel_cr3)
         probe.fail("private batch final accounting");
 }
@@ -311,14 +309,14 @@ fn copyAuthority(table: *const shared.Table, task: ids.TaskId, token: u64, addre
 // Copies use the checked supervisor alias and never open SMAP user access.
 fn checkedRead(table: *const shared.Table, space: *paging.UserAddressSpace, task: ids.TaskId, token: u64, address: usize, destination: []u8) bool {
     const authority = copyAuthority(table, task, token, address, destination.len) orelse return false;
-    const alias = demand.prepareSharedUserRange(space, authority, address, destination.len, false, 0) orelse return false;
+    const alias = demand.prepareSharedUserRange(space, authority, address, destination.len, false) orelse return false;
     @memcpy(destination, @as([*]const u8, @ptrFromInt(alias))[0..destination.len]);
     return true;
 }
 
 fn checkedWrite(table: *const shared.Table, space: *paging.UserAddressSpace, task: ids.TaskId, token: u64, address: usize, source: []const u8) bool {
     const authority = copyAuthority(table, task, token, address, source.len) orelse return false;
-    const alias = demand.prepareSharedUserRange(space, authority, address, source.len, true, 0) orelse return false;
+    const alias = demand.prepareSharedUserRange(space, authority, address, source.len, true) orelse return false;
     @memcpy(@as([*]u8, @ptrFromInt(alias))[0..source.len], source);
     return true;
 }
@@ -346,9 +344,8 @@ fn proveCheckedCopies(table: *const shared.Table, lifetime: *Lifetime, object: s
     }
     const authority = copyAuthority(table, ids.task(1), 1, owner_base, object.size_bytes) orelse probe.fail("shared whole logical authority");
     if (authority.virtual_base != owner.virtual_base or authority.physical_base != object.page_base or authority.size_bytes != object.size_bytes or
-        !demand.validateSharedUserRangeRegistration(&lifetime.spaces[0], authority, owner_base, object.size_bytes, true, 0) or
-        demand.validateSharedUserRangeRegistration(&lifetime.spaces[0], authority, owner_base, object.size_bytes + 1, true, 0) or
-        demand.validateSharedUserRangeRegistration(&lifetime.spaces[0], authority, owner_cross, COPY_BYTES, true, 1))
+        !demand.validateSharedUserRangeRegistration(&lifetime.spaces[0], authority, owner_base, object.size_bytes, true) or
+        demand.validateSharedUserRangeRegistration(&lifetime.spaces[0], authority, owner_base, object.size_bytes + 1, true))
         probe.fail("shared exact registration authority");
     rejectCopy(table, &lifetime.spaces[0], ids.task(2), 1, owner_cross);
     rejectCopy(table, &lifetime.spaces[0], ids.task(3), 1, owner_cross);
@@ -409,7 +406,7 @@ fn proveRetiredCopyRejection(table: *const shared.Table, lifetime: *Lifetime) vo
             .physical_base = descriptor.physical_base,
             .size_bytes = descriptor.size_bytes,
         };
-        if (demand.prepareSharedUserRange(&lifetime.spaces[index], stale, address, COPY_BYTES, false, 0) != null or
+        if (demand.prepareSharedUserRange(&lifetime.spaces[index], stale, address, COPY_BYTES, false) != null or
             leaf(&lifetime.spaces[index], address) != null) probe.fail("shared retired copy resurrection");
     }
     if (paging.frameStats().allocated != before) probe.fail("shared retired copy allocation");
