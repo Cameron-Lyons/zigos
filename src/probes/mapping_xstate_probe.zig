@@ -182,7 +182,7 @@ pub fn run(runtime: *task_runtime.Runtime, trap_top: usize, physical_cr3: usize)
         if (paging.frameStats().allocated != before + 1 or !source.installPreparedExecutionMappingForArchitectureProof(task, space, contexts[index], &handles[index]))
             proof.fail("Mapping xstate root admission");
         roots[index] = space.switch_cr3 & x86.CR3_ADDRESS_MASK;
-        const mapping = &source.mappings.?.getByHandle(handles[index]).?.mapping;
+        const mapping = &source.mappings.get().?.getByHandle(handles[index]).?.mapping;
         storages[index] = mapping.owned_xstate orelse proof.fail("Mapping xstate private allocation");
         states[index] = storages[index].state();
         if (!imageAuthority(states[index])) proof.fail("Mapping xstate WB image authority");

@@ -564,7 +564,7 @@ const TestExtendedCapabilityReader = struct {
 
     fn readDword(self: @This(), offset: u32) u32 {
         const start: usize = @intCast(offset);
-        return std.mem.readInt(u32, self.bytes[start .. start + @sizeOf(u32)], .little);
+        return std.mem.readInt(u32, self.bytes[start..][0..4], .little);
     }
 };
 
