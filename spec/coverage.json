@@ -437,11 +437,11 @@
         },
         {
           "file": "src/native/sync/sync_transport_harness.zig",
-          "name": "emulated native transport denies service identity before packet transmission"
+          "name": "service identity sessions are denied before any packet is encrypted"
         },
         {
           "file": "src/native/sync/sync_transport.zig",
-          "name": "native sync transport rejects revoked trusted devices and requires real I225 proof"
+          "name": "native sync transport rejects revoked trusted devices and unattested production sessions"
         },
         {
           "file": "src/native/sync/sync_service_test.zig",
@@ -1733,11 +1733,11 @@
       "negative_tests": [
         {
           "file": "src/native/sync/sync_transport_harness.zig",
-          "name": "emulated native transport denies service identity before packet transmission"
+          "name": "service identity sessions are denied before any packet is encrypted"
         },
         {
           "file": "src/native/sync/sync_transport.zig",
-          "name": "native sync transport rejects revoked trusted devices and requires real I225 proof"
+          "name": "native sync transport rejects revoked trusted devices and unattested production sessions"
         },
         {
           "file": "src/native/session/service_path_proofs.zig",

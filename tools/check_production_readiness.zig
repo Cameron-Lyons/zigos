@@ -752,15 +752,32 @@ const SECURITY_CONTROLS = [_]SecurityControl{
         .reason = "storage must validate replay logs against the committed root and adopt only production NVMe root volumes",
     },
     .{
+        .scopes = &.{"src/kernel/drivers/device_isolation.zig"},
+        .snippets = &.{
+            "if (!intel_vtd.requesterProtected(device)) return error.DmaIsolationBypassed;",
+            "if (!intel_vtd.faultMonitoringEnabled()) return error.DmaFaultMonitoringUnavailable;",
+            "if (!intel_vtd.interruptIsolationEnabled()) return error.InterruptIsolationUnavailable;",
+            "intel_vtd.routeInterrupt(device, vector,",
+            "errdefer intel_vtd.clearInterruptRoute(device)",
+            "intel_vtd.pollFaultForDevice(device)",
+        },
+        .reason = "the shared isolation helper must require VT-d translation, fault recording and interrupt remapping, remap every message route and poll DMA faults",
+    },
+    .{
+        .scopes = &.{"src/kernel/drivers/pci.zig"},
+        .snippets = &.{"if (busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;"},
+        .reason = "BAR admission must refuse devices that still hold inherited bus mastering",
+    },
+    .{
         .scopes = &.{ "src/kernel/drivers/xhci_hw.zig", "src/kernel/drivers/intel_i225_hw.zig", "src/kernel/drivers/virtio_net_hw.zig" },
-        .snippets = &.{ "return error.BusMasteringNotRevoked", ".requesterProtected(", ".routeInterrupt(", ".pollFaultForDevice(" },
+        .snippets = &.{ "BusMasteringNotRevoked", "device_isolation.requireIsolated(", "device_isolation.routeInterrupt(", ".pollFault" },
         .match = .each_scope,
-        .reason = "DMA-capable drivers must revoke inherited bus mastering, require VT-d requester isolation, remap interrupts and poll DMA faults",
+        .reason = "DMA-capable drivers must refuse inherited bus mastering, require VT-d requester isolation, remap interrupts and poll DMA faults",
     },
     .{
         .scopes = &.{"src/kernel/drivers/nvme_hw.zig"},
-        .snippets = &.{ "return error.BusMasteringNotRevoked", ".routeInterrupt(" },
-        .reason = "the NVMe driver must revoke inherited bus mastering and remap its interrupt",
+        .snippets = &.{ "return error.BusMasteringNotRevoked", "!intel_vtd.requesterProtected(dev)) return error.DmaIsolationBypassed", "device_isolation.routeInterrupt(", "device_isolation.pollFault(" },
+        .reason = "the NVMe driver must revoke inherited bus mastering, require VT-d requester isolation, remap its interrupt and poll DMA faults",
     },
     .{
         .scopes = &.{"src/kernel/drivers/xhci_hw.zig"},
@@ -795,7 +812,7 @@ const SECURITY_CONTROLS = [_]SecurityControl{
     },
     .{
         .scopes = &.{"src/kernel/boot/init/core.zig"},
-        .snippets = &.{ "gdt.init();", "syscall64.init();", "isr.init();", "try x86.enableLass();", "paging.init();" },
+        .snippets = &.{ "gdt.init();", "syscall64.init(", "isr.init();", "try x86.enableLass();", "paging.init();" },
         .match = .ordered,
         .reason = "native descriptor, entry and LASS initialization must precede paging",
     },

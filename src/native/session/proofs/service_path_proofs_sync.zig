@@ -3,7 +3,6 @@ const abi = @import("../../core/abi.zig");
 const binary_cursor = @import("binary_cursor");
 const capability = @import("../../kernel_api/capability.zig");
 const component_port = @import("../../kernel_api/component_port.zig");
-const measured_boot = @import("../../platform/measured_boot.zig");
 const object_store = @import("../../storage/object_store.zig");
 const principal = @import("../../core/principal.zig");
 const session_manager = @import("../session_manager.zig");
@@ -19,7 +18,6 @@ const expectEndpointCreateWithFlags = common.expectEndpointCreateWithFlags;
 const expectEndpointRecv = common.expectEndpointRecv;
 const expectEndpointSend = common.expectEndpointSend;
 const signer = common.signer;
-const addMeasuredNetworkArtifact = measured_boot.addMeasuredArtifact;
 
 pub fn proveBootedSyncServicePath(
     kernel_port: *component_port.KernelPort,
@@ -209,8 +207,6 @@ pub fn proveBootedSyncServicePath(
         .mode = .named_service_identity,
         .target = "overlay.service-path.notes",
     });
-    const network_attestation_metadata_digest = crypto_hash.digestFromByte(0x7B);
-    const peer_boot = try verifiedBootedNetworkPeer(7_050);
     _ = try sync_port.configureWorkspacePolicy(sync_authority, .{
         .workspace_id = workspace_id,
         .owner = user,
@@ -520,23 +516,6 @@ pub fn proveBootedSyncServicePath(
     const clean_peer_summary = try restarted_peer_port.replicateWorkspace(peer_authority, storage, workspace_id, laptop, tablet, .device_to_device);
     try std.testing.expectEqual(@as(usize, 0), clean_peer_summary.selected_entry_count);
     try std.testing.expectEqual(@as(usize, 0), clean_peer_summary.transport_frame_count);
-}
-
-fn verifiedBootedNetworkPeer(generation: u64) !measured_boot.BootRecord {
-    var recorder = measured_boot.Recorder.init();
-    var artifact_manifest = measured_boot.ArtifactManifest.init(generation);
-    recorder.begin(generation);
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .kernel, "kernel-zigos", "kernel=network-peer");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .base_image, "base-network-peer", "image=network-peer");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "network", "healthy");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "sync", "healthy");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "storage", "healthy");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .critical_service, "policy", "healthy");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .policy, "identity-first", "strict");
-    try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .driver_set, "signed-network-driver", "net");
-    var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
-    return boot;
 }
 
 fn exchangeSyncFrameOverNativeEndpoint(
