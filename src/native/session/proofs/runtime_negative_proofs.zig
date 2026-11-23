@@ -522,7 +522,7 @@ pub fn driverAuthorityEscapeIsRejected() bool {
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
     }) catch return false;
 
-    _ = directory.register(.{
+    _ = directory.registerSigned(.{
         .service_id = 40,
         .owner_task_id = 40,
         .device_id = 0xA0D10,
@@ -531,12 +531,7 @@ pub fn driverAuthorityEscapeIsRejected() bool {
         .capability_table = &capabilities,
         .requester = audio_driver,
         .now_ticks = 1,
-        .bundle = .{
-            .bundle_id = "zigos.system.audio-driver",
-            .display_name = "Audio Driver",
-            .publisher = "zigos.spec",
-            .signature = .{ .format = .ed25519, .signer = "zigos-spec-driver" },
-        },
+        .signer = "zigos-spec-driver",
     }) catch |err| return err == error.AuthorityRightsEscalation;
     return false;
 }

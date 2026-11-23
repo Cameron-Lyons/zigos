@@ -1,7 +1,7 @@
 const std = @import("std");
 const tpm2_crb_test = @import("../../kernel/platform/tpm2_crb_test.zig");
 
-const accelerator_driver_task = @import("../../native/drivers/accelerator_driver_task.zig");
+const accelerator_driver_task = @import("../../native/session/proofs/accelerator_driver_task.zig");
 const bootstrap_driver_port = @import("../../native/drivers/bootstrap_driver_port.zig");
 const dataplane_handoff = @import("../../native/drivers/dataplane_handoff.zig");
 const device_inventory = @import("../../native/drivers/device_inventory.zig");

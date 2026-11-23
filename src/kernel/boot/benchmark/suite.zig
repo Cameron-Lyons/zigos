@@ -1873,16 +1873,7 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
         @as(u64, 0x1234_1111_0001) + iteration,
         .graphics_adapter,
     );
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "svc.driver.runtime",
-        .display_name = "Driver Runtime",
-        .publisher = "zigos.spec",
-        .signature = .{
-            .format = .ed25519,
-            .signer = "zigos-driver-key",
-        },
-    };
-    const driver = directory.register(.{
+    const driver = directory.registerSigned(.{
         .service_id = compositor.id,
         .owner_task_id = 401 + iteration,
         .device_id = @as(u64, 0x1234_1111_0001) + iteration,
@@ -1891,7 +1882,7 @@ fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
         .capability_table = &capabilities,
         .requester = authority.holder,
         .now_ticks = 1 + iteration,
-        .bundle = bundle,
+        .signer = "zigos-driver-key",
     }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 
     var runtime = DriverRecoveryRuntime{};
@@ -2673,11 +2664,9 @@ fn createLoadTask(
 }
 
 const DriverRecoveryRuntime = struct {
-    const ActivationMode = enum(u8) { userspace_brokered_data_plane };
     const ActivationRecord = struct {
         activation_generation: u32,
         dma_domain_id: u64,
-        mode: ActivationMode,
 
         pub fn hasExclusiveClaim(_: *const @This()) bool {
             return true;
@@ -2697,7 +2686,6 @@ const DriverRecoveryRuntime = struct {
         return .{
             .dma_domain_id = driver.dma_domain_id,
             .activation_generation = @intCast(self.activation_count),
-            .mode = .userspace_brokered_data_plane,
         };
     }
 };

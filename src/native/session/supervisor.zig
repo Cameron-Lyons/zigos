@@ -5,7 +5,6 @@ const contract = @import("contract.zig");
 const driver_service = @import("../drivers/driver_service.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
-const manifest = @import("../policy/manifest.zig");
 const notification_center = @import("../services/notification_center.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -113,7 +112,6 @@ pub const DriverRecoveryReport = struct {
     runtime_activation_generation: u32 = 0,
     runtime_dma_domain_id: u64 = 0,
     runtime_exclusive_claim: bool = false,
-    userspace_brokered_data_plane: bool = false,
 };
 
 pub const DriverHotSwapReport = struct {
@@ -126,14 +124,12 @@ pub const DriverHotSwapReport = struct {
     runtime_activation_generation: u32 = 0,
     runtime_dma_domain_id: u64 = 0,
     runtime_exclusive_claim: bool = false,
-    userspace_brokered_data_plane: bool = false,
 };
 
 const DriverActivationState = struct {
     activation_generation: u32,
     dma_domain_id: u64,
     exclusive_claim: bool,
-    userspace_brokered_data_plane: bool,
 };
 
 const ServiceSlot = struct {
@@ -328,7 +324,6 @@ pub const Supervisor = struct {
             .runtime_activation_generation = activation.activation_generation,
             .runtime_dma_domain_id = activation.dma_domain_id,
             .runtime_exclusive_claim = activation.exclusive_claim,
-            .userspace_brokered_data_plane = activation.userspace_brokered_data_plane,
         };
     }
 
@@ -399,7 +394,6 @@ pub const Supervisor = struct {
             .runtime_activation_generation = activation.activation_generation,
             .runtime_dma_domain_id = activation.dma_domain_id,
             .runtime_exclusive_claim = activation.exclusive_claim,
-            .userspace_brokered_data_plane = activation.userspace_brokered_data_plane,
         };
     }
 
@@ -598,7 +592,6 @@ fn activateRuntimeDriver(
         .activation_generation = result.activation_generation,
         .dma_domain_id = result.dma_domain_id,
         .exclusive_claim = result.hasExclusiveClaim(),
-        .userspace_brokered_data_plane = result.mode == .userspace_brokered_data_plane,
     };
 }
 
@@ -771,11 +764,9 @@ test "direct service class slots follow the latest registration" {
 
 test "driver recovery restarts the failed driver and emits visible diagnostics only when needed" {
     const FakeRuntime = struct {
-        const ActivationMode = enum(u8) { userspace_brokered_data_plane };
         const ActivationRecord = struct {
             activation_generation: u32,
             dma_domain_id: u64,
-            mode: ActivationMode,
 
             pub fn hasExclusiveClaim(_: *const @This()) bool {
                 return true;
@@ -797,7 +788,6 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
             return .{
                 .activation_generation = @intCast(self.activation_count),
                 .dma_domain_id = driver.dma_domain_id,
-                .mode = .userspace_brokered_data_plane,
             };
         }
     };
@@ -810,15 +800,6 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
 
     var directory = driver_service.Directory.init();
     var capabilities = capability.CapabilityTable.init();
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "svc.driver.runtime",
-        .display_name = "Driver Runtime",
-        .publisher = "zigos.spec",
-        .signature = .{
-            .format = .ed25519,
-            .signer = "zigos-driver-key",
-        },
-    };
     const graphics_authority = try driverAuthority(
         &capabilities,
         compositor.owner,
@@ -826,7 +807,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
         0x1234_1111_0001,
         .graphics_adapter,
     );
-    const graphics_driver = try directory.register(.{
+    const graphics_driver = try directory.registerSigned(.{
         .service_id = compositor.id,
         .owner_task_id = 401,
         .device_id = 0x1234_1111_0001,
@@ -835,7 +816,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
         .capability_table = &capabilities,
         .requester = graphics_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-driver-key",
     });
     const storage_authority = try driverAuthority(
         &capabilities,
@@ -844,7 +825,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
         0x0000_1F00_0001,
         .storage_controller,
     );
-    _ = try directory.register(.{
+    _ = try directory.registerSigned(.{
         .service_id = storage.id,
         .owner_task_id = 402,
         .device_id = 0x0000_1F00_0001,
@@ -853,7 +834,7 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
         .capability_table = &capabilities,
         .requester = storage_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-driver-key",
     });
 
     var runtime = FakeRuntime{};
@@ -903,17 +884,12 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
 
 test "driver hot-swap rebinds authority and restarts only the owning service" {
     const FakeRuntime = struct {
-        const ActivationMode = enum(u8) {
-            control_only,
-            userspace_brokered_data_plane,
-        };
         const ActivationRecord = struct {
             activation_generation: u32,
             dma_domain_id: u64,
-            mode: ActivationMode,
 
-            pub fn hasExclusiveClaim(self: *const @This()) bool {
-                return self.mode != .control_only;
+            pub fn hasExclusiveClaim(_: *const @This()) bool {
+                return true;
             }
         };
 
@@ -938,7 +914,6 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
             return .{
                 .activation_generation = @intCast(self.activation_count),
                 .dma_domain_id = driver.dma_domain_id,
-                .mode = .userspace_brokered_data_plane,
             };
         }
 
@@ -1011,7 +986,6 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
     try std.testing.expectEqual(@as(u32, 1), report.runtime_activation_generation);
     try std.testing.expectEqual(swapped.dma_domain_id, report.runtime_dma_domain_id);
     try std.testing.expect(report.runtime_exclusive_claim);
-    try std.testing.expect(report.userspace_brokered_data_plane);
     try std.testing.expectEqual(second_authority.id, swapped.authority_capability_id);
     try std.testing.expect(swapped.signerMatches("graphics-v2"));
     try std.testing.expect(!swapped.signerMatches("graphics-v1"));

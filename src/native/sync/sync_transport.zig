@@ -39,7 +39,7 @@ pub const verifySignedFrame = harness.verifySignedFrame;
 pub const decryptForSession = harness.decryptForSession;
 pub const decryptSignedFrame = harness.decryptSignedFrame;
 
-pub const Error = harness.Error || endpoint.Error || network_driver_task.Error || error{
+pub const Error = harness.Error || endpoint.Error || error{
     NativeTransportCongested,
     NativeTransportDisconnected,
     NativeTransportDeviceRevoked,

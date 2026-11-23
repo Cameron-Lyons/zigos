@@ -10,7 +10,6 @@ const driver_service = @import("driver_service.zig");
 const network_driver_task = @import("network_driver_task.zig");
 const storage_driver_task = @import("storage_driver_task.zig");
 const xhci_driver_task = @import("xhci_driver_task.zig");
-const display_driver_task = @import("display_driver_task.zig");
 const storage_volume = @import("../storage/storage_volume.zig");
 const cooperative = @import("../task/cooperative_worker.zig");
 const kernel_device_start = if (builtin.target.os.tag == .freestanding)
@@ -50,21 +49,16 @@ else
     };
 
 pub const NetworkDevice = network_driver_task.NetworkDevice;
-pub const ReceiveStatus = network_driver_task.ReceiveStatus;
 pub const ReceiveResult = network_driver_task.ReceiveResult;
-pub const ReceiveServiceResult = network_driver_task.ReceiveServiceResult;
 pub const noNetworkFrame = network_driver_task.noNetworkFrame;
 pub const EgressRequest = network_driver_task.EgressRequest;
 pub const EgressDecision = network_driver_task.EgressDecision;
-pub const EgressBroker = network_driver_task.EgressBroker;
 pub const NetworkActivator = *const fn (device_id: u64) ?*const NetworkDevice;
 pub const StorageActivator = *const fn (device_id: u64) ?storage_volume.Backend;
 pub const MAX_PUBLISHER_BYTES: usize = 32;
-pub const COMPACT_PUBLICATION_METADATA = true;
 pub const DEVICE_DATA_PLANE_PUBLICATION_SIZE_CEILING_BYTES: usize = 56;
 pub const NETWORK_PUBLICATION_SIZE_CEILING_BYTES: usize = 72;
 pub const STORAGE_PUBLICATION_SIZE_CEILING_BYTES: usize = 328;
-pub const STARTS_DATAPLANE_AT_USERSPACE_CLAIM = true;
 
 comptime {
     if (MAX_PUBLISHER_BYTES > std.math.maxInt(u8)) {
@@ -306,50 +300,6 @@ pub fn publicationUsesKernelBootstrap(
             break :blk false;
         },
     };
-}
-
-pub fn hasActiveNetworkDevice() bool {
-    return network_driver_task.hasActiveDevice();
-}
-
-pub fn setEgressBroker(broker: ?EgressBroker) void {
-    network_driver_task.setEgressBroker(broker);
-}
-
-pub fn bindEgressCapability(capability_id: u64, policy_id: u64) void {
-    network_driver_task.bindEgressCapability(capability_id, policy_id);
-}
-
-pub fn clearEgressCapability() void {
-    network_driver_task.clearEgressCapability();
-}
-
-pub fn authorizeDriverTx(destination: [6]u8, frame: []const u8) bool {
-    return network_driver_task.authorizeDriverTx(destination, frame);
-}
-
-pub fn sendActiveNetworkFrame(destination: [6]u8, frame: []const u8) bool {
-    return network_driver_task.sendActiveFrame(destination, frame);
-}
-
-pub fn receiveActiveNetworkFrame(output: []u8) ReceiveResult {
-    return network_driver_task.receiveActiveFrame(output);
-}
-
-pub fn servicePendingNetworkFrames(budget: usize) ReceiveServiceResult {
-    return network_driver_task.servicePendingReceiveFrames(budget);
-}
-
-pub fn networkWorkPending() bool {
-    return network_driver_task.networkWorkPending();
-}
-
-pub fn nextNetworkWake() ?u64 {
-    return network_driver_task.nextNetworkWake();
-}
-
-pub fn activeNetworkTaskId() u64 {
-    return network_driver_task.activeTaskId();
 }
 
 pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
@@ -601,9 +551,8 @@ fn establishStorageControllerSession(
 }
 
 fn storageControllerSessionCurrent(publication: *const StoragePublication) bool {
-    const session = publication.controller_session orelse
-        return builtin.target.os.tag != .freestanding;
-    return storageSessionIsCurrent(&session);
+    const session = if (publication.controller_session) |*current| current else return builtin.target.os.tag != .freestanding;
+    return storageSessionIsCurrent(session);
 }
 
 fn programStorageDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
@@ -675,7 +624,7 @@ comptime {
 pub fn storageOwnedSubmitAuthorityCurrent(device_id: u64) callconv(.c) bool {
     const submission = active_storage_submission orelse return false;
     if (submission.lease.device_id != device_id or !dataplane_handoff.leaseCurrent(submission.lease)) return false;
-    return storageAuthorityCurrent(submission.controller_session, storageAuthorityTicks());
+    return storageAuthorityCurrent(&submission.controller_session, storageAuthorityTicks());
 }
 
 fn storageAuthorityTicks() u64 {
@@ -706,9 +655,9 @@ const StorageAuthorityClock = if (builtin.target.os.tag == .freestanding) struct
     }
 };
 
-fn storageAuthorityCurrent(session: ?StorageControllerSession, now_ticks: u64) bool {
-    const bound = session orelse return builtin.target.os.tag != .freestanding;
-    if (!storageSessionIsCurrent(&bound)) return false;
+fn storageAuthorityCurrent(session: *const ?StorageControllerSession, now_ticks: u64) bool {
+    const bound = if (session.*) |*current| current else return builtin.target.os.tag != .freestanding;
+    if (!storageSessionIsCurrent(bound)) return false;
     const authority = bound.kernel_port.kernel.requireTaskCapability(bound.task_id, bound.authority_capability_id, now_ticks) catch return false;
     return authority.target.kind == .device and authority.target.id == bound.device_id and authority.rights.containsAll(driver_service.allowedRightsFor(.storage_controller));
 }
@@ -748,12 +697,12 @@ fn beginStorageSubmit() ?StorageSubmission {
     // Copy and authenticate the attachment before entering a backend that may
     // suspend. Its exact lease pins these globals until that backend drains.
     const backend = owned_storage_backend orelse return null;
-    const publication = published_storage orelse return null;
-    if (publication.device_id != owned_storage_device_id or publication.active_service_id == 0 or !storageControllerSessionCurrent(&publication)) return null;
-    if (publication.controller_session) |session| {
+    const publication = if (published_storage) |*current| current else return null;
+    if (publication.device_id != owned_storage_device_id or publication.active_service_id == 0) return null;
+    if (publication.controller_session) |*session| {
         if (session.task_id != owned_storage_task_id or session.process_generation != owned_storage_generation) return null;
     }
-    if (!storageAuthorityCurrent(publication.controller_session, storageAuthorityTicks())) return null;
+    if (!storageAuthorityCurrent(&publication.controller_session, storageAuthorityTicks())) return null;
     const lease = dataplane_handoff.beginOwnedSubmit(owned_storage_device_id, owned_storage_task_id, owned_storage_generation) catch return null;
     return .{ .lease = lease, .backend = backend, .controller_session = publication.controller_session };
 }
@@ -805,7 +754,6 @@ fn deviceClassIndex(device_class: driver_service.DeviceClass) usize {
 }
 
 test "bootstrap driver publications use compact bounded metadata" {
-    try std.testing.expect(COMPACT_PUBLICATION_METADATA);
     try std.testing.expectEqual(u8, @FieldType(DeviceDataPlanePublication, "publisher_len"));
     try std.testing.expectEqual(u8, @FieldType(NetworkPublication, "publisher_len"));
     try std.testing.expectEqual(u8, @FieldType(StoragePublication, "publisher_len"));
@@ -862,16 +810,16 @@ test "driver-backed network tx fails closed without capability-backed egress dec
 
     const frame_with_raw_destination = "GET / HTTP/1.1\r\nHost: relay.zigos.dev\r\nX-IP: 203.0.113.7\r\n\r\n";
     const peer_mac = [_]u8{ 0x02, 0, 0, 0, 0, 0x44 };
-    try std.testing.expect(!sendActiveNetworkFrame(peer_mac, frame_with_raw_destination));
+    try std.testing.expect(!network_driver_task.sendActiveFrame(peer_mac, frame_with_raw_destination));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
-    setEgressBroker(Harness.broker);
-    try std.testing.expect(!sendActiveNetworkFrame(peer_mac, frame_with_raw_destination));
+    network_driver_task.setEgressBroker(Harness.broker);
+    try std.testing.expect(!network_driver_task.sendActiveFrame(peer_mac, frame_with_raw_destination));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
     try std.testing.expectEqual(@as(u64, 0), Harness.saw_capability_id);
 
-    bindEgressCapability(99, 44);
-    try std.testing.expect(sendActiveNetworkFrame(peer_mac, frame_with_raw_destination));
+    network_driver_task.bindEgressCapability(99, 44);
+    try std.testing.expect(network_driver_task.sendActiveFrame(peer_mac, frame_with_raw_destination));
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
     try std.testing.expectEqual(@as(u64, 44), Harness.saw_policy_id);
     try std.testing.expectEqual(@as(u64, 99), Harness.saw_capability_id);
@@ -916,15 +864,15 @@ test "adversarial raw IP or domain knowledge cannot substitute for egress capabi
     device_inventory.registerDetected(.network_adapter, i225_device_id, .intel_i225_lm_inventory, false);
     try std.testing.expect(try publishNetworkDevice(i225_device_id, "i225-userspace", &device, false));
     try std.testing.expect(activateNetworkDevice(i225_device_id, 10));
-    setEgressBroker(Harness.adversarialBroker);
+    network_driver_task.setEgressBroker(Harness.adversarialBroker);
 
     const forged_frame = "dst=203.0.113.7; host=relay.zigos.dev";
     const peer_mac = [_]u8{ 0x02, 0, 0, 0, 0, 0x45 };
-    try std.testing.expect(!sendActiveNetworkFrame(peer_mac, forged_frame));
+    try std.testing.expect(!network_driver_task.sendActiveFrame(peer_mac, forged_frame));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
-    bindEgressCapability(31337, 5150);
-    try std.testing.expect(sendActiveNetworkFrame(peer_mac, forged_frame));
+    network_driver_task.bindEgressCapability(31337, 5150);
+    try std.testing.expect(network_driver_task.sendActiveFrame(peer_mac, forged_frame));
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
 }
 

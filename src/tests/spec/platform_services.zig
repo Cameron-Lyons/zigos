@@ -312,11 +312,9 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "retry_safe=no") != null);
 
     const FakeRuntime = struct {
-        const ActivationMode = enum(u8) { userspace_brokered_data_plane };
         const ActivationRecord = struct {
             activation_generation: u32,
             dma_domain_id: u64,
-            mode: ActivationMode,
 
             pub fn hasExclusiveClaim(_: *const @This()) bool {
                 return true;
@@ -338,7 +336,6 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
             return .{
                 .dma_domain_id = driver.dma_domain_id,
                 .activation_generation = @intCast(self.activation_count),
-                .mode = .userspace_brokered_data_plane,
             };
         }
     };
@@ -349,15 +346,6 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
 
     var directory = driver_service.Directory.init();
     var capabilities = capability.CapabilityTable.init();
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "svc.driver.storage-runtime",
-        .display_name = "Storage Driver Runtime",
-        .publisher = "zigos.spec",
-        .signature = .{
-            .format = .ed25519,
-            .signer = "zigos-spec-driver",
-        },
-    };
     const storage_authority = try spec_support.driverAuthority(
         &capabilities,
         storage_record.owner,
@@ -365,7 +353,7 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
         0x0000_1F00_0002,
         .storage_controller,
     );
-    const storage_driver = try directory.register(.{
+    const storage_driver = try directory.registerSigned(.{
         .service_id = storage_record.id,
         .owner_task_id = 1_401,
         .device_id = 0x0000_1F00_0002,
@@ -374,7 +362,7 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
         .capability_table = &capabilities,
         .requester = storage_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
     });
 
     var runtime = FakeRuntime{};

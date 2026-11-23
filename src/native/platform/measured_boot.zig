@@ -831,10 +831,9 @@ fn criticalServiceMeasurementPayload(
 fn driverSetDigest(directory: *const driver_service.Directory) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     var driver_count: usize = 0;
-    for (directory.slots.slots) |slot| {
-        if (!slot.in_use) continue;
+    for (&directory.slots) |*slot| {
+        const driver = if (slot.*) |*current| current else continue;
         driver_count += 1;
-        const driver = &slot.driver;
         crypto_hash.updateInt(&hasher, "service-id", driver.service_id);
         crypto_hash.updateInt(&hasher, "owner-task-id", driver.owner_task_id);
         crypto_hash.updateInt(&hasher, "device-id", driver.device_id);
@@ -843,7 +842,6 @@ fn driverSetDigest(directory: *const driver_service.Directory) crypto_hash.Diges
         crypto_hash.updateInt(&hasher, "restart-generation", driver.restart_generation);
         crypto_hash.updateEnum(&hasher, "bootstrap-transport", driver.bootstrap_transport);
         crypto_hash.updateInt(&hasher, "dma-domain-id", driver.dma_domain_id);
-        crypto_hash.updateEnum(&hasher, "dma-protection", driver.dma_protection);
         crypto_hash.updateBytes(&hasher, "signer-fingerprint", &driver.signer_fingerprint);
         const dma_range_count = driver.dmaRangeCount();
         crypto_hash.updateInt(&hasher, "dma-range-count", dma_range_count);
@@ -1062,7 +1060,6 @@ test "critical service measurements bind launched userspace image artifacts" {
 
 test "driver set measurements bind signed driver records and restart generation" {
     const capability = @import("../kernel_api/capability.zig");
-    const manifest = @import("../policy/manifest.zig");
 
     var capabilities = capability.CapabilityTable.init();
     var directory = driver_service.Directory.init();
@@ -1082,16 +1079,7 @@ test "driver set measurements bind signed driver records and restart generation"
             .renewable = true,
         },
     });
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "svc.net.driver",
-        .display_name = "Network Driver",
-        .publisher = "zigos.dev",
-        .signature = .{
-            .format = .ed25519,
-            .signer = "zigos-driver-key",
-        },
-    };
-    const driver = try directory.register(.{
+    const driver = try directory.registerSigned(.{
         .service_id = 44,
         .owner_task_id = 7,
         .device_id = 100,
@@ -1100,7 +1088,7 @@ test "driver set measurements bind signed driver records and restart generation"
         .capability_table = &capabilities,
         .requester = authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-driver-key",
     });
 
     var first_recorder = Recorder.init();

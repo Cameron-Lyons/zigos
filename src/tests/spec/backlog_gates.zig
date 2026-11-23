@@ -624,13 +624,7 @@ pub fn driverBoundaryAuditGate() !void {
     const holder = spec_support.service(811);
     const authority = try spec_support.driverAuthority(&capabilities, holder, 812, 0x8086_15F2_0007, .network_adapter);
 
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "svc.driver.backlog",
-        .display_name = "Backlog Driver",
-        .publisher = "zigos.spec",
-        .signature = .{ .format = .ed25519, .signer = "zigos-spec-driver" },
-    };
-    const driver = try directory.register(.{
+    const driver = try directory.registerSigned(.{
         .service_id = 811,
         .owner_task_id = 812,
         .device_id = 0x8086_15F2_0007,
@@ -639,14 +633,14 @@ pub fn driverBoundaryAuditGate() !void {
         .capability_table = &capabilities,
         .requester = holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
     });
     const dma_range = driver.dmaRange(0).?;
     try std.testing.expect(driver.allowsDma(dma_range.base, 64));
     try std.testing.expect(!driver.allowsDma(dma_range.base - 64, 128));
 
     var rejected_directory = driver_service.Directory.init();
-    try std.testing.expectError(error.InvalidBootstrapTransport, rejected_directory.register(.{
+    try std.testing.expectError(error.InvalidBootstrapTransport, rejected_directory.registerSigned(.{
         .service_id = 812,
         .owner_task_id = 812,
         .device_id = 0x8086_15F2_0007,
@@ -655,7 +649,7 @@ pub fn driverBoundaryAuditGate() !void {
         .capability_table = &capabilities,
         .requester = holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
         .bootstrap_transport = .kernel_bootstrap_broker,
     }));
 
@@ -665,6 +659,10 @@ pub fn driverBoundaryAuditGate() !void {
 fn networkDriverBrokerRevocationGate() !void {
     const Harness = struct {
         var send_count: usize = 0;
+        var policy_broker: ?*network_policy.EgressBroker = null;
+        var owner: principal.PrincipalId = undefined;
+        var now_ticks: u64 = 0;
+        var last_reason: network_policy.EgressDecisionReason = .none;
 
         fn send(_: [6]u8, _: []const u8) bool {
             send_count += 1;
@@ -674,15 +672,31 @@ fn networkDriverBrokerRevocationGate() !void {
         fn mac() [6]u8 {
             return [_]u8{ 0x02, 0x81, 0x10, 0x0E, 0x00, 0x07 };
         }
+
+        // Every driver transmit re-asks the policy broker, so a revocation
+        // takes effect on the next frame rather than at connection open.
+        fn broker(request: network_driver_task.EgressRequest) network_driver_task.EgressDecision {
+            const denied = network_driver_task.EgressDecision{ .allowed = false, .capability_backed = false };
+            const policies = policy_broker orelse return denied;
+            const decision = policies.connect(.{
+                .task_id = 880,
+                .principal_id = owner,
+                .capability_id = request.egress_capability_id,
+                .policy_id = request.network_policy_id,
+                .evidence = .{ .destination = .{ .service_identity = "storage-sync.driver.zigos" } },
+                .now_ticks = now_ticks,
+            }) catch return denied;
+            last_reason = decision.reason;
+            return .{ .allowed = decision.allowed, .capability_backed = decision.capability_id == request.egress_capability_id };
+        }
     };
 
     Harness.send_count = 0;
+    Harness.last_reason = .none;
     network_driver_task.reset();
     defer network_driver_task.reset();
 
     const service_owner = spec_support.service(880);
-    const source_device = spec_support.device(881);
-    const target_device = spec_support.device(882);
     const network_device = network_driver_task.NetworkDevice{
         .send = Harness.send,
         .receive = network_driver_task.noNetworkFrame,
@@ -718,27 +732,21 @@ fn networkDriverBrokerRevocationGate() !void {
     });
 
     var broker = network_policy.EgressBroker.init(&policies, &capabilities);
-    var stack = network_driver_task.NativeNetworkStack.init();
-    try stack.bindPeerLink(target_device, .{ 0x02, 0x81, 0x10, 0x0E, 0x00, 0x08 });
-    const connection = try stack.openServiceIdentity(&broker, .{
-        .task_id = 880,
-        .principal_id = service_owner,
-        .capability_id = egress_capability.id,
-        .policy_id = policy.id,
-        .evidence = .{ .destination = .{ .service_identity = "storage-sync.driver.zigos" } },
-        .now_ticks = 10,
-    }, source_device, target_device);
+    Harness.policy_broker = &broker;
+    defer Harness.policy_broker = null;
+    Harness.owner = service_owner;
+    network_driver_task.setEgressBroker(Harness.broker);
+    network_driver_task.bindEgressCapability(egress_capability.id, policy.id);
+    const target_mac = [_]u8{ 0x02, 0x81, 0x10, 0x0E, 0x00, 0x08 };
 
-    const first_frame = try stack.sendServiceIdentityFrameBrokered(&broker, &connection, "brokered network payload", 11);
-    try std.testing.expect(first_frame.flags.egress_allowed);
+    Harness.now_ticks = 11;
+    try std.testing.expect(network_driver_task.sendActiveFrame(target_mac, "brokered network payload"));
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
 
     try capabilities.revokeTargetAuthority(revocation_trigger.id);
-    try std.testing.expectError(
-        error.EgressDenied,
-        stack.sendServiceIdentityFrameBrokered(&broker, &connection, "revoked network payload", 12),
-    );
-    try std.testing.expectEqual(network_policy.EgressDecisionReason.capability_revoked, stack.last_denial_reason);
+    Harness.now_ticks = 12;
+    try std.testing.expect(!network_driver_task.sendActiveFrame(target_mac, "revoked network payload"));
+    try std.testing.expectEqual(network_policy.EgressDecisionReason.capability_revoked, Harness.last_reason);
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
 }
 
@@ -947,13 +955,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
     try runtime.grantCapability(driver_task.task_id, device_authority.id);
 
     var directory = driver_service.Directory.init();
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "svc.driver.storage-boundary",
-        .display_name = "Storage Boundary Driver",
-        .publisher = "zigos.spec",
-        .signature = .{ .format = .ed25519, .signer = "zigos-spec-driver" },
-    };
-    const registered_driver = try directory.register(.{
+    const registered_driver = try directory.registerSigned(.{
         .service_id = storage_service.id,
         .owner_task_id = driver_task.task_id,
         .device_id = device_id,
@@ -962,7 +964,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         .capability_table = &capabilities,
         .requester = storage_service.owner,
         .now_ticks = 6,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
     });
     try std.testing.expect(session_supervisor.allowsDriverAttachment(storage_service.id, .storage_controller));
     try std.testing.expect(runtime.hasCapability(driver_task.task_id, device_authority.id));
@@ -1110,7 +1112,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
     try std.testing.expectEqual(driver_task.task_id, matching_device_capabilities[0].scope.task_id.?);
 
     var rejected_directory = driver_service.Directory.init();
-    try std.testing.expectError(error.AuthorityScopeViolation, rejected_directory.register(.{
+    try std.testing.expectError(error.AuthorityScopeViolation, rejected_directory.registerSigned(.{
         .service_id = storage_service.id + 100,
         .owner_task_id = untrusted_task.task_id,
         .device_id = device_id,
@@ -1119,7 +1121,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         .capability_table = &capabilities,
         .requester = storage_service.owner,
         .now_ticks = 21,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
     }));
     try std.testing.expectError(error.CapabilityNotFound, kernel.sharedMemoryMap(
         kernelContext(untrusted_task.task_id, .shared_memory_map, request_ring.capability_id, .{ .shared_memory = request_ring.object.object_id }),

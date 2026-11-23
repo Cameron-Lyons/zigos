@@ -1,5 +1,5 @@
 const std = @import("std");
-const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
+const accelerator_scheduler = @import("../../task/accelerator_scheduler.zig");
 
 pub const Error = accelerator_scheduler.Error || error{
     CpuEngineUnsupported,

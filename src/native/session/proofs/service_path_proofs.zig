@@ -72,7 +72,6 @@ pub fn bootedUserspaceServicePathsProveSyncDriverIsolationAndResourceAccounting(
         capability_table,
         supervisor.findByClass(.sync_replication).?,
         sync_task,
-        network_service_task,
         storage,
         session_task.id,
         session_authority_id,

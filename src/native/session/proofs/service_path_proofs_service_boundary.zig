@@ -70,10 +70,7 @@ pub fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
         try std.testing.expect(driver_task.runsAsUserspaceProcess());
         try std.testing.expect(driver_task.hasLoadedExecutable());
         try std.testing.expect(driver_task.launch.signed);
-        try std.testing.expect(driver_service.requiresUserspaceDataPlane(expectation.device_class));
-        try std.testing.expect(!driver_service.permitsKernelDataPlane(expectation.device_class));
         try std.testing.expect(driver.dma_domain_id != 0);
-        try std.testing.expectEqual(driver_service.DmaProtection.iommu_enforced, driver.dma_protection);
 
         const activation = driver_runtime.findByClass(expectation.device_class) orelse return error.MissingBootedDriverBinding;
         try std.testing.expectEqual(driver.service_id, activation.service_id);
@@ -81,21 +78,7 @@ pub fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
         try std.testing.expect(activation.iommuEnforced());
         try std.testing.expect(!activation.kernelBootstrap());
         try std.testing.expect(activation.hasExclusiveClaim());
-        switch (expectation.device_class) {
-            .storage_controller => try std.testing.expect(
-                activation.mode == .published_data_plane or
-                    activation.mode == .userspace_brokered_data_plane,
-            ),
-            .network_adapter,
-            .usb_controller,
-            .graphics_adapter,
-            .audio_print_io,
-            .input_device,
-            .compositor_policy,
-            => {
-                try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, activation.mode);
-            },
-        }
+        try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, activation.mode);
         try std.testing.expect(activation.publisherSlice().len != 0);
     }
 }

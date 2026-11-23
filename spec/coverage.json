@@ -447,12 +447,12 @@
           "name": "network policy connections can require remote attestation and pinned service identities"
         },
         {
-          "file": "src/native/drivers/network_driver_task.zig",
-          "name": "native network stack gates service identity packets on attested policy capability"
+          "file": "src/native/sync/sync_transport_harness.zig",
+          "name": "emulated native transport denies service identity before packet transmission"
         },
         {
-          "file": "src/native/drivers/network_driver_task.zig",
-          "name": "native network stack requires scoped local discovery before discovery broadcast"
+          "file": "src/native/sync/sync_transport.zig",
+          "name": "native sync transport rejects revoked trusted devices and requires real I225 proof"
         },
         {
           "file": "src/native/sync/sync_service_test.zig",
@@ -1321,7 +1321,7 @@
         },
         {
           "file": "src/native/sync/tpm_attestation_test.zig",
-          "name": "TPM remote attestation gates native driver and endpoint connections before transmission"
+          "name": "TPM remote attestation gates native transport connections before transmission"
         },
         {
           "file": "src/native/platform/tpm_attestation.zig",
@@ -1779,12 +1779,12 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/drivers/network_driver_task.zig",
-          "name": "native network stack gates service identity packets on attested policy capability"
+          "file": "src/native/sync/sync_transport_harness.zig",
+          "name": "emulated native transport denies service identity before packet transmission"
         },
         {
-          "file": "src/native/drivers/network_driver_task.zig",
-          "name": "native network stack requires scoped local discovery before discovery broadcast"
+          "file": "src/native/sync/sync_transport.zig",
+          "name": "native sync transport rejects revoked trusted devices and requires real I225 proof"
         },
         {
           "file": "src/native/session/service_path_proofs.zig",

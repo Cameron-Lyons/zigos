@@ -5,7 +5,7 @@ const capability = @import("../../native/kernel_api/capability.zig");
 const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_runtime_mod = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
-const manifest = @import("../../native/policy/manifest.zig");
+const network_driver_task = @import("../../native/drivers/network_driver_task.zig");
 const network_policy = @import("../../native/sync/network_policy.zig");
 const object_store = @import("../../native/storage/object_store.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
@@ -95,15 +95,6 @@ pub fn publishedDriversActivateScopedTransports() !void {
     const storage_device_id: u64 = 0x0000_8086_5845_0001;
     device_inventory.registerDetected(.storage_controller, storage_device_id, .nvme_pci_inventory, false);
     device_inventory.registerDetected(.network_adapter, network_device_id, .intel_i225_lm_inventory, false);
-    const bundle = manifest.BundleManifest{
-        .bundle_id = "svc.driver.runtime",
-        .display_name = "Published Driver Runtime",
-        .publisher = "zigos.spec",
-        .signature = .{
-            .format = .ed25519,
-            .signer = "zigos-spec-driver",
-        },
-    };
 
     try std.testing.expect(try bootstrap_driver_port.publishStorageActivator(
         storage_device_id,
@@ -156,7 +147,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         network_device_id,
         .network_adapter,
     );
-    const network_driver = try directory.register(.{
+    const network_driver = try directory.registerSigned(.{
         .service_id = 91,
         .owner_task_id = 901,
         .device_id = network_device_id,
@@ -165,7 +156,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = network_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
     });
     const storage_authority = try spec_support.driverAuthority(
         &capabilities,
@@ -174,7 +165,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         storage_device_id,
         .storage_controller,
     );
-    const storage_driver = try directory.register(.{
+    const storage_driver = try directory.registerSigned(.{
         .service_id = 92,
         .owner_task_id = 902,
         .device_id = storage_device_id,
@@ -183,7 +174,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = storage_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
         .bootstrap_transport = .kernel_bootstrap_broker,
     });
     const graphics_authority = try spec_support.driverAuthority(
@@ -193,7 +184,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         0x1234_1111_0001,
         .graphics_adapter,
     );
-    const graphics_driver = try directory.register(.{
+    const graphics_driver = try directory.registerSigned(.{
         .service_id = 93,
         .owner_task_id = 903,
         .device_id = 0x1234_1111_0001,
@@ -202,7 +193,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = graphics_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
     });
     const usb_authority = try spec_support.driverAuthority(
         &capabilities,
@@ -211,7 +202,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         0x8086_A0ED_0001,
         .usb_controller,
     );
-    const usb_driver = try directory.register(.{
+    const usb_driver = try directory.registerSigned(.{
         .service_id = 96,
         .owner_task_id = 906,
         .device_id = 0x8086_A0ED_0001,
@@ -220,7 +211,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = usb_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
     });
     const audio_authority = try spec_support.driverAuthority(
         &capabilities,
@@ -229,7 +220,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         0x8086_2668_0001,
         .audio_print_io,
     );
-    const audio_driver = try directory.register(.{
+    const audio_driver = try directory.registerSigned(.{
         .service_id = 94,
         .owner_task_id = 904,
         .device_id = 0x8086_2668_0001,
@@ -238,7 +229,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = audio_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
     });
     const input_authority = try spec_support.driverAuthority(
         &capabilities,
@@ -247,7 +238,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         0x8086_A0ED_0001,
         .input_device,
     );
-    const input_driver = try directory.register(.{
+    const input_driver = try directory.registerSigned(.{
         .service_id = 95,
         .owner_task_id = 905,
         .device_id = 0x8086_A0ED_0001,
@@ -256,7 +247,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = input_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
     });
     const compositor_policy_authority = try spec_support.driverAuthority(
         &capabilities,
@@ -265,7 +256,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         0xC0DE_C0DE_0001,
         .compositor_policy,
     );
-    const compositor_policy_driver = try directory.register(.{
+    const compositor_policy_driver = try directory.registerSigned(.{
         .service_id = 97,
         .owner_task_id = 907,
         .device_id = 0xC0DE_C0DE_0001,
@@ -274,7 +265,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = compositor_policy_authority.holder,
         .now_ticks = 1,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
     });
 
     var runtime = driver_runtime_mod.Runtime.init();
@@ -291,10 +282,10 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expect(!network_activation.kernelBootstrap());
     try std.testing.expectEqualStrings("i225-userspace", network_activation.publisherSlice());
     try std.testing.expectEqual(@as(usize, 1), FakeNetworkDevice.activation_count);
-    try std.testing.expect(bootstrap_driver_port.hasActiveNetworkDevice());
+    try std.testing.expect(network_driver_task.hasActiveDevice());
     try std.testing.expectEqual(@as(u64, 91), bootstrap_driver_port.networkPublication().?.active_service_id);
-    try std.testing.expect(runtime.deactivate(network_driver.service_id));
-    try std.testing.expect(!bootstrap_driver_port.hasActiveNetworkDevice());
+    try std.testing.expect(runtime.deactivateDriver(network_driver.service_id, .network_adapter));
+    try std.testing.expect(!network_driver_task.hasActiveDevice());
 
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, storage_activation.mode);
     try std.testing.expect(storage_activation.hasExclusiveClaim());
@@ -349,7 +340,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, runtime.findByClass(.compositor_policy).?.mode);
 
     var unsupported_network_transport_directory = driver_service.Directory.init();
-    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_network_transport_directory.register(.{
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_network_transport_directory.registerSigned(.{
         .service_id = 96,
         .owner_task_id = 901,
         .device_id = network_device_id,
@@ -358,11 +349,11 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = network_authority.holder,
         .now_ticks = 2,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
         .bootstrap_transport = .kernel_bootstrap_broker,
     }));
     var unsupported_transport_directory = driver_service.Directory.init();
-    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.registerSigned(.{
         .service_id = 97,
         .owner_task_id = 906,
         .device_id = 0x8086_A0ED_0001,
@@ -371,10 +362,10 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = usb_authority.holder,
         .now_ticks = 2,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
         .bootstrap_transport = .kernel_bootstrap_broker,
     }));
-    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.registerSigned(.{
         .service_id = 97,
         .owner_task_id = 903,
         .device_id = 0x1234_1111_0001,
@@ -383,10 +374,10 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = graphics_authority.holder,
         .now_ticks = 2,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
         .bootstrap_transport = .kernel_bootstrap_broker,
     }));
-    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.registerSigned(.{
         .service_id = 98,
         .owner_task_id = 904,
         .device_id = 0x8086_2668_0001,
@@ -395,10 +386,10 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = audio_authority.holder,
         .now_ticks = 2,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
         .bootstrap_transport = .kernel_bootstrap_broker,
     }));
-    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.registerSigned(.{
         .service_id = 100,
         .owner_task_id = 907,
         .device_id = 0xC0DE_C0DE_0001,
@@ -407,10 +398,10 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = compositor_policy_authority.holder,
         .now_ticks = 2,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
         .bootstrap_transport = .kernel_bootstrap_broker,
     }));
-    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.register(.{
+    try std.testing.expectError(driver_service.Error.InvalidBootstrapTransport, unsupported_transport_directory.registerSigned(.{
         .service_id = 99,
         .owner_task_id = 905,
         .device_id = 0x8086_A0ED_0001,
@@ -419,7 +410,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
         .capability_table = &capabilities,
         .requester = input_authority.holder,
         .now_ticks = 2,
-        .bundle = bundle,
+        .signer = "zigos-spec-driver",
         .bootstrap_transport = .kernel_bootstrap_broker,
     }));
 }
@@ -901,22 +892,22 @@ fn realDriverEgressRequiresNetworkPolicyCapability(requester: @TypeOf(spec_suppo
     try std.testing.expect(!bootstrap_driver_port.activateNetworkDevice(i225_device_id, 800));
     device_inventory.registerDetected(.network_adapter, i225_device_id, .intel_i225_lm_inventory, false);
     try std.testing.expect(bootstrap_driver_port.activateNetworkDevice(i225_device_id, 800));
-    bootstrap_driver_port.setEgressBroker(Harness.broker);
+    network_driver_task.setEgressBroker(Harness.broker);
 
     const peer_mac = [_]u8{ 0x02, 0x99, 0x88, 0x77, 0x66, 0x56 };
     const frame = "dst=relay.spec.zigos";
-    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(peer_mac, frame));
+    try std.testing.expect(!network_driver_task.sendActiveFrame(peer_mac, frame));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
-    bootstrap_driver_port.bindEgressCapability(authority.id + 1, policy.id);
-    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(peer_mac, frame));
+    network_driver_task.bindEgressCapability(authority.id + 1, policy.id);
+    try std.testing.expect(!network_driver_task.sendActiveFrame(peer_mac, frame));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
-    bootstrap_driver_port.bindEgressCapability(authority.id, policy.id + 1);
-    try std.testing.expect(!bootstrap_driver_port.sendActiveNetworkFrame(peer_mac, frame));
+    network_driver_task.bindEgressCapability(authority.id, policy.id + 1);
+    try std.testing.expect(!network_driver_task.sendActiveFrame(peer_mac, frame));
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
-    bootstrap_driver_port.bindEgressCapability(authority.id, policy.id);
-    try std.testing.expect(bootstrap_driver_port.sendActiveNetworkFrame(peer_mac, frame));
+    network_driver_task.bindEgressCapability(authority.id, policy.id);
+    try std.testing.expect(network_driver_task.sendActiveFrame(peer_mac, frame));
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
 }

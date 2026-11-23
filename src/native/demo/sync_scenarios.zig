@@ -398,6 +398,8 @@ fn proveNativeDriverPacketCapture(
         var allowed_capability_id: u64 = 0;
         var allowed_policy_id: u64 = 0;
         var authorized_native_frames: usize = 0;
+        var last_authorized_frame_len: usize = 0;
+        var last_authorized_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = undefined;
 
         fn broker(request: network_driver_task.EgressRequest) network_driver_task.EgressDecision {
             const native_sync_frame = std.mem.startsWith(u8, request.frame, &sync_transport.NativeTransportAbi.magic) or
@@ -407,7 +409,11 @@ fn proveNativeDriverPacketCapture(
                 request.network_policy_id == allowed_policy_id and
                 native_sync_frame and
                 no_plaintext;
-            if (allowed) authorized_native_frames += 1;
+            if (allowed) {
+                authorized_native_frames += 1;
+                last_authorized_frame_len = request.frame.len;
+                @memcpy(last_authorized_frame[0..request.frame.len], request.frame);
+            }
             return .{
                 .allowed = allowed,
                 .capability_backed = request.egress_capability_id == allowed_capability_id,
@@ -434,7 +440,7 @@ fn proveNativeDriverPacketCapture(
     DriverEgress.allowed_capability_id = packet_capability.id;
     DriverEgress.allowed_policy_id = relay_policy_id;
     DriverEgress.authorized_native_frames = 0;
-    network_driver_task.clearTransmitTelemetry();
+    DriverEgress.last_authorized_frame_len = 0;
     network_driver_task.setEgressBroker(DriverEgress.broker);
     network_driver_task.bindEgressCapability(packet_capability.id, relay_policy_id);
     defer {
@@ -476,7 +482,7 @@ fn proveNativeDriverPacketCapture(
 
     const captured = native_transport.capture.last() orelse return false;
     stage = "capture";
-    const driver_frame = network_driver_task.lastActiveDriverFrame();
+    const driver_frame = DriverEgress.last_authorized_frame[0..DriverEgress.last_authorized_frame_len];
     if (driver_frame.len == 0 or !std.mem.eql(u8, captured.slice(), driver_frame)) return false;
 
     const view = native_transport.assertLastCapturedFrame(&connection.session, .{

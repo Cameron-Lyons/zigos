@@ -4,7 +4,7 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
-const accelerator_driver_task = @import("../drivers/accelerator_driver_task.zig");
+const accelerator_driver_task = @import("proofs/accelerator_driver_task.zig");
 const xhci_driver_task = @import("../drivers/xhci_driver_task.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
 const device_inventory = @import("../drivers/device_inventory.zig");
@@ -767,16 +767,10 @@ fn activateDrivers(
     _ = activateBootstrapDriver(env, state.services.compositor_service.id, input_driver, 57) orelse return false;
     _ = activateBootstrapDriver(env, state.services.media_service.id, audio_driver, 58) orelse return false;
     _ = activateBootstrapDriver(env, state.services.compositor_service.id, compositor_policy_driver, 59) orelse return false;
-    if (network_activation_mode == .published_data_plane and
-        (storage_activation_mode == .published_data_plane or
-            storage_activation_mode == .userspace_brokered_data_plane))
-    {
+    if (network_activation_mode == .published_data_plane and storage_activation_mode == .published_data_plane) {
         common.printBootMarker(boot_markers.service_boot_driver_service_network_ready);
     }
-    if ((storage_activation_mode == .published_data_plane or
-        storage_activation_mode == .userspace_brokered_data_plane) and
-        storage_volume_mod.hasAttachedDevice())
-    {
+    if (storage_activation_mode == .published_data_plane and storage_volume_mod.hasAttachedDevice()) {
         common.printBootMarker(boot_markers.service_boot_driver_service_storage_ready);
     }
 
@@ -1030,8 +1024,7 @@ pub fn proveStorageDriverRestartIo(
     };
 
     const storage_driver = env.driver_directory.findByService(state.services.storage_service.id) orelse return false;
-    const expected_storage_data_plane = storage_recovery.userspace_brokered_data_plane or
-        bootstrap_driver_port.activeStorageControllerSession(state.services.storage_service.id) != null;
+    const expected_storage_data_plane = bootstrap_driver_port.activeStorageControllerSession(state.services.storage_service.id) != null;
     if (!storage_probe.stale_authority_rejected or
         !storage_probe.stale_dma_access_rejected or
         !storage_probe.stale_access_rejected or
