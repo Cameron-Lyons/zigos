@@ -37,7 +37,7 @@ Use the pinned toolchain and repo entrypoints:
 | `zig build fmt-check` | You only need tracked Zig formatting checks. |
 | `zig build zig-lint` | You only need optional zlint over Zig sources. |
 | `zig build action-lint` | You only need optional actionlint over GitHub workflows. |
-| `zig build test-roots` | You need to confirm Zig test-bearing files are reachable from the build test roots. |
+| `zig build test-roots` | You need to confirm every test-bearing Zig file under `src/` and `tools/` is reachable from a build test root. |
 | `zig build hardware-proof-checker-test` | You changed the RNUC15CRSU7 proof-bundle checker or bundle contract. |
 | `zig build kernel` | You need the production native kernel and embedded userspace archive. |
 | `zig build kernel-zigos-native` | You need the production native bootstrap kernel. |
@@ -50,9 +50,9 @@ Use the pinned toolchain and repo entrypoints:
 | `zig build host-tool-tests` | You changed native file/media, QEMU process/log, release, or hardware utilities. |
 | `zig build release-tool-fixture-test` | You changed release generation/publication or signer arguments and need the real independent verifier with disposable fixture keys. |
 | `zig build tool -- COMMAND [ARGUMENTS]` | Run one of the native utilities; use `--help` to list commands. |
-| `zig build spec-tests` | You need spec coverage and native spec tests without QEMU. |
-| `zig build prod-readiness` | You need production-readiness, checker regression tests and secure-by-design release-gate checks without changing spec conformance status. |
-| `zig build production-readiness-tests` | You want focused readiness checker tests, including source-gate mutation regressions; these also run with `host-tests` and `prod-readiness`. |
+| `zig build spec-tests` | You need the spec coverage gate, its checker tests, and native spec tests without QEMU. |
+| `zig build prod-readiness` | You need the production-readiness manifest, first-hardware-target, retired-source, security-control and secure-by-design release-gate checks without changing spec conformance status. |
+| `zig build production-readiness-tests` | You want focused readiness checker tests; these also run with `host-tests` and `prod-readiness`. |
 | `zig build release-security-check` | You touched parser, ABI, diagnostics, release-security policy, unsafe Zig, or disclosure gate inputs and need the fast release-security gate. |
 | `zig build release-security-preflight` | You need every mutable public-release audit, fixture, build, smoke, fault, recovery, sync, and UEFI-QEMU gate before freezing a candidate. |
 | `zig build -Dhardware-proof-dir=build/hardware-proofs/<fresh-name> -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-security-gate` | You set the external hardware-proof environment and need to reverify and seal an already frozen candidate without regenerating or signing artifacts. |
@@ -108,6 +108,7 @@ Keep the spec contract intact:
 - Keep `first_hardware_target` pinned to one real machine until it is boringly reliable. The current target is `asus-nuc15crsu7`; QEMU can be preflight evidence, but production readiness requires a real hardware proof bundle checked by `zig build tool -- check-nuc15crsu7-hardware-proof build/hardware-proofs/<fresh-name>`.
 - Prepare the NUC proof bundle with `zig build tool -- prepare-nuc15crsu7-hardware-proof --build --nonce <fresh-64-hex> --output build/hardware-proofs/<fresh-name>` after provisioning the authenticated release signer, root, policy, sequence, expiry, rollback state, and independently pinned verifier. The output must be a fresh empty direct child of `build/hardware-proofs`; acceptance requires two single-boot logs, individually hashed cycle evidence, a canonical capture statement, two role quote/signature pairs, an independently pinned hardware verifier and nonce, and an independently pinned release verifier, root, and persistent state path.
 - Keep the secure-by-design release gate in `spec/production_readiness.json` complete, release-blocking, and backed by `zig build release-security-check`. Updates that touch parsing, boot, storage, sync, kernel/user ABI, drivers, diagnostics, crypto, or release tooling should consider fuzzing, fault injection, reproducible builds, DSSE SBOM/provenance, hardware-backed TPM/secure-enclave/HSM/KMS release keys, rotation/revocation, `zigos-verify-release` customer verifier coverage, artifact measurements, threat-model tests, memory-safety audits, crash dump redaction, and the disclosure process in `SECURITY.md`.
+- `tools/check_production_readiness.zig` pins source text only for bans on retired legacy surfaces (`RETIRED_SOURCES`, `RETIRED_PATHS`), a short list of security controls and their required order (`SECURITY_CONTROLS`; moving one into another file means retargeting its entry), the benchmark-environment gate (`tools/host/qemu.zig`, `tools/check_kernel_benchmarks.zig`, the KVM benchmark job in `.github/workflows/ci.yml` and `benchmarks/kernel-baseline.txt`), the native scheduler loop in `src/kernel/boot/profiles/zigos_native.zig`, and the model-only marker on `syntheticUserspaceImage(` calls in critical launch paths. It also enforces kernel TCB imports, production boot flags and manifest anchors. Express any other invariant as a test or comptime assertion next to the code it protects instead of pinning source text in the checker.
 - Keep requirement ids stable when editing manifest prose or mappings so coverage references do not churn.
 - If you add, rename, or split spec tests, keep the test names and coverage references aligned.
 - Prefer expanding tests and coverage before changing requirement anchors or architecture claims.

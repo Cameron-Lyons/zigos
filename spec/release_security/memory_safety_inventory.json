@@ -66,7 +66,6 @@
         "zig build mapping-xstate-proof-image",
         "zig build mapping-xstate-proof-check",
         "zig build mapping-xstate-unsupported-check",
-        "zig build production-readiness-tests",
         "zig build release-security-check"
       ]
     },
@@ -902,29 +901,6 @@
       ],
       "tests": [
         "zig build release-security-check"
-      ]
-    },
-    {
-      "path": "tools/check_production_readiness.zig",
-      "categories": [
-        "release-gate-static-scan"
-      ],
-      "owner": "release-tooling-owner",
-      "review_state": "release-reviewed",
-      "mitigations": [
-        "required syscall entry symbol names are data-only scanner inputs, and the checker does not execute or dereference them",
-        "CPU timer source checks inspect production token scopes and require the real freestanding MSR adapter, immutable exact clock authority, selected owner slots, interrupt guards, disarmed AP setup and BSP-only service wake routing. Mutation fixtures reject weakened production paths even when original snippets survive in comments or quoted data. Checker unit tests now run through host-tests and prod-readiness; source gates supplement actual wrapper, linked-image and privileged guest evidence rather than proving native timer delivery.",
-        "The durable prompt gate inspects actual scoped core, notifier, immutable ISR/gate/stub, owner runner, isolated proof wrapper, bounded window assembly and guest bodies. It enforces EOI-before-hint, native IF/identity admission, prompt-before-claim after interrupt return, native/prompted versus explicitly polled routing, control-only post-ACK completion and 36 ordered markers. 83 hostile source mutations reject weakened ownership, replay, collection, reset, prompt routing, missing delivery/window checks and borrowed backing reads; quoted and commented decoys cannot satisfy admission.",
-        "The guarded-stack gate checks seven actual source scopes: selected stack/window/IDT lifetime and high-water guest, finite manual-RSP assembly, unchanged production ISR/common kernel return, standard kernel xstate macros, isolated build linkage and ordered marker37. An explicit native-state oracle requires current CR4.OSXSAVE, FRED disabled and exact XCR0=7 before instructions and unchanged controls after return; Zig and assembly masks are checked together. Sixty-four hostile mutations reject fake gates/prompts/paint/depth, missing WB/NX/guard authority, early shared-IDT restoration, omitted state/return admission, absent real object linkage and post-ACK domain reads. The prior 83 lifetime/IPI mutations and native AP guards remain enforced.",
-        "The cold entry-stack gate inspects eight actual scoped sources and 85 hostile mutations: saved-IF preflight, authenticated BSP/RDPID bootstrap, selected loaded GDTR/TR and busy TSS, dormant continuation, READY invalidation before writes, TSS and all FRED readbacks, GS-last publication, no FRED MSRs in nonmode binding, committed-failure IF=0 and halt, cold-only benchmark setup and unchanged native BSP guard. Actual CPU 1 SGDT/STR oracle and FRED linkage plus an unconditional unexpected native-entry rejection are required; quoted/commented decoys and premature receipts cannot satisfy it. Prior prepared, 83 lifetime/IPI and 64 guarded-stack mutation groups remain enforced.",
-        "Both prior guarded-stack and cold-stack build scopes now authenticate the exact ordinary entry wrapper and the shared upper-half image helper, including the unconditional real entry/state/descriptor linkage and production EFI path. Eleven additional redirection, early-return, dead/conditional-linkage and commented/quoted-decoy mutations are checked against both scopes; previous omission mutations remain required.",
-        "The separate Mapping compacted-state gate checks nine actual source scopes and ninety-one hostile mutations: real raw CPUID and early unsupported exit; exact OSXSAVE/XCR0/XSS/TS/layout and native-modes-zero admission; aligned WB private Mapping authority; unchanged generic compact macros, live-owner poison and independent standard readback with exact full register/header/canary oracles; A-B-A-B lease epochs, ACK versus static completion, retained collection refusal and exact two-root cleanup. Build and harness scopes require the strict positive dependency in verify and separate status/record protocols for positive versus allowlisted unsupported evidence. The actual QEMU command route and handler must build sixteen CPUs, clear stale serial/status files, use the timed child result, preserve its fresh status sidecar, read the launched serial path, call the direct validator with that status/mode/bytes and report success only to stderr. Nineteen launcher mutations reject dead or redirected routes, fabricated status/bytes, marker-only termination, dead validation and stdout test-server corruption. Dead linkage, substituted instructions, stale completion, post-ACK borrowed backing reads, fabricated headers and commented/quoted decoys fail. These static checks do not provide missing supported-hardware execution evidence."
-      ],
-      "tests": [
-        "zig build prod-readiness",
-        "zig build release-security-check",
-        "zig build production-readiness-tests",
-        "zig build host-tests"
       ]
     },
     {

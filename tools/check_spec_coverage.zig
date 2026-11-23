@@ -70,7 +70,6 @@ pub fn main(init: std.process.Init) !void {
     const allocator = arena_state.allocator();
 
     var errors = std.ArrayList([]const u8).empty;
-    try runSelfTests(allocator, &errors);
 
     const manifest_source = try common.readFileAlloc(allocator, io, MANIFEST_PATH, common.coverage_manifest_max_bytes);
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, manifest_source, .{});
@@ -581,49 +580,6 @@ fn loadTestNames(
     return test_cache.getPtr(path).?;
 }
 
-fn runSelfTests(allocator: std.mem.Allocator, errors: *std.ArrayList([]const u8)) !void {
-    try selfTestSummaryClauseGateRejectsMissingOrModeledDependencies(allocator, errors);
-    try selfTestSummaryClauseGateRequiresCurrentSummaryPhrases(allocator, errors);
-}
-
-fn selfTestSummaryClauseGateRejectsMissingOrModeledDependencies(
-    allocator: std.mem.Allocator,
-    errors: *std.ArrayList([]const u8),
-) !void {
-    var evidence = try summaryEvidenceFixture(allocator);
-    try evidence.put("REQ-LOCAL-FIRST-REPLICATION", "modeled");
-    _ = evidence.remove("REQ-SHARED-MEMORY-OBJECTS");
-
-    var self_errors = std.ArrayList([]const u8).empty;
-    try validateSummaryClauseDependencies(allocator, &self_errors, &evidence, completeSummaryText());
-
-    if (!common.errorContains(self_errors.items, "REQ-LOCAL-FIRST-REPLICATION") or
-        !common.errorContains(self_errors.items, "expected enforced"))
-    {
-        try common.addError(errors, allocator, "Spec coverage checker self-test failed: test_summary_clause_gate_rejects_missing_or_modeled_dependencies: modeled dependency was accepted", .{});
-    }
-    if (!common.errorContains(self_errors.items, "REQ-SHARED-MEMORY-OBJECTS") or
-        !common.errorContains(self_errors.items, "missing requirement evidence"))
-    {
-        try common.addError(errors, allocator, "Spec coverage checker self-test failed: test_summary_clause_gate_rejects_missing_or_modeled_dependencies: missing dependency was accepted", .{});
-    }
-}
-
-fn selfTestSummaryClauseGateRequiresCurrentSummaryPhrases(
-    allocator: std.mem.Allocator,
-    errors: *std.ArrayList([]const u8),
-) !void {
-    var evidence = try summaryEvidenceFixture(allocator);
-    var self_errors = std.ArrayList([]const u8).empty;
-    try validateSummaryClauseDependencies(allocator, &self_errors, &evidence, "Zigos is an operating system.");
-
-    if (!common.errorContains(self_errors.items, "capability-based") or
-        !common.errorContains(self_errors.items, "not present"))
-    {
-        try common.addError(errors, allocator, "Spec coverage checker self-test failed: test_summary_clause_gate_requires_current_summary_phrases: missing summary phrase was accepted", .{});
-    }
-}
-
 fn summaryEvidenceFixture(allocator: std.mem.Allocator) !std.StringHashMap([]const u8) {
     var evidence = std.StringHashMap([]const u8).init(allocator);
     try evidence.put(SUMMARY_REQUIREMENT_ID, "enforced");
@@ -651,9 +607,14 @@ test "test_summary_clause_gate_rejects_missing_or_modeled_dependencies" {
     defer arena_state.deinit();
     const allocator = arena_state.allocator();
 
+    var evidence = try summaryEvidenceFixture(allocator);
+    try evidence.put("REQ-LOCAL-FIRST-REPLICATION", "modeled");
+    _ = evidence.remove("REQ-SHARED-MEMORY-OBJECTS");
+
     var errors = std.ArrayList([]const u8).empty;
-    try selfTestSummaryClauseGateRejectsMissingOrModeledDependencies(allocator, &errors);
-    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+    try validateSummaryClauseDependencies(allocator, &errors, &evidence, completeSummaryText());
+    try std.testing.expect(common.errorContains(errors.items, "depends on REQ-LOCAL-FIRST-REPLICATION, which is 'modeled'; expected enforced"));
+    try std.testing.expect(common.errorContains(errors.items, "depends on missing requirement evidence: REQ-SHARED-MEMORY-OBJECTS"));
 }
 
 test "test_summary_clause_gate_requires_current_summary_phrases" {
@@ -661,7 +622,12 @@ test "test_summary_clause_gate_requires_current_summary_phrases" {
     defer arena_state.deinit();
     const allocator = arena_state.allocator();
 
+    var evidence = try summaryEvidenceFixture(allocator);
+    var complete_errors = std.ArrayList([]const u8).empty;
+    try validateSummaryClauseDependencies(allocator, &complete_errors, &evidence, completeSummaryText());
+    try std.testing.expectEqual(@as(usize, 0), complete_errors.items.len);
+
     var errors = std.ArrayList([]const u8).empty;
-    try selfTestSummaryClauseGateRequiresCurrentSummaryPhrases(allocator, &errors);
-    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+    try validateSummaryClauseDependencies(allocator, &errors, &evidence, "Zigos is an operating system.");
+    try std.testing.expect(common.errorContains(errors.items, "clause 'capability-based' is not present"));
 }

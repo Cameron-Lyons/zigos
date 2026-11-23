@@ -51,23 +51,17 @@ pub fn addCheckSteps(
     lint_step.dependOn(&action_lint_cmd.step);
 
     const spec_coverage_cmd = addHostToolRun(b, optimize, "check-spec-coverage", "tools/check_spec_coverage.zig");
+    const spec_coverage_test_cmd = addHostToolTestRun(b, optimize, "check-spec-coverage-tests", "tools/check_spec_coverage.zig");
     test_artifacts.run_spec_tests.step.dependOn(&spec_coverage_cmd.step);
+    test_artifacts.run_spec_tests.step.dependOn(&spec_coverage_test_cmd.step);
     test_artifacts.run_spec_tests.step.dependOn(&zig_test_roots_cmd.step);
-    const spec_tests_step = b.step("spec-tests", "Run the spec coverage gate and native spec unit tests");
+    host_tests_step.dependOn(&spec_coverage_test_cmd.step);
+    const spec_tests_step = b.step("spec-tests", "Run the spec coverage gate, its checker tests and native spec unit tests");
     spec_tests_step.dependOn(&test_artifacts.run_spec_tests.step);
 
     const prod_readiness_cmd = addHostToolRun(b, optimize, "check-production-readiness", "tools/check_production_readiness.zig");
-    const prod_readiness_tests = b.addTest(.{
-        .name = "check-production-readiness-tests",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/check_production_readiness.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
-    });
-    const prod_readiness_test_cmd = b.addRunArtifact(prod_readiness_tests);
-    prod_readiness_test_cmd.setCwd(b.path("."));
-    b.step("production-readiness-tests", "Test production-readiness source and ownership gates").dependOn(&prod_readiness_test_cmd.step);
+    const prod_readiness_test_cmd = addHostToolTestRun(b, optimize, "check-production-readiness-tests", "tools/check_production_readiness.zig");
+    b.step("production-readiness-tests", "Test the production-readiness manifest, retired-source and security-control gates").dependOn(&prod_readiness_test_cmd.step);
     host_tests_step.dependOn(&prod_readiness_test_cmd.step);
     const hardware_proof_checker_cmd = host_tools.addRun(b, "test-nuc15crsu7-hardware-proof-checker");
     const hardware_proof_checker_step = b.step("hardware-proof-checker-test", "Exercise the RNUC15CRSU7 proof-bundle checker with synthetic pass/fail fixtures");
@@ -110,6 +104,25 @@ fn addHostToolRun(
         }),
     });
     const run = b.addRunArtifact(tool);
+    run.setCwd(b.path("."));
+    return run;
+}
+
+fn addHostToolTestRun(
+    b: *std.Build,
+    optimize: std.lang.Optimize,
+    name: []const u8,
+    source_path: []const u8,
+) *std.Build.Step.Run {
+    const tests = b.addTest(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(source_path),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const run = b.addRunArtifact(tests);
     run.setCwd(b.path("."));
     return run;
 }

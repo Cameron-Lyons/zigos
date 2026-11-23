@@ -6,15 +6,14 @@ const max_elf_bytes: usize = 256 * 1024 * 1024;
 const maximum_production_boot_payload_size = kernel_role_options.maximum_production_boot_payload_size;
 const maximum_production_symbol_count = kernel_role_options.maximum_production_symbol_count;
 
-const elf_header_size: usize = @sizeOf(elf.Elf32_Ehdr);
-const program_header_size: usize = @sizeOf(elf.Elf32.Phdr);
-const section_header_size: usize = @sizeOf(elf.Elf32_Shdr);
-const symbol_size: usize = @sizeOf(elf.Elf32_Sym);
+const elf_header_size: usize = @sizeOf(elf.Elf64_Ehdr);
+const program_header_size: usize = @sizeOf(elf.Elf64.Phdr);
+const section_header_size: usize = @sizeOf(elf.Elf64_Shdr);
+const symbol_size: usize = @sizeOf(elf.Elf64_Sym);
 
 const ei_class: usize = 4;
 const ei_data: usize = 5;
 const ei_version: usize = 6;
-const elf_class_32: u8 = 1;
 const elf_class_64: u8 = 2;
 const elf_data_little_endian: u8 = 1;
 const elf_current_version: u8 = 1;
@@ -211,13 +210,7 @@ const UserspaceRoleError = error{
     MmuProofMissingMachineCodeSentinels,
 };
 
-const ElfClass = enum {
-    elf32,
-    elf64,
-};
-
 const Header = struct {
-    elf_class: ElfClass,
     entry: u64,
     program_offset: u64,
     section_offset: u64,
@@ -241,7 +234,6 @@ const ProgramHeader = struct {
 };
 
 const ProgramTable = struct {
-    elf_class: ElfClass,
     offset: usize,
     count: usize,
 };
@@ -266,7 +258,6 @@ const Symbol = struct {
 };
 
 const SectionTable = struct {
-    elf_class: ElfClass,
     offset: usize,
     count: usize,
     names_index: usize,
@@ -597,8 +588,7 @@ fn inspectSymbolTable(
     programs: ProgramTable,
     symbol_table: Section,
 ) ParseError!SymbolCounts {
-    const expected_symbol_size = symbolSize(sections.elf_class);
-    if (symbol_table.entry_size != expected_symbol_size or symbol_table.size % symbol_table.entry_size != 0) {
+    if (symbol_table.entry_size != symbol_size or symbol_table.size % symbol_table.entry_size != 0) {
         return error.InvalidSymbolTable;
     }
     if (symbol_table.link >= sections.count) return error.InvalidSymbolStringTable;
@@ -607,7 +597,7 @@ fn inspectSymbolTable(
     const strings = try sectionBytes(bytes, strings_section);
     if (strings.len == 0 or strings[0] != 0) return error.InvalidSymbolStringTable;
     const symbol_bytes = try sectionBytes(bytes, symbol_table);
-    const count = symbol_bytes.len / expected_symbol_size;
+    const count = symbol_bytes.len / symbol_size;
     if (symbol_table.info > count) return error.InvalidSymbolTable;
 
     var runtime_proof_symbols: usize = 0;
@@ -619,7 +609,7 @@ fn inspectSymbolTable(
     var verification_evidence_writable_bytes: u64 = 0;
     var index: usize = 0;
     while (index < count) : (index += 1) {
-        const symbol = try parseSymbol(symbol_bytes, index * expected_symbol_size, sections.elf_class);
+        const symbol = try parseSymbol(symbol_bytes, index * symbol_size);
         if (symbol.section_index == shn_xindex) return error.UnsupportedExtendedSymbolIndex;
         if (symbol.section_index != shn_undef and
             symbol.section_index < shn_loreserve and
@@ -776,48 +766,27 @@ fn parseHeader(bytes: []const u8) ParseError!Header {
         return error.UnsupportedElfVersion;
     }
 
-    const header = switch (bytes[ei_class]) {
-        elf_class_32 => header: {
-            const raw = try readStruct(elf.Elf32_Ehdr, bytes, 0);
-            if (raw.e_version != elf_current_version) return error.UnsupportedElfVersion;
-            break :header Header{
-                .elf_class = .elf32,
-                .entry = raw.e_entry,
-                .program_offset = raw.e_phoff,
-                .section_offset = raw.e_shoff,
-                .header_size = raw.e_ehsize,
-                .program_entry_size = raw.e_phentsize,
-                .program_count = raw.e_phnum,
-                .section_entry_size = raw.e_shentsize,
-                .section_count = raw.e_shnum,
-                .section_name_index = raw.e_shstrndx,
-            };
-        },
-        elf_class_64 => header: {
-            const raw = try readStruct(elf.Elf64_Ehdr, bytes, 0);
-            if (raw.e_version != elf_current_version) return error.UnsupportedElfVersion;
-            break :header Header{
-                .elf_class = .elf64,
-                .entry = raw.e_entry,
-                .program_offset = raw.e_phoff,
-                .section_offset = raw.e_shoff,
-                .header_size = raw.e_ehsize,
-                .program_entry_size = raw.e_phentsize,
-                .program_count = raw.e_phnum,
-                .section_entry_size = raw.e_shentsize,
-                .section_count = raw.e_shnum,
-                .section_name_index = raw.e_shstrndx,
-            };
-        },
-        else => return error.UnsupportedElfClass,
+    if (bytes[ei_class] != elf_class_64) return error.UnsupportedElfClass;
+    const raw = try readStruct(elf.Elf64_Ehdr, bytes, 0);
+    if (raw.e_version != elf_current_version) return error.UnsupportedElfVersion;
+    const header = Header{
+        .entry = raw.e_entry,
+        .program_offset = raw.e_phoff,
+        .section_offset = raw.e_shoff,
+        .header_size = raw.e_ehsize,
+        .program_entry_size = raw.e_phentsize,
+        .program_count = raw.e_phnum,
+        .section_entry_size = raw.e_shentsize,
+        .section_count = raw.e_shnum,
+        .section_name_index = raw.e_shstrndx,
     };
-    if (header.header_size != elfHeaderSize(header.elf_class)) return error.InvalidElfHeaderSize;
+    if (header.header_size != elf_header_size) return error.InvalidElfHeaderSize;
     if (header.program_offset == 0 or header.program_count == 0) {
         return error.MissingProgramHeaderTable;
     }
-    if (header.program_entry_size != programHeaderSize(header.elf_class)) return error.InvalidProgramHeaderSize;
+    if (header.program_entry_size != program_header_size) return error.InvalidProgramHeaderSize;
     if (header.section_offset == 0) return error.MissingSectionHeaderTable;
-    if (header.section_entry_size != sectionHeaderSize(header.elf_class)) return error.InvalidSectionHeaderSize;
+    if (header.section_entry_size != section_header_size) return error.InvalidSectionHeaderSize;
     return header;
 }
 
@@ -825,10 +794,10 @@ fn resolveProgramTable(bytes: []const u8, header: Header) ParseError!ProgramTabl
     const offset = std.math.cast(usize, header.program_offset) orelse return error.IntegerOverflow;
     const count: usize = header.program_count;
     if (count == 0xffff) return error.InvalidProgramHeaderTable;
-    const table_bytes = std.math.mul(usize, count, programHeaderSize(header.elf_class)) catch
+    const table_bytes = std.math.mul(usize, count, program_header_size) catch
         return error.IntegerOverflow;
     _ = checkedSlice(bytes, offset, table_bytes) catch return error.InvalidProgramHeaderTable;
-    return .{ .elf_class = header.elf_class, .offset = offset, .count = count };
+    return .{ .offset = offset, .count = count };
 }
 
 fn parseProgramHeader(
@@ -837,65 +806,19 @@ fn parseProgramHeader(
     index: usize,
 ) ParseError!ProgramHeader {
     if (index >= table.count) return error.InvalidProgramHeaderTable;
-    const entry_size = programHeaderSize(table.elf_class);
-    const delta = std.math.mul(usize, index, entry_size) catch
+    const delta = std.math.mul(usize, index, program_header_size) catch
         return error.IntegerOverflow;
     const offset = std.math.add(usize, table.offset, delta) catch return error.IntegerOverflow;
-    return switch (table.elf_class) {
-        .elf32 => header: {
-            const raw = try readStruct(elf.Elf32.Phdr, bytes, offset);
-            break :header .{
-                .segment_type = @backingInt(raw.type),
-                .offset = raw.offset,
-                .virtual_address = raw.vaddr,
-                .physical_address = raw.paddr,
-                .file_size = raw.filesz,
-                .memory_size = raw.memsz,
-                .flags = @bitCast(raw.flags),
-                .alignment = raw.@"align",
-            };
-        },
-        .elf64 => header: {
-            const raw = try readStruct(elf.Elf64.Phdr, bytes, offset);
-            break :header .{
-                .segment_type = @backingInt(raw.type),
-                .offset = raw.offset,
-                .virtual_address = raw.vaddr,
-                .physical_address = raw.paddr,
-                .file_size = raw.filesz,
-                .memory_size = raw.memsz,
-                .flags = @bitCast(raw.flags),
-                .alignment = raw.@"align",
-            };
-        },
-    };
-}
-
-fn elfHeaderSize(elf_class: ElfClass) usize {
-    return switch (elf_class) {
-        .elf32 => @sizeOf(elf.Elf32_Ehdr),
-        .elf64 => @sizeOf(elf.Elf64_Ehdr),
-    };
-}
-
-fn programHeaderSize(elf_class: ElfClass) usize {
-    return switch (elf_class) {
-        .elf32 => @sizeOf(elf.Elf32.Phdr),
-        .elf64 => @sizeOf(elf.Elf64.Phdr),
-    };
-}
-
-fn sectionHeaderSize(elf_class: ElfClass) usize {
-    return switch (elf_class) {
-        .elf32 => @sizeOf(elf.Elf32_Shdr),
-        .elf64 => @sizeOf(elf.Elf64_Shdr),
-    };
-}
-
-fn symbolSize(elf_class: ElfClass) usize {
-    return switch (elf_class) {
-        .elf32 => @sizeOf(elf.Elf32_Sym),
-        .elf64 => @sizeOf(elf.Elf64_Sym),
+    const raw = try readStruct(elf.Elf64.Phdr, bytes, offset);
+    return .{
+        .segment_type = @backingInt(raw.type),
+        .offset = raw.offset,
+        .virtual_address = raw.vaddr,
+        .physical_address = raw.paddr,
+        .file_size = raw.filesz,
+        .memory_size = raw.memsz,
+        .flags = @bitCast(raw.flags),
+        .alignment = raw.@"align",
     };
 }
 
@@ -972,8 +895,6 @@ fn analyzeProgramHeaders(bytes: []const u8, table: ProgramTable) ParseError!Prog
 }
 
 fn nativeKernelLoadLayoutValid(bytes: []const u8, header: Header, table: ProgramTable) bool {
-    if (header.elf_class != .elf64) return false;
-
     var load_index: usize = 0;
     var next_physical_address = kernel_physical_start;
     var next_file_offset: ?u64 = null;
@@ -1009,7 +930,7 @@ fn nativeKernelLoadLayoutValid(bytes: []const u8, header: Header, table: Program
         if (next_file_offset) |expected_offset| {
             if (program.offset != expected_offset) return false;
         } else {
-            const program_table_end = std.math.add(u64, header.program_offset, std.math.mul(u64, table.count, programHeaderSize(table.elf_class)) catch return false) catch return false;
+            const program_table_end = std.math.add(u64, header.program_offset, std.math.mul(u64, table.count, program_header_size) catch return false) catch return false;
             if (program.offset < program_table_end or program.offset < header.header_size) return false;
         }
         _ = checkedSlice(bytes, program.offset, program.file_size) catch return false;
@@ -1096,16 +1017,15 @@ fn sectionCoveredByLoad(bytes: []const u8, table: ProgramTable, section: Section
 
 fn resolveSectionTable(bytes: []const u8, header: Header) ParseError!SectionTable {
     const offset = std.math.cast(usize, header.section_offset) orelse return error.IntegerOverflow;
-    const entry_size = sectionHeaderSize(header.elf_class);
-    _ = try checkedSlice(bytes, offset, entry_size);
-    const section_zero = try parseSectionAt(bytes, offset, header.elf_class);
+    _ = try checkedSlice(bytes, offset, section_header_size);
+    const section_zero = try parseSectionAt(bytes, offset);
     const count: usize = if (header.section_count == 0)
         std.math.cast(usize, section_zero.size) orelse return error.IntegerOverflow
     else
         header.section_count;
     if (count == 0) return error.InvalidSectionHeaderTable;
 
-    const table_bytes = std.math.mul(usize, count, entry_size) catch return error.IntegerOverflow;
+    const table_bytes = std.math.mul(usize, count, section_header_size) catch return error.IntegerOverflow;
     _ = try checkedSlice(bytes, offset, table_bytes);
 
     const names_index: usize = if (header.section_name_index == shn_xindex)
@@ -1113,48 +1033,29 @@ fn resolveSectionTable(bytes: []const u8, header: Header) ParseError!SectionTabl
     else
         header.section_name_index;
     if (names_index == 0 or names_index >= count) return error.InvalidSectionNameTable;
-    return .{ .elf_class = header.elf_class, .offset = offset, .count = count, .names_index = names_index };
+    return .{ .offset = offset, .count = count, .names_index = names_index };
 }
 
 fn parseSection(bytes: []const u8, table: SectionTable, index: usize) ParseError!Section {
     if (index >= table.count) return error.InvalidSectionHeaderTable;
-    const delta = std.math.mul(usize, index, sectionHeaderSize(table.elf_class)) catch return error.IntegerOverflow;
+    const delta = std.math.mul(usize, index, section_header_size) catch return error.IntegerOverflow;
     const offset = std.math.add(usize, table.offset, delta) catch return error.IntegerOverflow;
-    return parseSectionAt(bytes, offset, table.elf_class);
+    return parseSectionAt(bytes, offset);
 }
 
-fn parseSectionAt(bytes: []const u8, offset: usize, elf_class: ElfClass) ParseError!Section {
-    return switch (elf_class) {
-        .elf32 => section: {
-            const raw = try readStruct(elf.Elf32_Shdr, bytes, offset);
-            break :section .{
-                .name_offset = raw.sh_name,
-                .section_type = raw.sh_type,
-                .flags = raw.sh_flags,
-                .address = raw.sh_addr,
-                .offset = raw.sh_offset,
-                .size = raw.sh_size,
-                .link = raw.sh_link,
-                .info = raw.sh_info,
-                .alignment = raw.sh_addralign,
-                .entry_size = raw.sh_entsize,
-            };
-        },
-        .elf64 => section: {
-            const raw = try readStruct(elf.Elf64_Shdr, bytes, offset);
-            break :section .{
-                .name_offset = raw.sh_name,
-                .section_type = raw.sh_type,
-                .flags = raw.sh_flags,
-                .address = raw.sh_addr,
-                .offset = raw.sh_offset,
-                .size = raw.sh_size,
-                .link = raw.sh_link,
-                .info = raw.sh_info,
-                .alignment = raw.sh_addralign,
-                .entry_size = raw.sh_entsize,
-            };
-        },
+fn parseSectionAt(bytes: []const u8, offset: usize) ParseError!Section {
+    const raw = try readStruct(elf.Elf64_Shdr, bytes, offset);
+    return .{
+        .name_offset = raw.sh_name,
+        .section_type = raw.sh_type,
+        .flags = raw.sh_flags,
+        .address = raw.sh_addr,
+        .offset = raw.sh_offset,
+        .size = raw.sh_size,
+        .link = raw.sh_link,
+        .info = raw.sh_info,
+        .alignment = raw.sh_addralign,
+        .entry_size = raw.sh_entsize,
     };
 }
 
@@ -1177,24 +1078,12 @@ fn sectionBytes(bytes: []const u8, section: Section) ParseError![]const u8 {
     };
 }
 
-fn parseSymbol(bytes: []const u8, offset: usize, elf_class: ElfClass) ParseError!Symbol {
-    return switch (elf_class) {
-        .elf32 => symbol: {
-            const raw = try readStruct(elf.Elf32_Sym, bytes, offset);
-            break :symbol .{
-                .name_offset = raw.st_name,
-                .section_index = raw.st_shndx,
-                .size = raw.st_size,
-            };
-        },
-        .elf64 => symbol: {
-            const raw = try readStruct(elf.Elf64_Sym, bytes, offset);
-            break :symbol .{
-                .name_offset = raw.st_name,
-                .section_index = raw.st_shndx,
-                .size = raw.st_size,
-            };
-        },
+fn parseSymbol(bytes: []const u8, offset: usize) ParseError!Symbol {
+    const raw = try readStruct(elf.Elf64_Sym, bytes, offset);
+    return .{
+        .name_offset = raw.st_name,
+        .section_index = raw.st_shndx,
+        .size = raw.st_size,
     };
 }
 
@@ -1370,10 +1259,10 @@ fn parseErrorDescription(err: ParseError) []const u8 {
     return switch (err) {
         error.UnexpectedEndOfFile => "a required ELF structure extends past the end of the file",
         error.InvalidElfMagic => "the ELF magic is missing",
-        error.UnsupportedElfClass => "the file is not little-endian ELF32 or ELF64",
+        error.UnsupportedElfClass => "the file is not ELF64",
         error.UnsupportedElfEndian => "the file is not little-endian ELF",
         error.UnsupportedElfVersion => "the ELF version is unsupported",
-        error.InvalidElfHeaderSize => "the ELF header size does not match its declared class",
+        error.InvalidElfHeaderSize => "the ELF header size is not the ELF64 header size",
         error.MissingProgramHeaderTable => "the program-header table is missing",
         error.InvalidProgramHeaderSize => "the program-header entry size is invalid",
         error.InvalidProgramHeaderTable => "the program-header table is invalid",
@@ -1752,15 +1641,17 @@ test "verification userspace validation requires exact identities and MMU positi
 }
 
 test "userspace ELF analysis scans loaded identities and executable probe sentinels" {
-    var storage: [2048]u8 = @splat(0);
+    var storage: [4096]u8 = @splat(0);
     const bytes = buildTestElf(&storage);
+    const layout = testElfLayout();
+    const first_flags = layout.program_table + @offsetOf(elf.Elf64.Phdr, "flags");
 
     const non_executable = try analyzeUserspaceElf(bytes);
     try std.testing.expectEqual(verification_only_signatures.len, non_executable.verification_only_signatures);
     try std.testing.expectEqual(@as(u8, 0x1f), non_executable.verification_identity_mask);
     try std.testing.expectEqual(@as(usize, 0), non_executable.mmu_probe_machine_code_sentinels);
 
-    var sentinel_offset = testSymbolTableOffset();
+    var sentinel_offset = layout.symbols;
     @memcpy(
         storage[sentinel_offset..][0..mmu_probe_foreign_address_machine_code.len],
         &mmu_probe_foreign_address_machine_code,
@@ -1771,7 +1662,7 @@ test "userspace ELF analysis scans loaded identities and executable probe sentin
         &mmu_probe_fault_code_imm32_machine_code,
     );
     const fault_code_offset = sentinel_offset;
-    writeU32(&storage, elf_header_size + 24, 4 | pf_execute);
+    writeU32(&storage, first_flags, pf_read | pf_execute);
     const executable = try analyzeUserspaceElf(bytes);
     try std.testing.expectEqual(
         mmu_probe_machine_code_sentinel_count,
@@ -1806,7 +1697,7 @@ test "userspace ELF analysis scans loaded identities and executable probe sentin
         debug_fault_code.mmu_probe_machine_code_sentinels,
     );
 
-    writeU32(&storage, elf_header_size + 24, 4);
+    writeU32(&storage, first_flags, pf_read);
     const executable_flag_removed = try analyzeUserspaceElf(bytes);
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -1832,8 +1723,9 @@ test "userspace ELF analysis rejects page-padded file layouts" {
 }
 
 test "ELF parser reads loaded state, defined symbols, and workload signatures" {
-    var storage: [2048]u8 = @splat(0);
+    var storage: [4096]u8 = @splat(0);
     const bytes = buildTestElf(&storage);
+    const layout = testElfLayout();
     const analysis = try analyzeElf(bytes);
     try std.testing.expectEqual(@as(u64, 16), analysis.data_size);
     try std.testing.expectEqual(@as(u64, bytes.len + 48), analysis.boot_payload_size);
@@ -1848,47 +1740,55 @@ test "ELF parser reads loaded state, defined symbols, and workload signatures" {
     try std.testing.expectEqual(@as(usize, 0), analysis.recovery_symbols);
     try std.testing.expectEqual(verification_only_signatures.len, analysis.verification_only_signatures);
 
+    const userspace = try analyzeUserspaceElf(bytes);
+    try std.testing.expectEqual(verification_only_signatures.len, userspace.verification_only_signatures);
+    try std.testing.expectEqual(@as(u8, 0x1f), userspace.verification_identity_mask);
+
+    const first_file_size = layout.program_table + @offsetOf(elf.Elf64.Phdr, "filesz");
+    const first_memory_size = layout.program_table + @offsetOf(elf.Elf64.Phdr, "memsz");
     const first_signature_offset = std.mem.indexOf(u8, bytes, verification_only_signatures[0]).?;
-    writeU32(&storage, elf_header_size + 16, first_signature_offset);
-    writeU32(&storage, elf_header_size + 20, first_signature_offset);
+    writeU64(&storage, first_file_size, first_signature_offset);
+    writeU64(&storage, first_memory_size, first_signature_offset);
     const unloaded_signature_analysis = try analyzeElf(bytes);
     try std.testing.expectEqual(@as(usize, 0), unloaded_signature_analysis.verification_only_signatures);
-    writeU32(&storage, elf_header_size + 16, bytes.len);
-    writeU32(&storage, elf_header_size + 20, bytes.len);
+    writeU64(&storage, first_file_size, bytes.len);
+    writeU64(&storage, first_memory_size, bytes.len);
 
-    const first_symbol_offset = testSymbolTableOffset() + symbol_size;
-    writeU16(&storage, first_symbol_offset + 14, shn_undef);
+    const first_symbol_section = layout.symbols + symbol_size + @offsetOf(elf.Elf64_Sym, "st_shndx");
+    writeU16(&storage, first_symbol_section, shn_undef);
     const undefined_analysis = try analyzeElf(bytes);
     try std.testing.expectEqual(@as(usize, 0), undefined_analysis.runtime_proof_symbols);
-    writeU16(&storage, first_symbol_offset + 14, 2);
+    writeU16(&storage, first_symbol_section, 2);
 
-    const section_table_offset = elf_header_size + 2 * program_header_size;
-    const data_section_offset = section_table_offset + 2 * section_header_size;
-    writeU32(&storage, data_section_offset + 8, 0);
+    const data_section_flags = layout.section_table + 2 * section_header_size + @offsetOf(elf.Elf64_Shdr, "sh_flags");
+    writeU64(&storage, data_section_flags, 0);
     try std.testing.expectError(error.InvalidDataSection, analyzeElf(bytes));
-    writeU32(&storage, data_section_offset + 8, shf_write | shf_alloc);
+    writeU64(&storage, data_section_flags, shf_write | shf_alloc);
 
-    const writable_program_offset = elf_header_size + program_header_size;
-    writeU32(&storage, writable_program_offset + 24, 4);
+    const writable_flags = layout.program_table + program_header_size + @offsetOf(elf.Elf64.Phdr, "flags");
+    writeU32(&storage, writable_flags, pf_read);
     try std.testing.expectError(error.MissingWritableLoadSegment, analyzeElf(bytes));
-    writeU32(&storage, writable_program_offset + 24, 4 | pf_write | pf_execute);
+    writeU32(&storage, writable_flags, pf_read | pf_write | pf_execute);
     try std.testing.expectError(error.WritableExecutableLoadSegment, analyzeElf(bytes));
-    writeU32(&storage, writable_program_offset + 24, 4 | pf_write);
+    writeU32(&storage, writable_flags, pf_read | pf_write);
 
-    storage[ei_class] = 0xff;
-    try std.testing.expectError(error.UnsupportedElfClass, analyzeElf(bytes));
+    for ([_]u8{ 0xff, 1 }) |unsupported_class| {
+        storage[ei_class] = unsupported_class;
+        try std.testing.expectError(error.UnsupportedElfClass, analyzeElf(bytes));
+    }
 
-    storage[ei_class] = elf_class_32;
+    storage[ei_class] = elf_class_64;
     storage[ei_data] = 2;
     try std.testing.expectError(error.UnsupportedElfEndian, analyzeElf(bytes));
 
     storage[ei_data] = elf_data_little_endian;
-    writeU16(&storage, 42, 16);
+    const program_entry_size = @offsetOf(elf.Elf64_Ehdr, "e_phentsize");
+    writeU16(&storage, program_entry_size, 16);
     try std.testing.expectError(error.InvalidProgramHeaderSize, analyzeElf(bytes));
-    writeU16(&storage, 42, program_header_size);
+    writeU16(&storage, program_entry_size, program_header_size);
 
-    const symbol_section_offset = section_table_offset + 5 * section_header_size;
-    writeU32(&storage, symbol_section_offset + 36, 8);
+    const symbol_entry_size = layout.section_table + 5 * section_header_size + @offsetOf(elf.Elf64_Shdr, "sh_entsize");
+    writeU64(&storage, symbol_entry_size, 8);
     try std.testing.expectError(error.InvalidSymbolTable, analyzeElf(bytes));
 }
 
@@ -1929,25 +1829,6 @@ test "kernel ELF section policy rejects unknown and incorrectly flagged sections
     );
 }
 
-test "ELF64 parser reads the same loaded-state and symbol contract" {
-    var storage: [4096]u8 = @splat(0);
-    const bytes = buildTestElf64(&storage);
-    const analysis = try analyzeElf(bytes);
-    try std.testing.expectEqual(@as(u64, 16), analysis.data_size);
-    try std.testing.expectEqual(@as(u64, bytes.len + 48), analysis.boot_payload_size);
-    try std.testing.expectEqual(@as(usize, 2), analysis.load_segment_count);
-    try std.testing.expect(!analysis.native_load_layout_valid);
-    try std.testing.expectEqual(@as(usize, 3), analysis.symbol_count);
-    try std.testing.expectEqual(@as(usize, 1), analysis.runtime_proof_symbols);
-    try std.testing.expectEqual(@as(usize, 1), analysis.booted_evidence_symbols);
-    try std.testing.expectEqual(@as(u64, 10), analysis.verification_evidence_writable_bytes);
-    try std.testing.expectEqual(verification_only_signatures.len, analysis.verification_only_signatures);
-
-    const userspace = try analyzeUserspaceElf(bytes);
-    try std.testing.expectEqual(verification_only_signatures.len, userspace.verification_only_signatures);
-    try std.testing.expectEqual(@as(u8, 0x1f), userspace.verification_identity_mask);
-}
-
 test "native kernel load gate accepts exactly contiguous page-aligned RX RO RW loads" {
     var storage: [5 * kernel_page_size]u8 = undefined;
     const bytes = buildNativeLoadTestElf(&storage);
@@ -1971,9 +1852,6 @@ test "native kernel load gate accepts exactly contiguous page-aligned RX RO RW l
     adjusted_header.entry += kernel_page_size;
     try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, adjusted_header, programs));
     adjusted_header.entry = header.entry - 1;
-    try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, adjusted_header, programs));
-    adjusted_header = header;
-    adjusted_header.elf_class = .elf32;
     try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, adjusted_header, programs));
 }
 
@@ -2235,12 +2113,12 @@ test "ELF64 role analysis detects defined architecture proof symbols" {
         "kernel.memory.paging64.drainFrameCachesForArchitectureProof",
     }) |probe| {
         var storage: [4096]u8 = @splat(0);
-        const bytes = buildTestElf64(&storage);
+        const bytes = buildTestElf(&storage);
         const sections = try resolveSectionTable(bytes, try parseHeader(bytes));
         const strings = try parseSection(bytes, sections, 4);
         const symbols = try parseSection(bytes, sections, 5);
         const first_symbol = @as(usize, @intCast(symbols.offset)) + @sizeOf(elf.Elf64_Sym);
-        const original = try parseSymbol(bytes, first_symbol, .elf64);
+        const original = try parseSymbol(bytes, first_symbol);
         const name_offset = @as(usize, @intCast(strings.offset)) + original.name_offset;
         const original_name = try readString(try sectionBytes(bytes, strings), original.name_offset);
         try std.testing.expect(probe.len <= original_name.len);
@@ -2258,157 +2136,49 @@ test "ELF64 role analysis detects defined architecture proof symbols" {
     }
 }
 
-fn buildTestElf(storage: []u8) []u8 {
-    @memset(storage, 0);
-    const program_count: u16 = 2;
-    const program_table_offset: u32 = elf_header_size;
-    const section_count: u16 = 6;
-    const section_table_offset: u32 = program_table_offset + program_count * program_header_size;
-    const section_names = "\x00.shstrtab\x00.data\x00.bss\x00.strtab\x00.symtab\x00";
-    const symbol_names = "\x00native.session.proofs.runtime_negative_proofs.fixture\x00native.session.booted_evidence.runProduction\x00";
-    const section_names_offset: u32 = section_table_offset + section_count * section_header_size;
-    const data_offset: u32 = section_names_offset + section_names.len;
-    const strings_offset: u32 = data_offset + 16;
-    const symbols_offset: u32 = std.mem.alignForward(u32, strings_offset + symbol_names.len, 4);
-    const signatures_offset: u32 = symbols_offset + 3 * @as(u32, symbol_size);
+const test_section_names = "\x00.shstrtab\x00.data\x00.bss\x00.strtab\x00.symtab\x00";
+const test_proof_symbol = "native.session.proofs.runtime_negative_proofs.fixture_for_architecture_symbol_admission";
+const test_symbol_names = "\x00" ++ test_proof_symbol ++ "\x00native.session.booted_evidence.runProduction\x00";
+const test_program_count: usize = 2;
+const test_section_count: usize = 6;
+
+const TestElfLayout = struct {
+    program_table: usize,
+    section_table: usize,
+    section_names: usize,
+    data: usize,
+    strings: usize,
+    symbols: usize,
+    signatures: usize,
+    file_size: usize,
+};
+
+fn testElfLayout() TestElfLayout {
+    const program_table = elf_header_size;
+    const section_table = program_table + test_program_count * program_header_size;
+    const section_names = section_table + test_section_count * section_header_size;
+    const data = section_names + test_section_names.len;
+    const strings = data + 16;
+    const symbols = std.mem.alignForward(usize, strings + test_symbol_names.len, 8);
+    const signatures = symbols + 3 * symbol_size;
     var signature_blob_size: usize = 0;
     for (verification_only_signatures) |signature| signature_blob_size += signature.len + 1;
     signature_blob_size += verification_userspace_identities.len * userspace_role_identity_bytes;
-    const file_size: usize = @as(usize, signatures_offset) + signature_blob_size;
-
-    @memcpy(storage[0..4], "\x7fELF");
-    storage[ei_class] = elf_class_32;
-    storage[ei_data] = elf_data_little_endian;
-    storage[ei_version] = elf_current_version;
-    writeU32(storage, 20, elf_current_version);
-    writeU32(storage, 28, program_table_offset);
-    writeU32(storage, 32, section_table_offset);
-    writeU16(storage, 40, elf_header_size);
-    writeU16(storage, 42, program_header_size);
-    writeU16(storage, 44, program_count);
-    writeU16(storage, 46, section_header_size);
-    writeU16(storage, 48, section_count);
-    writeU16(storage, 50, 1);
-
-    writeSection(storage, section_table_offset + section_header_size, .{
-        .name_offset = 1,
-        .section_type = sht_strtab,
-        .flags = 0,
-        .address = 0,
-        .offset = section_names_offset,
-        .size = section_names.len,
-        .link = 0,
-        .info = 0,
-        .alignment = 1,
-        .entry_size = 0,
-    });
-    writeSection(storage, section_table_offset + 2 * section_header_size, .{
-        .name_offset = 11,
-        .section_type = sht_progbits,
-        .flags = shf_write | shf_alloc,
-        .address = 0x2000,
-        .offset = data_offset,
-        .size = 16,
-        .link = 0,
-        .info = 0,
-        .alignment = 4,
-        .entry_size = 0,
-    });
-    writeSection(storage, section_table_offset + 3 * section_header_size, .{
-        .name_offset = 17,
-        .section_type = sht_nobits,
-        .flags = shf_write | shf_alloc,
-        .address = 0x2010,
-        .offset = 0,
-        .size = 32,
-        .link = 0,
-        .info = 0,
-        .alignment = 4,
-        .entry_size = 0,
-    });
-    writeSection(storage, section_table_offset + 4 * section_header_size, .{
-        .name_offset = 22,
-        .section_type = sht_strtab,
-        .flags = 0,
-        .address = 0,
-        .offset = strings_offset,
-        .size = symbol_names.len,
-        .link = 0,
-        .info = 0,
-        .alignment = 1,
-        .entry_size = 0,
-    });
-    writeSection(storage, section_table_offset + 5 * section_header_size, .{
-        .name_offset = 30,
-        .section_type = sht_symtab,
-        .flags = 0,
-        .address = 0,
-        .offset = symbols_offset,
-        .size = 3 * symbol_size,
-        .link = 4,
-        .info = 1,
-        .alignment = 4,
-        .entry_size = symbol_size,
-    });
-
-    @memcpy(storage[section_names_offset..][0..section_names.len], section_names);
-    @memcpy(storage[strings_offset..][0..symbol_names.len], symbol_names);
-    writeSymbol(storage, symbols_offset + symbol_size, 1, 2, 4);
-    const booted_name_offset = 1 + "native.session.proofs.runtime_negative_proofs.fixture".len + 1;
-    writeSymbol(storage, symbols_offset + 2 * symbol_size, booted_name_offset, 2, 6);
-
-    var signature_offset: usize = signatures_offset;
-    for (verification_only_signatures) |signature| {
-        @memcpy(storage[signature_offset..][0..signature.len], signature);
-        signature_offset += signature.len + 1;
-    }
-    for (verification_userspace_identities) |identity| {
-        const role_identity = userspaceRoleIdentity(identity.role_tag);
-        @memcpy(storage[signature_offset..][0..role_identity.len], &role_identity);
-        signature_offset += role_identity.len;
-    }
-
-    writeProgramHeader(storage, program_table_offset, .{
-        .segment_type = pt_load,
-        .offset = 0,
-        .virtual_address = 0,
-        .physical_address = 0,
-        .file_size = @intCast(file_size),
-        .memory_size = @intCast(file_size),
-        .flags = 4,
-        .alignment = 1,
-    });
-    writeProgramHeader(storage, program_table_offset + program_header_size, .{
-        .segment_type = pt_load,
-        .offset = data_offset,
-        .virtual_address = 0x2000,
-        .physical_address = 0x2000,
-        .file_size = 16,
-        .memory_size = 48,
-        .flags = 4 | pf_write,
-        .alignment = 1,
-    });
-    return storage[0..file_size];
+    return .{
+        .program_table = program_table,
+        .section_table = section_table,
+        .section_names = section_names,
+        .data = data,
+        .strings = strings,
+        .symbols = symbols,
+        .signatures = signatures,
+        .file_size = signatures + signature_blob_size,
+    };
 }
 
-fn buildTestElf64(storage: []u8) []u8 {
+fn buildTestElf(storage: []u8) []u8 {
     @memset(storage, 0);
-    const program_count: usize = 2;
-    const section_count: usize = 6;
-    const program_table_offset = @sizeOf(elf.Elf64_Ehdr);
-    const section_table_offset = program_table_offset + program_count * @sizeOf(elf.Elf64.Phdr);
-    const section_names = "\x00.shstrtab\x00.data\x00.bss\x00.strtab\x00.symtab\x00";
-    const proof_name = "native.session.proofs.runtime_negative_proofs.fixture_for_architecture_symbol_admission";
-    const symbol_names = "\x00" ++ proof_name ++ "\x00native.session.booted_evidence.runProduction\x00";
-    const section_names_offset = section_table_offset + section_count * @sizeOf(elf.Elf64_Shdr);
-    const data_offset = section_names_offset + section_names.len;
-    const strings_offset = data_offset + 16;
-    const symbols_offset = std.mem.alignForward(usize, strings_offset + symbol_names.len, 8);
-    const signatures_offset = symbols_offset + 3 * @sizeOf(elf.Elf64_Sym);
-    var signature_blob_size: usize = 0;
-    for (verification_only_signatures) |signature| signature_blob_size += signature.len + 1;
-    signature_blob_size += verification_userspace_identities.len * userspace_role_identity_bytes;
-    const file_size = signatures_offset + signature_blob_size;
+    const layout = testElfLayout();
 
     var header = std.mem.zeroes(elf.Elf64_Ehdr);
     @memcpy(header.e_ident[0..4], "\x7fELF");
@@ -2416,30 +2186,30 @@ fn buildTestElf64(storage: []u8) []u8 {
     header.e_ident[ei_data] = elf_data_little_endian;
     header.e_ident[ei_version] = elf_current_version;
     header.e_version = elf_current_version;
-    header.e_phoff = program_table_offset;
-    header.e_shoff = section_table_offset;
+    header.e_phoff = layout.program_table;
+    header.e_shoff = layout.section_table;
     header.e_ehsize = @sizeOf(elf.Elf64_Ehdr);
     header.e_phentsize = @sizeOf(elf.Elf64.Phdr);
-    header.e_phnum = program_count;
+    header.e_phnum = test_program_count;
     header.e_shentsize = @sizeOf(elf.Elf64_Shdr);
-    header.e_shnum = section_count;
+    header.e_shnum = test_section_count;
     header.e_shstrndx = 1;
     writeStruct(elf.Elf64_Ehdr, storage, 0, header);
 
-    writeStruct(elf.Elf64.Phdr, storage, program_table_offset, .{
+    writeStruct(elf.Elf64.Phdr, storage, layout.program_table, .{
         .type = .LOAD,
         .flags = .{ .R = true },
         .offset = 0,
         .vaddr = 0,
         .paddr = 0,
-        .filesz = file_size,
-        .memsz = file_size,
+        .filesz = layout.file_size,
+        .memsz = layout.file_size,
         .@"align" = 1,
     });
-    writeStruct(elf.Elf64.Phdr, storage, program_table_offset + @sizeOf(elf.Elf64.Phdr), .{
+    writeStruct(elf.Elf64.Phdr, storage, layout.program_table + @sizeOf(elf.Elf64.Phdr), .{
         .type = .LOAD,
         .flags = .{ .R = true, .W = true },
-        .offset = data_offset,
+        .offset = layout.data,
         .vaddr = 0x2000,
         .paddr = 0x2000,
         .filesz = 16,
@@ -2447,31 +2217,31 @@ fn buildTestElf64(storage: []u8) []u8 {
         .@"align" = 1,
     });
 
-    writeStruct(elf.Elf64_Shdr, storage, section_table_offset + @sizeOf(elf.Elf64_Shdr), .{
+    writeStruct(elf.Elf64_Shdr, storage, layout.section_table + @sizeOf(elf.Elf64_Shdr), .{
         .sh_name = 1,
         .sh_type = sht_strtab,
         .sh_flags = 0,
         .sh_addr = 0,
-        .sh_offset = section_names_offset,
-        .sh_size = section_names.len,
+        .sh_offset = layout.section_names,
+        .sh_size = test_section_names.len,
         .sh_link = 0,
         .sh_info = 0,
         .sh_addralign = 1,
         .sh_entsize = 0,
     });
-    writeStruct(elf.Elf64_Shdr, storage, section_table_offset + 2 * @sizeOf(elf.Elf64_Shdr), .{
+    writeStruct(elf.Elf64_Shdr, storage, layout.section_table + 2 * @sizeOf(elf.Elf64_Shdr), .{
         .sh_name = 11,
         .sh_type = sht_progbits,
         .sh_flags = shf_write | shf_alloc,
         .sh_addr = 0x2000,
-        .sh_offset = data_offset,
+        .sh_offset = layout.data,
         .sh_size = 16,
         .sh_link = 0,
         .sh_info = 0,
         .sh_addralign = 8,
         .sh_entsize = 0,
     });
-    writeStruct(elf.Elf64_Shdr, storage, section_table_offset + 3 * @sizeOf(elf.Elf64_Shdr), .{
+    writeStruct(elf.Elf64_Shdr, storage, layout.section_table + 3 * @sizeOf(elf.Elf64_Shdr), .{
         .sh_name = 17,
         .sh_type = sht_nobits,
         .sh_flags = shf_write | shf_alloc,
@@ -2483,24 +2253,24 @@ fn buildTestElf64(storage: []u8) []u8 {
         .sh_addralign = 8,
         .sh_entsize = 0,
     });
-    writeStruct(elf.Elf64_Shdr, storage, section_table_offset + 4 * @sizeOf(elf.Elf64_Shdr), .{
+    writeStruct(elf.Elf64_Shdr, storage, layout.section_table + 4 * @sizeOf(elf.Elf64_Shdr), .{
         .sh_name = 22,
         .sh_type = sht_strtab,
         .sh_flags = 0,
         .sh_addr = 0,
-        .sh_offset = strings_offset,
-        .sh_size = symbol_names.len,
+        .sh_offset = layout.strings,
+        .sh_size = test_symbol_names.len,
         .sh_link = 0,
         .sh_info = 0,
         .sh_addralign = 1,
         .sh_entsize = 0,
     });
-    writeStruct(elf.Elf64_Shdr, storage, section_table_offset + 5 * @sizeOf(elf.Elf64_Shdr), .{
+    writeStruct(elf.Elf64_Shdr, storage, layout.section_table + 5 * @sizeOf(elf.Elf64_Shdr), .{
         .sh_name = 30,
         .sh_type = sht_symtab,
         .sh_flags = 0,
         .sh_addr = 0,
-        .sh_offset = symbols_offset,
+        .sh_offset = layout.symbols,
         .sh_size = 3 * @sizeOf(elf.Elf64_Sym),
         .sh_link = 4,
         .sh_info = 1,
@@ -2508,9 +2278,9 @@ fn buildTestElf64(storage: []u8) []u8 {
         .sh_entsize = @sizeOf(elf.Elf64_Sym),
     });
 
-    @memcpy(storage[section_names_offset..][0..section_names.len], section_names);
-    @memcpy(storage[strings_offset..][0..symbol_names.len], symbol_names);
-    writeStruct(elf.Elf64_Sym, storage, symbols_offset + @sizeOf(elf.Elf64_Sym), .{
+    @memcpy(storage[layout.section_names..][0..test_section_names.len], test_section_names);
+    @memcpy(storage[layout.strings..][0..test_symbol_names.len], test_symbol_names);
+    writeStruct(elf.Elf64_Sym, storage, layout.symbols + @sizeOf(elf.Elf64_Sym), .{
         .st_name = 1,
         .st_info = 0,
         .st_other = 0,
@@ -2518,8 +2288,8 @@ fn buildTestElf64(storage: []u8) []u8 {
         .st_value = 0x2000,
         .st_size = 4,
     });
-    const booted_name_offset = 1 + proof_name.len + 1;
-    writeStruct(elf.Elf64_Sym, storage, symbols_offset + 2 * @sizeOf(elf.Elf64_Sym), .{
+    const booted_name_offset = 1 + test_proof_symbol.len + 1;
+    writeStruct(elf.Elf64_Sym, storage, layout.symbols + 2 * @sizeOf(elf.Elf64_Sym), .{
         .st_name = booted_name_offset,
         .st_info = 0,
         .st_other = 0,
@@ -2528,7 +2298,7 @@ fn buildTestElf64(storage: []u8) []u8 {
         .st_size = 6,
     });
 
-    var signature_offset = signatures_offset;
+    var signature_offset = layout.signatures;
     for (verification_only_signatures) |signature| {
         @memcpy(storage[signature_offset..][0..signature.len], signature);
         signature_offset += signature.len + 1;
@@ -2538,53 +2308,7 @@ fn buildTestElf64(storage: []u8) []u8 {
         @memcpy(storage[signature_offset..][0..role_identity.len], &role_identity);
         signature_offset += role_identity.len;
     }
-    return storage[0..file_size];
-}
-
-fn testSymbolTableOffset() usize {
-    const program_count: u32 = 2;
-    const section_count: u32 = 6;
-    const section_names = "\x00.shstrtab\x00.data\x00.bss\x00.strtab\x00.symtab\x00";
-    const symbol_names = "\x00native.session.proofs.runtime_negative_proofs.fixture\x00native.session.booted_evidence.runProduction\x00";
-    const section_names_offset: u32 = elf_header_size +
-        program_count * program_header_size +
-        section_count * section_header_size;
-    const data_offset: u32 = section_names_offset + section_names.len;
-    const strings_offset: u32 = data_offset + 16;
-    return @intCast(std.mem.alignForward(u32, strings_offset + symbol_names.len, 4));
-}
-
-fn writeProgramHeader(bytes: []u8, offset: anytype, program: ProgramHeader) void {
-    const start: usize = @intCast(offset);
-    writeU32(bytes, start, program.segment_type);
-    writeU32(bytes, start + 4, program.offset);
-    writeU32(bytes, start + 8, program.virtual_address);
-    writeU32(bytes, start + 12, program.physical_address);
-    writeU32(bytes, start + 16, program.file_size);
-    writeU32(bytes, start + 20, program.memory_size);
-    writeU32(bytes, start + 24, program.flags);
-    writeU32(bytes, start + 28, program.alignment);
-}
-
-fn writeSection(bytes: []u8, offset: anytype, section: Section) void {
-    const start: usize = @intCast(offset);
-    writeU32(bytes, start, section.name_offset);
-    writeU32(bytes, start + 4, section.section_type);
-    writeU32(bytes, start + 8, section.flags);
-    writeU32(bytes, start + 12, section.address);
-    writeU32(bytes, start + 16, section.offset);
-    writeU32(bytes, start + 20, section.size);
-    writeU32(bytes, start + 24, section.link);
-    writeU32(bytes, start + 28, section.info);
-    writeU32(bytes, start + 32, section.alignment);
-    writeU32(bytes, start + 36, section.entry_size);
-}
-
-fn writeSymbol(bytes: []u8, offset: anytype, name_offset: anytype, section_index: u16, size: u32) void {
-    const start: usize = @intCast(offset);
-    writeU32(bytes, start, name_offset);
-    writeU32(bytes, start + 8, size);
-    writeU16(bytes, start + 14, section_index);
+    return storage[0..layout.file_size];
 }
 
 fn writeU16(bytes: []u8, offset: usize, value: anytype) void {
@@ -2593,6 +2317,10 @@ fn writeU16(bytes: []u8, offset: usize, value: anytype) void {
 
 fn writeU32(bytes: []u8, offset: usize, value: anytype) void {
     std.mem.writeInt(u32, bytes[offset..][0..4], @intCast(value), .little);
+}
+
+fn writeU64(bytes: []u8, offset: usize, value: anytype) void {
+    std.mem.writeInt(u64, bytes[offset..][0..8], @intCast(value), .little);
 }
 
 fn writeStruct(comptime T: type, bytes: []u8, offset: usize, value: T) void {
