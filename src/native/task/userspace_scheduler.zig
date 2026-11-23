@@ -5004,7 +5004,6 @@ test "scheduler retirement domain isolates all CPU arenas and preflights complet
         const state = native_entry.stateForCpu(@intCast(index));
         previous.* = state.*;
         state.userspace_xstate = 0x1000 + index;
-        state.kernel_xstate = 0x2000 + index;
         state.resume_rsp = 0x3000 + index;
         state.resume_rip = 0x4000 + index;
         state.resume_requested = @intCast(index + 1);

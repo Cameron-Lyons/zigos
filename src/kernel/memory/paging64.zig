@@ -16,7 +16,7 @@ const cpu_identity = @import("../cpu_identity.zig");
 const physical_mapper = @import("kernel_physical_mapper.zig");
 const cache_policy = @import("../../arch/cache_policy.zig");
 const efi_paging = @import("../../boot/efi_paging.zig");
-const efi_handoff = @import("../../boot/efi_handoff.zig");
+const paging_info = @import("../../boot/paging_info.zig");
 const sparse = @import("../../arch/sparse_physical_map.zig");
 
 const PAGE_SIZE: u32 = virtual_layout.PAGE_BYTES;
@@ -529,8 +529,6 @@ const PagingFailure = enum {
     corrupt_rejected_huge_page_allocation_accounting,
     corrupt_retired_user_range_accounting,
     corrupt_retired_user_hierarchy_accounting,
-    invalid_native_memory_map,
-    native_memory_map_capacity_exceeded,
     invalid_framebuffer_ownership_extent,
     invalid_ram_direct_map_authority,
     final_paging_arena_outside_direct_map_aperture,
@@ -540,14 +538,12 @@ const PagingFailure = enum {
     high_memory_direct_map_leaf_missing,
     high_memory_direct_map_permissions_are_invalid,
     high_memory_direct_map_probe_failed,
-    missing_multiboot_memory_map_handoff,
-    invalid_multiboot_information_extent,
-    missing_multiboot_memory_map,
+    missing_boot_info_handoff,
     missing_admitted_cache_policy,
     invalid_native_boot_memory_ownership,
     insufficient_early_heap_for_physical_frame_state,
-    invalid_multiboot_memory_map,
-    invalid_live_multiboot_handoff_extent,
+    invalid_native_memory_map_allocator_admission,
+    invalid_live_boot_handoff_extent,
     invalid_kernel_or_efi_heap_reservation,
     physical_memory_reservation_table_overflow,
     no_usable_physical_frames_remain_after_kernel_reservation,
@@ -588,8 +584,6 @@ const paging_failure_messages = blk: {
         "Corrupt rejected huge-page allocation accounting!\n",
         "Corrupt retired user-range accounting!\n",
         "Corrupt retired user-hierarchy accounting!\n",
-        "Invalid native memory map!\n",
-        "Native memory map capacity exceeded!\n",
         "Invalid framebuffer ownership extent!\n",
         "Invalid RAM direct-map authority!\n",
         "Final paging arena lies outside the direct-map aperture!\n",
@@ -599,14 +593,12 @@ const paging_failure_messages = blk: {
         "High-memory direct-map leaf is missing!\n",
         "High-memory direct-map permissions are invalid!\n",
         "High-memory direct-map probe failed!\n",
-        "Missing Multiboot memory-map handoff!\n",
-        "Invalid Multiboot information extent!\n",
-        "Missing Multiboot memory map!\n",
+        "Missing validated EFI boot handoff!\n",
         "Missing admitted cache policy!\n",
         "Invalid native boot memory ownership!\n",
         "Insufficient early heap for physical-frame state!\n",
-        "Invalid Multiboot memory map!\n",
-        "Invalid live Multiboot handoff extent!\n",
+        "Invalid native memory map allocator admission!\n",
+        "Invalid live EFI handoff extent!\n",
         "Invalid kernel or EFI heap reservation!\n",
         "Physical-memory reservation table overflow!\n",
         "No usable physical frames remain after kernel reservation!\n",
@@ -757,14 +749,13 @@ fn mappedRamSpanForAccess(physical: u64, bytes: u64, write: bool) ?usize {
     if (comptime builtin.target.os.tag != .freestanding) return null;
     const cache = cache_policy.admittedMtrrView() catch return null;
     const info = handoff.capturedInfo() orelse return null;
-    const memory_map = handoff.capturedMemoryMap(info) orelse return null;
+    const memory_map = info.memoryMap();
     firmware_memory_map.requireRamWriteBack(memory_map, physical, bytes, cache) catch return null;
     var backend = DirectSpanTables{};
     const root = if (kernel_switch_cr3 != 0)
         trackedCurrentDirectory() catch return null
     else boot: {
-        const arenas = info.boot_paging orelse return null;
-        arenas.validate() catch return null;
+        const arenas = info.paging;
         const root_physical = x86.readCr3() & x86.CR3_ADDRESS_MASK;
         if (root_physical != arenas.transition_base) return null;
         backend.transition = .{ .start = arenas.transition_base, .end = arenas.transition_base + arenas.transitionBytes() };
@@ -3105,21 +3096,12 @@ pub inline fn switchToKernelAddressSpace() void {
     switchAddressSpace(kernelPageDirectory(), kernel_switch_cr3);
 }
 
-// init has admitted the complete immutable handoff before opening any frames.
-// The shared builder still preflights writable WB arena backing and capacity.
-fn initializeKernelHierarchy(arenas: efi_handoff.paging_info.Info, memory_map: handoff.MemoryMap, cache: cache_policy.ValidatedMtrrView) usize {
-    var entries: [256]efi_handoff.MmapEntry = undefined;
-    var entry_count: usize = 0;
-    var iterator = memory_map.iterator();
-    while (iterator.next() catch haltPagingFailure(.invalid_native_memory_map)) |entry| {
-        if (entry.length == 0) continue;
-        if (entry_count == entries.len) haltPagingFailure(.native_memory_map_capacity_exceeded);
-        entries[entry_count] = .{ .base = entry.base, .length = entry.length, .kind = entry.kind, .firmware_type = entry.firmware_type, .attributes = entry.attributes };
-        entry_count += 1;
-    }
-    efi_paging.sortEntries(entries[0..entry_count]);
+// init has admitted the complete immutable handoff before opening any frames;
+// its validated copy is already sorted and non-overlapping. The shared builder
+// still preflights writable WB arena backing and capacity.
+fn initializeKernelHierarchy(arenas: paging_info.Info, memory_map: handoff.MemoryMap, cache: cache_policy.ValidatedMtrrView) usize {
     var direct: [256]sparse.Region = undefined;
-    const direct_count = efi_paging.ramRegions(entries[0..entry_count], &direct, arenas.framebufferSpan() catch
+    const direct_count = efi_paging.ramRegions(memory_map, &direct, arenas.framebufferSpan() catch
         haltPagingFailure(.invalid_framebuffer_ownership_extent)) catch
         haltPagingFailure(.invalid_ram_direct_map_authority);
     const image = kernelImageExtents();
@@ -3197,15 +3179,12 @@ pub fn init() void {
     early_console.print("Initializing four-level paging...\n");
 
     const boot_info = handoff.capturedInfo() orelse
-        haltPagingFailure(.missing_multiboot_memory_map_handoff);
-    const boot_info_address = handoff.capturedInfoAddress() orelse
-        haltPagingFailure(.invalid_multiboot_information_extent);
-    const memory_map = handoff.capturedMemoryMap(boot_info) orelse
-        haltPagingFailure(.missing_multiboot_memory_map);
+        haltPagingFailure(.missing_boot_info_handoff);
+    const memory_map = boot_info.memoryMap();
     const cache = cache_policy.admittedMtrrView() catch haltPagingFailure(.missing_admitted_cache_policy);
-    firmware_memory_map.validateBootOwnedRanges(memory_map, boot_info_address, boot_info, memory.kernelPhysicalStartAddress(), memory.kernelPhysicalEndAddress(), cache) catch
+    firmware_memory_map.validateBootOwnedRanges(boot_info, memory.kernelPhysicalStartAddress(), memory.kernelPhysicalEndAddress(), cache) catch
         haltPagingFailure(.invalid_native_boot_memory_ownership);
-    @import("../platform/smbios.zig").captureTargetSku(boot_info.efi64_system_table_addr);
+    @import("../platform/smbios.zig").captureTargetSku(boot_info.efi_system_table);
     const frame_storage_memory = memory.claimEarly(
         PhysicalFrameAllocator.storage_bytes,
         @alignOf(PhysicalFrameAllocator.Storage),
@@ -3213,20 +3192,19 @@ pub fn init() void {
     const frame_storage: *PhysicalFrameAllocator.Storage = @ptrCast(@alignCast(frame_storage_memory));
     physical_frames = PhysicalFrameAllocator.bindStorage(frame_storage);
     firmware_memory_map.initializeAllocator(MANAGED_PHYSICAL_BYTES, PAGE_SIZE, &physical_frames, memory_map, cache) catch
-        haltPagingFailure(.invalid_multiboot_memory_map);
+        haltPagingFailure(.invalid_native_memory_map_allocator_admission);
     high_memory_zone_has_free_frames = false;
     low_identity_frame_cursor = .{};
     firmware_memory_map.reserveLiveHandoffRanges(
         MANAGED_PHYSICAL_BYTES,
         PAGE_SIZE,
         &physical_frames,
-        boot_info_address,
         boot_info,
-    ) catch haltPagingFailure(.invalid_live_multiboot_handoff_extent);
+    ) catch haltPagingFailure(.invalid_live_boot_handoff_extent);
 
     reserved_sipi_page = selectSipiPage(&physical_frames);
 
-    const final_used_pages = initializeKernelHierarchy(boot_info.boot_paging.?, memory_map, cache);
+    const final_used_pages = initializeKernelHierarchy(boot_info.paging, memory_map, cache);
 
     firmware_memory_map.reserveKernelRanges(
         MANAGED_PHYSICAL_BYTES,
@@ -3237,10 +3215,8 @@ pub fn init() void {
         memory.heapPhysicalStartAddress(),
         memory.HEAP_SIZE,
     ) catch haltPagingFailure(.invalid_kernel_or_efi_heap_reservation);
-    const boot_image = boot_info.boot_image.?;
+    const boot_image = boot_info.image;
     kernel_mapping_authority = .{
-        .memory_map = memory_map,
-        .info_address = boot_info_address,
         .info = boot_info,
         .image = .{ .start = memory.kernelPhysicalStartAddress(), .end = memory.kernelPhysicalEndAddress() },
         .heap = .{ .start = boot_image.heap_base, .end = boot_image.heap_base + memory.HEAP_SIZE },
@@ -3264,8 +3240,6 @@ pub fn init() void {
         PAGE_SIZE,
         &physical_frames,
         &boot_arena_retirement,
-        memory_map,
-        boot_info_address,
         boot_info,
         memory.kernelPhysicalStartAddress(),
         memory.kernelPhysicalEndAddress(),
@@ -4369,7 +4343,7 @@ test "sparse direct-map capacity remains bounded to 512 GiB" {
     try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 512 * 1024 * 1024 * 1024), MANAGED_PHYSICAL_BYTES);
     try std.testing.expectEqual(@as(usize, 512), DIRECT_MAP_PDPT_ENTRIES);
     try std.testing.expect(SPARSE_CACHE_AWARE_RAM_MAP);
-    try std.testing.expectEqual(@as(usize, 4096), efi_handoff.paging_info.MAX_ARENA_PAGES);
+    try std.testing.expectEqual(@as(usize, 4096), paging_info.MAX_ARENA_PAGES);
     try std.testing.expectEqual(@as(usize, table64.TABLE_ENTRIES), IDENTITY_DIRECTORY_ENTRIES);
 }
 

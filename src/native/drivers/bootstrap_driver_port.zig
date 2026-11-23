@@ -17,9 +17,6 @@ const kernel_device_start = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/init/devices.zig")
 else
     struct {
-        pub fn startStorageDataplane() bool {
-            return true;
-        }
         pub fn startNetworkDataplane() bool {
             return true;
         }
@@ -30,35 +27,7 @@ else
             return true;
         }
     };
-const kernel_network_claim = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/net/link_port.zig")
-else
-    struct {
-        var claimed_device_id: u64 = 0;
-        var claimed_service_id: u64 = 0;
-
-        pub fn init() void {
-            claimed_device_id = 0;
-            claimed_service_id = 0;
-        }
-
-        pub fn recordDriverClaim(device_id: u64, service_id: u64) bool {
-            if (device_id == 0 or service_id == 0) return false;
-            if (claimed_service_id != 0) {
-                return claimed_device_id == device_id and claimed_service_id == service_id;
-            }
-            claimed_device_id = device_id;
-            claimed_service_id = service_id;
-            return true;
-        }
-
-        pub fn clearDriverClaim(service_id: u64) bool {
-            if (claimed_service_id == 0 or claimed_service_id != service_id) return false;
-            claimed_device_id = 0;
-            claimed_service_id = 0;
-            return true;
-        }
-    };
+const kernel_network_claim = @import("../../kernel/net/link_port.zig");
 const nvme_dma_bridge = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn zigosStorageBootstrapNvmeDmaWindow(

@@ -109,6 +109,7 @@ const ExecutorInvariant = enum(u8) {
     userspace_page_fault_code_exceeds_its_abi_width,
     userspace_entry_requires_the_active_mapping_owner,
     userspace_entry_requires_private_extended_state,
+    userspace_return_restores_the_default_kernel_controls,
 };
 
 const executor_invariant_messages = [_][]const u8{
@@ -144,6 +145,7 @@ const executor_invariant_messages = [_][]const u8{
     "userspace page-fault code exceeds its ABI width",
     "userspace entry requires the active mapping owner",
     "userspace entry requires private extended state",
+    "userspace return restores the default kernel controls",
 };
 
 const executor_invariant_message_bytes: []const u8 = blk: {
@@ -450,7 +452,7 @@ pub fn reserveTrapStackStorageForCpu(index: u8) TrapStackReserveError!void {
     if (@import("../../kernel/interrupts/context.zig").active()) return error.InterruptContext;
     if (!freestanding.paging.kernelAddressSpaceActive()) return error.UserAddressSpaceActive;
     const entry = native_entry.stateForCpu(index);
-    if (entry.active_task_id != 0 or entry.userspace_xstate != 0 or entry.kernel_xstate != 0 or
+    if (entry.active_task_id != 0 or entry.userspace_xstate != 0 or
         entry.resume_rsp != 0 or entry.resume_rip != 0 or entry.resume_requested != 0)
         return error.ActiveTrapStack;
     const slot = &trap_stacks[index];
@@ -623,9 +625,26 @@ pub fn enterPreparedUserContext(context: *const UserContext64) u32 {
 fn enterUserContextWithState(context: *const UserContext64, state: *align(xstate.alignment) xstate.State) u32 {
     if (!smp.isRuntimeOwner()) @call(.never_inline, executorInvariantFailure, .{.one_runtime_cpu_owns_the_userspace_entry_state});
     const result = zigos_enter_userspace(@intFromPtr(context), @intFromPtr(state));
+    if (!resumedWithDefaultKernelControls())
+        @call(.never_inline, executorInvariantFailure, .{.userspace_return_restores_the_default_kernel_controls});
     requireIdleSyscallReturn();
     native_entry.clearContinuation();
     return result;
+}
+
+// Every return resumes through the constant init xstate image rather than a
+// saved kernel image, so no user-written x87, SSE or PKRU control survives it.
+inline fn resumedWithDefaultKernelControls() bool {
+    var x87_control: u16 = undefined;
+    var mxcsr: u32 = undefined;
+    asm volatile ("fnstcw %[control]"
+        : [control] "=m" (x87_control),
+    );
+    asm volatile ("stmxcsr %[control]"
+        : [control] "=m" (mxcsr),
+    );
+    const pku = (native_entry.current().native_entry_modes & native_entry.ENTRY_PKU) != 0;
+    return x87_control == 0x037f and mxcsr == 0x1f80 and (!pku or x86.rdpkru() == 0);
 }
 
 const MappingState = enum(u8) {
@@ -876,7 +895,7 @@ inline fn decodeMappingLifetimeToken(token: u64, out: *LifetimeMapping) bool {
 }
 
 inline fn continuationCleared(state: *const volatile native_entry.State) bool {
-    return state.active_task_id == 0 and state.userspace_xstate == 0 and state.kernel_xstate == 0 and
+    return state.active_task_id == 0 and state.userspace_xstate == 0 and
         state.resume_rsp == 0 and state.resume_rip == 0 and state.resume_requested == 0;
 }
 
@@ -946,7 +965,7 @@ fn remoteSyscallWithHardware(frame: *freestanding.isr.InterruptFrame, hardware: 
         mappingPhysicalRoot(mapping) != bound.physical_root or mapping.owned_xstate == null) return false;
     const entry = native_entry.current();
     if (entry.active_task_id != bound.identity.task_id or entry.userspace_xstate != @intFromPtr(mapping.owned_xstate.?.state()) or
-        entry.kernel_xstate == 0 or entry.resume_rsp == 0 or entry.resume_rip == 0 or entry.resume_requested != 0 or
+        entry.resume_rsp == 0 or entry.resume_rip == 0 or entry.resume_requested != 0 or
         !execution.syscallIdle(ticket)) return false;
 
     hardware.switchToKernel();
@@ -6436,7 +6455,7 @@ test "remote syscall real owner path parks drains STOP and preserves all CPU nei
                 fixture.mapping.address_space.?.directory = @ptrFromInt(0x2000);
                 try guard.expectRejected(&fixture);
                 fixture.mapping.address_space.?.directory = @ptrFromInt(0x1000);
-                inline for (.{ "active_task_id", "userspace_xstate", "kernel_xstate", "resume_rsp", "resume_rip" }) |field| {
+                inline for (.{ "active_task_id", "userspace_xstate", "resume_rsp", "resume_rip" }) |field| {
                     const original = @field(native_entry.current(), field);
                     @field(native_entry.current(), field) = 0;
                     try guard.expectRejected(&fixture);
@@ -6523,7 +6542,6 @@ const DeviceInterruptFixture = struct {
         native_entry.current().resume_rsp = 0xfeed_1000;
         native_entry.current().resume_rip = 0xfeed_2000;
         native_entry.current().userspace_xstate = 0xfeed_3000;
-        native_entry.current().kernel_xstate = 0xfeed_4000;
         self.frame = std.mem.zeroes(isr.Registers);
         inline for (.{ "eax", "ebx", "ecx", "edx", "ebp", "esi", "edi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }, 0..) |field, index|
             @field(self.frame, field) = 0x1234_0000 + index * 0x101;
@@ -6596,7 +6614,6 @@ const DeviceInterruptFixture = struct {
         try std.testing.expectEqual(@as(usize, 0xfeed_1000), native_entry.current().resume_rsp);
         try std.testing.expectEqual(@as(usize, 0xfeed_2000), native_entry.current().resume_rip);
         try std.testing.expectEqual(userspace_xstate, native_entry.current().userspace_xstate);
-        try std.testing.expectEqual(@as(usize, 0xfeed_4000), native_entry.current().kernel_xstate);
     }
 
     fn expectNoResume(self: *const @This()) !void {
@@ -7579,7 +7596,6 @@ test "executor CPU registrations reject replacement and reset only their selecte
             .active_task_id = 100 + index,
             .native_entry_modes = native_entry.ENTRY_READY | @as(u8, @intCast(index & 3)),
             .userspace_xstate = 0xffff_8000_3000_0000 + index * PAGE_SIZE,
-            .kernel_xstate = 0xffff_8000_4000_0000 + index * PAGE_SIZE,
             .resume_rsp = 0xffff_8000_5000_0000 + index * PAGE_SIZE,
             .resume_rip = 0xffff_ffff_8000_0000 + index * 64,
             .resume_requested = @intCast(200 + index),
@@ -7622,7 +7638,6 @@ test "executor CPU registrations reject replacement and reset only their selecte
         retired[index] = true;
         expected_entries[index].active_task_id = 0;
         expected_entries[index].userspace_xstate = 0;
-        expected_entries[index].kernel_xstate = 0;
         expected_entries[index].resume_rsp = 0;
         expected_entries[index].resume_rip = 0;
         expected_entries[index].resume_requested = 0;
@@ -7863,7 +7878,6 @@ const PreparedDispatchTestBackend = if (builtin.is_test) struct {
             native_entry.current().resume_rsp = 0xfeed_1000;
             native_entry.current().resume_rip = 0xfeed_2000;
             native_entry.current().userspace_xstate = @intFromPtr(state);
-            native_entry.current().kernel_xstate = 0xfeed_3000;
             switch (self.backend.outcome) {
                 .unavailable => {},
                 .faulted => requestUserExceptionHandoff(self.executor, self.backend.fault),

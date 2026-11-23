@@ -2,12 +2,12 @@ const std = @import("std");
 const kernel_address = @import("../arch/kernel_address.zig");
 const cache_policy = @import("../arch/cache_policy.zig");
 pub const sparse = @import("../arch/sparse_physical_map.zig");
-const efi_handoff = @import("efi_handoff.zig");
+const boot_info = @import("boot_info.zig");
+const MemoryMapEntry = boot_info.MemoryMapEntry;
 const efi_elf = @import("efi_elf.zig");
-pub const Mode = efi_elf.Mode;
 
 pub const PAGE_BYTES: usize = 4096;
-pub const MAX_PAGE_COUNT: usize = efi_handoff.paging_info.MAX_ARENA_PAGES;
+pub const MAX_PAGE_COUNT: usize = boot_info.paging_info.MAX_ARENA_PAGES;
 pub const ALIAS_BYTES: u64 = kernel_address.image_physical_limit;
 pub const PHYSICAL_ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 pub const Error = error{ InvalidPhysicalRange, InvalidPagingMode, TransitionAliasConflict, InvalidMemoryMap, BufferTooSmall, AddressOverflow };
@@ -20,10 +20,6 @@ pub fn validateTransition(cr4: u64, instruction_address: u64, stack_address: u64
     }
 }
 
-pub fn mappedBytes(mode: Mode) u64 {
-    return if (mode == .native_high) kernel_address.direct_map_capacity else ALIAS_BYTES;
-}
-
 // The arrays live in each caller's stack frame throughout the synchronous
 // count/build call. No configuration borrows a returned local array.
 const Plan = struct {
@@ -34,19 +30,19 @@ const Plan = struct {
     image_count: usize = 0,
     overlay_count: usize = 0,
 
-    fn config(self: *const Plan, mode: Mode, cache: cache_policy.ValidatedMtrrView) sparse.Config {
+    fn config(self: *const Plan, cache: cache_policy.ValidatedMtrrView) sparse.Config {
         return .{
             .cache = cache,
             .image = self.image[0..self.image_count],
             .direct = self.direct[0..self.direct_count],
             .direct_overlays = self.overlays[0..self.overlay_count],
-            .allow_1g = mode == .native_high,
-            .direct_limit = mappedBytes(mode),
+            .allow_1g = true,
+            .direct_limit = kernel_address.direct_map_capacity,
         };
     }
 };
 
-fn prepareInto(image: efi_elf.Image, entries: []const efi_handoff.MmapEntry, heap_base: u64, framebuffer_span: ?efi_handoff.paging_info.Span, out: *Plan) !void {
+fn prepareInto(image: efi_elf.Image, entries: []const MemoryMapEntry, heap_base: u64, framebuffer_span: ?boot_info.paging_info.Span, out: *Plan) !void {
     if (image.segment_count == 0 or image.segment_count > efi_elf.MAX_LOAD_SEGMENTS) return error.InvalidPhysicalRange;
     out.direct_count = try ramRegions(entries, &out.direct, framebuffer_span);
     out.image_count = image.segment_count;
@@ -65,28 +61,27 @@ fn prepareInto(image: efi_elf.Image, entries: []const efi_handoff.MmapEntry, hea
         out.overlays[out.overlay_count] = .{ .start = region.start, .end = region.end, .permissions = .{ .writable = false } };
         out.overlay_count += 1;
     }
-    const heap_end = std.math.add(u64, heap_base, efi_handoff.image_info.KERNEL_HEAP_BYTES) catch return error.AddressOverflow;
+    const heap_end = std.math.add(u64, heap_base, boot_info.image_info.KERNEL_HEAP_BYTES) catch return error.AddressOverflow;
     out.overlays[out.overlay_count] = .{ .start = heap_base, .end = heap_end, .permissions = .{ .force_4k = true } };
     out.overlay_count += 1;
     sortRegions(out.overlays[0..out.overlay_count]);
 }
 
-pub fn countForModeInto(mode: Mode, image: efi_elf.Image, entries: []const efi_handoff.MmapEntry, cache: cache_policy.ValidatedMtrrView, heap_base: u64, framebuffer_span: ?efi_handoff.paging_info.Span, out: *sparse.Counts) !void {
+pub fn countInto(image: efi_elf.Image, entries: []const MemoryMapEntry, cache: cache_policy.ValidatedMtrrView, heap_base: u64, framebuffer_span: ?boot_info.paging_info.Span, out: *sparse.Counts) !void {
     var plan: Plan = undefined;
     try prepareInto(image, entries, heap_base, framebuffer_span, &plan);
-    try sparse.countInto(plan.config(mode, cache), out);
+    try sparse.countInto(plan.config(cache), out);
 }
 
-pub fn buildForMode(
+pub fn build(
     arena: []align(PAGE_BYTES) std.os.uefi.Page,
     physical_base: u64,
     active_root: *const [512]u64,
-    mode: Mode,
     image: efi_elf.Image,
-    entries: []const efi_handoff.MmapEntry,
+    entries: []const MemoryMapEntry,
     cache: cache_policy.ValidatedMtrrView,
     heap_base: u64,
-    paging_info: efi_handoff.paging_info.Info,
+    paging_info: boot_info.paging_info.Info,
 ) !u64 {
     try paging_info.validate();
     if (arena.len < 3 or arena.len > MAX_PAGE_COUNT or physical_base != paging_info.transition_base or arena.len != paging_info.transition_pages)
@@ -95,13 +90,13 @@ pub fn buildForMode(
     try prepareInto(image, entries, heap_base, try paging_info.framebufferSpan(), &plan);
     var result: sparse.Result = undefined;
     const tables: [*]align(PAGE_BYTES) [512]u64 = @ptrCast(arena.ptr);
-    try sparse.build(tables[0..arena.len], physical_base, active_root, plan.config(mode, cache), &result);
+    try sparse.build(tables[0..arena.len], physical_base, active_root, plan.config(cache), &result);
     return result.root_physical;
 }
 
 // Retain original EFI RAM provenance even for the reserved table arenas.
 // Unknown/reserved/device descriptors never grant direct-map authority.
-pub fn ramRegions(entries: []const efi_handoff.MmapEntry, out: []sparse.Region, device: ?efi_handoff.paging_info.Span) Error!usize {
+pub fn ramRegions(entries: []const MemoryMapEntry, out: []sparse.Region, device: ?boot_info.paging_info.Span) Error!usize {
     if (entries.len == 0 or entries.len > 256) return error.InvalidMemoryMap;
     if (device) |span| {
         if (span.start >= span.end or span.start % PAGE_BYTES != 0 or span.end % PAGE_BYTES != 0) return error.InvalidPhysicalRange;
@@ -112,9 +107,12 @@ pub fn ramRegions(entries: []const efi_handoff.MmapEntry, out: []sparse.Region, 
         const end = std.math.add(u64, entry.base, entry.length) catch return error.AddressOverflow;
         if (entry.length == 0 or (index != 0 and entry.base < previous_end)) return error.InvalidMemoryMap;
         previous_end = end;
-        if (!efi_handoff.memory_kind.efiTypeIsRam(entry.firmware_type)) continue;
-        if (entry.kind != 1 and entry.kind != 2 and entry.kind != 3 and entry.kind != 4 and entry.kind != 7) continue;
-        const writable = entry.kind == 1 or entry.kind == 2;
+        if (!boot_info.memory_kind.efiTypeIsRam(entry.firmware_type)) continue;
+        const writable = switch (entry.kind) {
+            .available, .reserved => true,
+            .acpi_reclaimable, .acpi_nvs, .firmware_runtime_ram => false,
+            else => continue,
+        };
         if (device) |excluded| {
             if (entry.base < excluded.end and excluded.start < end) {
                 try appendRamRegion(out, &count, entry.base, @min(end, excluded.start), writable);
@@ -139,16 +137,6 @@ fn appendRamRegion(out: []sparse.Region, count: *usize, start: u64, end: u64, wr
     count.* += 1;
 }
 
-pub fn sortEntries(entries: []efi_handoff.MmapEntry) void {
-    if (entries.len < 2) return;
-    for (1..entries.len) |index| {
-        const value = entries[index];
-        var position = index;
-        while (position != 0 and entries[position - 1].base > value.base) : (position -= 1) entries[position] = entries[position - 1];
-        entries[position] = value;
-    }
-}
-
 pub fn sortRegions(regions: []sparse.Region) void {
     if (regions.len < 2) return;
     for (1..regions.len) |index| {
@@ -159,14 +147,14 @@ pub fn sortRegions(regions: []sparse.Region) void {
     }
 }
 
-pub fn requireRamRange(entries: []const efi_handoff.MmapEntry, start: u64, bytes: u64) Error!void {
+pub fn requireRamRange(entries: []const MemoryMapEntry, start: u64, bytes: u64) Error!void {
     const end = std.math.add(u64, start, bytes) catch return error.AddressOverflow;
     if (bytes == 0) return error.InvalidPhysicalRange;
     var cursor = start;
     for (entries) |entry| {
         const entry_end = std.math.add(u64, entry.base, entry.length) catch return error.AddressOverflow;
         if (entry_end <= cursor) continue;
-        if (entry.base > cursor or !efi_handoff.memory_kind.efiTypeIsRam(entry.firmware_type)) return error.InvalidPhysicalRange;
+        if (entry.base > cursor or !boot_info.memory_kind.efiTypeIsRam(entry.firmware_type)) return error.InvalidPhysicalRange;
         cursor = @min(end, entry_end);
         if (cursor == end) return;
     }
@@ -174,36 +162,36 @@ pub fn requireRamRange(entries: []const efi_handoff.MmapEntry, start: u64, bytes
 }
 
 pub fn appendMemoryDescriptor(
-    entries: []efi_handoff.MmapEntry,
+    entries: []MemoryMapEntry,
     count: *usize,
     base: u64,
     length: u64,
-    kind: u32,
+    kind: boot_info.MemoryKind,
     firmware_type: u32,
     attributes: u64,
-    arenas: ?efi_handoff.paging_info.Info,
+    arenas: ?boot_info.paging_info.Info,
 ) Error!void {
     const end = std.math.add(u64, base, length) catch return error.AddressOverflow;
     const receipts = arenas orelse return appendRange(entries, count, base, end, kind, firmware_type, attributes);
     receipts.validate() catch return error.InvalidPhysicalRange;
-    var spans = [_]efi_handoff.paging_info.Span{
+    var spans = [_]boot_info.paging_info.Span{
         .{ .start = receipts.transition_base, .end = receipts.transition_base + receipts.transitionBytes() },
         .{ .start = receipts.final_base, .end = receipts.final_base + receipts.finalBytes() },
     };
-    if (spans[0].start > spans[1].start) std.mem.swap(efi_handoff.paging_info.Span, &spans[0], &spans[1]);
+    if (spans[0].start > spans[1].start) std.mem.swap(boot_info.paging_info.Span, &spans[0], &spans[1]);
     var cursor = base;
     for (spans) |span| {
         if (span.start >= end or span.end <= cursor) continue;
         const start = @max(cursor, span.start);
         try appendRange(entries, count, cursor, start, kind, firmware_type, attributes);
         const limit = @min(end, span.end);
-        try appendRange(entries, count, start, limit, efi_handoff.MULTIBOOT_MEMORY_RESERVED, firmware_type, attributes);
+        try appendRange(entries, count, start, limit, .reserved, firmware_type, attributes);
         cursor = limit;
     }
     try appendRange(entries, count, cursor, end, kind, firmware_type, attributes);
 }
 
-fn appendRange(entries: []efi_handoff.MmapEntry, count: *usize, start: u64, end: u64, kind: u32, firmware_type: u32, attributes: u64) Error!void {
+fn appendRange(entries: []MemoryMapEntry, count: *usize, start: u64, end: u64, kind: boot_info.MemoryKind, firmware_type: u32, attributes: u64) Error!void {
     if (start == end) return;
     if (count.* >= entries.len) return error.BufferTooSmall;
     entries[count.*] = .{ .base = start, .length = end - start, .kind = kind, .firmware_type = firmware_type, .attributes = attributes };
@@ -211,13 +199,13 @@ fn appendRange(entries: []efi_handoff.MmapEntry, count: *usize, start: u64, end:
 }
 
 test "EFI handoff reserves disjoint table arenas without losing RAM provenance" {
-    const arenas = efi_handoff.paging_info.Info{ .transition_base = 0x2000000, .transition_pages = 5, .final_base = 0x4000000, .final_pages = 9 };
-    var entries: [5]efi_handoff.MmapEntry = undefined;
+    const arenas = boot_info.paging_info.Info{ .transition_base = 0x2000000, .transition_pages = 5, .final_base = 0x4000000, .final_pages = 9 };
+    var entries: [5]MemoryMapEntry = undefined;
     var count: usize = 0;
-    try appendMemoryDescriptor(&entries, &count, 0x1000000, 0x5000000, 1, 2, 8, arenas);
+    try appendMemoryDescriptor(&entries, &count, 0x1000000, 0x5000000, .available, 2, 8, arenas);
     try std.testing.expectEqual(@as(usize, 5), count);
-    try std.testing.expectEqual(@as(u32, 2), entries[1].kind);
-    try std.testing.expectEqual(@as(u32, 2), entries[3].kind);
+    try std.testing.expectEqual(boot_info.MemoryKind.reserved, entries[1].kind);
+    try std.testing.expectEqual(boot_info.MemoryKind.reserved, entries[3].kind);
     try std.testing.expectEqual(arenas.transitionBytes(), entries[1].length);
     try std.testing.expectEqual(arenas.finalBytes(), entries[3].length);
     for (entries) |entry| {
@@ -235,10 +223,10 @@ test "EFI handoff reserves disjoint table arenas without losing RAM provenance" 
 
 test "EFI RAM authority rejects gaps overlap unknown memory and overflow" {
     var regions: [4]sparse.Region = undefined;
-    var entries = [_]efi_handoff.MmapEntry{
-        .{ .base = 0x1000, .length = 0x1000, .kind = 1, .firmware_type = 7 },
-        .{ .base = 0x3000, .length = 0x1000, .kind = 6, .firmware_type = 11 },
-        .{ .base = 0x5000, .length = 0x1000, .kind = 2 },
+    var entries = [_]MemoryMapEntry{
+        .{ .base = 0x1000, .length = 0x1000, .kind = .available, .firmware_type = 7 },
+        .{ .base = 0x3000, .length = 0x1000, .kind = .device_mmio, .firmware_type = 11 },
+        .{ .base = 0x5000, .length = 0x1000, .kind = .reserved },
     };
     try std.testing.expectEqual(@as(usize, 1), try ramRegions(&entries, &regions, null));
     try std.testing.expectError(error.InvalidPhysicalRange, requireRamRange(&entries, 0x1000, 0x2000));
@@ -253,10 +241,10 @@ test "EFI RAM authority rejects gaps overlap unknown memory and overflow" {
 }
 
 test "EFI RAM authority excludes the complete GOP allocation across descriptor boundaries" {
-    const entries = [_]efi_handoff.MmapEntry{
-        .{ .base = 0x1000, .length = 0x3000, .kind = 1, .firmware_type = 7 },
-        .{ .base = 0x4000, .length = 0x4000, .kind = 2, .firmware_type = 2 },
-        .{ .base = 0x8000, .length = 0x2000, .kind = 3, .firmware_type = 9 },
+    const entries = [_]MemoryMapEntry{
+        .{ .base = 0x1000, .length = 0x3000, .kind = .available, .firmware_type = 7 },
+        .{ .base = 0x4000, .length = 0x4000, .kind = .reserved, .firmware_type = 2 },
+        .{ .base = 0x8000, .length = 0x2000, .kind = .acpi_reclaimable, .firmware_type = 9 },
     };
     var regions: [3]sparse.Region = undefined;
     const count = try ramRegions(&entries, &regions, .{ .start = 0x3000, .end = 0x9000 });
@@ -281,46 +269,44 @@ fn countFixtureImage() efi_elf.Image {
 test "EFI count and build share exact capacities and preserve clone and unused canaries" {
     const state = cache_policy.MtrrState{ .physical_bits = 40, .default_type = cache_policy.MTRR_ENABLED | 6 };
     const cache = try cache_policy.ValidatedMtrrView.init(&state);
-    const entries = [_]efi_handoff.MmapEntry{.{ .base = 0, .length = 2 * sparse.HUGE_PAGE_BYTES, .kind = 1, .firmware_type = 7 }};
+    const entries = [_]MemoryMapEntry{.{ .base = 0, .length = 2 * sparse.HUGE_PAGE_BYTES, .kind = .available, .firmware_type = 7 }};
     const image = countFixtureImage();
-    for ([_]Mode{ .native_high, .isolated_low_proof }) |mode| {
-        var counts: sparse.Counts = undefined;
-        try countForModeInto(mode, image, &entries, cache, 64 * 1024 * 1024, null, &counts);
-        try std.testing.expect(counts.used_pages >= 3 and counts.used_pages < 64);
-        try std.testing.expectEqual(@as(u64, if (mode == .native_high) 1 else 0), counts.leaf_1g);
-        var tables: [64]sparse.Table align(PAGE_BYTES) = @splat(@splat(0xabab_abab_abab_abab));
-        const pages: [*]align(PAGE_BYTES) std.os.uefi.Page = @ptrCast(&tables);
-        var active: sparse.Table = undefined;
-        for (&active, 0..) |*value, index| value.* = @as(u64, index) * PAGE_BYTES | 3;
-        var receipt = efi_handoff.paging_info.Info{
-            .transition_base = 0x100000,
-            .transition_pages = @intCast(counts.used_pages),
-            .final_base = 0x200000,
-            .final_pages = @intCast(counts.used_pages),
-        };
-        receipt.transition_pages -= 1;
-        try std.testing.expectError(error.ArenaCapacity, buildForMode(pages[0 .. counts.used_pages - 1], receipt.transition_base, &active, mode, image, &entries, cache, 64 * 1024 * 1024, receipt));
-        for (tables) |page| try std.testing.expect(std.mem.allEqual(u64, &page, 0xabab_abab_abab_abab));
-        receipt.transition_pages += 1;
-        try std.testing.expectError(error.InvalidPhysicalRange, buildForMode(pages[0 .. counts.used_pages - 1], receipt.transition_base, &active, mode, image, &entries, cache, 64 * 1024 * 1024, receipt));
-        try std.testing.expectError(error.InvalidPhysicalRange, buildForMode(pages[0..counts.used_pages], receipt.transition_base + PAGE_BYTES, &active, mode, image, &entries, cache, 64 * 1024 * 1024, receipt));
-        for (tables) |page| try std.testing.expect(std.mem.allEqual(u64, &page, 0xabab_abab_abab_abab));
-        try std.testing.expectEqual(receipt.transition_base, try buildForMode(pages[0..counts.used_pages], receipt.transition_base, &active, mode, image, &entries, cache, 64 * 1024 * 1024, receipt));
-        for (active, 0..) |value, index| if (index != 256 and index != 511) try std.testing.expectEqual(value, tables[0][index]);
-        for (tables[counts.used_pages..]) |page| try std.testing.expect(std.mem.allEqual(u64, &page, 0xabab_abab_abab_abab));
-    }
+    var counts: sparse.Counts = undefined;
+    try countInto(image, &entries, cache, 64 * 1024 * 1024, null, &counts);
+    try std.testing.expect(counts.used_pages >= 3 and counts.used_pages < 64);
+    try std.testing.expectEqual(@as(u64, 1), counts.leaf_1g);
+    var tables: [64]sparse.Table align(PAGE_BYTES) = @splat(@splat(0xabab_abab_abab_abab));
+    const pages: [*]align(PAGE_BYTES) std.os.uefi.Page = @ptrCast(&tables);
+    var active: sparse.Table = undefined;
+    for (&active, 0..) |*value, index| value.* = @as(u64, index) * PAGE_BYTES | 3;
+    var receipt = boot_info.paging_info.Info{
+        .transition_base = 0x100000,
+        .transition_pages = @intCast(counts.used_pages),
+        .final_base = 0x200000,
+        .final_pages = @intCast(counts.used_pages),
+    };
+    receipt.transition_pages -= 1;
+    try std.testing.expectError(error.ArenaCapacity, build(pages[0 .. counts.used_pages - 1], receipt.transition_base, &active, image, &entries, cache, 64 * 1024 * 1024, receipt));
+    for (tables) |page| try std.testing.expect(std.mem.allEqual(u64, &page, 0xabab_abab_abab_abab));
+    receipt.transition_pages += 1;
+    try std.testing.expectError(error.InvalidPhysicalRange, build(pages[0 .. counts.used_pages - 1], receipt.transition_base, &active, image, &entries, cache, 64 * 1024 * 1024, receipt));
+    try std.testing.expectError(error.InvalidPhysicalRange, build(pages[0..counts.used_pages], receipt.transition_base + PAGE_BYTES, &active, image, &entries, cache, 64 * 1024 * 1024, receipt));
+    for (tables) |page| try std.testing.expect(std.mem.allEqual(u64, &page, 0xabab_abab_abab_abab));
+    try std.testing.expectEqual(receipt.transition_base, try build(pages[0..counts.used_pages], receipt.transition_base, &active, image, &entries, cache, 64 * 1024 * 1024, receipt));
+    for (active, 0..) |value, index| if (index != 256 and index != 511) try std.testing.expectEqual(value, tables[0][index]);
+    for (tables[counts.used_pages..]) |page| try std.testing.expect(std.mem.allEqual(u64, &page, 0xabab_abab_abab_abab));
 }
 
 test "EFI ELF transition planning equals final native geometry with merged immutable overlay and global leaves" {
     const state = cache_policy.MtrrState{ .physical_bits = 40, .default_type = cache_policy.MTRR_ENABLED | 6 };
     const cache = try cache_policy.ValidatedMtrrView.init(&state);
-    const entries = [_]efi_handoff.MmapEntry{.{ .base = 0, .length = 2 * sparse.HUGE_PAGE_BYTES, .kind = 1, .firmware_type = 7 }};
+    const entries = [_]MemoryMapEntry{.{ .base = 0, .length = 2 * sparse.HUGE_PAGE_BYTES, .kind = .available, .firmware_type = 7 }};
     const image = countFixtureImage();
     var plan: Plan = undefined;
     try prepareInto(image, &entries, 64 * 1024 * 1024, null, &plan);
     var transition: sparse.Counts = undefined;
-    try countForModeInto(.native_high, image, &entries, cache, 64 * 1024 * 1024, null, &transition);
-    var final = plan.config(.native_high, cache);
+    try countInto(image, &entries, cache, 64 * 1024 * 1024, null, &transition);
+    var final = plan.config(cache);
     const overlays = [_]sparse.Region{
         .{ .start = 32 * 1024 * 1024, .end = 36 * 1024 * 1024, .permissions = .{ .writable = false } },
         .{ .start = 64 * 1024 * 1024, .end = 96 * 1024 * 1024, .permissions = .{ .force_4k = true } },
@@ -335,22 +321,22 @@ test "EFI ELF transition planning equals final native geometry with merged immut
 test "EFI planning malformed extents preserve caller output and unallocated descriptors stay native" {
     const state = cache_policy.MtrrState{ .physical_bits = 40, .default_type = cache_policy.MTRR_ENABLED | 6 };
     const cache = try cache_policy.ValidatedMtrrView.init(&state);
-    const entries = [_]efi_handoff.MmapEntry{.{ .base = 0, .length = sparse.HUGE_PAGE_BYTES, .kind = 1, .firmware_type = 7 }};
+    const entries = [_]MemoryMapEntry{.{ .base = 0, .length = sparse.HUGE_PAGE_BYTES, .kind = .available, .firmware_type = 7 }};
     const expected = sparse.Counts{ .used_pages = 71, .leaf_4k = 72, .leaf_2m = 73, .leaf_1g = 74 };
     var counts = expected;
     var image = countFixtureImage();
     image.segments[0].mem_size = std.math.maxInt(u64);
-    try std.testing.expectError(error.AddressOverflow, countForModeInto(.native_high, image, &entries, cache, 64 * 1024 * 1024, null, &counts));
+    try std.testing.expectError(error.AddressOverflow, countInto(image, &entries, cache, 64 * 1024 * 1024, null, &counts));
     try std.testing.expectEqualDeep(expected, counts);
     image = countFixtureImage();
-    try std.testing.expectError(error.AddressOverflow, countForModeInto(.native_high, image, &entries, cache, std.math.maxInt(u64), null, &counts));
+    try std.testing.expectError(error.AddressOverflow, countInto(image, &entries, cache, std.math.maxInt(u64), null, &counts));
     try std.testing.expectEqualDeep(expected, counts);
     image.segment_count = efi_elf.MAX_LOAD_SEGMENTS + 1;
-    try std.testing.expectError(error.InvalidPhysicalRange, countForModeInto(.native_high, image, &entries, cache, 64 * 1024 * 1024, null, &counts));
+    try std.testing.expectError(error.InvalidPhysicalRange, countInto(image, &entries, cache, 64 * 1024 * 1024, null, &counts));
     try std.testing.expectEqualDeep(expected, counts);
-    var descriptors: [1]efi_handoff.MmapEntry = undefined;
+    var descriptors: [1]MemoryMapEntry = undefined;
     var count: usize = 0;
-    try appendMemoryDescriptor(&descriptors, &count, 0x100000, 0x800000, 1, 7, 8, null);
+    try appendMemoryDescriptor(&descriptors, &count, 0x100000, 0x800000, .available, 7, 8, null);
     try std.testing.expectEqual(@as(usize, 1), count);
-    try std.testing.expectEqualDeep(efi_handoff.MmapEntry{ .base = 0x100000, .length = 0x800000, .kind = 1, .firmware_type = 7, .attributes = 8 }, descriptors[0]);
+    try std.testing.expectEqualDeep(MemoryMapEntry{ .base = 0x100000, .length = 0x800000, .kind = .available, .firmware_type = 7, .attributes = 8 }, descriptors[0]);
 }

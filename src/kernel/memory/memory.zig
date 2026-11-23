@@ -104,17 +104,14 @@ fn alignUp(addr: usize, alignment: usize) usize {
 
 pub fn heapPhysicalStartAddress() usize {
     const info = boot_handoff.capturedInfo() orelse @panic("missing EFI heap handoff");
-    const image = info.boot_image orelse @panic("missing EFI heap reservation");
-    return @intCast(image.heap_base);
+    return @intCast(info.image.heap_base);
 }
 
 pub fn heapStartAddress() usize {
     if (!early_heap_admitted) {
         const info = boot_handoff.capturedInfo() orelse @panic("missing EFI heap handoff");
-        const map = boot_handoff.capturedMemoryMap(info) orelse @panic("missing EFI memory authority");
         const cache = @import("../../arch/cache_policy.zig").admittedMtrrView() catch @panic("missing admitted cache policy");
-        const info_address = boot_handoff.capturedInfoAddress() orelse @panic("missing EFI handoff extent");
-        @import("firmware_memory_map.zig").validateBootOwnedRanges(map, info_address, info, kernelPhysicalStartAddress(), kernelPhysicalEndAddress(), cache) catch
+        @import("firmware_memory_map.zig").validateBootOwnedRanges(info, kernelPhysicalStartAddress(), kernelPhysicalEndAddress(), cache) catch
             @panic("invalid native boot memory ownership");
         early_heap_admitted = true;
     }

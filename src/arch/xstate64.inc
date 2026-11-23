@@ -61,9 +61,10 @@
 #endif
 .endm
 
-// Stack images may occupy an address last used by XRSTORS but overwritten
-// after unwinding. Full XSAVE prevents modified-state optimization from omitting
-// bytes in that ephemeral storage; persistent user images remain XSAVES-owned.
+// Kernel-origin interrupt stack images may occupy an address last used by
+// XRSTORS but overwritten after unwinding. Full XSAVE prevents modified-state
+// optimization from omitting bytes in that ephemeral storage; persistent user
+// images remain XSAVES-owned.
 .macro XSAVE_FULL_STATE pointer, prepared=0
     XSAVE_STATE \pointer, 1, \prepared
 .endm
@@ -108,9 +109,12 @@
 .extern zigos_initial_kernel_xstate
 /* r12 always points to the already-saved GP/return frame. Kernel entries
  * preserve their interrupted live SIMD state; user entries switch owners
- * before the first compiler-generated instruction. The user-origin path needs
- * kernel GS already active. Kernel-origin paths intentionally avoid GS, even
- * for early diagnostics or the model SWAPGS/return NMI window. */
+ * before the first compiler-generated instruction. Kernel code relies only on
+ * the SysV callee-saved FP controls, which never leave their defaults, so user
+ * entries load the constant init image rather than a saved kernel image. The
+ * user-origin path needs kernel GS already active. Kernel-origin paths
+ * intentionally avoid GS, even for early diagnostics or the model
+ * SWAPGS/return NMI window. */
 .macro ENTER_KERNEL_XSTATE frame_cs
     cli
     subq $XSTATE_STACK_BYTES, %rsp
@@ -127,9 +131,7 @@
     # The prepared owner has TS clear and a CPU-bound PKE mode. Avoid
     # serializing control-register instructions on every native operation.
     XSAVE_STATE %r13, 0, 1
-    movq %gs:CPU_KERNEL_XSTATE, %r13
-    testq %r13, %r13
-    jz .Lmissing_xstate\@
+    leaq zigos_initial_kernel_xstate(%rip), %r13
     XRSTOR_FULL_STATE %r13, 1
     jmp .Lkernel_xstate_ready\@
 .Lsave_kernel_xstate\@:

@@ -15,7 +15,6 @@ const task_runtime = @import("task/task_runtime.zig");
 const storage_volume = @import("storage/storage_volume.zig");
 const cpu_baseline = @import("../arch/cpu_baseline.zig");
 const cpu_identity = @import("../kernel/cpu_identity.zig");
-const x86 = @import("../arch/x86.zig");
 
 pub const generated_from_typed_idl = true;
 
@@ -23,7 +22,6 @@ pub const Floor = struct {
     canonical_47_bit_user: bool,
     u64_user_stacks: bool,
     image_2m_pages: bool,
-    owned_xstate: bool,
     register_fred_syscalls: bool,
     rings_only_ipc: bool,
     yield_plus_rings: bool,
@@ -33,7 +31,6 @@ pub const Floor = struct {
     userspace_gop_dataplane: bool,
     eight_address_spaces: bool,
     checkpoint_only_cold_load: bool,
-    fred_only_traps: bool,
     trusted_cpu_identity: bool,
 };
 
@@ -43,8 +40,7 @@ pub const floor: Floor = .{
     .u64_user_stacks = task_runtime.UserStackByteLength == u64,
     .image_2m_pages = userspace_layout.USES_2M_IMAGE_PAGES and
         userspace_layout.image_start % userspace_layout.huge_page_size == 0,
-    .owned_xstate = x86.OWNED_XSTATE,
-    .register_fred_syscalls = syscall_surface.REGISTER_FRED_SYSCALLS and cpu_baseline.FRED_ONLY_TRAPS,
+    .register_fred_syscalls = syscall_surface.REGISTER_FRED_SYSCALLS,
     .rings_only_ipc = ipc_ring.DATA_PLANE_USES_SEALED_RINGS and
         endpoint.RINGS_ONLY_DATAPLANE and
         endpoint.AUTO_ATTACHES_DATA_RINGS and
@@ -76,7 +72,6 @@ pub const floor: Floor = .{
         storage_volume.SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD and
         storage_volume.USES_CHECKPOINT_ONLY_COLD_LOAD and
         storage_volume.COMPACTS_IN_BACKGROUND,
-    .fred_only_traps = cpu_baseline.FRED_ONLY_TRAPS,
     .trusted_cpu_identity = cpu_baseline.REQUIRES_RDPID and cpu_identity.USES_RDPID,
 };
 

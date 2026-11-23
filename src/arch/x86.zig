@@ -16,6 +16,14 @@ pub inline fn stiHlt() void {
     asm volatile ("sti; hlt" ::: .{ .memory = true });
 }
 
+// Fail closed on a violated privileged-control invariant. Unlike
+// `unreachable`, this survives ReleaseFast and never becomes an assumption.
+pub fn haltFatal() noreturn {
+    @branchHint(.cold);
+    cli();
+    while (true) hlt();
+}
+
 pub inline fn interruptsEnabled() bool {
     const flags = asm volatile ("pushfq; pop %[flags]"
         : [flags] "=r" (-> usize),
@@ -46,25 +54,11 @@ pub inline fn outw(port: u16, value: u16) void {
     );
 }
 
-pub inline fn inw(port: u16) u16 {
-    return asm volatile ("inw %[port], %[result]"
-        : [result] "={ax}" (-> u16),
-        : [port] "{dx}" (port),
-    );
-}
-
 pub inline fn outl(port: u16, value: u32) void {
     asm volatile ("outl %[value], %[port]"
         :
         : [value] "{eax}" (value),
           [port] "{dx}" (port),
-    );
-}
-
-pub inline fn inl(port: u16) u32 {
-    return asm volatile ("inl %[port], %[result]"
-        : [result] "={eax}" (-> u32),
-        : [port] "{dx}" (port),
     );
 }
 
@@ -131,7 +125,6 @@ pub const CR0_WP: usize = 1 << 16;
 pub const CR0_PG: usize = 1 << 31;
 pub const CR0_CD = cache_policy.CR0_CD;
 pub const CR0_NW = cache_policy.CR0_NW;
-pub const OWNED_XSTATE = true;
 
 pub const CR4_PGE: usize = 1 << 7;
 pub const CR4_OSFXSR: usize = 1 << 9;
@@ -161,10 +154,6 @@ const InvpcidDescriptor = extern struct {
 
 extern fn x86_invalidate_pcid(descriptor: *const InvpcidDescriptor) callconv(.c) void;
 extern fn x86_invalidate_all(descriptor: *const InvpcidDescriptor) callconv(.c) void;
-extern fn x86_allow_supervisor_user_memory() callconv(.c) void;
-extern fn x86_forbid_supervisor_user_memory() callconv(.c) void;
-extern fn x86_write_xcr0(value: u64) callconv(.c) void;
-extern fn x86_read_xcr0() callconv(.c) u64;
 
 pub const EFER_MSR: u32 = 0xC000_0080;
 pub const EFER_SCE: u64 = 1 << 0;
@@ -189,7 +178,6 @@ pub const IA32_FRED_RSP2_MSR: u32 = 0x1CE;
 pub const IA32_FRED_RSP3_MSR: u32 = 0x1CF;
 pub const IA32_FRED_STKLVLS_MSR: u32 = 0x1D0;
 pub const IA32_FRED_CONFIG_MSR: u32 = 0x1D4;
-pub const FRED_CONFIG_ENTRY_ALIGN: u64 = 4096;
 pub const FRED_STACK_ALIGNMENT: usize = 64;
 const FRED_DOUBLE_FAULT_STACK_LEVELS: u64 = @as(u64, 3) << (2 * 8);
 
@@ -220,7 +208,14 @@ pub inline fn readCr0() usize {
     );
 }
 
-inline fn cacheFeatureFlags() u32 {
+pub const CpuidResult = struct {
+    eax: u32,
+    ebx: u32,
+    ecx: u32,
+    edx: u32,
+};
+
+pub inline fn cpuid(leaf: u32, subleaf: u32) CpuidResult {
     var eax: u32 = undefined;
     var ebx: u32 = undefined;
     var ecx: u32 = undefined;
@@ -230,14 +225,14 @@ inline fn cacheFeatureFlags() u32 {
           [ebx] "={ebx}" (ebx),
           [ecx] "={ecx}" (ecx),
           [edx] "={edx}" (edx),
-        : [leaf] "{eax}" (@as(u32, 1)),
-          [subleaf] "{ecx}" (@as(u32, 0)),
-        : .{ .memory = true });
-    return edx;
+        : [leaf] "{eax}" (leaf),
+          [subleaf] "{ecx}" (subleaf),
+    );
+    return .{ .eax = eax, .ebx = ebx, .ecx = ecx, .edx = edx };
 }
 
 pub inline fn readPat() ?u64 {
-    if (cacheFeatureFlags() & cache_policy.CPUID_PAT == 0) return null;
+    if (cpuid(1, 0).edx & cache_policy.CPUID_PAT == 0) return null;
     return readMsr(IA32_PAT_MSR);
 }
 
@@ -249,29 +244,8 @@ pub inline fn readBootstrapCacheState() cache_policy.BootstrapState {
 // MTRR interpretation remains separate from PAT selection. These gated reads
 // expose firmware state without changing package-shared cache configuration.
 pub inline fn readMtrrCapabilities() ?u64 {
-    if (cacheFeatureFlags() & (1 << 12) == 0) return null;
+    if (cpuid(1, 0).edx & (1 << 12) == 0) return null;
     return readMsr(IA32_MTRR_CAP_MSR);
-}
-
-pub inline fn readMtrrDefaultType() ?u64 {
-    if (cacheFeatureFlags() & (1 << 12) == 0) return null;
-    return readMsr(IA32_MTRR_DEFAULT_TYPE_MSR);
-}
-
-inline fn cacheCpuIdEax(leaf: u32) u32 {
-    var eax: u32 = undefined;
-    var ebx: u32 = undefined;
-    var ecx: u32 = undefined;
-    var edx: u32 = undefined;
-    asm volatile ("cpuid"
-        : [eax] "={eax}" (eax),
-          [ebx] "={ebx}" (ebx),
-          [ecx] "={ecx}" (ecx),
-          [edx] "={edx}" (edx),
-        : [leaf] "{eax}" (leaf),
-          [subleaf] "{ecx}" (@as(u32, 0)),
-        : .{ .memory = true });
-    return eax;
 }
 
 // Fill caller-owned bounded storage. No large error-union snapshot is copied
@@ -282,8 +256,8 @@ pub inline fn readMtrrStateInto(state: *cache_policy.MtrrState) cache_policy.Mtr
     // Reject before any unimplemented pair is addressed. Future variable
     // counts need an explicit bounded contract rather than partial admission.
     if (count > cache_policy.MAX_VARIABLE_MTRRS) return error.UnsupportedVariableMtrrCount;
-    if (cacheCpuIdEax(0x8000_0000) < 0x8000_0008) return error.UnsupportedPhysicalAddressWidth;
-    const physical_bits: u8 = @truncate(cacheCpuIdEax(0x8000_0008));
+    if (cpuid(0x8000_0000, 0).eax < 0x8000_0008) return error.UnsupportedPhysicalAddressWidth;
+    const physical_bits: u8 = @truncate(cpuid(0x8000_0008, 0).eax);
     if (physical_bits < 32 or physical_bits > 52) return error.UnsupportedPhysicalAddressWidth;
     @memset(@import("std").mem.asBytes(state), 0);
     state.physical_bits = physical_bits;
@@ -321,10 +295,6 @@ pub inline fn taskSwitched() bool {
     return (readCr0() & CR0_TS) != 0;
 }
 
-pub inline fn setTaskSwitched() void {
-    writeCr0(readCr0() | CR0_TS);
-}
-
 pub inline fn clearTaskSwitched() void {
     writeCr0(readCr0() & ~CR0_TS);
 }
@@ -348,10 +318,6 @@ pub fn pcidCr3Value(page_table_root: usize, pcid: u16, preserve_translations: bo
     return page_table_root |
         @as(usize, pcid) |
         (if (preserve_translations) CR3_NO_FLUSH else 0);
-}
-
-pub inline fn writeCr3WithPcid(page_table_root: usize, pcid: u16, preserve_translations: bool) void {
-    writeCr3(pcidCr3Value(page_table_root, pcid, preserve_translations) orelse unreachable);
 }
 
 pub inline fn invalidatePcid(pcid: u16) void {
@@ -394,7 +360,7 @@ pub inline fn writeCr4(value: usize) void {
 }
 
 pub inline fn enableProcessContextIdentifiers() void {
-    if ((readCr3() & CR3_PCID_MASK) != 0) unreachable;
+    if ((readCr3() & CR3_PCID_MASK) != 0) haltFatal();
     writeCr4(readCr4() | CR4_PCIDE);
 }
 
@@ -410,23 +376,13 @@ pub inline fn supervisorAccessPreventionEnabled() bool {
     return (readCr4() & CR4_SMAP) != 0;
 }
 
+// The memory clobbers keep user accesses inside the STAC/CLAC window.
 pub inline fn allowSupervisorUserMemory() void {
-    x86_allow_supervisor_user_memory();
+    asm volatile ("stac" ::: .{ .memory = true });
 }
 
 pub inline fn forbidSupervisorUserMemory() void {
-    x86_forbid_supervisor_user_memory();
-}
-
-pub fn enableSse() void {
-    var cr0 = readCr0();
-    cr0 &= ~CR0_EM;
-    cr0 |= CR0_MP;
-    writeCr0(cr0);
-
-    writeCr4(readCr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
-
-    asm volatile ("fninit");
+    asm volatile ("clac" ::: .{ .memory = true });
 }
 
 pub fn enableXsaves() void {
@@ -453,11 +409,22 @@ pub fn cetEnabled() bool {
         (readMsr(IA32_S_CET_MSR) & CET_ENDBR_EN) != 0;
 }
 
-extern fn x86_wrpkru(value: u32) callconv(.c) void;
-
 pub fn wrpkru(value: u32) void {
     if (!pkuEnabled()) return;
-    x86_wrpkru(value);
+    asm volatile (".byte 0x0f, 0x01, 0xef" // wrpkru
+        :
+        : [value] "{eax}" (value),
+          [ecx] "{ecx}" (@as(u32, 0)),
+          [edx] "{edx}" (@as(u32, 0)),
+        : .{ .memory = true });
+}
+
+// Requires CR4.PKE; callers check their published entry mode first.
+pub inline fn rdpkru() u32 {
+    return asm volatile (".byte 0x0f, 0x01, 0xee" // rdpkru
+        : [value] "={eax}" (-> u32),
+        : [ecx] "{ecx}" (@as(u32, 0)),
+        : .{ .rdx = true });
 }
 
 pub fn pkruAllowKeys(key: u4) u32 {
@@ -526,14 +493,13 @@ pub fn lassEnabled() bool {
     return (readCr4() & CR4_LASS) != 0;
 }
 
+// fred64.S fixes the 4 KiB entry alignment and the CPL0 entry at +256 when
+// it is assembled.
 extern fn zigos_fred_entry() callconv(.c) void;
-extern fn zigos_fred_kernel_entry() callconv(.c) void;
 
 pub fn enableFred(kernel_stack_top: usize, double_fault_stack_top: usize) void {
-    if (!validFredStackTop(kernel_stack_top) or !validFredStackTop(double_fault_stack_top)) unreachable;
+    if (!validFredStackTop(kernel_stack_top) or !validFredStackTop(double_fault_stack_top)) haltFatal();
     const entry = @intFromPtr(&zigos_fred_entry);
-    if ((entry & (FRED_CONFIG_ENTRY_ALIGN - 1)) != 0) unreachable;
-    if (@intFromPtr(&zigos_fred_kernel_entry) != entry + 256) unreachable;
     writeMsr(IA32_FRED_RSP0_MSR, kernel_stack_top);
     writeMsr(IA32_FRED_RSP1_MSR, kernel_stack_top);
     writeMsr(IA32_FRED_RSP2_MSR, kernel_stack_top);
@@ -582,7 +548,7 @@ pub inline fn updateFredStack(kernel_stack_top: usize) void {
 }
 
 pub inline fn updateFredStackWith(kernel_stack_top: usize, hardware: anytype) void {
-    if (!validFredStackTop(kernel_stack_top)) unreachable;
+    if (!validFredStackTop(kernel_stack_top)) haltFatal();
     hardware.writeMsr(IA32_FRED_RSP0_MSR, kernel_stack_top);
     hardware.writeMsr(IA32_FRED_RSP1_MSR, kernel_stack_top);
     hardware.writeMsr(IA32_FRED_RSP2_MSR, kernel_stack_top);
@@ -593,11 +559,23 @@ pub inline fn validFredStackTop(stack_top: usize) bool {
 }
 
 pub fn writeXcr0(value: u64) void {
-    x86_write_xcr0(value);
+    asm volatile (".byte 0x0f, 0x01, 0xd1" // xsetbv
+        :
+        : [low] "{eax}" (@as(u32, @truncate(value))),
+          [high] "{edx}" (@as(u32, @truncate(value >> 32))),
+          [index] "{ecx}" (@as(u32, 0)),
+        : .{ .memory = true });
 }
 
 pub fn readXcr0() u64 {
-    return x86_read_xcr0();
+    var low: u32 = undefined;
+    var high: u32 = undefined;
+    asm volatile (".byte 0x0f, 0x01, 0xd0" // xgetbv
+        : [low] "={eax}" (low),
+          [high] "={edx}" (high),
+        : [index] "{ecx}" (@as(u32, 0)),
+    );
+    return (@as(u64, high) << 32) | low;
 }
 
 test "PCID CR3 composition preserves an aligned page-table root" {
@@ -616,9 +594,15 @@ test "PCID CR3 composition preserves an aligned page-table root" {
 // RDSEED64, CPUID.7.0:EBX[18], with CF checked independently of the data.
 // Intel DRNG Software Implementation Guide rev. 2.2, sections 5.1 and 5.3:
 // https://cdrdv2-public.intel.com/864722/drng-software-implementation-guide.pdf
-extern fn x86_rdseed64(out: *u64) callconv(.c) u8;
-
 pub fn rdseed64() ?u64 {
     var value: u64 = undefined;
-    return if (x86_rdseed64(&value) != 0) value else null;
+    var ready: u8 = undefined;
+    asm volatile (
+        \\.byte 0x48, 0x0f, 0xc7, 0xf8
+        \\setc %[ready]
+        : [value] "={rax}" (value),
+          [ready] "=r" (ready),
+        :
+        : .{ .cc = true });
+    return if (ready != 0) value else null;
 }

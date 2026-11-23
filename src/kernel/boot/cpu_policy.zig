@@ -53,10 +53,6 @@ pub const AdmissionPolicy = struct {
         };
     }
 
-    pub fn featureMode(self: AdmissionPolicy) cpu_features.FeatureMode {
-        return if (self.model_request.enabled()) .explicit_model else .hardware;
-    }
-
     pub fn resolveFeatures(self: AdmissionPolicy, raw_features: baseline.Features) baseline.Features {
         var resolved = raw_features;
         resolved.tsc_frequency_hz = self.model_request.resolveTscFrequency(raw_features.tsc_frequency_hz);
@@ -65,9 +61,25 @@ pub const AdmissionPolicy = struct {
 
     pub fn firstMissing(self: AdmissionPolicy, raw_features: baseline.Features) ?baseline.MissingFeature {
         const resolved = self.resolveFeatures(raw_features);
-        if (cpu_features.firstMissingForEnablement(resolved, self.process_context_mode, self.cet_mode, self.featureMode())) |missing| {
-            return missing;
+        // Only the complete explicit model request waives the controls it
+        // replaces with software policy; hardware admission requires them all.
+        var required = resolved;
+        if (self.model_request.enabled()) {
+            if (self.process_context_mode == .software_flush) {
+                required.pcid = true;
+                required.invpcid = true;
+            }
+            if (self.cet_mode == .deferred) {
+                required.cet_ibt = true;
+                required.cet_ss = true;
+            }
+            required.lass = true;
+            required.fred = true;
+            required.lkgs = true;
+            required.tsc_deadline = true;
+            required.invariant_tsc = true;
         }
+        if (baseline.firstMissing(required)) |missing| return missing;
         // Explicit model authority may waive unavailable controls on the BSP,
         // but cannot downgrade controls the BSP selected for all CPUs.
         if (self.hardware_lass and !resolved.lass) return .lass;
@@ -151,10 +163,6 @@ test "admission captures complete model authority before selecting software cont
         const policy = AdmissionPolicy.init(features, request);
         try std.testing.expectEqualDeep(request, policy.model_request);
         try std.testing.expectEqual(
-            @as(cpu_features.FeatureMode, if (flags == 7) .explicit_model else .hardware),
-            policy.featureMode(),
-        );
-        try std.testing.expectEqual(
             @as(cpu_features.ProcessContextMode, if (flags == 7) .software_flush else .hardware_pcid),
             policy.process_context_mode,
         );
@@ -183,7 +191,7 @@ test "hardware BSP and AP admission share the complete mandatory feature floor" 
     const complete = baseline.completeFeatures();
     const policy = AdmissionPolicy.init(complete, .{});
     try std.testing.expectEqual(@as(?baseline.MissingFeature, null), policy.firstMissing(complete));
-    inline for ([_]baseline.MissingFeature{ .cpuid, .sse2, .long_mode, .sse3, .ssse3, .sse4_1, .sse4_2, .popcnt, .cx16, .lahf_sahf, .avx, .avx2, .f16c, .fma, .movbe, .bmi1, .bmi2, .lzcnt, .aes, .pclmul, .sha, .ymm_state, .syscall, .nx, .smep, .smap, .umip, .pge, .pcid, .invpcid, .x2apic, .xsave, .xsaves, .cet_ibt, .cet_ss, .lass, .fred, .lkgs, .pages_1g, .rdseed, .rdpid }) |required| {
+    inline for ([_]baseline.MissingFeature{ .syscall, .nx, .smep, .smap, .umip, .pge, .pcid, .invpcid, .x2apic, .xsaves, .cet_ibt, .cet_ss, .lass, .fred, .lkgs, .pages_1g, .rdseed, .rdpid }) |required| {
         var missing = complete;
         @field(missing, @tagName(required)) = false;
         try std.testing.expectEqual(@as(?baseline.MissingFeature, required), policy.firstMissing(missing));
@@ -199,14 +207,14 @@ test "hardware BSP and AP admission share the complete mandatory feature floor" 
     }
 }
 
-test "explicit model APs retain every real compiler and native instruction requirement" {
+test "explicit model APs retain every privileged and native instruction requirement" {
     const complete = baseline.completeFeatures();
     const policy = AdmissionPolicy.init(complete, .{
         .model_inventory = true,
         .software_cpu_fallback = true,
         .tsc_frequency_hz = QEMU_TSC_FREQUENCY_HZ,
     });
-    inline for ([_]baseline.MissingFeature{ .cpuid, .sse2, .long_mode, .sse3, .ssse3, .sse4_1, .sse4_2, .popcnt, .cx16, .lahf_sahf, .avx, .avx2, .f16c, .fma, .movbe, .bmi1, .bmi2, .lzcnt, .aes, .pclmul, .sha, .ymm_state, .syscall, .nx, .smep, .smap, .umip, .pge, .x2apic, .xsave, .xsaves, .pages_1g, .rdseed, .rdpid }) |required| {
+    inline for ([_]baseline.MissingFeature{ .syscall, .nx, .smep, .smap, .umip, .pge, .x2apic, .xsaves, .pages_1g, .rdseed, .rdpid }) |required| {
         var missing = complete;
         @field(missing, @tagName(required)) = false;
         try std.testing.expectEqual(@as(?baseline.MissingFeature, required), policy.firstMissing(missing));

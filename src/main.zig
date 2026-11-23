@@ -15,6 +15,8 @@ const crypto_hash = @import("native/core/crypto_hash.zig");
 const config = @import("kernel/config.zig");
 const embedded_userspace_archive = @import("userspace_archive");
 const syscall_cpu = @import("kernel/interrupts/syscall64.zig");
+const cpu_identity = @import("kernel/cpu_identity.zig");
+const native_entry = @import("arch/x86_64/native_entry_state.zig");
 const endpoint_syscalls = @import("native/kernel_api/endpoint_syscalls.zig");
 const syscall_surface = @import("native/kernel_api/syscall_surface.zig");
 const userspace_executor = @import("native/task/userspace_executor.zig");
@@ -47,13 +49,12 @@ pub fn bootDescriptorDigest() [32]u8 {
 
 pub fn bootImageAuthenticated() bool {
     const info = @import("kernel/boot/handoff.zig").capturedInfo() orelse return false;
-    const image = info.boot_image orelse return false;
-    return image.firmware_authenticated;
+    return info.image.firmware_authenticated;
 }
 
 pub fn bootImageDigest() ![32]u8 {
     const info = @import("kernel/boot/handoff.zig").capturedInfo() orelse return error.MissingBootImage;
-    const image = info.boot_image orelse return error.MissingBootImage;
+    const image = info.image;
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "embedded-kernel-elf", &image.kernel_digest);
     crypto_hash.updateBytes(&hasher, "embedded-command-line", &image.cmdline_digest);
@@ -84,7 +85,10 @@ export fn kernel_main() void {
 
 export fn syscall_handler(context: *anyopaque) callconv(.c) void {
     const frame: *isr.Registers = @ptrCast(@alignCast(context));
-    if (!@import("kernel/smp.zig").isRuntimeOwner()) {
+    // One RDPID identity selects this CPU's native entry record for the
+    // ownership check, the published kernel port and the caller task.
+    const cpu = cpu_identity.currentIndex();
+    if (cpu != @import("kernel/smp.zig").runtimeOwnerCpu()) {
         if (!userspace_executor.remoteSyscall(frame)) {
             frame.eax = @backingInt(abi.SyscallStatus.unavailable);
             frame.edx = 0;
@@ -92,14 +96,17 @@ export fn syscall_handler(context: *anyopaque) callconv(.c) void {
         }
         return;
     }
-    const port = currentKernelPort() orelse {
+    const entry = native_entry.stateForCpu(cpu);
+    const port_addr = entry.kernel_port;
+    if (port_addr == 0) {
         frame.eax = @backingInt(abi.SyscallStatus.unavailable);
         frame.edx = 0;
         frame.r10 = @backingInt(abi.DenialReason.none);
         return;
-    };
+    }
+    const port: *component_port.KernelPort = @ptrFromInt(port_addr);
     const caller_task_id = blk: {
-        const published = syscall_cpu.currentActiveTaskId();
+        const published = entry.active_task_id;
         if (published != 0) break :blk published;
         break :blk userspace_executor.activeTaskId();
     };
@@ -116,12 +123,6 @@ export fn syscall_handler(context: *anyopaque) callconv(.c) void {
     frame.eax = @backingInt(result.status);
     frame.edx = result.bytes_written;
     frame.r10 = @backingInt(result.denial_reason);
-}
-
-fn currentKernelPort() ?*component_port.KernelPort {
-    const published = syscall_cpu.currentKernelPortAddr();
-    if (published != 0) return @ptrFromInt(published);
-    return null;
 }
 
 comptime {

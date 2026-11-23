@@ -62,14 +62,6 @@ pub fn shouldInitSmp() bool {
     return true;
 }
 
-pub fn shouldInitNetworkStack() bool {
-    return false;
-}
-
-pub fn shouldInitRuntimeExtras() bool {
-    return false;
-}
-
 pub fn shouldExitOnCompletion() bool {
     return bootProfile() == .benchmark or bootProfile() == .recovery;
 }

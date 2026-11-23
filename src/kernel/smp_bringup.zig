@@ -144,14 +144,9 @@ fn apEntry(cpu_index: u64) callconv(.c) noreturn {
     x86.invalidatePage(startup_page_physical);
     gdt.initCpu(index);
     gdt.setKernelStack(bringup_cpus[index].kernel_stack_top);
-    cpu_features.enableModernFeatures(
-        features,
-        admission_policy.process_context_mode,
-        admission_policy.cet_mode,
-        admission_policy.featureMode(),
-    );
+    cpu_features.enableModernFeatures(features, admission_policy.process_context_mode, admission_policy.cet_mode);
     const syscall64 = @import("interrupts/syscall64.zig");
-    syscall64.initApplicationProcessor(index, bringup_cpus[index].kernel_stack_top);
+    syscall64.initApplicationProcessor(index, bringup_cpus[index].kernel_stack_top, admission_policy.hardware_fred);
     // Interrupt stubs require the published GS state and owned xstate, even
     // for an NMI while ordinary interrupts remain disabled.
     idt.init();

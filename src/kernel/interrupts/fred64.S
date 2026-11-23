@@ -1,5 +1,4 @@
 .section .text
-.balign 4096
 
 .extern isrHandler
 .extern syscall_handler
@@ -10,14 +9,18 @@
 .equ FRAME_CS, 160
 .equ FRAME_INT_NO, 136
 
+    # IA32_FRED_CONFIG requires a 4 KiB aligned entry; the section alignment
+    # carries this through the link.
+.balign 4096
 .global zigos_fred_entry
 .type zigos_fred_entry, @function
 zigos_fred_entry:
     .byte 0xf3, 0x0f, 0x1e, 0xfa
     jmp .fred_common_entry
 
-    # FRED selects base+256 for events that originated in CPL0.
-.balign 256
+    # FRED selects base+256 for events that originated in CPL0. The assembler
+    # rejects user-entry code that would push this entry past that offset.
+.org zigos_fred_entry + 256, 0xcc
 .global zigos_fred_kernel_entry
 .type zigos_fred_kernel_entry, @function
 zigos_fred_kernel_entry:

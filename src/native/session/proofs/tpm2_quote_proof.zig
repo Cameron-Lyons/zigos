@@ -76,7 +76,7 @@ pub fn run(manager: anytype, io: anytype) !void {
         _ = try storage.checkpointDurable();
     }
     const info = handoff.capturedInfo() orelse return error.MissingBootInfo;
-    const measured = info.boot_tpm orelse return error.MissingBootMeasurement;
+    const measured = info.tpmLog() orelse return error.MissingBootMeasurement;
     var evidence = quote.Evidence{};
     var nonce: tpm.Key = undefined;
     // Exceed the device's loaded object/session capacity to prove cleanup.

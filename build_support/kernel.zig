@@ -27,20 +27,13 @@ pub const BootImage = struct {
 
 // Firmware can authenticate one PE image containing the exact kernel and command
 // line. Neither boot-volume files nor LoadedImage options can replace them.
+// Every probe boots through this same loader, so it only admits upper-half
+// images linked by src/arch/x86_64/linker.ld.
 pub fn addEfiImage(b: *std.Build, kernel: std.Build.LazyPath, cmdline: std.Build.LazyPath) *std.Build.Step.Compile {
-    return addEfiImageWithMode(b, kernel, cmdline, false);
-}
-
-fn addEfiImageWithMode(
-    b: *std.Build,
-    kernel: std.Build.LazyPath,
-    cmdline: std.Build.LazyPath,
-    isolated_low_proof: bool,
-) *std.Build.Step.Compile {
     const files = b.addWriteFiles();
     _ = files.addCopyFile(kernel, "kernel.elf");
     _ = files.addCopyFile(cmdline, "cmdline.txt");
-    const payload = files.add("payload.zig", b.fmt("pub const isolated_low_proof = {};\npub const kernel = @embedFile(\"kernel.elf\");\npub const cmdline = @embedFile(\"cmdline.txt\");\n", .{isolated_low_proof}));
+    const payload = files.add("payload.zig", "pub const kernel = @embedFile(\"kernel.elf\");\npub const cmdline = @embedFile(\"cmdline.txt\");\n");
     // Firmware entry and its CPUID preflight must execute before the native
     // floor is established. Keep this image on the architectural baseline.
     // Shipped media and every QEMU proof boot the same ReleaseSmall loader.
@@ -155,13 +148,14 @@ pub fn addNativeCryptoCheck(
         .red_zone = false,
     }));
     module.addAssemblyFile(b.path("src/tests/host/xstate_roundtrip64.S"));
+    configureKernelModuleGraph(module);
     const probe = b.addObject(.{
         .name = "native-crypto-probe",
         .root_module = module,
     });
     probe.bundle_compiler_rt = true;
-    const linked_probe = addLldLink(b, "src/arch/x86_64/native_crypto_linker.ld", "native-crypto-probe.elf", &.{probe.getEmittedBin()}, .{});
-    const image = addBootMedia(b, "native-crypto", addEfiImageWithMode(b, linked_probe, b.path(shared.qemu_cmdline_path), true));
+    const linked_probe = addLldLink(b, kernel_linker_script, "native-crypto-probe.elf", &.{probe.getEmittedBin()}, .{});
+    const image = addBootMedia(b, "native-crypto", addEfiImage(b, linked_probe, b.path(shared.qemu_cmdline_path)));
 
     // The dedicated checker requires every proof marker in execution order,
     // including default FP controls and complete x87/SSE/YMM owner round trips.
@@ -239,8 +233,6 @@ const UpperHalfProbeKind = enum { entry, mapping_xstate };
 const upper_half_probe_assembly = [_][]const u8{
     "src/boot/boot_x86_64.S",
     "src/arch/x86/invpcid.S",
-    "src/arch/x86/xsaves.S",
-    "src/arch/x86/user_access.S",
     "src/kernel/interrupts/gdt_flush64.S",
     "src/kernel/smp/ap_trampoline.S",
     "src/arch/x86_64/high_half_ipi_probe.S",
@@ -269,7 +261,6 @@ fn addUpperHalfProbeImage(b: *std.Build, optimize: std.lang.Optimize, kind: Uppe
 const ap_cache_probe_assembly = [_][]const u8{
     "src/boot/boot_x86_64.S",
     "src/arch/x86/invpcid.S",
-    "src/arch/x86/user_access.S",
     "src/kernel/interrupts/gdt_flush64.S",
 };
 
@@ -438,10 +429,6 @@ fn addKernelAssemblyObject(b: *std.Build, target: std.Build.ResolvedTarget, opti
     for ([_][]const u8{
         "src/boot/boot_x86_64.S",
         "src/arch/x86/invpcid.S",
-        "src/arch/x86/rdseed.S",
-        "src/arch/x86/wrpkru.S",
-        "src/arch/x86/user_access.S",
-        "src/arch/x86/xsaves.S",
         "src/kernel/interrupts/interrupt64.S",
         "src/kernel/interrupts/syscall64.S",
         "src/kernel/interrupts/fred64.S",

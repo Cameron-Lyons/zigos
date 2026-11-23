@@ -321,9 +321,7 @@ extern fn isr116() callconv(.c) void;
 // than maximum-capacity reservations. This reads receipts before the final
 // hierarchy exists and does not use its later per-CPU root tracker.
 pub fn proveBootArenaSizing(transition_cr3: u64) void {
-    const info = handoff.capturedInfo() orelse proof.fail("initial arena handoff");
-    const arenas = info.boot_paging orelse proof.fail("initial arena receipts");
-    arenas.validate() catch proof.fail("initial arena receipt bounds");
+    const arenas = (handoff.capturedInfo() orelse proof.fail("initial arena handoff")).paging;
     if (transition_cr3 != arenas.transition_base or
         arenas.transition_pages == paging_info.MAX_ARENA_PAGES or
         arenas.final_pages == paging_info.MAX_ARENA_PAGES) proof.fail("initial small arena allocation");
@@ -340,8 +338,7 @@ pub fn proveBootArenaSizing(transition_cr3: u64) void {
 // retirement. Every table emitted by the sparse builder is in its live prefix.
 pub fn proveBootArenaReclamation(final_cr3: u64, instruction: usize, anchor: usize) void {
     if (x86.interruptsEnabled() or !paging.kernelAddressSpaceActive()) proof.fail("boot arena proof context");
-    const info = handoff.capturedInfo() orelse proof.fail("boot arena handoff");
-    const arenas = info.boot_paging orelse proof.fail("boot arena receipts");
+    const arenas = (handoff.capturedInfo() orelse proof.fail("boot arena handoff")).paging;
     const retired = paging.bootPagingArenaRetirement();
     if (retired.used_pages < 3 or retired.used_pages > arenas.final_pages or
         final_cr3 != arenas.final_base) proof.fail("boot arena retained prefix");
@@ -851,7 +848,6 @@ fn bindProofContinuation(index: u8) void {
     state.kernel_port = @intFromPtr(&cpus[index]);
     state.active_task_id = 0xfeed_0000_0000_1000 + @as(u64, index);
     state.userspace_xstate = @intFromPtr(&cpus[index].seed);
-    state.kernel_xstate = @intFromPtr(&cpus[index].restored);
     state.resume_rsp = cpus[index].stack_top - x86.FRED_STACK_ALIGNMENT;
     state.resume_rip = @intFromPtr(&apEntry) + @as(usize, index);
     state.resume_requested = 0x4000_1000 + @as(u32, index);
@@ -906,7 +902,6 @@ fn continuationMatches(index: u8, cleared: bool) bool {
         state.active_task_id == 0xfeed_0000_0000_1000 + @as(u64, index) and
         state.native_entry_modes == 0 and
         state.userspace_xstate == (if (cleared) @as(usize, 0) else @intFromPtr(&cpus[index].seed)) and
-        state.kernel_xstate == (if (cleared) @as(usize, 0) else @intFromPtr(&cpus[index].restored)) and
         state.resume_rsp == (if (cleared) @as(usize, 0) else cpus[index].stack_top - x86.FRED_STACK_ALIGNMENT) and
         state.resume_rip == (if (cleared) @as(usize, 0) else @intFromPtr(&apEntry) + @as(usize, index)) and
         state.resume_requested == (if (cleared) @as(u32, 0) else 0x4000_1000 + @as(u32, index));
@@ -940,7 +935,7 @@ fn verifyCurrentGs(index: u8, cleared: bool) bool {
         gsWord("kernel_stack_top") == state.kernel_stack_top and gsWord("user_stack_pointer") == state.user_stack_pointer and
         gsWord("kernel_port") == state.kernel_port and gsWord("active_task_id") == state.active_task_id and
         gsEntryModes() == 0 and gsWord("userspace_xstate") == state.userspace_xstate and
-        gsWord("kernel_xstate") == state.kernel_xstate and gsWord("resume_rsp") == state.resume_rsp and
+        gsWord("resume_rsp") == state.resume_rsp and
         gsWord("resume_rip") == state.resume_rip and gsResumeRequested() == state.resume_requested;
 }
 
@@ -2975,7 +2970,6 @@ fn holdBrokerRequest(index: u8) void {
     const entry = native_entry.current();
     entry.active_task_id = bound.identity.task_id;
     entry.userspace_xstate = @intFromPtr(&cpus[index].seed);
-    entry.kernel_xstate = @intFromPtr(&cpus[index].restored);
     entry.resume_rsp = cpus[index].stack_top - x86.FRED_STACK_ALIGNMENT;
     entry.resume_rip = @intFromPtr(&apEntry);
     entry.resume_requested = 0;
@@ -3092,7 +3086,7 @@ fn holdBrokerRequest(index: u8) void {
     if (!paging.kernelAddressSpaceActive() or x86.interruptsEnabled() or !runtime.execution.syscallIdle(ticket)) reject(index);
     native_entry.clearContinuation();
     entry.active_task_id = 0;
-    if (entry.userspace_xstate != 0 or entry.kernel_xstate != 0 or entry.resume_rsp != 0 or
+    if (entry.userspace_xstate != 0 or entry.resume_rsp != 0 or
         entry.resume_rip != 0 or entry.resume_requested != 0) reject(index);
     runtime.execution.acknowledgeOwnedRootReturn(ticket) catch reject(index);
     @atomicStore(u8, &cpus[index].broker_returned, 1, .release);
@@ -3138,7 +3132,7 @@ fn holdPrivateRoot(index: u8) void {
     native_entry.clearContinuation();
     const entry = native_entry.current();
     entry.active_task_id = 0;
-    if (entry.active_task_id != 0 or entry.userspace_xstate != 0 or entry.kernel_xstate != 0 or
+    if (entry.active_task_id != 0 or entry.userspace_xstate != 0 or
         entry.resume_rsp != 0 or entry.resume_rip != 0 or entry.resume_requested != 0) reject(index);
     runtime.execution.acknowledgeOwnedRootReturn(ticket) catch reject(index);
     @atomicStore(u32, &cpus[index].root_phase_completed, 2, .release);

@@ -64,14 +64,11 @@ pub const native_2026 = .{
         demand_paging.ISOLATES_REGIONS_BY_SPACE and
         demand_paging.RELEASES_REGIONS_WITH_SPACE and
         shared_memory.REGISTERS_DEMAND_PAGED_MAPPINGS,
-    .production_requires_hardware_fred = cpu_baseline.PRODUCTION_REQUIRES_HARDWARE_FRED,
-    .fred_only_traps = cpu_baseline.FRED_ONLY_TRAPS,
     .arc_scanout_by_handle = display_hw.PROGRAMS_SCANOUT_HANDLE and display_driver_task.ARC_SCANOUT_PREFERRED,
     .drops_gop_copies = !display_hw.COPIES_GOP_PIXELS,
     .canonical_47_bit_user = contract_2026.floor.canonical_47_bit_user,
     .u64_user_stacks = contract_2026.floor.u64_user_stacks,
     .image_2m_pages = contract_2026.floor.image_2m_pages,
-    .owned_xstate = contract_2026.floor.owned_xstate,
     .register_fred_syscalls = contract_2026.floor.register_fred_syscalls,
     .rings_only_ipc = contract_2026.floor.rings_only_ipc,
     .yield_plus_rings = contract_2026.floor.yield_plus_rings,

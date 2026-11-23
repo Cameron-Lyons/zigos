@@ -29,7 +29,6 @@ SECTIONS
     .rodata ALIGN(4K) : AT(ADDR(.rodata) - __kernel_image_bias)
     {
         __kernel_rodata_start = .;
-        *(.rodata.boot)
         *(.rodata)
         *(.rodata.cst*)
         *(.rodata.str*)

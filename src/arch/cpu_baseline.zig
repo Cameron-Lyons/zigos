@@ -17,7 +17,6 @@ const leaf1_ecx_x2apic: u32 = 1 << 21;
 const leaf1_ecx_tsc_deadline: u32 = 1 << 24;
 const leaf1_ecx_xsave: u32 = 1 << 26;
 const leaf1_edx_pge: u32 = 1 << 13;
-const leaf1_edx_sse2: u32 = 1 << 26;
 const leaf13_1_eax_xsaves: u32 = 1 << 3;
 const leaf7_ebx_smep: u32 = 1 << 7;
 const leaf7_ebx_bmi1: u32 = 1 << 3;
@@ -40,11 +39,9 @@ const extended1_ecx_lahf_sahf: u32 = 1 << 0;
 const extended1_ecx_lzcnt: u32 = 1 << 5;
 const extended1_edx_nx: u32 = 1 << 20;
 const extended1_edx_pages_1g: u32 = 1 << 26;
-const extended1_edx_long_mode: u32 = 1 << 29;
 const extended7_edx_invariant_tsc: u32 = 1 << 8;
 
 pub const Registers = struct {
-    cpuid_available: bool = false,
     max_basic_leaf: u32 = 0,
     leaf1_ecx: u32 = 0,
     leaf1_edx: u32 = 0,
@@ -67,14 +64,7 @@ pub const Registers = struct {
     extended7_edx: u32 = 0,
 };
 
-pub const REQUIRES_XSAVES = true;
 pub const REQUIRES_RDPID = true;
-pub const REQUIRES_CET = true;
-pub const REQUIRES_PKU = false;
-pub const REQUIRES_LASS = true;
-pub const REQUIRES_FRED = true;
-pub const PRODUCTION_REQUIRES_HARDWARE_FRED = true;
-pub const FRED_ONLY_TRAPS = true;
 
 pub const KernelAddressPartition = struct {
     instruction: usize,
@@ -151,8 +141,6 @@ test "LASS admission rejects the four-level canonical hole and lower half" {
 }
 
 pub const Features = struct {
-    cpuid: bool = false,
-    sse2: bool = false,
     sse3: bool = false,
     ssse3: bool = false,
     sse4_1: bool = false,
@@ -172,7 +160,6 @@ pub const Features = struct {
     pclmul: bool = false,
     sha: bool = false,
     ymm_state: bool = false,
-    long_mode: bool = false,
     syscall: bool = false,
     nx: bool = false,
     smep: bool = false,
@@ -199,8 +186,6 @@ pub const Features = struct {
 };
 
 pub const MissingFeature = enum {
-    cpuid,
-    sse2,
     sse3,
     ssse3,
     sse4_1,
@@ -220,7 +205,6 @@ pub const MissingFeature = enum {
     pclmul,
     sha,
     ymm_state,
-    long_mode,
     syscall,
     nx,
     smep,
@@ -245,11 +229,8 @@ pub const MissingFeature = enum {
 };
 
 pub fn decode(registers: Registers) Features {
-    if (!registers.cpuid_available) return .{};
-
-    var features = Features{ .cpuid = true };
+    var features = Features{};
     if (registers.max_basic_leaf >= 1) {
-        features.sse2 = (registers.leaf1_edx & leaf1_edx_sse2) != 0;
         features.sse3 = (registers.leaf1_ecx & leaf1_ecx_sse3) != 0;
         features.ssse3 = (registers.leaf1_ecx & leaf1_ecx_ssse3) != 0;
         features.sse4_1 = (registers.leaf1_ecx & leaf1_ecx_sse4_1) != 0;
@@ -302,7 +283,6 @@ pub fn decode(registers: Registers) Features {
         features.syscall = (registers.extended1_edx & extended1_edx_syscall) != 0;
         features.nx = (registers.extended1_edx & extended1_edx_nx) != 0;
         features.pages_1g = (registers.extended1_edx & extended1_edx_pages_1g) != 0;
-        features.long_mode = (registers.extended1_edx & extended1_edx_long_mode) != 0;
     }
     if (registers.max_extended_leaf >= 0x8000_0007) {
         features.invariant_tsc = (registers.extended7_edx & extended7_edx_invariant_tsc) != 0;
@@ -325,12 +305,12 @@ fn decodeTscFrequency(registers: Registers) u64 {
     return 0;
 }
 
-// This subset runs in baseline-compiled firmware code before generated native
-// instructions. It is also part of the kernel gate and is never modeled away.
+// The EFI stub runs this in baseline-compiled firmware code so a missing
+// compiler-floor feature is reported on the firmware console. Kernel and AP
+// entries enforce the same floor in ZIGOS_REQUIRE_NATIVE before any compiled
+// instruction, so the kernel gate below never repeats it. CPUID, SSE2 and long
+// mode are architectural in a UEFI x86-64 image.
 pub fn firstMissingCodegen(features: Features) ?MissingFeature {
-    if (!features.cpuid) return .cpuid;
-    if (!features.sse2) return .sse2;
-    if (!features.long_mode) return .long_mode;
     if (!features.sse3) return .sse3;
     if (!features.ssse3) return .ssse3;
     if (!features.sse4_1) return .sse4_1;
@@ -354,8 +334,9 @@ pub fn firstMissingCodegen(features: Features) ?MissingFeature {
     return null;
 }
 
+// Privileged, timer and task-state features that the assembly preflight does
+// not check.
 pub fn firstMissing(features: Features) ?MissingFeature {
-    if (firstMissingCodegen(features)) |missing| return missing;
     if (!features.syscall) return .syscall;
     if (!features.nx) return .nx;
     if (!features.smep) return .smep;
@@ -365,7 +346,6 @@ pub fn firstMissing(features: Features) ?MissingFeature {
     if (!features.pcid) return .pcid;
     if (!features.invpcid) return .invpcid;
     if (!features.x2apic) return .x2apic;
-    if (!features.xsave) return .xsave;
     if (!features.xsaves) return .xsaves;
     if (!features.cet_ibt) return .cet_ibt;
     if (!features.cet_ss) return .cet_ss;
@@ -387,8 +367,6 @@ pub fn completeFeatures() Features {
     return .{
         .rdseed = true,
         .rdpid = true,
-        .cpuid = true,
-        .sse2 = true,
         .sse3 = true,
         .ssse3 = true,
         .sse4_1 = true,
@@ -408,7 +386,6 @@ pub fn completeFeatures() Features {
         .pclmul = true,
         .sha = true,
         .ymm_state = true,
-        .long_mode = true,
         .syscall = true,
         .nx = true,
         .smep = true,
@@ -435,7 +412,6 @@ pub fn completeFeatures() Features {
 
 fn modernRegisters() Registers {
     return .{
-        .cpuid_available = true,
         .max_basic_leaf = 0x16,
         .leaf1_ecx = leaf1_ecx_pcid | leaf1_ecx_x2apic | leaf1_ecx_xsave | leaf1_ecx_tsc_deadline |
             leaf1_ecx_sse3 | leaf1_ecx_ssse3 | leaf1_ecx_sse4_1 | leaf1_ecx_sse4_2 | leaf1_ecx_popcnt | leaf1_ecx_cx16 |
@@ -444,7 +420,7 @@ fn modernRegisters() Registers {
         .leaf13_0_eax = 7,
         .leaf13_2_eax = 256,
         .leaf13_2_ebx = 576,
-        .leaf1_edx = leaf1_edx_sse2 | leaf1_edx_pge,
+        .leaf1_edx = leaf1_edx_pge,
         .leaf15_eax = 2,
         .leaf15_ebx = 200,
         .leaf15_ecx = 24_000_000,
@@ -456,7 +432,7 @@ fn modernRegisters() Registers {
         .leaf7_1_eax = leaf7_1_eax_lass | leaf7_1_eax_fred | leaf7_1_eax_lkgs,
         .max_extended_leaf = 0x8000_0007,
         .extended1_ecx = extended1_ecx_lahf_sahf | extended1_ecx_lzcnt,
-        .extended1_edx = extended1_edx_syscall | extended1_edx_nx | extended1_edx_pages_1g | extended1_edx_long_mode,
+        .extended1_edx = extended1_edx_syscall | extended1_edx_nx | extended1_edx_pages_1g,
         .extended7_edx = extended7_edx_invariant_tsc,
     };
 }
@@ -464,6 +440,7 @@ fn modernRegisters() Registers {
 test "decode recognizes the 2026 x86-64 baseline" {
     const features = decode(modernRegisters());
     try std.testing.expect(isSupported(features));
+    try std.testing.expectEqual(@as(?MissingFeature, null), firstMissingCodegen(features));
     try std.testing.expect(features.rdseed);
     try std.testing.expect(features.rdpid);
     try std.testing.expect(features.pcid);
@@ -482,7 +459,7 @@ test "codegen gate requires every real v3 crypto instruction and state feature" 
         var missing = completeFeatures();
         @field(missing, @tagName(required)) = false;
         try std.testing.expectEqual(@as(?MissingFeature, required), firstMissingCodegen(missing));
-        try std.testing.expectEqual(@as(?MissingFeature, required), firstMissing(missing));
+        try std.testing.expectEqual(@as(?MissingFeature, null), firstMissing(missing));
     }
     // Firmware admission checks codegen only; the kernel still checks security,
     // timer and task-state features before enabling privileged controls.
@@ -578,24 +555,17 @@ test "v2 decode respects advertised CPUID leaves and distinct feature bits" {
 test "RDPID decoding requires advertised CPUID leaf 7 and exactly ECX bit 22" {
     for ([_]u32{ 0, 1, 6 }) |max_basic_leaf| {
         try std.testing.expect(!decode(.{
-            .cpuid_available = true,
             .max_basic_leaf = max_basic_leaf,
             .leaf7_ecx = 0x0040_0000,
         }).rdpid);
     }
-    try std.testing.expect(!decode(.{
-        .max_basic_leaf = 7,
-        .leaf7_ecx = 0x0040_0000,
-    }).rdpid);
     // Leaf 7 subleaf zero advertises RDPID even without subleaf one.
     try std.testing.expect(decode(.{
-        .cpuid_available = true,
         .max_basic_leaf = 7,
         .leaf7_ecx = 0x0040_0000,
     }).rdpid);
     for ([_]u32{ 0x0020_0000, 0x0080_0000, 0x00a0_0000, 0xffbf_ffff }) |ecx| {
         try std.testing.expect(!decode(.{
-            .cpuid_available = true,
             .max_basic_leaf = 7,
             .leaf7_ebx = 0x0040_0000,
             .leaf7_ecx = ecx,
@@ -606,16 +576,12 @@ test "RDPID decoding requires advertised CPUID leaf 7 and exactly ECX bit 22" {
 
 test "decode ignores registers outside advertised CPUID ranges" {
     const features = decode(.{
-        .cpuid_available = true,
-        .leaf1_edx = leaf1_edx_sse2,
+        .leaf1_edx = leaf1_edx_pge,
         .leaf7_ebx = leaf7_ebx_smep | leaf7_ebx_smap | leaf7_ebx_rdseed,
         .leaf7_ecx = leaf7_ecx_umip,
-        .extended1_edx = extended1_edx_nx | extended1_edx_long_mode,
+        .extended1_edx = extended1_edx_nx | extended1_edx_syscall,
     });
 
-    try std.testing.expect(features.cpuid);
-    try std.testing.expect(!features.sse2);
-    try std.testing.expect(!features.long_mode);
     try std.testing.expect(!features.syscall);
     try std.testing.expect(!features.nx);
     try std.testing.expect(!features.smep);
@@ -640,12 +606,7 @@ test "decode ignores registers outside advertised CPUID ranges" {
 }
 
 test "baseline rejects every missing required feature" {
-    try std.testing.expectEqual(MissingFeature.cpuid, firstMissing(.{}).?);
-    try std.testing.expectEqual(MissingFeature.sse2, firstMissing(.{ .cpuid = true }).?);
-    try std.testing.expectEqual(MissingFeature.long_mode, firstMissing(.{
-        .cpuid = true,
-        .sse2 = true,
-    }).?);
+    try std.testing.expectEqual(MissingFeature.syscall, firstMissing(.{}).?);
     var missing_nx = completeFeatures();
     missing_nx.nx = false;
     try std.testing.expectEqual(MissingFeature.nx, firstMissing(missing_nx).?);

@@ -1,7 +1,6 @@
 pub const boot_start = "BOOT:START";
 pub const boot_profile_zigos_native = "BOOT:PROFILE:zigos_native";
 pub const boot_profile_recovery = "BOOT:PROFILE:recovery";
-pub const boot_profile_benchmark = "BOOT:PROFILE:benchmark";
 pub const kernel_role_production = "BOOT:ROLE:production";
 pub const identity_owner_attached = "ZIGOS:IDENTITY:OWNER:ATTACHED";
 pub const kernel_role_verification = "BOOT:ROLE:verification";
@@ -29,9 +28,7 @@ pub const smp_ready = "ZIGOS:SMP:READY";
 pub const kernel_wx_enforced = "ZIGOS:KERNEL:W_X:ENFORCED";
 
 pub const bench_start = "BENCH:START";
-pub const bench_summary_prefix = "BENCH:SUMMARY";
 pub const bench_pass = "BENCH:PASS";
-pub const bench_fail = "BENCH:FAIL";
 
 pub const recovery_start = "RECOVERY:START";
 pub const recovery_break_glass_audited = "RECOVERY:BREAK_GLASS:AUDITED";
@@ -190,8 +187,6 @@ pub const platform_health_checks_storage_rollback = "ZIGOS:PLATFORM:HEALTH_CHECK
 pub const platform_health_checks_network_rollback = "ZIGOS:PLATFORM:HEALTH_CHECKS:NETWORK_ROLLBACK";
 pub const platform_health_checks_ui_rollback = "ZIGOS:PLATFORM:HEALTH_CHECKS:UI_ROLLBACK";
 pub const platform_health_checks_promote_ok = "ZIGOS:PLATFORM:HEALTH_CHECKS:PROMOTE_OK";
-pub const platform_crash_record_persisted = "ZIGOS:PLATFORM:CRASH_RECORD:PERSISTED";
-pub const platform_update_rollback_power_cycle_ok = "ZIGOS:PLATFORM:UPDATE_ROLLBACK:POWER_CYCLE_OK";
 pub const platform_build_artifact_manifest_verified = "ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED";
 pub const platform_boot_descriptor_verified = "ZIGOS:PLATFORM:BOOT_DESCRIPTOR:VERIFIED";
 pub const platform_bootloader_measurement_tamper_rejected = "ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:TAMPER_REJECTED";

@@ -44,8 +44,7 @@ pub export fn kernel_main() callconv(.c) noreturn {
     const anchor_address = @intFromPtr(&image_anchor);
     const anchor_physical = address.imagePhysicalAddress(anchor_address) orelse fail("image LMA");
     if (address.imagePhysicalAddress(image_start).? != 32 * 1024 * 1024 or
-        anchor_physical < 32 * 1024 * 1024 or handoff.zigos_multiboot_magic != 0x36D7_6289 or
-        handoff.zigos_multiboot_info_addr == 0) fail("image LMA");
+        anchor_physical < 32 * 1024 * 1024 or handoff.zigos_boot_info_addr == 0) fail("image LMA");
     pass("IMAGE_LMA");
 
     // Exercise a compiled static pointer and the independent physical alias.

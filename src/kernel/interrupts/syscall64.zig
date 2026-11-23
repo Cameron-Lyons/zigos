@@ -3,8 +3,6 @@ const gdt = @import("gdt64.zig");
 const cpu_identity = @import("../cpu_identity.zig");
 const native_entry = @import("../../arch/x86_64/native_entry_state.zig");
 
-pub const FRED_ONLY_TRAPS = @import("../../arch/cpu_baseline.zig").FRED_ONLY_TRAPS;
-
 const ENTRY_PKU = native_entry.ENTRY_PKU;
 const ENTRY_FRED = native_entry.ENTRY_FRED;
 const ENTRY_READY = native_entry.ENTRY_READY;
@@ -30,24 +28,26 @@ const APIC_BASE_BSP: u64 = 1 << 8;
 extern fn zigos_syscall_entry() callconv(.c) void;
 extern var stack_top: u8;
 
-pub fn init() void {
+// `rdpid` is this CPU's admitted feature and `fred` the BSP-selected entry
+// mode that admission also required of every AP.
+pub fn init(rdpid: bool, fred: bool) void {
     const interrupts_enabled = x86.interruptsEnabled();
     x86.cli();
     // Firmware owns TSC_AUX until authenticated BSP setup. Do not select a
     // software owner slot using that inherited value before publishing CPU0.
-    if (!bootstrapIdentityWith(Hardware{})) haltInvalidStack();
+    if (!bootstrapIdentityWith(Hardware{}, rdpid)) haltInvalidStack();
     bindCpu(0, @intFromPtr(&stack_top));
-    enableNativeEntry(@intFromPtr(&stack_top));
+    enableNativeEntry(@intFromPtr(&stack_top), fred);
     if (!setKernelStack(@intFromPtr(&stack_top)) or !enabled()) haltInvalidStack();
     publishNativeEntryModes(0);
     if (interrupts_enabled) x86.sti();
 }
 
-pub fn initApplicationProcessor(cpu_index: u8, stack_top_value: usize) void {
+pub fn initApplicationProcessor(cpu_index: u8, stack_top_value: usize, fred: bool) void {
     const interrupts_enabled = x86.interruptsEnabled();
     x86.cli();
     bindCpu(cpu_index, stack_top_value);
-    enableNativeEntry(stack_top_value);
+    enableNativeEntry(stack_top_value, fred);
     if (!setKernelStack(stack_top_value) or !enabled()) haltInvalidStack();
     publishNativeEntryModes(cpu_index);
     if (interrupts_enabled) x86.sti();
@@ -67,8 +67,8 @@ pub fn enabled() bool {
 
 const StackBinding = enum { bound, rejected, failed };
 
-inline fn bootstrapIdentityWith(hardware: anytype) bool {
-    if (!hardware.supportsRdpid() or (hardware.readMsr(IA32_APIC_BASE_MSR) & APIC_BASE_BSP) == 0) return false;
+inline fn bootstrapIdentityWith(hardware: anytype, rdpid: bool) bool {
+    if (!rdpid or (hardware.readMsr(IA32_APIC_BASE_MSR) & APIC_BASE_BSP) == 0) return false;
     hardware.initializeLogicalCpu(0);
     return true;
 }
@@ -85,7 +85,7 @@ inline fn installKernelStack(stack_top_value: usize, hardware: anytype) StackBin
     if (!x86.validFredStackTop(stack_top_value) or
         !gdt.kernelStackOwnerIsLoaded(hardware.readGdt(), hardware.readTaskRegister()) or
         hardware.readMsr(x86.IA32_GS_BASE_MSR) != @intFromPtr(state) or
-        state.userspace_xstate != 0 or state.kernel_xstate != 0 or
+        state.userspace_xstate != 0 or
         state.resume_rsp != 0 or state.resume_rip != 0 or state.resume_requested != 0 or
         (publishedFredMode(state) != null and state.native_entry_modes != entryModesFromCr4(cr4)))
         return .rejected;
@@ -135,9 +135,6 @@ inline fn haltInvalidStack() noreturn {
 }
 
 const Hardware = struct {
-    pub inline fn supportsRdpid(_: @This()) bool {
-        return @import("../../arch/cpu_features.zig").detect().rdpid;
-    }
     pub inline fn initializeLogicalCpu(_: @This(), index: u8) void {
         cpu_identity.initialize(index);
     }
@@ -194,25 +191,16 @@ pub fn clearKernelPort() void {
     native_entry.current().kernel_port = 0;
 }
 
-pub fn currentKernelPortAddr() usize {
-    return native_entry.current().kernel_port;
-}
-
 pub fn setActiveTaskId(task_id: u64) void {
     native_entry.current().active_task_id = task_id;
 }
 
-pub fn currentActiveTaskId() u64 {
-    return native_entry.current().active_task_id;
-}
-
-fn enableNativeEntry(kernel_stack_top: usize) void {
+fn enableNativeEntry(kernel_stack_top: usize, fred: bool) void {
     // FRED reads STAR directly on ring transitions and requires SCE for SYSCALL.
     x86.writeMsr(x86.IA32_STAR_MSR, SYSCALL_STAR_VALUE);
     x86.writeMsr(x86.EFER_MSR, x86.readMsr(x86.EFER_MSR) | x86.EFER_SCE);
     if (!syscallSelectorsEnabled()) haltInvalidStack();
-    const features = @import("../../arch/cpu_features.zig").detect();
-    if (features.fred and features.lkgs) {
+    if (fred) {
         x86.enableFred(kernel_stack_top, gdt.doubleFaultStackTop());
         if (!x86.fredEnabled(kernel_stack_top, gdt.doubleFaultStackTop())) haltInvalidStack();
         return;
@@ -242,9 +230,8 @@ fn bindCpu(cpu_index: u8, stack_top_value: usize) void {
         cpu_identity.currentIndex() != cpu_index or
         !gdt.kernelStackOwnerIsLoaded((Hardware{}).readGdt(), (Hardware{}).readTaskRegister())) haltInvalidStack();
     const state = native_entry.current();
-    if (state.native_entry_modes != 0 or state.userspace_xstate != 0 or state.kernel_xstate != 0 or
+    if (state.native_entry_modes != 0 or state.userspace_xstate != 0 or
         state.resume_rsp != 0 or state.resume_rip != 0 or state.resume_requested != 0) haltInvalidStack();
-    if (!@import("../../arch/cpu_features.zig").detect().rdpid) @panic("RDPID is required for native CPU identity");
     const state_addr = @intFromPtr(native_entry.initializeCpu(cpu_index, 0));
     x86.writeMsr(x86.IA32_GS_BASE_MSR, state_addr);
     // ERETU (or the explicit validation path's SWAPGS) installs the user base.
@@ -308,16 +295,16 @@ test "native entry modes remain bound to each initialized logical CPU" {
         try std.testing.expectEqual((index & 1) != 0, (native_entry.current().native_entry_modes & ENTRY_PKU) != 0);
         try std.testing.expectEqual(@as(u8, 0), native_entry.current().native_entry_modes & ~(ENTRY_READY | ENTRY_PKU | ENTRY_FRED));
         try std.testing.expectEqual(@as(usize, 0xFFFF_8000_1000_0000 + @as(usize, index) * 4096), native_entry.current().kernel_stack_top);
-        try std.testing.expectEqual(@as(usize, 0xFFFF_8000_2000_0000 + @as(usize, index) * 64), currentKernelPortAddr());
-        try std.testing.expectEqual(@as(u64, 100 + index), currentActiveTaskId());
+        try std.testing.expectEqual(@as(usize, 0xFFFF_8000_2000_0000 + @as(usize, index) * 64), native_entry.current().kernel_port);
+        try std.testing.expectEqual(@as(u64, 100 + index), native_entry.current().active_task_id);
         clearKernelPort();
-        try std.testing.expectEqual(@as(usize, 0), currentKernelPortAddr());
+        try std.testing.expectEqual(@as(usize, 0), native_entry.current().kernel_port);
     }
     // Task ownership survives every independently cleared per-CPU port slot.
     for (0..cpu_identity.MAX_CPUS) |index| {
         cpu_identity.setIndexForTest(@intCast(index));
-        try std.testing.expectEqual(@as(usize, 0), currentKernelPortAddr());
-        try std.testing.expectEqual(@as(u64, 100 + index), currentActiveTaskId());
+        try std.testing.expectEqual(@as(usize, 0), native_entry.current().kernel_port);
+        try std.testing.expectEqual(@as(u64, 100 + index), native_entry.current().active_task_id);
     }
 }
 
@@ -487,7 +474,7 @@ test "cold stack binding rejects foreign unloaded active and malformed owners be
     const fixture = StackTestFixture.install();
     defer fixture.restore();
     var model = StackTestModel{};
-    const Attack = enum { low, noncanonical, unaligned, gdtr, limit, tr, gs, unloaded, ist, userspace_xstate, kernel_xstate, resume_rsp, resume_rip, resume_requested, mode, config, levels, emergency };
+    const Attack = enum { low, noncanonical, unaligned, gdtr, limit, tr, gs, unloaded, ist, userspace_xstate, resume_rsp, resume_rip, resume_requested, mode, config, levels, emergency };
     for (0..cpu_identity.MAX_CPUS) |index| {
         cpu_identity.setIndexForTest(@intCast(index));
         inline for (@typeInfo(Attack).@"enum".field_values) |value| {
@@ -507,7 +494,6 @@ test "cold stack binding rejects foreign unloaded active and malformed owners be
                 .unloaded => gdt.Testing.initialized(@intCast(index), false),
                 .ist => gdt.Testing.tss(@intCast(index)).ist1 ^= 64,
                 .userspace_xstate => native_entry.current().userspace_xstate = 64,
-                .kernel_xstate => native_entry.current().kernel_xstate = 64,
                 .resume_rsp => native_entry.current().resume_rsp = 64,
                 .resume_rip => native_entry.current().resume_rip = 64,
                 .resume_requested => native_entry.current().resume_requested = 1,
@@ -616,9 +602,6 @@ test "cold BSP identity authentication replaces inherited firmware AUX only afte
         inherited_aux: u32 = 0xFFFF_FFFF,
         reads: usize = 0,
         writes: usize = 0,
-        pub fn supportsRdpid(self: *@This()) bool {
-            return self.rdpid;
-        }
         pub fn readMsr(self: *@This(), msr: u32) u64 {
             std.debug.assert(msr == IA32_APIC_BASE_MSR);
             self.reads += 1;
@@ -636,7 +619,7 @@ test "cold BSP identity authentication replaces inherited firmware AUX only afte
             for ([_]bool{ false, true }) |bsp| {
                 cpu_identity.setIndexForTest(15);
                 var model = Model{ .rdpid = rdpid, .bsp = bsp, .inherited_aux = firmware_aux };
-                try std.testing.expectEqual(rdpid and bsp, bootstrapIdentityWith(&model));
+                try std.testing.expectEqual(rdpid and bsp, bootstrapIdentityWith(&model, rdpid));
                 try std.testing.expectEqual(@as(usize, if (rdpid) 1 else 0), model.reads);
                 try std.testing.expectEqual(@as(usize, if (rdpid and bsp) 1 else 0), model.writes);
                 try std.testing.expectEqual(if (rdpid and bsp) @as(u32, 0) else firmware_aux, model.inherited_aux);

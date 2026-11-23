@@ -390,7 +390,7 @@ const RuntimeMarker = enum(u5) {
     evidence_source,
     board_sku,
     smbios_sku,
-    multiboot_memory_map,
+    memory_map,
     acpi_xsdt,
     acpi_madt,
     acpi_fadt,
@@ -590,7 +590,7 @@ pub fn captureEarlyBootEvidence() void {
     facts.real_target_sku = false;
     if (handoff.capturedInfo()) |info| {
         facts.multiboot_handoff = true;
-        if (handoff.capturedMemoryMapSummary(info)) |summary| {
+        if (handoff.summarizeMemoryMap(info.memoryMap()) catch null) |summary| {
             facts.memory_map = summary.hasUsableMemory();
             if (summary.hasUsableMemory()) {
                 const max_usable: u64 = std.math.maxInt(usize);
@@ -602,9 +602,9 @@ pub fn captureEarlyBootEvidence() void {
         // Firmware system/configuration tables may occupy boot-services pages.
         // Snapshot the validated identity before the frame allocator reclaims
         // them; later platform probes consume only this kernel-owned result.
-        if (handoff.efi64SystemTableAddress(info)) |address| {
-            smbios.captureTargetSku(address);
-            facts.real_target_sku = smbios.efiSystemTableContainsTargetSku(address, smbios.NUC15CRSU7_SKU);
+        if (info.efi_system_table != 0) {
+            smbios.captureTargetSku(info.efi_system_table);
+            facts.real_target_sku = smbios.efiSystemTableContainsTargetSku(info.efi_system_table, smbios.NUC15CRSU7_SKU);
         }
     }
 
@@ -867,7 +867,7 @@ fn firmwareSupportsTelemetry(firmware: fadt.FixedAcpiDescription) bool {
 
 fn capturedRsdp() ?acpi.Rsdp {
     const info = handoff.capturedInfo() orelse return null;
-    const bytes = handoff.capturedAcpi2Rsdp(info) orelse return null;
+    const bytes = info.acpiRsdp() orelse return null;
     return acpi.parseRsdp(bytes) catch null;
 }
 
@@ -973,7 +973,7 @@ fn printNewMarkers() void {
 fn runtimeMarkerReady(marker: RuntimeMarker) bool {
     return switch (marker) {
         .evidence_source, .board_sku, .smbios_sku => true,
-        .multiboot_memory_map => facts.multiboot_handoff and facts.memory_map,
+        .memory_map => facts.multiboot_handoff and facts.memory_map,
         .acpi_xsdt => facts.acpi_xsdt,
         .acpi_madt => facts.acpi_madt,
         .acpi_fadt => facts.acpi_fadt,

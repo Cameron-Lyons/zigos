@@ -16,11 +16,10 @@ pub const State = extern struct {
     native_entry_modes: u8 = 0,
     _mode_padding: [7]u8 = @splat(0),
     userspace_xstate: usize = 0,
-    kernel_xstate: usize = 0,
     resume_rsp: usize = 0,
     resume_rip: usize = 0,
     resume_requested: u32 = 0,
-    _reserved: [52]u8 = @splat(0),
+    _reserved: [60]u8 = @splat(0),
 };
 
 var states: [cpu_identity.MAX_CPUS]State = @splat(.{});
@@ -44,48 +43,22 @@ pub fn initializeCpu(index: u8, stack_top: usize) *volatile State {
 pub fn clearContinuation() void {
     const state = current();
     state.userspace_xstate = 0;
-    state.kernel_xstate = 0;
     state.resume_rsp = 0;
     state.resume_rip = 0;
     state.resume_requested = 0;
 }
 
+// native_entry_state.inc is the assembly view of this layout. Every image that
+// links native entry fails to compile if a field, size or mode bit drifts.
 comptime {
-    if (@sizeOf(usize) != 8 or @sizeOf(State) != 128 or @alignOf(State) != 128 or
-        @offsetOf(State, "kernel_stack_top") != 0 or @offsetOf(State, "user_stack_pointer") != 8 or
-        @offsetOf(State, "kernel_port") != 16 or @offsetOf(State, "active_task_id") != 24 or
-        @offsetOf(State, "native_entry_modes") != 32 or @offsetOf(State, "userspace_xstate") != 40 or
-        @offsetOf(State, "kernel_xstate") != 48 or @offsetOf(State, "resume_rsp") != 56 or
-        @offsetOf(State, "resume_rip") != 64 or @offsetOf(State, "resume_requested") != 72)
-    {
-        @compileError("native entry GS state must preserve its x86-64 assembly ABI");
-    }
-}
-
-fn assemblyConstant(name: []const u8) !usize {
-    var lines = std.mem.tokenizeScalar(u8, @embedFile("native_entry_state.inc"), '\n');
-    var value: ?usize = null;
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (!std.mem.startsWith(u8, trimmed, "#define CPU_")) continue;
-        var definition = std.mem.tokenizeAny(u8, trimmed[8..], " \t");
-        if (!std.mem.eql(u8, definition.next() orelse return error.InvalidAssemblyConstant, name)) continue;
-        if (value != null) return error.DuplicateAssemblyConstant;
-        value = try std.fmt.parseInt(usize, definition.next() orelse return error.InvalidAssemblyConstant, 0);
-        if (definition.next() != null) return error.InvalidAssemblyConstant;
-    }
-    return value orelse error.MissingAssemblyConstant;
-}
-
-test "native entry assembly constants match every GS field and immutable mode bit" {
-    inline for (.{
+    @setEvalBranchQuota(200_000);
+    for (.{
         .{ "CPU_KERNEL_STACK_TOP", @offsetOf(State, "kernel_stack_top") },
         .{ "CPU_USER_STACK_POINTER", @offsetOf(State, "user_stack_pointer") },
         .{ "CPU_KERNEL_PORT", @offsetOf(State, "kernel_port") },
         .{ "CPU_ACTIVE_TASK_ID", @offsetOf(State, "active_task_id") },
         .{ "CPU_NATIVE_ENTRY_MODES", @offsetOf(State, "native_entry_modes") },
         .{ "CPU_USERSPACE_XSTATE", @offsetOf(State, "userspace_xstate") },
-        .{ "CPU_KERNEL_XSTATE", @offsetOf(State, "kernel_xstate") },
         .{ "CPU_RESUME_RSP", @offsetOf(State, "resume_rsp") },
         .{ "CPU_RESUME_RIP", @offsetOf(State, "resume_rip") },
         .{ "CPU_RESUME_REQUESTED", @offsetOf(State, "resume_requested") },
@@ -94,7 +67,24 @@ test "native entry assembly constants match every GS field and immutable mode bi
         .{ "CPU_ENTRY_PKU", ENTRY_PKU },
         .{ "CPU_ENTRY_FRED", ENTRY_FRED },
         .{ "CPU_ENTRY_READY", ENTRY_READY },
-    }) |item| try std.testing.expectEqual(@as(usize, item[1]), try assemblyConstant(item[0]));
+    }) |item| {
+        if (assemblyConstant(item[0]) != item[1])
+            @compileError("native_entry_state.inc " ++ item[0] ++ " does not match State");
+    }
+}
+
+fn assemblyConstant(comptime name: []const u8) usize {
+    var value: ?usize = null;
+    var lines = std.mem.tokenizeScalar(u8, @embedFile("native_entry_state.inc"), '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeAny(u8, line, " \t\r");
+        if (!std.mem.eql(u8, fields.next() orelse continue, "#define")) continue;
+        if (!std.mem.eql(u8, fields.next() orelse continue, name)) continue;
+        const text = fields.next() orelse @compileError(name ++ " has no value");
+        if (value != null or fields.next() != null) @compileError(name ++ " is not one plain definition");
+        value = std.fmt.parseInt(usize, text, 0) catch @compileError(name ++ " is not an integer");
+    }
+    return value orelse @compileError("native_entry_state.inc does not define " ++ name);
 }
 
 test "all native CPU slots select and clear independent continuations in adversarial order" {
@@ -118,7 +108,6 @@ test "all native CPU slots select and clear independent continuations in adversa
         try std.testing.expectEqualDeep(expected[index], current().*);
         clearContinuation();
         expected[index].userspace_xstate = 0;
-        expected[index].kernel_xstate = 0;
         expected[index].resume_rsp = 0;
         expected[index].resume_rip = 0;
         expected[index].resume_requested = 0;
@@ -165,7 +154,6 @@ fn canaryState(index: usize) State {
         .native_entry_modes = ENTRY_READY | @as(u8, @intCast(index & 3)),
         ._mode_padding = @splat(@intCast(index + 1)),
         .userspace_xstate = 0xffff_8000_3000_0000 + index * 4096,
-        .kernel_xstate = 0xffff_8000_4000_0000 + index * 4096,
         .resume_rsp = 0xffff_8000_5000_0000 + index * 4096,
         .resume_rip = 0xffff_ffff_8000_0000 + index * 64,
         .resume_requested = @intCast(1000 + index),

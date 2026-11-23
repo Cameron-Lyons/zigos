@@ -961,19 +961,13 @@
         "src/native/session/service_graph_builder.zig",
         "src/native/session/session_service_bootstrap.zig",
         "src/native/session/service_path_proofs.zig",
-        "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
-        "src/kernel/boot/init/devices.zig",
-        "src/kernel/boot/init/data_plane_boundary.zig"
+        "src/kernel/boot/init/devices.zig"
       ],
       "negative_tests": [
         {
           "file": "src/native/session/service_path_proofs.zig",
           "name": "booted userspace service paths prove sync driver isolation and resource accounting"
-        },
-        {
-          "file": "src/kernel/boot/init/data_plane_boundary.zig",
-          "name": "kernel device init boundary rejects excluded subsystem data planes"
         }
       ]
     },
@@ -1095,10 +1089,8 @@
         "src/native/drivers/network_driver_task.zig",
         "src/native/session/session_service_bootstrap.zig",
         "src/native/session/service_path_proofs.zig",
-        "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
-        "src/kernel/boot/init/devices.zig",
-        "src/kernel/boot/init/data_plane_boundary.zig"
+        "src/kernel/boot/init/devices.zig"
       ],
       "negative_tests": [
         {
@@ -1108,10 +1100,6 @@
         {
           "file": "src/native/kernel_api/syscall_surface.zig",
           "name": "syscall surface binds the caller from the trap, not the request header"
-        },
-        {
-          "file": "src/kernel/boot/init/data_plane_boundary.zig",
-          "name": "kernel device init boundary rejects excluded subsystem data planes"
         }
       ]
     },
@@ -1167,6 +1155,7 @@
         "src/boot/efi_stub.zig",
         "src/boot/efi_elf.zig",
         "src/boot/image_info.zig",
+        "src/boot/boot_info.zig",
         "tools/host/qemu.zig",
         "src/boot/efi_tcg2.zig",
         "src/boot/tcg_event_log.zig",
@@ -1200,8 +1189,8 @@
           "name": "EFI authentication requires complete enforcing firmware state"
         },
         {
-          "file": "src/kernel/boot/multiboot2.zig",
-          "name": "EFI image provenance rejects duplicates and invalid encoded claims"
+          "file": "src/boot/boot_info.zig",
+          "name": "EFI image provenance rejects zero digests and an invalid authentication byte"
         },
         {
           "file": "src/native/sync/sync_state_store.zig",
@@ -1232,8 +1221,8 @@
           "name": "PCR read rejects substituted banks, extra selections and malformed replies"
         },
         {
-          "file": "src/kernel/boot/multiboot2.zig",
-          "name": "EFI TPM log handoff rejects duplicate and malformed measurement tags"
+          "file": "src/boot/tpm_info.zig",
+          "name": "EFI TPM log handoff rejects malformed copied log receipts"
         },
         {
           "file": "src/kernel/memory/firmware_memory_map.zig",
@@ -1412,8 +1401,7 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/recovery_environment.zig",
-        "src/kernel/boot/recovery_suite.zig",
-        "src/kernel/boot/profiles/recovery.zig"
+        "src/kernel/boot/recovery_suite.zig"
       ],
       "negative_tests": [
         {
@@ -2037,10 +2025,8 @@
         "src/native/session/service_path_proofs.zig",
         "src/native/drivers/bootstrap_driver_port.zig",
         "src/native/drivers/network_driver_task.zig",
-        "src/kernel/net/ethernet.zig",
         "src/kernel/net/link_port.zig",
-        "src/kernel/boot/init/devices.zig",
-        "src/kernel/boot/init/data_plane_boundary.zig"
+        "src/kernel/boot/init/devices.zig"
       ],
       "negative_tests": [
         {
@@ -2054,10 +2040,6 @@
         {
           "file": "src/tests/spec/drivers_storage_sync.zig",
           "name": "publishedDriversActivateScopedTransports"
-        },
-        {
-          "file": "src/kernel/boot/init/data_plane_boundary.zig",
-          "name": "kernel device init boundary rejects excluded subsystem data planes"
         }
       ]
     },

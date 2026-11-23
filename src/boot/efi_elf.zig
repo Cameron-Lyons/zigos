@@ -1,10 +1,5 @@
 const std = @import("std");
-const endian = @import("bytes.zig");
 const kernel_address = @import("../arch/kernel_address.zig");
-
-const readU16 = endian.readU16Le;
-const readU32 = endian.readU32Le;
-const readU64 = endian.readU64Le;
 
 pub const EI_MAG = [_]u8{ 0x7F, 'E', 'L', 'F' };
 pub const ELFCLASS64: u8 = 2;
@@ -18,8 +13,6 @@ pub const PF_R: u32 = 4;
 pub const MAX_LOAD_SEGMENTS: usize = 8;
 pub const MAX_LOAD_END: u64 = kernel_address.image_physical_limit;
 pub const IMAGE_VIRTUAL_BIAS: u64 = kernel_address.image_virtual_bias;
-
-pub const Mode = enum { native_high, isolated_low_proof };
 
 pub const Error = error{
     Truncated,
@@ -51,10 +44,6 @@ pub const Image = struct {
 };
 
 pub fn parse(bytes: []const u8) Error!Image {
-    return parseForMode(bytes, .native_high);
-}
-
-pub fn parseForMode(bytes: []const u8, mode: Mode) Error!Image {
     if (bytes.len < 64) return error.Truncated;
     if (!std.mem.eql(u8, bytes[0..4], &EI_MAG)) return error.InvalidMagic;
     if (bytes[4] != ELFCLASS64 or bytes[5] != ELFDATA2LSB or bytes[6] != 1) return error.UnsupportedClass;
@@ -62,8 +51,7 @@ pub fn parseForMode(bytes: []const u8, mode: Mode) Error!Image {
     if (readU16(bytes[18..20]) != EM_X86_64 or readU32(bytes[20..24]) != 1 or readU16(bytes[52..54]) != 64) return error.UnsupportedMachine;
 
     var image = Image{ .entry = readU64(bytes[24..32]) };
-    const virtual_bias: u64 = if (mode == .native_high) IMAGE_VIRTUAL_BIAS else 0;
-    if (image.entry < virtual_bias or image.entry - virtual_bias >= MAX_LOAD_END) return error.InvalidSegment;
+    if (image.entry < IMAGE_VIRTUAL_BIAS or image.entry - IMAGE_VIRTUAL_BIAS >= MAX_LOAD_END) return error.InvalidSegment;
 
     const phoff = readU64(bytes[32..40]);
     const phentsize = readU16(bytes[54..56]);
@@ -89,7 +77,7 @@ pub fn parseForMode(bytes: []const u8, mode: Mode) Error!Image {
         const flags = readU32(header[4..8]);
         const alignment = readU64(header[48..56]);
         const phys = paddr;
-        if (phys >= MAX_LOAD_END or vaddr != virtual_bias + phys or phys % 4096 != 0 or mem_size == 0 or
+        if (phys >= MAX_LOAD_END or vaddr != IMAGE_VIRTUAL_BIAS + phys or phys % 4096 != 0 or mem_size == 0 or
             (flags != PF_R and flags != (PF_R | PF_X) and flags != (PF_R | PF_W)))
             return error.InvalidSegment;
         if (alignment > 1 and (!std.math.isPowerOfTwo(alignment) or vaddr % alignment != file_offset % alignment)) return error.InvalidSegment;
@@ -224,10 +212,6 @@ test "ELF64 parser checks every segment permission even after admitting entry" {
         var bytes = testSplitImage();
         writeU32(bytes[68..72], flags);
         try std.testing.expectError(error.InvalidSegment, parse(&bytes));
-        // The same proof policy applies to explicit isolated low images.
-        writeU64(bytes[24..32], 0x100000);
-        for (0..3) |index| writeU64(bytes[80 + index * 56 ..][0..8], 0x100000 + index * 4096);
-        try std.testing.expectError(error.InvalidSegment, parseForMode(&bytes, .isolated_low_proof));
     }
 }
 
@@ -273,15 +257,11 @@ test "ELF64 native loader admits only the fixed upper image alias and bounded ph
     try std.testing.expectError(error.InvalidSegment, parse(&bytes));
 }
 
-test "ELF64 low image admission requires the explicit isolated proof mode" {
+test "ELF64 loader rejects a low identity-linked image" {
     var bytes = testImage();
-    try std.testing.expectError(error.InvalidSegment, parseForMode(&bytes, .isolated_low_proof));
     writeU64(bytes[24..32], 0x100000);
     writeU64(bytes[80..88], 0x100000);
     try std.testing.expectError(error.InvalidSegment, parse(&bytes));
-    const proof = try parseForMode(&bytes, .isolated_low_proof);
-    try std.testing.expectEqual(@as(u64, 0x100000), proof.entry);
-    try std.testing.expectEqual(@as(u64, 0x100000), proof.segments[0].phys_addr);
 }
 
 test "ELF64 parser enforces declared alignment before allocation" {
@@ -337,14 +317,26 @@ fn testSplitImage() [512]u8 {
     return bytes;
 }
 
-fn writeU16(bytes: []u8, value: u16) void {
-    endian.writeU16Le(bytes, value);
+fn readU16(bytes: *const [2]u8) u16 {
+    return std.mem.readInt(u16, bytes, .little);
 }
 
-fn writeU32(bytes: []u8, value: u32) void {
-    endian.writeU32Le(bytes, value);
+fn readU32(bytes: *const [4]u8) u32 {
+    return std.mem.readInt(u32, bytes, .little);
 }
 
-fn writeU64(bytes: []u8, value: u64) void {
-    endian.writeU64Le(bytes, value);
+fn readU64(bytes: *const [8]u8) u64 {
+    return std.mem.readInt(u64, bytes, .little);
+}
+
+fn writeU16(bytes: *[2]u8, value: u16) void {
+    std.mem.writeInt(u16, bytes, value, .little);
+}
+
+fn writeU32(bytes: *[4]u8, value: u32) void {
+    std.mem.writeInt(u32, bytes, value, .little);
+}
+
+fn writeU64(bytes: *[8]u8, value: u64) void {
+    std.mem.writeInt(u64, bytes, value, .little);
 }

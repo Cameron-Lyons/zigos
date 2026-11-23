@@ -19,14 +19,11 @@ const kernel_crash_record = @import("../../kernel/platform/crash_record.zig");
 const kernel_acpi = @import("../../kernel/platform/acpi.zig");
 const kernel_apic = @import("../../kernel/platform/apic.zig");
 const kernel_dmar = @import("../../kernel/platform/dmar.zig");
-const kernel_data_plane_boundary = @import("../../kernel/boot/init/data_plane_boundary.zig");
 const kernel_fadt = @import("../../kernel/platform/fadt.zig");
 const kernel_framebuffer = @import("../../kernel/platform/framebuffer.zig");
 const kernel_handoff = @import("../../kernel/boot/handoff.zig");
 const kernel_hardware_proof = @import("../../kernel/platform/hardware_proof.zig");
 const kernel_intel_vtd = @import("../../kernel/platform/intel_vtd.zig");
-const kernel_ethernet = @import("../../kernel/net/ethernet.zig");
-const kernel_link_port = @import("../../kernel/net/link_port.zig");
 const kernel_mmio_windows = @import("../../kernel/memory/mmio_windows.zig");
 const kernel_paging = @import("../../kernel/memory/paging64.zig");
 const kernel_virtual_layout = @import("../../kernel/memory/virtual_layout.zig");
@@ -56,7 +53,6 @@ const typed_component_abi = @import("../../native/services/typed_component_abi.z
 
 const COMPOSITOR_RENDER_BUFFER_BYTES: usize = 1024;
 const SYNC_ADAPTER_REPLAY_BUFFER_BYTES: usize = 96;
-const XHCI_CAPABILITY_MMAP_BYTES: usize = 24;
 const DRIVER_RING_BYTES: usize = shared_memory.PAGE_SIZE;
 
 pub fn isolationProofDepthGate() !void {
@@ -390,13 +386,7 @@ pub fn firstHardwareTargetGate() !void {
         .bar0 = 0,
         .bar1 = 0,
     }));
-    var mmap = @as([XHCI_CAPABILITY_MMAP_BYTES]u8, @splat(0));
-    mmap[2] = 0x10;
-    mmap[10] = 0x20;
-    mmap[16] = 1;
-    const memory_map = try kernel_handoff.summarizeMemoryMap(
-        kernel_handoff.multiboot2MemoryMap(mmap[0..], @intCast(XHCI_CAPABILITY_MMAP_BYTES)),
-    );
+    const memory_map = try kernel_handoff.summarizeMemoryMap(&.{.{ .base = 0x100000, .length = 0x200000, .kind = .available }});
     try std.testing.expect(memory_map.hasUsableMemory());
     const nuc_smbios_table = [_]u8{
         1,   8,   1,   0,   1,   2,   0,   0,
@@ -1041,22 +1031,6 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expect(
         kernel_mmio_windows.pci_ecam.endExclusive().? <= kernel_mmio_windows.intel_i225.base,
     );
-    try std.testing.expectEqualStrings("bootstrap_network_shim", kernel_ethernet.kernel_boundary_role);
-    try std.testing.expect(!kernel_ethernet.publishes_full_network_service);
-    try std.testing.expect(kernel_ethernet.network_data_plane_exports_fail_closed);
-    try std.testing.expectError(error.KernelNetworkDataPlaneDisabled, kernel_ethernet.rejectDataPlaneExport(.{
-        .service_id = 811,
-        .device_id = 0x8086_15F2_0007,
-        .frame_len = 64,
-    }));
-
-    try std.testing.expectEqualStrings("bootstrap_network_link_shim", kernel_link_port.kernel_boundary_role);
-    try std.testing.expect(!kernel_link_port.publishes_full_network_service);
-    try std.testing.expect(kernel_link_port.network_data_plane_exports_fail_closed);
-    try std.testing.expectError(error.KernelNetworkDataPlaneDisabled, kernel_link_port.rejectKernelDataPlaneTransport(.{
-        .device_id = 0x8086_15F2_0007,
-        .service_id = 811,
-    }));
 
     try std.testing.expectEqualStrings("bootstrap_i225_lm_inventory_shim", intel_i225.kernel_boundary_role);
     try std.testing.expect(!intel_i225.publishes_full_network_service);
@@ -1260,36 +1234,6 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         .phase_tag_observations = 4,
     });
     try std.testing.expect(nvme_hardware_proof.productionHardwareVerified());
-
-    try std.testing.expectEqualStrings("bootstrap_device_inventory_shim", kernel_data_plane_boundary.kernel_boundary_role);
-    try std.testing.expect(!kernel_data_plane_boundary.publishes_device_data_planes);
-    try std.testing.expect(!kernel_data_plane_boundary.publishes_windowing_data_plane);
-    try std.testing.expect(!kernel_data_plane_boundary.publishes_package_data_plane);
-    try std.testing.expect(!kernel_data_plane_boundary.publishes_indexing_data_plane);
-    try std.testing.expect(!kernel_data_plane_boundary.publishes_sync_data_plane);
-    try std.testing.expectError(error.KernelDeviceDataPlaneDisabled, kernel_data_plane_boundary.rejectKernelDeviceDataPlane(.{
-        .service_id = 811,
-        .device_id = 0x1F001,
-        .device_class = @backingInt(driver_service.DeviceClass.storage_controller),
-    }));
-    const excluded_subsystems = [_]kernel_data_plane_boundary.SubsystemPublicationRequest{
-        .{ .kind = .windowing, .service_id = 831, .owner_task_id = 841, .endpoint_id = 851 },
-        .{ .kind = .package_install, .service_id = 832, .owner_task_id = 842, .endpoint_id = 852 },
-        .{ .kind = .indexing, .service_id = 833, .owner_task_id = 843, .endpoint_id = 853 },
-        .{ .kind = .sync_replication, .service_id = 834, .owner_task_id = 844, .endpoint_id = 854 },
-    };
-    for (excluded_subsystems) |request| {
-        try std.testing.expectError(
-            error.KernelSubsystemDataPlaneDisabled,
-            kernel_data_plane_boundary.rejectKernelSubsystemDataPlane(request),
-        );
-    }
-    try std.testing.expectError(error.KernelDeviceDataPlaneDisabled, kernel_data_plane_boundary.rejectKernelSubsystemDataPlane(.{
-        .kind = .device,
-        .service_id = 835,
-        .owner_task_id = 845,
-        .endpoint_id = 855,
-    }));
 
     try bootedDriverKernelBoundaryGate();
 }

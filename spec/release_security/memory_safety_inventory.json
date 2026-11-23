@@ -149,7 +149,7 @@
       "owner": "boot-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "The adapter converts a page-aligned firmware allocation of 3..4096 pages to table pages only after v3 receipt validation and exact pointer/capacity checks. Count and build use the same caller-owned synchronous plan; independent transition/final capacities preserve the existing maximum. Original EFI RAM provenance survives reserved arena splits; sorted nonoverlapping descriptors normalize into bounded RAM authority. The complete page-rounded GOP allocation from native v3 paging metadata is excluded from RAM regions even when firmware describes it as RAM or rendering is unavailable. The shared sparse builder validates full WB coverage and exact capacity before writes, maps only complete authorized spans, preserves immutable direct aliases and 4 KiB heap guards, and clones only the active firmware root before replacing native alias slots. Unknown/device ranges remain absent. Both below-1-GiB allocations remain disjoint and fully owned during construction and the final-root switch. The kernel later reclaims the retired transition allocation and unused final tail before sealing frame reservations; only the exact used final prefix remains reserved. Original full extents remain allocation receipts and conservative mapping exclusions."
+        "The adapter converts a page-aligned firmware allocation of 3..4096 pages to table pages only after paging receipt validation and exact pointer/capacity checks. Count and build use the same caller-owned synchronous plan; independent transition/final capacities preserve the existing maximum. Original EFI RAM provenance survives reserved arena splits; sorted nonoverlapping descriptors normalize into bounded RAM authority. The complete page-rounded GOP allocation from the paging receipt is excluded from RAM regions even when firmware describes it as RAM or rendering is unavailable. The shared sparse builder validates full WB coverage and exact capacity before writes, maps only complete authorized spans, preserves immutable direct aliases and 4 KiB heap guards, and clones only the active firmware root before replacing native alias slots. Unknown/device ranges remain absent. Both below-1-GiB allocations remain disjoint and fully owned during construction and the final-root switch. The kernel later reclaims the retired transition allocation and unused final tail before sealing frame reservations; only the exact used final prefix remains reserved. Original full extents remain allocation receipts and conservative mapping exclusions."
       ],
       "tests": [
         "zig build host-tests",
@@ -1093,8 +1093,8 @@
       "owner": "boot-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "Multiboot2 aligned tags are normalized only after magic, total-size, tag-stride, physical-extent, command-line, memory-map, and framebuffer bounds validation",
-        "Wire fields remain physical u32 values; checked extent validation precedes every read. Freestanding reads use the bootstrap high direct alias so captured tags, command lines and memory-map slices remain usable after LASS and the final CR3 replacement."
+        "The 64-bit BootInfo address is admitted only when aligned and entirely below the image window, and is read once through the bootstrap high direct alias before any frame allocation",
+        "The kernel validates its own static copy (counts, sorted nonoverlapping map extents, framebuffer containment and the image, TPM and paging receipts) before any reader observes it; later readers never touch loader memory."
       ],
       "tests": [
         "zig build host-tests",
@@ -1113,7 +1113,7 @@
       "owner": "boot-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "The baseline EFI stub preflights all ELF segments and file-backed executable entry, reserves disjoint page destinations and checks complete effective WB before loading. Original memory types and attributes are preserved. Native v3, 48-byte paging metadata retains the full advertised GOP allocation independently of renderer pixel-format acceptance. Checked page rounding and loader write guards reject overlap with image, heap, arenas, TPM log, handoff and memory-map storage; both sparse roots exclude the complete device span. Image, heap, TPM, handoff and map-buffer allocations precede at most eight sizing iterations. The shared planner counts both transition and native-final modes, each arena allocates only its needed 3..4096-page capacity, and any arena or buffer growth requires a new map capture. Replacement ownership slots clear after successful free, so failed growth cannot unwind a stale receipt. Final exit attempts reuse retained allocations and reject capacity growth before inactive-table writes. The first ExitBootServices attempt disables firmware console use; subsequent retries use the existing buffers and no protocol calls. Native RAM, complete WB, capacity and overlap admission remain required before each build. Post-exit final TPM events are merged while firmware mappings remain active, the cache configuration is compared to its frozen snapshot, the same bounded root is rebuilt from the current firmware root, NXE is enabled and CR0.WP is set with checked readback before split high-root entry and kernel CET activation, and PGE is cleared/restored around physical CR3 installation. LA57/alias-slot conflicts fail before exit. Terminal post-exit errors use bounded serial output and never return through firmware defers."
+        "The baseline EFI stub preflights all ELF segments and file-backed executable entry, reserves disjoint page destinations and checks complete effective WB before loading. Original memory types and attributes are preserved. The 48-byte paging receipt retains the full advertised GOP allocation independently of renderer pixel-format acceptance. Checked page rounding and loader write guards reject overlap with image, heap, arenas, TPM log, handoff and memory-map storage; both sparse roots exclude the complete device span. Image, heap, TPM, handoff and map-buffer allocations precede at most eight sizing iterations. The shared planner counts the native geometry once, both arenas allocate only that needed 3..4096-page capacity, and any arena or buffer growth requires a new map capture. Replacement ownership slots clear after successful free, so failed growth cannot unwind a stale receipt. Final exit attempts reuse retained allocations and reject capacity growth before inactive-table writes. The first ExitBootServices attempt disables firmware console use; subsequent retries use the existing buffers and no protocol calls. Native RAM, complete WB, capacity and overlap admission remain required before each build. Post-exit final TPM events are merged while firmware mappings remain active, the cache configuration is compared to its frozen snapshot, the same bounded root is rebuilt from the current firmware root, NXE is enabled and CR0.WP is set with checked readback before split high-root entry and kernel CET activation, and PGE is cleared/restored around physical CR3 installation. LA57/alias-slot conflicts fail before exit. Terminal post-exit errors use bounded serial output and never return through firmware defers."
       ],
       "tests": [
         "zig build kernel",
@@ -1130,13 +1130,77 @@
       "review_state": "release-reviewed",
       "mitigations": [
         "ELF64 PT_LOAD segments are accepted only for little-endian x86-64 executables whose physical ranges sit between 1 MiB and 1 GiB and whose file extents stay inside the loaded image",
-        "Native ELF64 admission requires the fixed signed upper-half virtual bias over page-aligned physical destinations between 1 MiB and 1 GiB, bounded nonoverlapping file/memory extents, congruent power-of-two alignment, exact R/RX/RW flags and a file-backed executable entry. Every segment is validated before loading writes reserved physical pages. Low virtual images are admitted only by explicit isolated proof mode; inherited low firmware leaves are not effective W^X evidence."
+        "Native ELF64 admission requires the fixed signed upper-half virtual bias over page-aligned physical destinations between 1 MiB and 1 GiB, bounded nonoverlapping file/memory extents, congruent power-of-two alignment, exact R/RX/RW flags and a file-backed executable entry. Every segment is validated before loading writes reserved physical pages."
       ],
       "tests": [
         "zig build host-tests",
         "zig build spec-tests",
         "zig build kernel",
         "zig build high-half-entry-check"
+      ]
+    },
+    {
+      "path": "src/boot/boot_info.zig",
+      "categories": [
+        "extern-abi"
+      ],
+      "owner": "boot-owner",
+      "review_state": "release-reviewed",
+      "mitigations": [
+        "The single EFI stub to kernel record is a fixed extern layout shared by both sides of one signed image, with bounded inline arrays for the memory map, command line and RSDP. validate rejects a non-boolean authentication byte before reading it, out-of-range counts and lengths, empty, wrapping, unsorted or overlapping map entries and a rendered framebuffer outside the owned GOP allocation, and delegates the image, TPM and paging receipts to their own validators."
+      ],
+      "tests": [
+        "zig build host-tests",
+        "zig build kernel",
+        "zig build zigos-native-smoke-test"
+      ]
+    },
+    {
+      "path": "src/boot/image_info.zig",
+      "categories": [
+        "extern-abi"
+      ],
+      "owner": "boot-owner",
+      "review_state": "release-reviewed",
+      "mitigations": [
+        "The extern image record carries only the measured kernel and command-line digests, the firmware authentication result and the early heap base; validate rejects zero digests and an unaligned, low or out-of-window heap."
+      ],
+      "tests": [
+        "zig build host-tests",
+        "zig build kernel",
+        "zig build zigos-native-smoke-test"
+      ]
+    },
+    {
+      "path": "src/boot/tpm_info.zig",
+      "categories": [
+        "extern-abi"
+      ],
+      "owner": "boot-owner",
+      "review_state": "release-reviewed",
+      "mitigations": [
+        "The extern TCG2 log receipt is admitted only for a page-aligned, bounded log below the identity window, a bounded final-event count and a nonzero PCR 11 digest; an all-zero record denotes an absent TPM."
+      ],
+      "tests": [
+        "zig build host-tests",
+        "zig build kernel",
+        "zig build zigos-native-smoke-test"
+      ]
+    },
+    {
+      "path": "src/boot/paging_info.zig",
+      "categories": [
+        "extern-abi"
+      ],
+      "owner": "boot-owner",
+      "review_state": "release-reviewed",
+      "mitigations": [
+        "The extern paging receipt admits only two disjoint page-aligned 3..4096-page arenas between 1 MiB and 1 GiB, and a complete page-rounded GOP allocation inside the direct map that overlaps neither arena."
+      ],
+      "tests": [
+        "zig build host-tests",
+        "zig build kernel",
+        "zig build zigos-native-smoke-test"
       ]
     },
     {
@@ -1672,7 +1736,7 @@
       "owner": "hardware-target-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "ACPI discovery requires the bounded Multiboot2 ACPI 2 handoff and a nonzero XSDT, maps physical tables through dedicated RO/NX/WB firmware windows only after paging is ready and complete firmware-RAM/effective-WB authority is admitted, caps every SDT at 1 MiB and the architectural physical-address width, and validates XSDT and child checksums before proof facts are emitted. MADT physical identity is retained and its scratch view is remapped and checksum-validated immediately before synchronous topology consumption. Telemetry observations remain typed and fail closed on missing firmware evidence or mismatched reader generations.",
+        "ACPI discovery requires the bounded ACPI 2 RSDP copy in the validated BootInfo and a nonzero XSDT, maps physical tables through dedicated RO/NX/WB firmware windows only after paging is ready and complete firmware-RAM/effective-WB authority is admitted, caps every SDT at 1 MiB and the architectural physical-address width, and validates XSDT and child checksums before proof facts are emitted. MADT physical identity is retained and its scratch view is remapped and checksum-validated immediately before synchronous topology consumption. Telemetry observations remain typed and fail closed on missing firmware evidence or mismatched reader generations.",
         "Early hardware-evidence capture invokes checked SMBIOS target capture before reading its cached result and before frame allocator opening can reclaim firmware boot-services pages. Later platform probes consume only the kernel-owned result; retained ACPI reclaim/NVS tables remain bounded independently."
       ],
       "tests": [
@@ -1912,21 +1976,6 @@
         "ABI 23 EndpointSendWireRequest is an exact 64-byte aligned extern scalar record with asserted offsets. Validation rejects wrong operation, nonzero header flags, zero subject, unknown move flags, reserved fields, counts above 88 and move without an attachment. Empty payloads perform no address dereference. All raw syscall producers migrate together without an old-layout fallback.",
         "ABI 23 EndpointRecvWireRequest is an exact 56-byte aligned extern scalar record with asserted offsets, receiver identity, capacity at most 88 and zero reserved encoding. CapabilityDescriptor and EndpointMessageDescriptor retain explicit zero-initialized padding at every wire byte without changing their 64-byte and 48-byte extents.",
         "ABI 23 contains exactly 23 retained operations with individually asserted unchanged opcodes 0x100 through 0x116; removed 0x117 cannot decode to NativeOperation. Scalar send/receive and descriptor extents are unchanged. RequestHeader flags are reserved-zero, not a version encoding; generated archives and ELF admission provide no image-wide syscall ABI stamp, so ABI 21 binaries using retained calls are not universally rejected."
-      ],
-      "tests": [
-        "zig build host-tests"
-      ]
-    },
-    {
-      "path": "src/kernel/net/ethernet.zig",
-      "categories": [
-        "packed-abi",
-        "pointer-cast"
-      ],
-      "owner": "network-owner",
-      "review_state": "release-reviewed",
-      "mitigations": [
-        "packet header parsing uses fixed Ethernet header layout"
       ],
       "tests": [
         "zig build host-tests"

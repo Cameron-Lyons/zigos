@@ -198,7 +198,7 @@ pub const nuc15crsu7_proof_metadata_markers = [_][]const u8{
 
 pub const nuc15crsu7_hardware_fact_markers = [_][]const u8{
     nuc15crsu7_marker_prefix ++ ":SMBIOS_SKU:OBSERVED",
-    nuc15crsu7_marker_prefix ++ ":MULTIBOOT_MEMORY_MAP:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":MEMORY_MAP:OBSERVED",
     nuc15crsu7_marker_prefix ++ ":ACPI_XSDT:OBSERVED",
     nuc15crsu7_marker_prefix ++ ":ACPI_MADT:OBSERVED",
     nuc15crsu7_marker_prefix ++ ":ACPI_FADT:OBSERVED",
