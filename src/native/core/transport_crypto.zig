@@ -53,19 +53,24 @@ pub fn open(out: []u8, ciphertext: []const u8, auth: Authentication, key: Key, c
     Aead.decrypt(out, ciphertext, auth[Aead.nonce_length..].*, context, auth[0..Aead.nonce_length].*, key) catch return error.AuthenticationFailed;
 }
 
-// Authenticate the complete native wire header, including sequence and task
-// routing, under a separate MAC key derived from the session secret.
-pub fn wireMac(key: Key, bytes: []const u8) hash.Digest {
+// The wire MAC key is derived once per session from the session secret, so
+// encryption and frame authentication never share a key.
+pub fn wireMacKey(key: Key) Key {
     var mac_key: Key = undefined;
-    defer std.crypto.secureZero(u8, &mac_key);
     Hmac.create(&mac_key, "zigos.native-sync.wire.v4", &key);
+    return mac_key;
+}
+
+// Authenticate the complete native wire header, including sequence and task
+// routing, under the session's derived wire MAC key.
+pub fn wireMac(mac_key: Key, bytes: []const u8) hash.Digest {
     var result: hash.Digest = undefined;
     Hmac.create(&result, bytes, &mac_key);
     return result;
 }
 
-pub fn verifyWireMac(key: Key, bytes: []const u8, expected: hash.Digest) bool {
-    const actual = wireMac(key, bytes);
+pub fn verifyWireMac(mac_key: Key, bytes: []const u8, expected: hash.Digest) bool {
+    const actual = wireMac(mac_key, bytes);
     return std.crypto.timing_safe.eql(hash.Digest, actual, expected);
 }
 
@@ -122,7 +127,10 @@ test "transport AEAD uses fresh secrets and nonces and fails closed without entr
     @memset(&a, 0xa5);
     try std.testing.expectError(error.EntropyUnavailable, sealUsing(Broken{}, &a, &message, first, &context));
     try std.testing.expect(std.mem.allEqual(u8, &a, 0));
-    const mac = wireMac(first, "header and ciphertext");
-    try std.testing.expect(verifyWireMac(first, "header and ciphertext", mac));
-    try std.testing.expect(!verifyWireMac(first, "other routing", mac));
+    const mac_key = wireMacKey(first);
+    try std.testing.expect(!std.mem.eql(u8, &mac_key, &first));
+    const mac = wireMac(mac_key, "header and ciphertext");
+    try std.testing.expect(verifyWireMac(mac_key, "header and ciphertext", mac));
+    try std.testing.expect(!verifyWireMac(mac_key, "other routing", mac));
+    try std.testing.expect(!verifyWireMac(wireMacKey(second), "header and ciphertext", mac));
 }

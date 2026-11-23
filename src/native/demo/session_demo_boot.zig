@@ -100,6 +100,7 @@ fn initPolicyMediator(
             .policy_service_id = services.policy_service.id,
             .service_registry_id = services.service_registry.id,
         },
+        .{ .directory = &@import("../policy/policy_object.zig").unattached },
     );
 }
 

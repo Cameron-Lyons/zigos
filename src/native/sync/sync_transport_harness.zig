@@ -39,7 +39,7 @@ pub const BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os
     FREESTANDING_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES
 else
     HOST_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES;
-pub const TRANSPORT_SESSION_SIZE_CEILING_BYTES: usize = 288;
+pub const TRANSPORT_SESSION_SIZE_CEILING_BYTES: usize = 320;
 pub const HARNESS_SIZE_CEILING_BYTES: usize = 24;
 pub const EMULATED_NATIVE_TRANSPORT_SIZE_CEILING_BYTES: usize = 40;
 
@@ -409,6 +409,7 @@ pub const TransportSession = struct {
     relay_domain_len: u8 = 0,
     relay_domain: [network_policy.MAX_TARGET_BYTES]u8 = @as([network_policy.MAX_TARGET_BYTES]u8, @splat(0)),
     key: crypto_hash.Digest,
+    mac_key: crypto_hash.Digest,
     egress_decision: network_policy.EgressDecision,
     trust_posture: SessionTrustPosture = .local_lab_only,
     verified_remote_attestation: bool = false,
@@ -659,6 +660,8 @@ pub const Harness = struct {
         const session_id = try self.pendingSessionId();
         const trust_posture = sessionTrustPosture(request.evidence, decision.policy_decision);
 
+        var key = try transport_crypto.freshKey(sessionContext(transport, trust_posture, request, source_device, target_device, relay_domain));
+        defer std.crypto.secureZero(u8, &key);
         var session = TransportSession{
             .id = session_id,
             .task_id = request.task_id,
@@ -667,7 +670,8 @@ pub const Harness = struct {
             .capability_id = request.capability_id,
             .source_device = source_device,
             .target_device = target_device,
-            .key = try transport_crypto.freshKey(sessionContext(transport, trust_posture, request, source_device, target_device, relay_domain)),
+            .key = key,
+            .mac_key = transport_crypto.wireMacKey(key),
             .egress_decision = decision,
             .trust_posture = trust_posture,
             .verified_remote_attestation = request.evidence.verified_remote_attestation,

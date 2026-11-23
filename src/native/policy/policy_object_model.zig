@@ -4,7 +4,6 @@ const principal = @import("../core/principal.zig");
 
 pub const MAX_ALLOW_LIST: usize = 8;
 pub const MAX_LABEL_BYTES: usize = 64;
-pub const COMPACT_POLICY_METADATA = true;
 pub const POLICY_OBJECT_SIZE_CEILING_BYTES: usize = 2_000;
 
 comptime {
@@ -240,11 +239,6 @@ pub const CreateRequest = struct {
     audit_export_required: bool = false,
 };
 
-pub const RetentionAuditRequest = struct {
-    retention_days: u16,
-    audit_export_present: bool = false,
-};
-
 pub const AiUseRequest = struct {
     remote_model: bool = false,
     training_user_content: bool = false,
@@ -403,113 +397,113 @@ pub const SensitiveCaptureRequest = struct {
 };
 
 pub const PolicyObject = struct {
-    id: u64,
-    generation: u32,
-    revoked: bool,
-    scope: Scope,
-    subject_id: u64,
-    issuer: principal.PrincipalId,
-    label_len: u8,
-    label: [MAX_LABEL_BYTES]u8,
-    install_source_mode: InstallSourceMode,
-    allowed_install_source_count: u8,
-    allowed_install_sources: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8,
-    allowed_install_source_lens: [MAX_ALLOW_LIST]u8,
-    network_egress_mode: NetworkEgressMode,
-    allowed_network_destination_count: u8,
-    allowed_network_destinations: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8,
-    allowed_network_destination_lens: [MAX_ALLOW_LIST]u8,
-    allowed_sync_destination_count: u8,
-    allowed_sync_destinations: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8,
-    allowed_sync_destination_lens: [MAX_ALLOW_LIST]u8,
-    removable_storage_allowed: bool,
-    screen_capture_allowed: bool,
-    clipboard_allowed: bool,
-    camera_allowed: bool,
-    microphone_allowed: bool,
-    location_allowed: bool,
-    contacts_allowed: bool,
-    sensors_allowed: bool,
-    peer_ipc_allowed: bool,
-    remote_ai_allowed: bool,
-    ai_training_allowed: bool,
-    max_ai_context_bytes: usize,
-    require_ai_model_measurement: bool,
-    require_trusted_ai_model_source: bool,
-    max_ai_model_age_days: u16,
-    require_hardware_backed_session: bool,
-    require_platform_backed_device_session: bool,
-    require_primary_device_session: bool,
-    max_session_unlock_age_ticks: u64,
-    require_package_sbom: bool,
-    require_reproducible_package_build: bool,
-    require_trusted_package_builder: bool,
-    require_vulnerability_scan: bool,
-    agent_delegation_allowed: bool,
-    max_agent_actions_per_session: u16,
-    max_agent_remote_calls_per_session: u16,
-    require_agent_user_confirmation: bool,
-    require_agent_audit: bool,
-    require_agent_session_binding: bool,
-    require_agent_local_context: bool,
-    max_agent_context_bytes: usize,
-    min_agent_delegation_generation: u32,
-    require_agent_visible_plan: bool,
-    max_remote_private_egress_bytes: usize,
-    data_export_allowed: bool,
-    data_deletion_allowed: bool,
-    require_data_deletion_receipt: bool,
-    max_data_export_bytes: usize,
-    object_backup_allowed: bool,
-    object_restore_allowed: bool,
-    require_encrypted_object_backup: bool,
-    require_backup_recovery_key: bool,
-    require_restore_device_trust: bool,
-    max_object_backup_bytes: usize,
-    max_object_restore_age_days: u16,
-    semantic_memory_allowed: bool,
-    require_local_semantic_model: bool,
-    require_encrypted_semantic_index: bool,
-    require_redacted_semantic_snippets: bool,
-    max_semantic_query_bytes: usize,
-    credential_assertions_allowed: bool,
-    deny_credential_password_fallback: bool,
-    require_phishing_resistant_credential: bool,
-    require_hardware_backed_credential: bool,
-    require_local_credential_unlock: bool,
-    max_credential_unlock_age_ticks: u64,
-    secret_vault_allowed: bool,
-    require_hardware_backed_secrets: bool,
-    deny_secret_raw_export: bool,
-    max_secret_handle_lease_ticks: u64,
-    task_lifecycle_allowed: bool,
-    require_lifecycle_checkpoint_before_terminate: bool,
-    quiet_until_tick: u64,
-    max_visible_notifications: u16,
-    max_interruptive_notifications: u16,
-    allow_critical_interruption: bool,
-    require_adaptive_ui: bool,
-    require_screen_reader_support: bool,
-    require_keyboard_navigation: bool,
-    require_reduced_motion_support: bool,
-    require_high_contrast_support: bool,
-    max_background_duration_seconds: u32,
-    max_background_cpu_time_ticks: u64,
-    max_background_memory_bytes: usize,
-    max_background_shared_memory_bytes: usize,
-    allow_remote_background_network: bool,
-    require_visible_background_activity: bool,
-    max_sensitive_retention_days: u16,
-    max_permission_lease_ticks: u64,
-    require_sensitive_permission_lease: bool,
-    require_sensitive_capture_foreground: bool,
-    require_capture_indicator: bool,
-    allow_background_capture: bool,
-    max_sensitive_capture_lease_ticks: u64,
-    max_sensitive_capture_samples: u32,
-    retention_days: u16,
-    audit_export_required: bool,
-    signature: manifest.Signature,
+    id: u64 = 0,
+    generation: u32 = 0,
+    revoked: bool = false,
+    scope: Scope = .user,
+    subject_id: u64 = 0,
+    issuer: principal.PrincipalId = .{ .kind = .policy_authority, .serial = 0 },
+    label_len: u8 = 0,
+    label: [MAX_LABEL_BYTES]u8 = @splat(0),
+    allowed_install_source_count: u8 = 0,
+    allowed_install_sources: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8 = @splat(@splat(0)),
+    allowed_install_source_lens: [MAX_ALLOW_LIST]u8 = @splat(0),
+    allowed_network_destination_count: u8 = 0,
+    allowed_network_destinations: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8 = @splat(@splat(0)),
+    allowed_network_destination_lens: [MAX_ALLOW_LIST]u8 = @splat(0),
+    allowed_sync_destination_count: u8 = 0,
+    allowed_sync_destinations: [MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8 = @splat(@splat(0)),
+    allowed_sync_destination_lens: [MAX_ALLOW_LIST]u8 = @splat(0),
+    install_source_mode: InstallSourceMode = .any_signed,
+    network_egress_mode: NetworkEgressMode = .inherit,
+    removable_storage_allowed: bool = false,
+    screen_capture_allowed: bool = false,
+    clipboard_allowed: bool = false,
+    camera_allowed: bool = false,
+    microphone_allowed: bool = false,
+    location_allowed: bool = false,
+    contacts_allowed: bool = false,
+    sensors_allowed: bool = false,
+    peer_ipc_allowed: bool = false,
+    remote_ai_allowed: bool = false,
+    ai_training_allowed: bool = false,
+    max_ai_context_bytes: usize = 0,
+    require_ai_model_measurement: bool = false,
+    require_trusted_ai_model_source: bool = false,
+    max_ai_model_age_days: u16 = 0,
+    require_hardware_backed_session: bool = false,
+    require_platform_backed_device_session: bool = false,
+    require_primary_device_session: bool = false,
+    max_session_unlock_age_ticks: u64 = 0,
+    require_package_sbom: bool = false,
+    require_reproducible_package_build: bool = false,
+    require_trusted_package_builder: bool = false,
+    require_vulnerability_scan: bool = false,
+    agent_delegation_allowed: bool = false,
+    max_agent_actions_per_session: u16 = 0,
+    max_agent_remote_calls_per_session: u16 = 0,
+    require_agent_user_confirmation: bool = true,
+    require_agent_audit: bool = true,
+    require_agent_session_binding: bool = false,
+    require_agent_local_context: bool = false,
+    max_agent_context_bytes: usize = 0,
+    min_agent_delegation_generation: u32 = 0,
+    require_agent_visible_plan: bool = false,
+    max_remote_private_egress_bytes: usize = 0,
+    data_export_allowed: bool = false,
+    data_deletion_allowed: bool = false,
+    require_data_deletion_receipt: bool = false,
+    max_data_export_bytes: usize = 0,
+    object_backup_allowed: bool = false,
+    object_restore_allowed: bool = false,
+    require_encrypted_object_backup: bool = true,
+    require_backup_recovery_key: bool = true,
+    require_restore_device_trust: bool = true,
+    max_object_backup_bytes: usize = 0,
+    max_object_restore_age_days: u16 = 0,
+    semantic_memory_allowed: bool = false,
+    require_local_semantic_model: bool = true,
+    require_encrypted_semantic_index: bool = true,
+    require_redacted_semantic_snippets: bool = true,
+    max_semantic_query_bytes: usize = 0,
+    credential_assertions_allowed: bool = false,
+    deny_credential_password_fallback: bool = true,
+    require_phishing_resistant_credential: bool = true,
+    require_hardware_backed_credential: bool = false,
+    require_local_credential_unlock: bool = true,
+    max_credential_unlock_age_ticks: u64 = 0,
+    secret_vault_allowed: bool = false,
+    require_hardware_backed_secrets: bool = true,
+    deny_secret_raw_export: bool = true,
+    max_secret_handle_lease_ticks: u64 = 0,
+    task_lifecycle_allowed: bool = false,
+    require_lifecycle_checkpoint_before_terminate: bool = true,
+    quiet_until_tick: u64 = 0,
+    max_visible_notifications: u16 = 0,
+    max_interruptive_notifications: u16 = 0,
+    allow_critical_interruption: bool = true,
+    require_adaptive_ui: bool = false,
+    require_screen_reader_support: bool = false,
+    require_keyboard_navigation: bool = false,
+    require_reduced_motion_support: bool = false,
+    require_high_contrast_support: bool = false,
+    max_background_duration_seconds: u32 = 0,
+    max_background_cpu_time_ticks: u64 = 0,
+    max_background_memory_bytes: usize = 0,
+    max_background_shared_memory_bytes: usize = 0,
+    allow_remote_background_network: bool = false,
+    require_visible_background_activity: bool = false,
+    max_sensitive_retention_days: u16 = 0,
+    max_permission_lease_ticks: u64 = 0,
+    require_sensitive_permission_lease: bool = false,
+    require_sensitive_capture_foreground: bool = true,
+    require_capture_indicator: bool = true,
+    allow_background_capture: bool = false,
+    max_sensitive_capture_lease_ticks: u64 = 0,
+    max_sensitive_capture_samples: u32 = 0,
+    retention_days: u16 = 0,
+    audit_export_required: bool = false,
+    signature: manifest.Signature = .{},
 
     pub fn labelSlice(self: *const PolicyObject) []const u8 {
         return self.label[0..@as(usize, self.label_len)];
@@ -529,22 +523,6 @@ pub const PolicyObject = struct {
                 source_identity,
             ),
         };
-    }
-
-    pub fn packageProvenanceDenial(self: *const PolicyObject, request: PackageProvenanceRequest) ?DecisionReason {
-        if (self.require_package_sbom and !request.sbom_present) return .package_sbom_denied;
-        if (self.require_reproducible_package_build and
-            (!request.reproducible_build or !request.source_archive_present or !request.build_recipe_present))
-        {
-            return .package_reproducibility_denied;
-        }
-        if (self.require_trusted_package_builder and !request.trusted_builder) return .package_builder_denied;
-        if (self.require_vulnerability_scan and !request.vulnerability_scan_present) return .package_vulnerability_scan_denied;
-        return null;
-    }
-
-    pub fn allowsPackageProvenance(self: *const PolicyObject, request: PackageProvenanceRequest) bool {
-        return self.packageProvenanceDenial(request) == null;
     }
 
     pub fn allowsNetworkDestination(self: *const PolicyObject, destination: []const u8) bool {
@@ -581,6 +559,55 @@ pub const PolicyObject = struct {
         }
     }
 };
+
+/// Scalar CreateRequest controls, in declaration order. PolicyObject stores
+/// each one under the same name and the policy digest signs them in this
+/// order, so reordering or renaming a control changes every signature.
+pub const signed_controls: []const [:0]const u8 = blk: {
+    const info = @typeInfo(CreateRequest).@"struct";
+    var names: [info.field_names.len][:0]const u8 = undefined;
+    var count: usize = 0;
+    for (info.field_names, info.field_types) |name, Field| {
+        if (isPolicyIdentity(name) or @typeInfo(Field) == .pointer) continue;
+        names[count] = name;
+        count += 1;
+    }
+    const final = names[0..count].*;
+    break :blk &final;
+};
+
+fn fieldIndex(names: []const [:0]const u8, name: []const u8) ?usize {
+    for (names, 0..) |candidate, index| {
+        if (std.mem.eql(u8, candidate, name)) return index;
+    }
+    return null;
+}
+
+fn isPolicyIdentity(name: []const u8) bool {
+    return std.mem.eql(u8, name, "scope") or
+        std.mem.eql(u8, name, "subject_id") or
+        std.mem.eql(u8, name, "issuer");
+}
+
+comptime {
+    @setEvalBranchQuota(100_000);
+    const request = @typeInfo(CreateRequest).@"struct";
+    const object = @typeInfo(PolicyObject).@"struct";
+    for (signed_controls) |name| {
+        const request_index = fieldIndex(request.field_names, name).?;
+        const object_index = fieldIndex(object.field_names, name) orelse
+            @compileError("policy object is missing signed control " ++ name);
+        const Field = request.field_types[request_index];
+        if (object.field_types[object_index] != Field) @compileError("policy control type differs: " ++ name);
+        if (request.field_attrs[request_index].defaultValue(Field) != object.field_attrs[object_index].defaultValue(Field)) {
+            @compileError("policy control default differs: " ++ name);
+        }
+        switch (@typeInfo(Field)) {
+            .bool, .int, .@"enum" => {},
+            else => @compileError("policy control is not a digestable scalar: " ++ name),
+        }
+    }
+}
 
 pub const Error = error{
     InstallSourceTooLong,

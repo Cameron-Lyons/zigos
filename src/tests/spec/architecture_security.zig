@@ -40,7 +40,7 @@ pub fn designGoalsKeepInstallsDeclarativeAndAuthorityExplicit() !void {
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
 
     var policies = policy_object.Directory.init();
-    const install_policy = try policies.create(.{
+    _ = try policies.create(.{
         .scope = .organization,
         .subject_id = 41,
         .issuer = spec_support.policyAuthority(41),
@@ -79,12 +79,12 @@ pub fn designGoalsKeepInstallsDeclarativeAndAuthorityExplicit() !void {
         .bundle = bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, install_policy);
+    }, &policies, .{ .organization_id = 41 });
     try std.testing.expectError(package_service.Error.InstallSourceDenied, package_port.install(package_authority, .{
         .bundle = bundle,
         .source_identity = "repo:opaque-script",
         .data_schema_version = 1,
-    }, install_policy));
+    }, &policies, .{ .organization_id = 41 }));
 
     var compatibility_bundle = bundle;
     compatibility_bundle.bundle_id = "compat.writer.bridge";
@@ -94,7 +94,7 @@ pub fn designGoalsKeepInstallsDeclarativeAndAuthorityExplicit() !void {
         .bundle = compatibility_bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, install_policy));
+    }, &policies, .{ .organization_id = 41 }));
 }
 
 pub fn explicitGrantsRequireAuthority() !void {
@@ -110,6 +110,7 @@ pub fn explicitGrantsRequireAuthority() !void {
             .policy_service_id = 43,
             .service_registry_id = 44,
         },
+        .{ .directory = &policy_object.unattached },
     );
 
     const bundle_requests = [_]manifest.PermissionRequest{
@@ -847,8 +848,8 @@ pub fn principalIdentityAndAdministrativeScopeStaySplit() !void {
     try std.testing.expectEqual(policy_object.NetworkEgressMode.local_only, user_policy.network_egress_mode);
     try std.testing.expect(device_policy.allowsInstallSource("store:zigos"));
     try std.testing.expect(!device_policy.allowsInstallSource("repo:unsigned"));
-    try std.testing.expect(policies.syncDestinationAllowed(.workspace, 500, "relay.spec.zigos"));
-    try std.testing.expect(!policies.syncDestinationAllowed(.workspace, 500, "relay.other"));
+    try std.testing.expect(policies.syncDestinationDecision(.{ .workspace_id = 500 }, "relay.spec.zigos").allowed);
+    try std.testing.expect(!policies.syncDestinationDecision(.{ .workspace_id = 500 }, "relay.other").allowed);
     try std.testing.expect(org_policy.audit_export_required);
 
     const subjects = policy_object.SubjectSet{

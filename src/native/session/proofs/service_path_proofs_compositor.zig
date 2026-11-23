@@ -461,6 +461,7 @@ fn proveBootedRenderedPermissionReviewSurface(
             .policy_service_id = 82_032,
             .service_registry_id = 82_033,
         },
+        .{ .directory = &@import("../../policy/policy_object.zig").unattached },
     );
     mediator.attachLedger(&ledger);
     const summary = try mediator.applyManifest(app_task_id, bundle, grants, 158);

@@ -99,18 +99,13 @@ fn printSignature(
     var public_key_hex: [hex.encodedLen(manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES)]u8 = undefined;
     var signature_hex: [hex.encodedLen(manifest.MAX_SIGNATURE_VALUE_BYTES)]u8 = undefined;
     try writer.print(
-        "provider={s}\nrole={s}\nprovider_boundary={s}\ncustody={s}\nverifier_protocol={s}\nfips_standard={s}\npost_quantum_algorithm={s}\nfips_204={s}\nfips_140_validated_module={s}\nvalidation_certificate={s}\nrelease_eligible={s}\nformat={s}\nsigner={s}\npublic_key={s}\nsignature={s}\n",
+        "provider={s}\nrole={s}\nprovider_boundary={s}\ncustody={s}\nverifier_protocol={s}\nrelease_eligible={s}\nformat={s}\nsigner={s}\npublic_key={s}\nsignature={s}\n",
         .{
             provider.descriptor.name,
             @tagName(provider.descriptor.role),
             @tagName(provider.descriptor.provider_boundary),
             @tagName(provider.descriptor.custody),
             @tagName(provider.descriptor.verifier_protocol),
-            @tagName(provider.descriptor.fips_standard),
-            @tagName(provider.descriptor.post_quantum_algorithm),
-            @tagName(provider.descriptor.fips_204),
-            if (provider.descriptor.fips_140_validated_module) "yes" else "no",
-            provider.descriptor.validation_certificate,
             if (provider.releaseEligible()) "yes" else "no",
             signature.formatSlice(),
             signature.signer,
@@ -132,7 +127,6 @@ fn printProviderPolicy(writer: anytype) !void {
         \\production_ml_dsa_profile=ml-dsa-65
         \\production_ml_dsa_required_boundary=hardware key handle through TPM, secure enclave, HSM, or KMS backed by a FIPS 140 validated module
         \\production_ml_dsa_required_metadata=FIPS 204 algorithm, ML-DSA-65 parameter set, validation certificate, rotation, revocation, DSSE verifier support
-        \\release_verifier_metadata_schema=zigos.release-verifier-metadata
         \\attestation_verifier_metadata_schema=zigos.attestation-verifier-metadata
         \\
     , .{

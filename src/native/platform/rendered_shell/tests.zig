@@ -1175,7 +1175,7 @@ test "booted notes docs loop edits shares syncs reviews rollback recovery and re
         .bundle = notes_bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &.{}, .{});
     try std.testing.expect(packages_service.find("app.notes") != null);
 
     var storage = storage_service.Service.initWithStore(11_110, 11_111, storage_owner, &storage_checkpoint_store);

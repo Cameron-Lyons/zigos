@@ -11,8 +11,6 @@ const REVIEW_RENDER_BUFFER_BYTES: usize = units.kibibytes(2);
 const REVIEW_REQUEST_BUFFER_BYTES: usize = 512;
 
 pub const MAX_REVIEW_DECISIONS: usize = policy_mediation.MAX_PERMISSION_DECISIONS;
-pub const COMPACT_REVIEW_SESSION_DECISIONS = true;
-pub const GROUPS_REVIEW_TEXT_WRITES = true;
 pub const REVIEW_SESSION_SIZE_CEILING_BYTES: usize = 88;
 
 const DecisionMask = u16;
@@ -422,8 +420,6 @@ fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype
 }
 
 test "review sessions store decisions in compact masks" {
-    try std.testing.expect(COMPACT_REVIEW_SESSION_DECISIONS);
-    try std.testing.expect(GROUPS_REVIEW_TEXT_WRITES);
     try std.testing.expectEqual(u8, @FieldType(ReviewSession, "decision_count"));
     try std.testing.expectEqual(u16, @FieldType(ReviewSession, "allowed_mask"));
     try std.testing.expectEqual(u16, @FieldType(ReviewSession, "local_only_mask"));

@@ -147,7 +147,7 @@ pub fn runBoot(manager: anytype, io: anytype, request: provisioning.Request, pin
     while (owner.setup.busy() or owner.setup.pending != null) try service(manager, &owner.setup, clock);
     if (!owner.authentication_ready or owner.authentication.view.status != .entering or owner.session.replay.active or
         !std.meta.eql(owner.adapter.recovery_pin.?, trusted) or owner.setup_worker.stack != null) return error.BootOwnerDidNotAuthenticateEnrollment;
-    if (owner.policies.policies.countInUse() != 1 or !owner.policies.verify(1) or
+    if (owner.policies.count() != 1 or !owner.policies.verify(1) or
         owner.adapter.lifetime_ticks != request.max_session_ticks) return error.BootOwnerMissingPolicy;
     const policy_object = owner.policies.activeForScope(.user, request.owner.serial) orelse return error.BootOwnerMissingPolicy;
     const before = io.commands;

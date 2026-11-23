@@ -975,9 +975,8 @@ the first-target readiness track remains blocked on real hardware validation.
   Measured policy roots cover boot service, device, and policy authority while
   excluding live resource grants and runtime issuance timestamps, so identical
   cold boots remain reproducible regardless of user activity or timer phase.
-  Ed25519 is the classical signing baseline; production PQC is represented
-  by a separate ML-DSA-65 provider boundary with FIPS validation metadata
-  and fail-closed verifier requirements.
+  Ed25519 is the only implemented signing profile; ML-DSA-65 signatures are
+  parsed and rejected until a validated FIPS 204 provider exists.
 
 The spec contract is now the machine-readable manifest in
 `spec/coverage.json`; this checkout does not require a separate prose spec
@@ -2216,8 +2215,8 @@ The remaining data and test helpers also use the native host utility:
   logic, storage volume backend, file bridge, and IPC paths.
 - `src/native/sync/`: device graph, sync service, sync state, adapters, network
   policy, and transport harnesses.
-- `src/native/policy/`: policy objects, manifest fixtures, mediation,
-  permission review, enterprise management, and denial explanations.
+- `src/native/policy/`: signed policy objects, manifest fixtures, mediation,
+  permission review, and denial explanations.
 - `src/native/platform/`: measured boot, attestation, recovery, update health,
   event ledger, compositor/session UX, rendered shell, and platform signals.
 - `src/native/services/`: service registry, service authority, package service,

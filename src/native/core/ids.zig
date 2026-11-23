@@ -44,9 +44,6 @@ pub const TaskId = Id("TaskId");
 pub const ObjectId = Id("ObjectId");
 pub const WorkspaceId = Id("WorkspaceId");
 pub const EndpointId = Id("EndpointId");
-pub const ServiceId = Id("ServiceId");
-pub const PolicyId = Id("PolicyId");
-pub const DeviceId = Id("DeviceId");
 pub const CapabilityId = Id("CapabilityId");
 pub const SharedMemoryId = Id("SharedMemoryId");
 pub const VersionId = Id("VersionId");
@@ -66,18 +63,6 @@ pub fn workspace(raw_value: u64) WorkspaceId {
 
 pub fn endpoint(raw_value: u64) EndpointId {
     return EndpointId.from(raw_value);
-}
-
-pub fn service(raw_value: u64) ServiceId {
-    return ServiceId.from(raw_value);
-}
-
-pub fn policy(raw_value: u64) PolicyId {
-    return PolicyId.from(raw_value);
-}
-
-pub fn device(raw_value: u64) DeviceId {
-    return DeviceId.from(raw_value);
 }
 
 pub fn capability(raw_value: u64) CapabilityId {
@@ -122,10 +107,6 @@ pub fn coerce(comptime Target: type, value: anytype) Target {
         return value;
     }
     return Target.from(raw(value));
-}
-
-pub fn isZero(value: anytype) bool {
-    return raw(value) == 0;
 }
 
 pub fn isTypedId(comptime T: type) bool {

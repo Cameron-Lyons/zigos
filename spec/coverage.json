@@ -717,20 +717,12 @@
           "name": "policy objects remain signed scoped and enforce enterprise controls"
         },
         {
-          "file": "src/native/policy/policy_example_enforcement.zig",
-          "name": "policy examples route package network removable and sync denials through subsystem gates"
+          "file": "src/native/services/package_service.zig",
+          "name": "package install composes device scope policy and refuses tampered policy"
         },
         {
-          "file": "src/native/policy/policy_example_enforcement.zig",
-          "name": "policy examples deny screen capture grants and enforce retention audit requirements"
-        },
-        {
-          "file": "src/native/policy/enterprise_management.zig",
-          "name": "enterprise management applies overrides revokes and audits organization policy"
-        },
-        {
-          "file": "src/native/policy/enterprise_management.zig",
-          "name": "enterprise management gates device trust administration through existing graph and audits it"
+          "file": "src/native/policy/policy_mediation.zig",
+          "name": "policy mediation applies signed organization policy before user grants"
         }
       ],
       "requirements": [
@@ -2227,7 +2219,6 @@
     "REQ-POLICY-EXAMPLES": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/policy/policy_example_enforcement.zig",
         "src/native/policy/policy_object.zig",
         "src/native/services/package_service.zig",
         "src/native/sync/network_policy.zig",
@@ -2236,32 +2227,43 @@
       ],
       "negative_tests": [
         {
-          "file": "src/native/policy/policy_example_enforcement.zig",
-          "name": "policy examples route package network removable and sync denials through subsystem gates"
+          "file": "src/native/services/package_service.zig",
+          "name": "package install composes device scope policy and refuses tampered policy"
         },
         {
-          "file": "src/native/policy/policy_example_enforcement.zig",
-          "name": "policy examples deny screen capture grants and enforce retention audit requirements"
+          "file": "src/native/services/package_service.zig",
+          "name": "package service enforces package supply chain policy before install"
+        },
+        {
+          "file": "src/native/policy/policy_mediation.zig",
+          "name": "policy mediation applies signed organization policy before user grants"
+        },
+        {
+          "file": "src/native/sync/network_policy.zig",
+          "name": "network policy objects enforce discovery inbound service domain and explicit internet grants"
         }
       ]
     },
     "REQ-ENTERPRISE-SUPPORT": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/policy/enterprise_management.zig",
         "src/native/policy/policy_object.zig",
-        "src/native/policy/policy_example_enforcement.zig",
-        "src/native/platform/event_ledger.zig",
+        "src/native/policy/policy_mediation.zig",
+        "src/native/services/package_service.zig",
         "src/native/sync/device_graph.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/policy/enterprise_management.zig",
-          "name": "enterprise management applies overrides revokes and audits organization policy"
+          "file": "src/native/policy/policy_object.zig",
+          "name": "policy directory composes active user device workspace and organization policy"
         },
         {
-          "file": "src/native/policy/enterprise_management.zig",
-          "name": "enterprise management gates device trust administration through existing graph and audits it"
+          "file": "src/native/policy/policy_mediation.zig",
+          "name": "policy mediation applies signed organization policy before user grants"
+        },
+        {
+          "file": "src/native/sync/device_graph.zig",
+          "name": "device graph requires root authority for enrollment retries and revocation"
         }
       ]
     },

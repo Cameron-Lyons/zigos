@@ -40,11 +40,6 @@ pub fn sign(bundle: manifest.BundleManifest, flow: SigningFlow) !SignedPackage {
     };
 }
 
-pub fn verifySignedBundle(bundle: manifest.BundleManifest) bool {
-    const package_digest = digest(bundle);
-    return signing.verifyWithDefaultRegistry(bundle.signature, &package_digest);
-}
-
 test "package signing flow lints signs and verifies installable manifests" {
     const examples = @import("example_apps.zig");
     const package = examples.firstPartyWriter();
@@ -54,5 +49,4 @@ test "package signing flow lints signs and verifies installable manifests" {
     try std.testing.expect(!signed.lint.hasErrors());
     try std.testing.expect(signed.bundle.signature.isComplete());
     try std.testing.expect(signed.verify());
-    try std.testing.expect(verifySignedBundle(signed.bundle));
 }

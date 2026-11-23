@@ -60,11 +60,6 @@ pub const MAX_REVIEW_DECISIONS: usize = permission_review.MAX_REVIEW_DECISIONS;
 pub const MAX_INPUT_LINE: usize = 96;
 pub const MAX_PHYSICAL_INPUT_COMMANDS: usize = MAX_REVIEW_DECISIONS;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
-pub const COMPACT_COMMAND_QUEUE_METADATA = true;
-pub const COMPACT_REVIEW_PROGRESS_METADATA = true;
-pub const IN_PLACE_MODELED_INPUT_INITIALIZATION = true;
-pub const RENDERED_BEGIN_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
-pub const BATCH_REVIEW_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const COMMAND_INPUT_SIZE_CEILING_BYTES: usize = 1_664;
 pub const RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES: usize = 1_144;
 
@@ -1611,6 +1606,7 @@ test "rendered permission review surface drives allow deny controls through comp
             .policy_service_id = 45_002,
             .service_registry_id = 45_003,
         },
+        .{ .directory = &@import("policy_object.zig").unattached },
     );
     mediator.attachLedger(&ledger);
     const summary = try mediator.applyManifest(task.id, bundle, grants, 55);

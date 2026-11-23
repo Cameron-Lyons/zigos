@@ -1534,7 +1534,7 @@ fn packageActiveRevisionMutationGate() bool {
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null) catch return false;
+    }, &.{}, .{}) catch return false;
     if (!installed.installed_new) return false;
 
     const stale_rollback = package_service.rollbackRequestForActive(service.find("app.notes") orelse return false);
@@ -1545,7 +1545,7 @@ fn packageActiveRevisionMutationGate() bool {
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null) catch return false;
+    }, &.{}, .{}) catch return false;
     if (!updated.updated_existing or !updated.rollback_available) return false;
 
     const stale_rollback_denied = if (port.rollback(authority, stale_rollback)) |_| false else |err| err == error.PackageActiveRevisionMismatch;
@@ -5499,7 +5499,7 @@ fn packageOffboardingEvidence() PackageOffboardingEvidence {
         .bundle = bundle,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null) catch return evidence;
+    }, &.{}, .{}) catch return evidence;
     if (!installed.installed_new) return evidence;
 
     var policies = policy_object.Directory.init();

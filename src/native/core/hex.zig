@@ -36,13 +36,6 @@ pub fn decodeFixed(comptime len: usize, text: []const u8) Error![len]u8 {
     return result;
 }
 
-pub fn isText(text: []const u8) bool {
-    for (text) |byte| {
-        if (value(byte) == null) return false;
-    }
-    return true;
-}
-
 pub fn value(byte: u8) ?u8 {
     if (byte >= '0' and byte <= '9') return byte - '0';
     if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;

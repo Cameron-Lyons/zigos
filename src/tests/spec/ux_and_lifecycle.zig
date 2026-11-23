@@ -129,7 +129,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
     const bundle_signer = spec_support.signer("spec.journey.bundle", 0x88);
 
     var policies = policy_object.Directory.init();
-    const org_policy = try policies.create(.{
+    _ = try policies.create(.{
         .scope = .organization,
         .subject_id = 16,
         .issuer = spec_support.policyAuthority(16),
@@ -182,7 +182,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, org_policy);
+    }, &policies, .{ .organization_id = 16 });
     try std.testing.expect(installed.installed_new);
 
     var storage = storage_service.Service.initWithStore(910, 96, storage_owner, &storage_checkpoint_store);
@@ -313,7 +313,7 @@ pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, org_policy);
+    }, &policies, .{ .organization_id = 16 });
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.rollback_available);
     _ = try packages_entry.port.rollback(
@@ -400,12 +400,12 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, org_policy);
+    }, &policies, .{ .organization_id = 1 });
     try std.testing.expect(first.installed_new);
     try std.testing.expect(!first.rollback_available);
-    try std.testing.expect(policies.installSourceAllowed(.organization, 1, "store:zigos"));
-    try std.testing.expect(!policies.installSourceAllowed(.organization, 1, "repo:personal"));
-    try std.testing.expect(policies.syncDestinationAllowed(.organization, 1, "relay.corp.example"));
+    try std.testing.expect(policies.installSourceDecision(.{ .organization_id = 1 }, "store:zigos").allowed);
+    try std.testing.expect(!policies.installSourceDecision(.{ .organization_id = 1 }, "repo:personal").allowed);
+    try std.testing.expect(policies.syncDestinationDecision(.{ .organization_id = 1 }, "relay.corp.example").allowed);
 
     const v2_permissions = [_]manifest.PermissionRequest{
         .{
@@ -460,7 +460,7 @@ pub fn packageLifecycleStaysDeclarativeSignedAndPolicyScoped() !void {
         .source_identity = "store:zigos",
         .data_schema_version = 2,
         .declared_permission_change = true,
-    }, org_policy);
+    }, &policies, .{ .organization_id = 1 });
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.permissions_changed);
     try std.testing.expect(updated.rollback_available);
@@ -578,7 +578,7 @@ pub fn backgroundWorkStaysDeclaredTriggeredBudgetedAndThrottled() !void {
         .bundle = package_bundle,
         .source_identity = "store.zigos.spec",
         .data_schema_version = 1,
-    }, null);
+    }, &.{}, .{});
 
     var resolved: package_service.ResolvedManifest = undefined;
     const installed_bundle = try packages.resolveCurrentManifest("app.background.spec", &resolved);

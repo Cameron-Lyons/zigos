@@ -10,7 +10,6 @@ pub const PutResult = object_store.PutResult;
 pub const ObjectQueryResult = object_store.ObjectQueryResult;
 pub const ObjectHistoryEntry = object_store.ObjectHistoryEntry;
 pub const ObjectOperatingModel = object_store.ObjectOperatingModel;
-pub const COMPACT_OBJECT_HANDLE_METADATA = true;
 pub const OBJECT_HANDLE_SIZE_CEILING_BYTES: usize = 136;
 pub const LOADED_OBJECT_SIZE_CEILING_BYTES: usize = 152;
 pub const Error = object_store.Error || error{
@@ -198,7 +197,6 @@ fn copyText(dest: []u8, source: []const u8) error{TextTooLong}!usize {
 }
 
 test "object-store SDK handle uses compact bounded metadata" {
-    try std.testing.expect(COMPACT_OBJECT_HANDLE_METADATA);
     try std.testing.expectEqual(u8, @FieldType(ObjectHandle, "label_len"));
     try std.testing.expectEqual(u8, @FieldType(ObjectHandle, "content_type_len"));
     try std.testing.expect(@sizeOf(ObjectHandle) <= OBJECT_HANDLE_SIZE_CEILING_BYTES);

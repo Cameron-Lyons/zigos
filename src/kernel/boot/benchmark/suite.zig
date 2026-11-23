@@ -38,6 +38,7 @@ const object_store = @import("../../../native/storage/object_store.zig");
 const storage_service = @import("../../../native/storage/storage_service.zig");
 const storage_volume = @import("../../../native/storage/storage_volume.zig");
 const package_service = @import("../../../native/services/package_service.zig");
+const policy_object = @import("../../../native/policy/policy_object.zig");
 const package_service_bundle_ops = @import("../../../native/services/package_service_bundle_ops.zig");
 const indexing_service = @import("../../../native/services/indexing_service.zig");
 const notification_center = @import("../../../native/services/notification_center.zig");
@@ -156,6 +157,7 @@ const TaskCheckpointContext = struct {
 
 const PackageContext = struct {
     service: package_service.Service = package_service.Service.init(),
+    policies: policy_object.Directory = .{},
     signed_v1: manifest.BundleManifest = package_bundle_v1,
     signed_v2: manifest.BundleManifest = package_bundle_v2,
     resolved: package_service.ResolvedManifest = undefined,
@@ -963,7 +965,7 @@ fn preparePackageFixture() void {
     _ = package_context.service.install(.{
         .bundle = package_context.signed_v1,
         .source_identity = "benchmark:zigos",
-    }, null) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    }, &package_context.policies, .{}) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
 }
 
 fn prepareEventLedgerFixture() void {

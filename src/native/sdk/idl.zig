@@ -10,7 +10,6 @@ pub const MAX_DECLARATIONS: usize = 32;
 pub const MAX_NAME_BYTES: usize = 64;
 pub const MAX_RESOURCE_BYTES: usize = 96;
 pub const MAX_GENERATED_BYTES: usize = 32768;
-pub const COMPACT_IDL_METADATA = true;
 pub const TYPE_REF_SIZE_CEILING_BYTES: usize = 66;
 pub const FIELD_SIZE_CEILING_BYTES: usize = 132;
 pub const RECORD_SIZE_CEILING_BYTES: usize = 67;
@@ -268,10 +267,6 @@ pub const Document = struct {
     permissions: [MAX_DECLARATIONS]PermissionDecl = @as([MAX_DECLARATIONS]PermissionDecl, @splat(.{})),
     objects: [MAX_DECLARATIONS]ObjectDecl = @as([MAX_DECLARATIONS]ObjectDecl, @splat(.{})),
     syncs: [MAX_DECLARATIONS]SyncDecl = @as([MAX_DECLARATIONS]SyncDecl, @splat(.{})),
-
-    pub fn interfaceAt(self: *const Document, index: usize) *const Interface {
-        return &self.interfaces[index];
-    }
 
     pub fn operationsFor(self: *const Document, interface: *const Interface) []const Operation {
         const start: usize = @intCast(interface.operation_start);
@@ -897,8 +892,8 @@ test "IDL parser produces manifest interfaces and codegen bindings" {
     try std.testing.expectEqual(@as(u8, 1), doc.object_count);
     try std.testing.expectEqual(@as(u8, 1), doc.sync_count);
     try std.testing.expect(doc.allOperationsTyped());
-    try std.testing.expectEqualStrings("writer.edit", doc.interfaceAt(0).nameSlice());
-    try std.testing.expectEqual(@as(u16, 1), doc.interfaceAt(0).manifestDecl().version_major);
+    try std.testing.expectEqualStrings("writer.edit", doc.interfaces[0].nameSlice());
+    try std.testing.expectEqual(@as(u16, 1), doc.interfaces[0].manifestDecl().version_major);
     try std.testing.expectEqualStrings("SaveRequest", doc.operations[1].requestTypeSlice());
     try std.testing.expect(doc.operations[1].request_size > 0);
 

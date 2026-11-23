@@ -62,6 +62,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
             .policy_service_id = graph.state.services.policy_service.id,
             .service_registry_id = graph.state.services.service_registry.id,
         },
+        .{ .directory = &@import("../policy/policy_object.zig").unattached },
     );
     mediator.attachLedger(manager.updateLedgerPtr());
 

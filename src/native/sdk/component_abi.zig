@@ -15,7 +15,6 @@ pub const PackageInstallRequest = typed_component_abi.PackageInstallRequest;
 pub const PackageInstallResponse = typed_component_abi.PackageInstallResponse;
 pub const PackageUpdateRequest = typed_component_abi.PackageUpdateRequest;
 pub const PackageUpdateResponse = typed_component_abi.PackageUpdateResponse;
-pub const COMPACT_COMPONENT_BINDING_METADATA = true;
 pub const BINDING_SIZE_CEILING_BYTES: usize = 40;
 pub const Error = typed_component_abi.Error || idl.Error || error{
     InterfaceNotDeclared,
@@ -91,7 +90,6 @@ pub fn validateHeader(
 
 test "SDK component ABI exposes typed bindings and validates real wire headers" {
     const bind = binding(.package_install);
-    try std.testing.expect(COMPACT_COMPONENT_BINDING_METADATA);
     try std.testing.expectEqual(u8, @FieldType(Binding, "operation_count"));
     try std.testing.expect(@sizeOf(Binding) <= BINDING_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(InterfaceId.package_install, bind.interface_id);

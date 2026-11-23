@@ -5,7 +5,6 @@ const ids = @import("ids.zig");
 const native_util = @import("util.zig");
 
 pub const no_index = std.math.maxInt(usize);
-pub const COMPACT_ARENA_METADATA = true;
 pub const RIGHT_SIZES_DIRTY_ID_INDEXES = true;
 // The final metadata value permanently retires a physical slot. It is never
 // issued as a handle generation, including after reset or index rebuilding.
@@ -782,6 +781,8 @@ pub fn IndexedArenaWithKeyOptions(
             return null;
         }
 
+        // Secondary keys are hashes of the full key: a hit whose slot does not
+        // match the full key is a collision and therefore a miss.
         pub fn findByUniqueIndex(
             self: *Self,
             secondary_index: anytype,
@@ -793,8 +794,7 @@ pub fn IndexedArenaWithKeyOptions(
                 if (slot_index >= capacity) native_util.impossibleByInvariant("indexed arena secondary index points outside slots");
                 const slot = &self.slots[slot_index];
                 if (!slotInUse(slot)) native_util.impossibleByInvariant("indexed arena secondary index points at a free slot");
-                if (!matches(context, slot)) native_util.impossibleByInvariant("indexed arena secondary index points at the wrong slot");
-                return slot;
+                return if (matches(context, slot)) slot else null;
             }
             if (debugScanFallbackEnabled() and self.findMatching(context, matches) != null) {
                 native_util.impossibleByInvariant("indexed arena secondary index missed a live slot");
@@ -813,8 +813,7 @@ pub fn IndexedArenaWithKeyOptions(
                 if (slot_index >= capacity) native_util.impossibleByInvariant("indexed arena secondary index points outside slots");
                 const slot = &self.slots[slot_index];
                 if (!slotInUse(slot)) native_util.impossibleByInvariant("indexed arena secondary index points at a free slot");
-                if (!matches(context, slot)) native_util.impossibleByInvariant("indexed arena secondary index points at the wrong slot");
-                return slot;
+                return if (matches(context, slot)) slot else null;
             }
             if (debugScanFallbackEnabled() and self.findConstMatching(context, matches) != null) {
                 native_util.impossibleByInvariant("indexed arena secondary index missed a live slot");
@@ -2108,6 +2107,10 @@ test "indexed arena supports secondary indexes" {
         arena.findByUniqueIndex(&owner_index, 92, @as(u64, 92), testSlotMatchesOwner).?.record.label,
     );
     try std.testing.expectEqual(@as(?*TestSlot, null), arena.findByUniqueIndex(&owner_index, 93, @as(u64, 93), testSlotMatchesOwner));
+
+    // A colliding secondary key resolves to a live slot whose full key differs.
+    try std.testing.expectEqual(@as(?*TestSlot, null), arena.findByUniqueIndex(&owner_index, 92, @as(u64, 93), testSlotMatchesOwner));
+    try std.testing.expectEqual(@as(?*const TestSlot, null), arena.findConstByUniqueIndex(&owner_index, 91, @as(u64, 94), testSlotMatchesOwner));
 }
 
 test "multimap indexes size links to their fixed capacities" {

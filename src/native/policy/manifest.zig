@@ -3,7 +3,6 @@ const capability = @import("../kernel_api/capability.zig");
 const units = @import("../core/units.zig");
 
 pub const LeaseTicks = u32;
-pub const COMPACT_LEASE_DURATIONS = true;
 
 pub const MAX_DATA_RIGHTS_FORMAT_BYTES: usize = 64;
 pub const MAX_AI_MODEL_DIGEST_BYTES: usize = 96;

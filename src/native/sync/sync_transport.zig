@@ -895,7 +895,7 @@ pub fn decodeNativeSyncFrame(session: *const TransportSession, frame: []const u8
     if (view.session_id != session.id or view.transport != session.transport or
         view.policy_id != session.policy_id or view.capability_id != session.capability_id or
         !view.source_device.eql(session.source_device) or !view.target_device.eql(session.target_device)) return error.PacketTargetMismatch;
-    if (!transport_crypto.verifyWireMac(session.key, frame[0 .. frame.len - 32], view.wire_mac[0..32].*)) return error.PacketAuthenticationFailed;
+    if (!transport_crypto.verifyWireMac(session.mac_key, frame[0 .. frame.len - 32], view.wire_mac[0..32].*)) return error.PacketAuthenticationFailed;
     return view;
 }
 
@@ -954,7 +954,7 @@ pub fn encodeNativeSyncFrame(
     try writer.writeU16(@intCast(ciphertext.len));
     try writer.writeBytes(ciphertext);
     try writer.writeBytes(&frame.packet.authentication);
-    const mac = transport_crypto.wireMac(session.key, buffer[0..writer.offset]);
+    const mac = transport_crypto.wireMac(session.mac_key, buffer[0..writer.offset]);
     try writer.writeBytes(&mac);
     return buffer[0..writer.offset];
 }
@@ -1214,6 +1214,7 @@ test "native sync transport captures encrypted driver packets and handles replay
     var other_session = connection.session;
     defer other_session.deinit();
     other_session.key = try transport_crypto.freshKey(crypto_hash.zero_digest);
+    other_session.mac_key = transport_crypto.wireMacKey(other_session.key);
     try std.testing.expectError(error.PacketAuthenticationFailed, decryptNativeSyncFrame(&other_session, captured.slice(), &plaintext_out));
     var old_abi = captured;
     std.mem.writeInt(u16, old_abi.bytes[4..6], 3, .little);

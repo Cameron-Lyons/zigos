@@ -178,6 +178,7 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
             .policy_service_id = 902,
             .service_registry_id = 903,
         },
+        .{ .directory = &policy_object.unattached },
     );
     mediator.attachLedger(&ledger);
     const activation = try mediator.applyManifest(app_task.id, bundle, grants, 55);
@@ -520,7 +521,7 @@ pub fn thermalPowerAndAppUpdatesStayExplicit() !void {
         .bundle = v1,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null);
+    }, &.{}, .{});
 
     const v2_permissions = [_]manifest.PermissionRequest{
         .{
@@ -558,14 +559,14 @@ pub fn thermalPowerAndAppUpdatesStayExplicit() !void {
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
-    }, null));
+    }, &.{}, .{}));
 
     const updated = try package_port.install(package_authority, .{
         .bundle = v2,
         .source_identity = "store:zigos",
         .data_schema_version = 1,
         .declared_permission_change = true,
-    }, null);
+    }, &.{}, .{});
     try std.testing.expect(updated.updated_existing);
     try std.testing.expect(updated.permissions_changed);
     try std.testing.expect(updated.rollback_available);
@@ -581,13 +582,13 @@ pub fn thermalPowerAndAppUpdatesStayExplicit() !void {
         .bundle = hidden_schema_change,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
-    }, null));
+    }, &.{}, .{}));
 
     const compatible = try package_port.install(package_authority, .{
         .bundle = v3,
         .source_identity = "store:zigos",
         .data_schema_version = 2,
-    }, null);
+    }, &.{}, .{});
     try std.testing.expect(compatible.updated_existing);
     try std.testing.expectEqual(@as(u32, 2), packages.find("app.notes").?.schemaVersion());
 
