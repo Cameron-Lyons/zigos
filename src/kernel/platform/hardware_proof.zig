@@ -12,11 +12,8 @@ const console = @import("../utils/console.zig");
 const numfmt = @import("../utils/numfmt.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
-const intel_i225 = @import("../drivers/intel_i225.zig");
 const intel_vtd = @import("intel_vtd.zig");
-const nvme = @import("../drivers/nvme.zig");
 const pci = @import("../drivers/pci.zig");
-const xhci = @import("../drivers/xhci.zig");
 const xhci_hw = @import("../drivers/xhci_hw.zig");
 const hardware_target = @import("../../native/platform/hardware_target.zig");
 
@@ -626,24 +623,10 @@ pub fn recordVtdIsolationProof(proof: intel_vtd.FaultRecord) void {
     printNewMarkers();
 }
 
-pub fn recordInputProof(proof: xhci.InputProof) void {
-    facts.xhci_keyboard_input = facts.xhci_controller and proof.productionHardwareVerified();
-    printNewMarkers();
-}
-
-pub fn recordStorageProof(proof: nvme.IoProof) void {
-    if (facts.nvme_controller and proof.productionHardwareVerified()) {
-        facts.nvme_write_read_io = true;
-        facts.storage_write_read_cycles = @max(facts.storage_write_read_cycles, proof.write_read_cycles);
-    }
-    printNewMarkers();
-}
-
-pub fn recordNetworkProof(proof: intel_i225.PacketProof) void {
-    if (facts.i225_lm_controller and proof.productionHardwareVerified()) {
-        facts.i225_frame_io = true;
-        facts.network_frame_cycles = @max(facts.network_frame_cycles, proof.tx_rx_cycles);
-    }
+/// Record boot keyboard input delivered by the hardware xHCI event ring.
+/// Only xhci_hw advances this count, so modeled input can never set the fact.
+pub fn recordKeyboardInput(hardware_report_count: u64) void {
+    facts.xhci_keyboard_input = facts.xhci_controller and hardware_report_count != 0;
     printNewMarkers();
 }
 
@@ -1182,139 +1165,17 @@ test "hardware proof records telemetry observations only with real target ACPI a
     try std.testing.expectEqual(@as(u64, 14), factsForTest().acceleratorTelemetryFacts().?.sample_sequence);
 }
 
-test "hardware proof records xHCI input only from enumerated boot keyboard evidence" {
-    var controller = try xhci.HidController.initWithMmio(xhci.defaultCapabilityRegisters(), .{
-        .command_ring_trbs = 64,
-        .event_ring_trbs = 64,
-        .command_ring_address = 0x1000,
-        .event_ring_address = 0x2000,
-    });
-    const descriptor = xhci.bootKeyboardConfigurationDescriptor(xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
-    const keyboard = try controller.attachBootKeyboard(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, descriptor[0..]);
-    const report = try xhci.bootKeyboardReport(keyboard.device_id, keyboard.endpoint_id, 0, &.{0x04});
-    try controller.submitKeyboardInterruptEvent(keyboard.slot_id, keyboard.endpoint_id, report.reportSlice());
-    const modeled_proof = controller.inputProof().?;
-    const hardware_proof = xhci.withHardwareInputEvidence(modeled_proof, .{
-        .source = .hardware_event_ring,
-        .controller_event_trbs = 1,
-        .event_ring_dma_writes = 1,
-        .device_context_reads_by_controller = 1,
-        .endpoint_context_reads_by_controller = 1,
-        .interrupt_assertions = 1,
-        .port_status_change_events = 1,
-        .input_report_dma_bytes = xhci.HID_BOOT_KEYBOARD_REPORT_BYTES,
-    });
-
+test "hardware proof records xHCI input only for a detected controller with hardware reports" {
     resetForTest();
-    recordInputProof(hardware_proof);
+    recordKeyboardInput(1);
     try std.testing.expect(!factsForTest().xhci_keyboard_input);
 
     resetForTest();
     facts.xhci_controller = true;
-    recordInputProof(modeled_proof);
+    recordKeyboardInput(0);
     try std.testing.expect(!factsForTest().xhci_keyboard_input);
-
-    recordInputProof(hardware_proof);
+    recordKeyboardInput(1);
     try std.testing.expect(factsForTest().xhci_keyboard_input);
-
-    var malformed = hardware_proof;
-    malformed.mmio.endpoint_context_writes = 0;
-    resetForTest();
-    facts.xhci_controller = true;
-    recordInputProof(malformed);
-    try std.testing.expect(!factsForTest().xhci_keyboard_input);
-}
-
-test "hardware proof records NVMe block cycles only from verified write read proof" {
-    const cap = nvme.ControllerCapabilities{ .raw = (@as(u64, 63) | (@as(u64, 1) << 37)) };
-    var image = @as([nvme.SECTOR_BYTES * 4]u8, @splat(0));
-    var namespaces = [_]nvme.Namespace{.{
-        .id = 1,
-        .sector_count = 4,
-        .image = image[0..],
-    }};
-    var controller = try nvme.Controller.initWithMmio(
-        cap,
-        namespaces[0..],
-        16,
-        nvme.defaultAdminQueuePlan(),
-        nvme.defaultProofPrp1Address(),
-        nvme.SECTOR_BYTES,
-    );
-    const modeled_proof = try controller.proveWriteReadCycles(1, 0, 3);
-    const hardware_proof = nvme.withHardwareCompletionEvidence(modeled_proof, .{
-        .source = .hardware_dma,
-        .controller_completion_writes = 6,
-        .dma_read_bytes = 3 * nvme.SECTOR_BYTES,
-        .dma_write_bytes = 3 * nvme.SECTOR_BYTES,
-        .interrupt_count = 1,
-        .phase_tag_observations = 6,
-    });
-
-    resetForTest();
-    recordStorageProof(hardware_proof);
-    try std.testing.expect(!factsForTest().nvme_write_read_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().storage_write_read_cycles);
-
-    resetForTest();
-    facts.nvme_controller = true;
-    recordStorageProof(modeled_proof);
-    try std.testing.expect(!factsForTest().nvme_write_read_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().storage_write_read_cycles);
-
-    recordStorageProof(hardware_proof);
-    try std.testing.expect(factsForTest().nvme_write_read_io);
-    try std.testing.expectEqual(@as(u16, 3), factsForTest().storage_write_read_cycles);
-
-    var malformed = hardware_proof;
-    malformed.mmio.completed_commands = 0;
-    resetForTest();
-    facts.nvme_controller = true;
-    recordStorageProof(malformed);
-    try std.testing.expect(!factsForTest().nvme_write_read_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().storage_write_read_cycles);
-}
-
-test "hardware proof records I225 network cycles only from verified packet proof" {
-    var adapter = try intel_i225.SoftwareAdapter.initWithMmio(.{
-        .rx_descriptors = 128,
-        .tx_descriptors = 128,
-        .rx_ring_address = 0x1000,
-        .tx_ring_address = 0x2000,
-    }, .{ 0x02, 0x15, 0xF2, 0, 0, 9 }, intel_i225.defaultPhyLinkState(), intel_i225.defaultPacketBufferPlan());
-    const modeled_proof = try adapter.proveFrameCycles(4);
-    const hardware_proof = intel_i225.withHardwarePacketEvidence(modeled_proof, .{
-        .source = .hardware_descriptor_ring,
-        .tx_descriptors_owned_by_device = 4,
-        .rx_descriptors_owned_by_device = 4,
-        .tx_dma_bytes = 4 * intel_i225.MIN_ETHERNET_FRAME_BYTES,
-        .rx_dma_bytes = 4 * intel_i225.MIN_ETHERNET_FRAME_BYTES,
-        .asserted_interrupts = 4,
-        .phy_packet_observations = 4,
-    });
-
-    resetForTest();
-    recordNetworkProof(hardware_proof);
-    try std.testing.expect(!factsForTest().i225_frame_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().network_frame_cycles);
-
-    resetForTest();
-    facts.i225_lm_controller = true;
-    recordNetworkProof(modeled_proof);
-    try std.testing.expect(!factsForTest().i225_frame_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().network_frame_cycles);
-
-    recordNetworkProof(hardware_proof);
-    try std.testing.expect(factsForTest().i225_frame_io);
-    try std.testing.expectEqual(@as(u16, 4), factsForTest().network_frame_cycles);
-
-    var malformed = hardware_proof;
-    malformed.mmio.interrupt_cause_reads = 0;
-    resetForTest();
-    facts.i225_lm_controller = true;
-    recordNetworkProof(malformed);
-    try std.testing.expect(!factsForTest().i225_frame_io);
-    try std.testing.expectEqual(@as(u16, 0), factsForTest().network_frame_cycles);
 }
 
 test "hardware proof records update rollback only from verified power cycle proof" {

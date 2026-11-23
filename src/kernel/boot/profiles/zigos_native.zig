@@ -86,8 +86,7 @@ inline fn wakeBoundXhciTask(driver: anytype, manager: anytype, pending: event_wa
 
 fn harvestInputProof() void {
     const input_report_count = xhci_driver_task.keyboardReportCount();
-    if (input_report_count == recorded_input_report_count) return;
-    const proof = xhci_driver_task.inputProof() orelse return;
+    if (input_report_count == 0 or input_report_count == recorded_input_report_count) return;
     if (xhci_driver_task.controllerDeviceId()) |device_id| {
         device_inventory.registerDetected(
             .input_device,
@@ -96,7 +95,7 @@ fn harvestInputProof() void {
             false,
         );
     }
-    hardware_proof.recordInputProof(proof);
+    hardware_proof.recordKeyboardInput(input_report_count);
     recorded_input_report_count = input_report_count;
 }
 

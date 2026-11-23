@@ -16,6 +16,7 @@ const policy_mediation = @import("policy_mediation.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
 const xhci = @import("../../kernel/drivers/xhci.zig");
+const modeled_xhci = @import("../session/proofs/modeled_xhci.zig");
 
 const REVIEW_RENDER_BUFFER_BYTES: usize = units.kibibytes(4);
 const REVIEW_CARD_BUFFER_BYTES: usize = 512;
@@ -198,7 +199,7 @@ pub const CommandInput = struct {
 };
 
 pub const ModeledInputSource = struct {
-    controller: xhci.HidController,
+    controller: modeled_xhci.HidController,
     commands: CommandInput = .{},
     decoder: input_driver_task.Decoder = .{},
     reports_consumed: usize = 0,
@@ -229,9 +230,9 @@ pub const ModeledInputSource = struct {
         self.commands.initializeAllocated();
         self.decoder = .{};
         self.reports_consumed = 0;
-        const descriptor = xhci.bootKeyboardConfigurationDescriptor(xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
+        const descriptor = modeled_xhci.bootKeyboardConfigurationDescriptor(modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
         _ = try self.controller.attachBootKeyboard(
-            xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+            modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
             descriptor[0..],
         );
     }
@@ -286,15 +287,15 @@ pub const ModeledInputSource = struct {
         ch: u8,
     ) InputError!void {
         const key = hidKeyForAscii(ch) orelse return error.UnsupportedTextInput;
-        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, key.modifiers, &.{key.usage}));
-        try self.submitKeyboardReport(device_id, endpoint_id, try xhci.bootKeyboardReport(device_id, endpoint_id, 0, &.{}));
+        try self.submitKeyboardReport(device_id, endpoint_id, try modeled_xhci.bootKeyboardReport(device_id, endpoint_id, key.modifiers, &.{key.usage}));
+        try self.submitKeyboardReport(device_id, endpoint_id, try modeled_xhci.bootKeyboardReport(device_id, endpoint_id, 0, &.{}));
     }
 
     fn submitKeyboardReport(
         self: *ModeledInputSource,
         device_id: u64,
         endpoint_id: u8,
-        report: xhci.HidReport,
+        report: modeled_xhci.HidReport,
     ) InputError!void {
         const boot_keyboard = self.controller.configuredBootKeyboard() orelse return error.MissingBootKeyboardInterface;
         if (boot_keyboard.device_id != device_id) return error.UnknownHidDevice;
@@ -314,7 +315,7 @@ pub const ModeledInputSource = struct {
         }
     }
 
-    fn pollReport(self: *ModeledInputSource) InputError!?xhci.HidReport {
+    fn pollReport(self: *ModeledInputSource) InputError!?modeled_xhci.HidReport {
         return self.controller.pollHidReport() catch |err| switch (err) {
             error.EventRingEmpty => null,
             else => return err,
@@ -1360,8 +1361,8 @@ test "review service consumes xHCI keyboard reports for physical permission comm
     var runtime = task_runtime.Runtime.init();
     const task = try createReviewTestTask(&runtime, 14, 37);
     var modeled_input = try ModeledInputSource.initDefault();
-    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
-    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
+    try modeled_input.enqueueTextCommand(modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
+    try modeled_input.enqueueTextCommand(modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
 
     var compositor = compositor_session.Session.init();
     var checkpoint_store = compositor_session.CheckpointStore{};
@@ -1429,8 +1430,8 @@ test "permission input consumes only centrally routed events for its focused tas
     var service = Service.init(1, 2, &runtime, &.{});
     var modeled_input = try ModeledInputSource.initDefault();
     try modeled_input.enqueueTextCommand(
-        xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
-        xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
         "deny",
     );
     service.bindModeledInput(&modeled_input);
@@ -1450,8 +1451,8 @@ test "hosted modeled xHCI reports still count when a focused router is bound" {
     var runtime = task_runtime.Runtime.init();
     const task = try createReviewTestTask(&runtime, 14, 37);
     var modeled_input = try ModeledInputSource.initDefault();
-    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
-    try modeled_input.enqueueTextCommand(xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
+    try modeled_input.enqueueTextCommand(modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "allow local lease=25");
+    try modeled_input.enqueueTextCommand(modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID, modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID, "deny");
 
     var compositor = compositor_session.Session.init();
     var checkpoint_store = compositor_session.CheckpointStore{};
@@ -1503,13 +1504,13 @@ test "physical input command editing honors shift punctuation and backspace" {
     try std.testing.expectEqual(@as(u8, 0), source.commands.pending_command_count);
     try std.testing.expectEqual(@as(usize, 0), source.commands.commands_completed);
     try source.enqueueTextCommand(
-        xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
-        xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
         "Allow_Local+1?",
     );
     try source.enqueueTextCommand(
-        xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
-        xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+        modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
         "denyx\x08",
     );
     var command_buffer: [MAX_INPUT_LINE]u8 = undefined;

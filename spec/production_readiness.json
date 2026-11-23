@@ -612,9 +612,7 @@
         "src/kernel/timer/tsc_clock.zig",
         "src/kernel/drivers/serial.zig",
         "src/kernel/drivers/pci.zig",
-        "src/kernel/drivers/nvme.zig",
         "src/kernel/drivers/nvme_hw.zig",
-        "src/kernel/drivers/intel_i225.zig",
         "src/kernel/drivers/xhci.zig",
         "src/kernel/drivers/xhci_hw.zig"
       ],
@@ -1093,7 +1091,6 @@
         "src/native/services/attention_broker_service.zig",
         "src/native/platform/platform_policy_signals.zig",
         "src/native/drivers/accelerator_driver_task.zig",
-        "src/kernel/drivers/first_target_telemetry.zig",
         "src/kernel/platform/hardware_proof.zig",
         "src/native/kernel_api/shared_memory.zig",
         "src/native/task/userspace_executor.zig",

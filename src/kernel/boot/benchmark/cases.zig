@@ -13,11 +13,10 @@ pub const QualityGateCase = struct {
 
 pub const SECRET_STORE_OPERATIONS_PER_ITERATION: u32 = 16;
 pub const SLO_IRQ_TO_TASK = "slo.irq_to_task";
-pub const SLO_NVME_QUEUED_IO = "slo.nvme_queued_io";
 pub const SLO_ENDPOINT_RTT = "slo.endpoint_rtt";
 pub const SLO_FOCUSED_INPUT = "slo.focused_input";
 
-pub fn benchmarkCases(handlers: anytype) [34]BenchmarkCase {
+pub fn benchmarkCases(handlers: anytype) [33]BenchmarkCase {
     return .{
         .{ .name = "capability.derive.workspace_object", .iterations = 40_000, .runIteration = handlers.capability_derive },
         .{ .name = "capability.mint_reuse_free_slot", .iterations = 4_000, .runIteration = handlers.capability_mint_reuse_free_slot },
@@ -49,7 +48,6 @@ pub fn benchmarkCases(handlers: anytype) [34]BenchmarkCase {
         .{ .name = "update_health.validate_pending_activation", .iterations = 8, .runIteration = handlers.update_health_validation },
         .{ .name = "driver_recovery.restart_driver", .iterations = 512, .runIteration = handlers.driver_recovery_restart },
         .{ .name = SLO_IRQ_TO_TASK, .iterations = 8_000, .runIteration = handlers.slo_irq_to_task, .teardown = handlers.slo_irq_teardown },
-        .{ .name = SLO_NVME_QUEUED_IO, .iterations = 4_000, .runIteration = handlers.slo_nvme_queued_io },
         .{ .name = SLO_ENDPOINT_RTT, .iterations = 40_000, .runIteration = handlers.slo_endpoint_rtt },
         .{ .name = SLO_FOCUSED_INPUT, .iterations = 12_000, .runIteration = handlers.slo_focused_input },
         .{ .name = "text_layout.navigate_full_document", .iterations = 20_000, .runIteration = handlers.text_navigation },

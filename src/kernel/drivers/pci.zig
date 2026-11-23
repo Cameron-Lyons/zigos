@@ -1,6 +1,5 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const console = @import("../utils/console.zig");
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     @import("../memory/memory.zig")
 else
@@ -14,8 +13,10 @@ const ECAM_BUS_SHIFT: u6 = 20;
 const ECAM_DEVICE_SHIFT: u6 = 15;
 const ECAM_FUNCTION_SHIFT: u6 = 12;
 const ECAM_FUNCTION_BYTES: usize = 1 << ECAM_FUNCTION_SHIFT;
+const ECAM_BUS_BYTES: usize = 1 << ECAM_BUS_SHIFT;
 const ECAM_CONFIG_OFFSET_MASK: u16 = ECAM_FUNCTION_BYTES - 1;
-const CONFIG_DWORD_ALIGNMENT_MASK: u16 = 0x0FFC;
+const MAPPED_BUS_BUDGET: usize = mmio_windows.pci_ecam.bytes / ECAM_BUS_BYTES;
+const UNMAPPED_BUS_SLOT: u8 = std.math.maxInt(u8);
 
 const PCI_MAX_BUS_COUNT: u16 = 256;
 const PCI_MAX_DEVICE_COUNT: u8 = 32;
@@ -28,6 +29,7 @@ const PCI_BAR0_OFFSET: u16 = 0x10;
 const PCI_BAR1_OFFSET: u16 = 0x14;
 const PCI_COMMAND_OFFSET: u16 = 0x04;
 const PCI_STATUS_OFFSET: u16 = 0x06;
+const PCI_COMMAND_IO_SPACE: u16 = 1 << 0;
 const PCI_COMMAND_MEMORY_SPACE: u16 = 1 << 1;
 const PCI_COMMAND_BUS_MASTER: u16 = 1 << 2;
 const PCI_COMMAND_INTERRUPT_DISABLE: u16 = 1 << 10;
@@ -51,6 +53,9 @@ const PCI_MSI_64_BIT_CAPABLE: u16 = 1 << 7;
 const PCI_MSI_PER_VECTOR_MASK_CAPABLE: u16 = 1 << 8;
 const PCI_MSIX_FUNCTION_MASK: u16 = 1 << 14;
 const PCI_MSIX_ENABLE: u16 = 1 << 15;
+const PCI_MSIX_TABLE_SIZE_MASK: u16 = 0x7FF;
+const PCI_MSIX_TABLE_BIR_MASK: u32 = 0x7;
+const PCI_MSIX_VECTOR_MASKED: u32 = 1 << 0;
 
 const PCI_ABSENT_VENDOR_ID: u16 = 0xFFFF;
 const PCI_MULTI_FUNCTION_FLAG: u8 = 0x80;
@@ -59,8 +64,6 @@ const PCI_SUBCLASS_PCI_TO_PCI: u8 = 0x04;
 const PCI_INVENTORY_CAPACITY: usize = 256;
 const PCI_U8_MASK: u32 = 0xFF;
 const PCI_U16_MASK: u32 = 0xFFFF;
-const BITS_PER_BYTE: u5 = 8;
-const U16_HIGH_BYTE_SHIFT = 8;
 const PCI_DEVICE_ID_SHIFT = 16;
 const PCI_CLASS_CODE_SHIFT = 24;
 const PCI_SUBCLASS_SHIFT = 16;
@@ -71,8 +74,13 @@ const STABLE_BUS_SHIFT = 8;
 const STABLE_DEVICE_SHIFT = 3;
 
 comptime {
-    if (ECAM_FUNCTION_BYTES > mmio_windows.pci_ecam.bytes) {
-        @compileError("PCI ECAM window is smaller than one configuration function");
+    if (mmio_windows.pci_ecam.bytes % ECAM_BUS_BYTES != 0 or MAPPED_BUS_BUDGET == 0 or
+        MAPPED_BUS_BUDGET >= UNMAPPED_BUS_SLOT)
+    {
+        @compileError("PCI ECAM bus window must hold a whole number of bounded bus slots");
+    }
+    if (ECAM_FUNCTION_BYTES > mmio_windows.pci_ecam_scratch.bytes) {
+        @compileError("PCI ECAM scratch window is smaller than one configuration function");
     }
 }
 
@@ -89,10 +97,9 @@ pub const PCIDevice = struct {
     bar1: u32,
 };
 
-pub const PCI_DEVICE_SIZE_CEILING_BYTES: usize = 20;
+const PCI_DEVICE_SIZE_CEILING_BYTES: usize = 20;
 const PCI_INVENTORY_SIZE_CEILING_BYTES: usize = 5_120;
-pub const HEAP_BACKED_PCI_INVENTORY_ON_FREESTANDING = true;
-pub const PCI_INVENTORY_HANDLE_SIZE_CEILING_BYTES: usize = 8;
+const PCI_INVENTORY_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 
 pub const MemoryBarWidth = enum {
     bits32,
@@ -106,43 +113,74 @@ pub const MemoryBar = struct {
 
 pub const BarAperture = struct { address: u64 = 0, length: u64 = 0 };
 
+pub const BarProbeError = error{ UnsafeBarProbe, InvalidBar };
+
 /// Size endpoint BARs only while DMA and address decoding are stopped. The
 /// configuration lock spans the destructive sizing writes and their restoration.
-pub fn probeMemoryBars(dev: PCIDevice) error{ UnsafeBarProbe, InvalidBar }![6]BarAperture {
+pub fn probeMemoryBars(dev: PCIDevice) BarProbeError![6]BarAperture {
     acquireConfigurationLock();
     defer releaseConfigurationLock();
-    const command: u16 = @truncate(readConfigUnlocked(dev.bus, dev.device, dev.function, 4));
-    if (command & PCI_COMMAND_BUS_MASTER != 0 or
-        (readConfigUnlocked(dev.bus, dev.device, dev.function, 0x0C) >> 16) & 0x7F != 0) return error.UnsafeBarProbe;
-    // Upper status bits are write-one-to-clear, so always write zero there.
-    writeConfigUnlocked(dev.bus, dev.device, dev.function, 4, command & ~@as(u16, 3));
-    defer writeConfigUnlocked(dev.bus, dev.device, dev.function, 4, command);
+    const command = try beginBarProbeUnlocked(dev);
+    defer writeUnlocked(u16, dev, PCI_COMMAND_OFFSET, command);
     var bars = @as([6]BarAperture, @splat(.{}));
     var index: u16 = 0;
     while (index < 6) : (index += 1) {
-        const offset: u16 = 0x10 + index * 4;
-        const low = readConfigUnlocked(dev.bus, dev.device, dev.function, offset);
-        if (low & 1 != 0) continue;
-        const wide = low & 6 == 4;
-        if ((low & 6 != 0 and !wide) or (wide and index == 5)) return error.InvalidBar;
-        const high = if (wide) readConfigUnlocked(dev.bus, dev.device, dev.function, offset + 4) else 0;
-        writeConfigUnlocked(dev.bus, dev.device, dev.function, offset, 0xFFFF_FFFF);
-        if (wide) writeConfigUnlocked(dev.bus, dev.device, dev.function, offset + 4, 0xFFFF_FFFF);
-        const mask_low = readConfigUnlocked(dev.bus, dev.device, dev.function, offset) & 0xFFFF_FFF0;
-        const mask_high = if (wide) readConfigUnlocked(dev.bus, dev.device, dev.function, offset + 4) else 0xFFFF_FFFF;
-        writeConfigUnlocked(dev.bus, dev.device, dev.function, offset, low);
-        if (wide) writeConfigUnlocked(dev.bus, dev.device, dev.function, offset + 4, high);
-        if (mask_low != 0 or (wide and mask_high != 0)) {
-            const mask = (@as(u64, mask_high) << 32) | mask_low;
-            const length = std.math.add(u64, ~mask, 1) catch return error.InvalidBar;
-            const address = (@as(u64, high) << 32) | (low & 0xFFFF_FFF0);
-            if (!std.math.isPowerOfTwo(length) or address == 0 or address % length != 0) return error.InvalidBar;
-            _ = std.math.add(u64, address, length - 1) catch return error.InvalidBar;
-            bars[index] = .{ .address = address, .length = length };
-        }
-        if (wide) index += 1;
+        const sized = try sizeBarUnlocked(dev, index);
+        bars[index] = sized.aperture;
+        if (sized.wide) index += 1;
     }
     return bars;
+}
+
+pub const BarAdmissionError = BarProbeError || error{ BusMasteringNotRevoked, BarUnmappable };
+
+/// Admit the memory BAR0 aperture a driver maps: bus mastering must already be
+/// revoked, and the sized aperture must match the decoded BAR0 address and
+/// cover at least `min_bytes`. Only BAR0 (with BAR1 for a 64-bit BAR0) is sized.
+pub fn admitMemoryBar0(dev: PCIDevice, min_bytes: u64) BarAdmissionError!BarAperture {
+    if (busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
+    const bar = memoryBar0(dev) orelse return error.BarUnmappable;
+    const aperture = aperture: {
+        acquireConfigurationLock();
+        defer releaseConfigurationLock();
+        const command = try beginBarProbeUnlocked(dev);
+        defer writeUnlocked(u16, dev, PCI_COMMAND_OFFSET, command);
+        break :aperture (try sizeBarUnlocked(dev, 0)).aperture;
+    };
+    if (bar.address == 0 or aperture.address != bar.address or aperture.length < min_bytes) return error.BarUnmappable;
+    return aperture;
+}
+
+fn beginBarProbeUnlocked(dev: PCIDevice) BarProbeError!u16 {
+    const command = readUnlocked(u16, dev, PCI_COMMAND_OFFSET);
+    if (command & PCI_COMMAND_BUS_MASTER != 0 or
+        readUnlocked(u8, dev, PCI_HEADER_TYPE_OFFSET) & PCI_HEADER_TYPE_MASK != 0) return error.UnsafeBarProbe;
+    writeUnlocked(u16, dev, PCI_COMMAND_OFFSET, command & ~(PCI_COMMAND_IO_SPACE | PCI_COMMAND_MEMORY_SPACE));
+    return command;
+}
+
+const SizedBar = struct { aperture: BarAperture = .{}, wide: bool = false };
+
+fn sizeBarUnlocked(dev: PCIDevice, index: u16) BarProbeError!SizedBar {
+    const offset: u16 = PCI_BAR0_OFFSET + index * 4;
+    const low = readUnlocked(u32, dev, offset);
+    if (low & PCI_BAR_IO_SPACE != 0) return .{};
+    const wide = low & PCI_BAR_MEMORY_TYPE_MASK == PCI_BAR_MEMORY_TYPE_64;
+    if ((low & PCI_BAR_MEMORY_TYPE_MASK != 0 and !wide) or (wide and index == 5)) return error.InvalidBar;
+    const high = if (wide) readUnlocked(u32, dev, offset + 4) else 0;
+    writeUnlocked(u32, dev, offset, 0xFFFF_FFFF);
+    if (wide) writeUnlocked(u32, dev, offset + 4, 0xFFFF_FFFF);
+    const mask_low = readUnlocked(u32, dev, offset) & PCI_BAR_ADDRESS_MASK;
+    const mask_high = if (wide) readUnlocked(u32, dev, offset + 4) else 0xFFFF_FFFF;
+    writeUnlocked(u32, dev, offset, low);
+    if (wide) writeUnlocked(u32, dev, offset + 4, high);
+    if (mask_low == 0 and !(wide and mask_high != 0)) return .{ .wide = wide };
+    const mask = (@as(u64, mask_high) << 32) | mask_low;
+    const length = std.math.add(u64, ~mask, 1) catch return error.InvalidBar;
+    const address = (@as(u64, high) << 32) | (low & PCI_BAR_ADDRESS_MASK);
+    if (!std.math.isPowerOfTwo(length) or address == 0 or address % length != 0) return error.InvalidBar;
+    _ = std.math.add(u64, address, length - 1) catch return error.InvalidBar;
+    return .{ .aperture = .{ .address = address, .length = length }, .wide = wide };
 }
 
 pub fn enableMemoryDecoding(dev: PCIDevice) void {
@@ -161,7 +199,7 @@ pub const PCI_VENDOR_INTEL: u16 = 0x8086;
 pub const PCI_DEVICE_INTEL_I225_LM: u16 = 0x15F2;
 
 const PciInventory = [PCI_INVENTORY_CAPACITY]PCIDevice;
-const heap_backed_pci_inventory = builtin.target.os.tag == .freestanding and HEAP_BACKED_PCI_INVENTORY_ON_FREESTANDING;
+const heap_backed_pci_inventory = builtin.target.os.tag == .freestanding;
 const PciInventoryBacking = if (heap_backed_pci_inventory) ?*PciInventory else PciInventory;
 
 var boot_inventory: PciInventoryBacking = if (heap_backed_pci_inventory) null else undefined;
@@ -169,7 +207,12 @@ var boot_inventory_count: usize = 0;
 var boot_inventory_initialized = false;
 var boot_inventory_valid = false;
 var ecam_allocation: ?mcfg.Allocation = null;
-var mapped_configuration_page: ?usize = null;
+// Discovered buses stay mapped for the kernel lifetime, so configuration
+// access is plain address arithmetic on any CPU and in any context. Buses
+// beyond the window budget share one remapped scratch function page.
+var bus_slots = @as([PCI_MAX_BUS_COUNT]u8, @splat(UNMAPPED_BUS_SLOT));
+var mapped_bus_count: usize = 0;
+var scratch_function_page: ?usize = null;
 var configuration_lock = spin.Lock.init();
 
 comptime {
@@ -183,12 +226,6 @@ comptime {
         @compileError("heap-backed PCI inventory exceeds its handle size ceiling");
     }
 }
-
-pub const inventory_layout = .{
-    .inventory_size_bytes = @sizeOf(PciInventory),
-    .freestanding_handle_size_bytes = @sizeOf(?*PciInventory),
-    .heap_backs_inventory_on_freestanding = HEAP_BACKED_PCI_INVENTORY_ON_FREESTANDING,
-};
 
 pub const InitError = error{InvalidEcamAllocation} || paging.DeviceMapError;
 pub const QuiesceError = error{
@@ -220,19 +257,16 @@ pub fn init(allocation: mcfg.Allocation) InitError!void {
     const last_address = std.math.add(u64, allocation.base_address, span - 1) catch
         return error.InvalidEcamAllocation;
     _ = std.math.cast(usize, last_address) orelse return error.InvalidEcamAllocation;
+    // Bus slots are mapped for the kernel lifetime against one allocation.
+    if (ecam_allocation != null) return error.InvalidEcamAllocation;
 
     if (comptime builtin.target.os.tag == .freestanding) try paging.registerPciEcam(allocation);
 
     releaseBootInventory();
     ecam_allocation = allocation;
-    mapped_configuration_page = null;
     boot_inventory_count = 0;
     boot_inventory_initialized = false;
     boot_inventory_valid = false;
-}
-
-pub fn initialized() bool {
-    return ecam_allocation != null;
 }
 
 pub fn ecamPhysicalAddress(
@@ -266,43 +300,103 @@ fn releaseConfigurationLock() void {
     configuration_lock.release();
 }
 
-fn mappedRegister(bus: u8, device: u8, function: u8, offset: u16) ?*volatile u32 {
+/// Map a whole discovered bus once, before its functions are probed. Fresh
+/// absent-to-present leaves need no remote shootdown, and no remap follows.
+fn mapBus(bus: u8) void {
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    if (bus_slots[bus] != UNMAPPED_BUS_SLOT or mapped_bus_count == MAPPED_BUS_BUDGET) return;
+    const allocation = ecam_allocation orelse return;
+    const physical = ecamPhysicalAddress(allocation, bus, 0, 0, 0) orelse return;
+    paging.mapKernelDeviceRange(
+        mmio_windows.pci_ecam.base + mapped_bus_count * ECAM_BUS_BYTES,
+        physical,
+        ECAM_BUS_BYTES,
+        true,
+    ) catch return;
+    bus_slots[bus] = @intCast(mapped_bus_count);
+    mapped_bus_count += 1;
+}
+
+/// ECAM accesses are naturally aligned 1, 2 or 4 byte loads and stores, so a
+/// narrow COMMAND write never rewrites the write-one-to-clear STATUS bits.
+fn configAddress(dev: PCIDevice, offset: u16, size: u16) ?usize {
+    if (offset % size != 0) return null;
     const allocation = ecam_allocation orelse return null;
-    const aligned_offset = offset & CONFIG_DWORD_ALIGNMENT_MASK;
-    const physical_address = ecamPhysicalAddress(allocation, bus, device, function, aligned_offset) orelse return null;
+    const physical_address = ecamPhysicalAddress(allocation, dev.bus, dev.device, dev.function, offset) orelse return null;
+    const slot = bus_slots[dev.bus];
+    if (slot != UNMAPPED_BUS_SLOT) {
+        return mmio_windows.pci_ecam.base + @as(usize, slot) * ECAM_BUS_BYTES +
+            (physical_address & (ECAM_BUS_BYTES - 1));
+    }
     const physical_page = physical_address & ~(ECAM_FUNCTION_BYTES - 1);
-    if (mapped_configuration_page == null or mapped_configuration_page.? != physical_page) {
+    if (scratch_function_page != physical_page) {
         paging.mapKernelDeviceRange(
-            mmio_windows.pci_ecam.base,
+            mmio_windows.pci_ecam_scratch.base,
             physical_page,
             ECAM_FUNCTION_BYTES,
             true,
         ) catch return null;
-        mapped_configuration_page = physical_page;
+        scratch_function_page = physical_page;
     }
-    return @ptrFromInt(mmio_windows.pci_ecam.base + (physical_address & (ECAM_FUNCTION_BYTES - 1)));
+    return mmio_windows.pci_ecam_scratch.base + (physical_address & (ECAM_FUNCTION_BYTES - 1));
 }
 
-fn readConfigUnlocked(bus: u8, device: u8, function: u8, offset: u16) u32 {
-    const register = mappedRegister(bus, device, function, offset) orelse return std.math.maxInt(u32);
-    return register.*;
+inline fn readUnlocked(comptime T: type, dev: PCIDevice, offset: u16) T {
+    const address = configAddress(dev, offset, @sizeOf(T)) orelse return std.math.maxInt(T);
+    return @as(*volatile T, @ptrFromInt(address)).*;
 }
 
-fn writeConfigUnlocked(bus: u8, device: u8, function: u8, offset: u16, value: u32) void {
-    const register = mappedRegister(bus, device, function, offset) orelse return;
-    register.* = value;
+inline fn writeUnlocked(comptime T: type, dev: PCIDevice, offset: u16, value: T) void {
+    const address = configAddress(dev, offset, @sizeOf(T)) orelse return;
+    @as(*volatile T, @ptrFromInt(address)).* = value;
+}
+
+inline fn readLocked(comptime T: type, dev: PCIDevice, offset: u16) T {
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    return readUnlocked(T, dev, offset);
+}
+
+inline fn writeLocked(comptime T: type, dev: PCIDevice, offset: u16, value: T) void {
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    writeUnlocked(T, dev, offset, value);
+}
+
+inline fn locator(bus: u8, device: u8, function: u8) PCIDevice {
+    return .{
+        .bus = bus,
+        .device = device,
+        .function = function,
+        .vendor_id = 0,
+        .device_id = 0,
+        .class_code = 0,
+        .subclass = 0,
+        .prog_if = 0,
+        .bar0 = 0,
+        .bar1 = 0,
+    };
 }
 
 pub fn readConfig(bus: u8, device: u8, function: u8, offset: u16) u32 {
-    acquireConfigurationLock();
-    defer releaseConfigurationLock();
-    return readConfigUnlocked(bus, device, function, offset);
+    return readLocked(u32, locator(bus, device, function), offset);
 }
 
 pub fn writeConfig(bus: u8, device: u8, function: u8, offset: u16, value: u32) void {
-    acquireConfigurationLock();
-    defer releaseConfigurationLock();
-    writeConfigUnlocked(bus, device, function, offset, value);
+    writeLocked(u32, locator(bus, device, function), offset, value);
+}
+
+pub fn readConfigByte(bus: u8, device: u8, function: u8, offset: u16) u8 {
+    return readLocked(u8, locator(bus, device, function), offset);
+}
+
+pub fn readConfigWord(bus: u8, device: u8, function: u8, offset: u16) u16 {
+    return readLocked(u16, locator(bus, device, function), offset);
+}
+
+pub fn writeConfigWord(bus: u8, device: u8, function: u8, offset: u16, value: u16) void {
+    writeLocked(u16, locator(bus, device, function), offset, value);
 }
 
 pub fn checkDevice(bus: u8, device: u8, func: u8) ?PCIDevice {
@@ -445,6 +539,7 @@ fn buildBootInventory() void {
 
     while (queue_head < queue_tail) : (queue_head += 1) {
         const bus = queue[queue_head];
+        mapBus(bus);
         var device: u8 = 0;
         while (device < PCI_MAX_DEVICE_COUNT) : (device += 1) {
             const function_zero = checkDevice(bus, device, 0) orelse continue;
@@ -479,94 +574,40 @@ fn bootDevices() []const PCIDevice {
 }
 
 pub fn disableBusMastering(device_info: PCIDevice) void {
-    const command = readConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        PCI_COMMAND_OFFSET,
-    );
-    writeConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    const command = readUnlocked(u16, device_info, PCI_COMMAND_OFFSET);
+    writeUnlocked(
+        u16,
+        device_info,
         PCI_COMMAND_OFFSET,
         (command & ~PCI_COMMAND_BUS_MASTER) | PCI_COMMAND_INTERRUPT_DISABLE,
     );
 }
 
-pub fn enableMemoryBusMastering(device_info: PCIDevice) error{ ConfigurationUnavailable, BusMasterEnableFailed }!void {
+const BUS_MASTER_COMMAND = PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER;
+pub const BusMasterError = error{ ConfigurationUnavailable, BusMasterEnableFailed };
+
+pub fn enableMemoryBusMastering(device_info: PCIDevice) BusMasterError!void {
     acquireConfigurationLock();
     defer releaseConfigurationLock();
-    const pointer = mappedRegister(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        PCI_COMMAND_OFFSET,
-    );
-    const CommandRegister = struct {
-        pointer: *volatile u32,
-
-        inline fn read(self: @This()) u32 {
-            return self.pointer.*;
-        }
-
-        inline fn write(self: @This(), value: u32) void {
-            self.pointer.* = value;
-        }
-    };
-    const register: ?CommandRegister = if (pointer) |mapped| .{ .pointer = mapped } else null;
-    try enableMemoryBusMasteringRegister(register);
-}
-
-inline fn enableMemoryBusMasteringRegister(optional_register: anytype) error{ ConfigurationUnavailable, BusMasterEnableFailed }!void {
-    const register = optional_register orelse return error.ConfigurationUnavailable;
-    const command: u16 = @truncate(register.read());
+    const command = readUnlocked(u16, device_info, PCI_COMMAND_OFFSET);
     if (command == std.math.maxInt(u16)) return error.ConfigurationUnavailable;
-    const required = PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER;
-    // The upper status word is write-one-to-clear. Never copy its read value
-    // into a command update, including after a missing ECAM mapping.
-    register.write(@as(u32, command | required));
-    const observed = register.read();
-    if (observed == std.math.maxInt(u32)) return error.ConfigurationUnavailable;
-    if (@as(u16, @truncate(observed)) & required != required) return error.BusMasterEnableFailed;
+    writeUnlocked(u16, device_info, PCI_COMMAND_OFFSET, command | BUS_MASTER_COMMAND);
+    try verifyBusMasterCommand(readUnlocked(u16, device_info, PCI_COMMAND_OFFSET));
 }
 
-test "PCI bus mastering requires an exact command register and verified decoding without clearing status" {
-    const Register = struct {
-        value: u32 = 0xabcd0400,
-        reject: u16 = 0,
-        disappear: bool = false,
-        writes: usize = 0,
-        written: u32 = 0,
+fn verifyBusMasterCommand(observed: u16) BusMasterError!void {
+    if (observed == std.math.maxInt(u16)) return error.ConfigurationUnavailable;
+    if (observed & BUS_MASTER_COMMAND != BUS_MASTER_COMMAND) return error.BusMasterEnableFailed;
+}
 
-        fn read(self: *@This()) u32 {
-            if (self.disappear and self.writes != 0) return std.math.maxInt(u32);
-            return self.value;
-        }
-
-        fn write(self: *@This(), value: u32) void {
-            self.writes += 1;
-            self.written = value;
-            self.value = (self.value & 0xffff0000) | (@as(u16, @truncate(value)) & ~self.reject);
-        }
-    };
-    try std.testing.expectError(error.ConfigurationUnavailable, enableMemoryBusMasteringRegister(@as(?*Register, null)));
-    var register = Register{};
-    try enableMemoryBusMasteringRegister(@as(?*Register, &register));
-    try std.testing.expectEqual(@as(u32, 0x406), register.written);
-    try std.testing.expectEqual(@as(u32, 0xabcd0406), register.value);
-    try std.testing.expectEqual(@as(usize, 1), register.writes);
+test "PCI bus mastering requires verified memory decoding and DMA enable" {
+    try verifyBusMasterCommand(0x0406);
+    try std.testing.expectError(error.ConfigurationUnavailable, verifyBusMasterCommand(std.math.maxInt(u16)));
     for ([_]u16{ PCI_COMMAND_MEMORY_SPACE, PCI_COMMAND_BUS_MASTER }) |rejected| {
-        register = .{ .reject = rejected };
-        try std.testing.expectError(error.BusMasterEnableFailed, enableMemoryBusMasteringRegister(@as(?*Register, &register)));
-        try std.testing.expectEqual(@as(u32, 0), register.written >> 16);
+        try std.testing.expectError(error.BusMasterEnableFailed, verifyBusMasterCommand(0x0406 & ~rejected));
     }
-    register = .{ .value = std.math.maxInt(u32) };
-    try std.testing.expectError(error.ConfigurationUnavailable, enableMemoryBusMasteringRegister(@as(?*Register, &register)));
-    try std.testing.expectEqual(@as(usize, 0), register.writes);
-    register = .{ .disappear = true };
-    try std.testing.expectError(error.ConfigurationUnavailable, enableMemoryBusMasteringRegister(@as(?*Register, &register)));
-    try std.testing.expectEqual(@as(usize, 1), register.writes);
 }
 
 pub fn busMasteringEnabled(device_info: PCIDevice) bool {
@@ -698,17 +739,20 @@ fn findCapabilityOffset(device_info: PCIDevice, wanted_id: u8) MsiError!?u8 {
     return null;
 }
 
+pub fn hasMsi(device_info: PCIDevice) MsiError!bool {
+    return try findCapabilityOffset(device_info, PCI_CAPABILITY_MSI) != null;
+}
+
+pub fn hasMsix(device_info: PCIDevice) MsiError!bool {
+    return try findCapabilityOffset(device_info, PCI_CAPABILITY_MSIX) != null;
+}
+
 pub fn enableSingleMsi(device_info: PCIDevice, message: MsiMessage) MsiError!void {
     const capability = try findCapabilityOffset(device_info, PCI_CAPABILITY_MSI) orelse
         return error.MsiCapabilityMissing;
     const control_offset = @as(u16, capability) + 2;
     const address_offset = @as(u16, capability) + 4;
-    const control = readConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        control_offset,
-    );
+    const control = readLocked(u16, device_info, control_offset);
     const layout = msiLayout(capability, control) orelse
         return error.MalformedCapabilityList;
     if ((control & PCI_MSI_64_BIT_CAPABLE) == 0 and message.address >> 32 != 0) {
@@ -716,113 +760,97 @@ pub fn enableSingleMsi(device_info: PCIDevice, message: MsiMessage) MsiError!voi
     }
 
     const disabled = control & ~(PCI_MSI_ENABLE | PCI_MSI_MULTI_MESSAGE_ENABLE_MASK);
-    writeConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        control_offset,
-        disabled,
-    );
-    writeConfigDword(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        address_offset,
-        @truncate(message.address),
-    );
+    writeLocked(u16, device_info, control_offset, disabled);
+    writeLocked(u32, device_info, address_offset, @truncate(message.address));
     if ((control & PCI_MSI_64_BIT_CAPABLE) != 0) {
-        writeConfigDword(
-            device_info.bus,
-            device_info.device,
-            device_info.function,
-            address_offset + 4,
-            @truncate(message.address >> 32),
-        );
+        writeLocked(u32, device_info, address_offset + 4, @truncate(message.address >> 32));
     }
-    writeConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        layout.data_offset,
-        message.data,
-    );
+    writeLocked(u16, device_info, layout.data_offset, message.data);
     if (layout.mask_offset) |mask_offset| {
-        const mask = readConfigDword(
-            device_info.bus,
-            device_info.device,
-            device_info.function,
-            mask_offset,
-        );
-        writeConfigDword(
-            device_info.bus,
-            device_info.device,
-            device_info.function,
-            mask_offset,
-            mask & ~@as(u32, 1),
-        );
+        writeLocked(u32, device_info, mask_offset, readLocked(u32, device_info, mask_offset) & ~@as(u32, 1));
     }
-    writeConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        control_offset,
-        disabled | PCI_MSI_ENABLE,
-    );
-    const verified = readConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        control_offset,
-    );
+    writeLocked(u16, device_info, control_offset, disabled | PCI_MSI_ENABLE);
+    const verified = readLocked(u16, device_info, control_offset);
     if ((verified & PCI_MSI_ENABLE) == 0 or
         (verified & PCI_MSI_MULTI_MESSAGE_ENABLE_MASK) != 0 or
-        readConfigDword(
-            device_info.bus,
-            device_info.device,
-            device_info.function,
-            address_offset,
-        ) != @as(u32, @truncate(message.address)) or
-        readConfigWord(
-            device_info.bus,
-            device_info.device,
-            device_info.function,
-            layout.data_offset,
-        ) != message.data)
+        readLocked(u32, device_info, address_offset) != @as(u32, @truncate(message.address)) or
+        readLocked(u16, device_info, layout.data_offset) != message.data)
     {
-        writeConfigWord(
-            device_info.bus,
-            device_info.device,
-            device_info.function,
-            control_offset,
-            disabled,
-        );
+        writeLocked(u16, device_info, control_offset, disabled);
         return error.MsiEnableFailed;
     }
 }
 
-pub fn disableMsi(device_info: PCIDevice) MsiError!void {
-    const capability = try findCapabilityOffset(device_info, PCI_CAPABILITY_MSI) orelse
+pub const MsixTable = struct {
+    bar_index: u3,
+    offset: u32,
+    entries: u16,
+};
+
+/// Locate the MSI-X table. Callers bound it by the sized BAR aperture before
+/// mapping entry 0.
+pub fn msixTable(device_info: PCIDevice) MsiError!?MsixTable {
+    const capability = try findCapabilityOffset(device_info, PCI_CAPABILITY_MSIX) orelse return null;
+    const control = readLocked(u16, device_info, @as(u16, capability) + 2);
+    const table = readLocked(u32, device_info, @as(u16, capability) + 4);
+    return .{
+        .bar_index = @truncate(table & PCI_MSIX_TABLE_BIR_MASK),
+        .offset = table & ~PCI_MSIX_TABLE_BIR_MASK,
+        .entries = (control & PCI_MSIX_TABLE_SIZE_MASK) + 1,
+    };
+}
+
+/// MSI-X table entry: message address low/high, data and vector control.
+pub const MsixEntry = *volatile [4]u32;
+
+fn msixControlOffset(device_info: PCIDevice) MsiError!u16 {
+    const capability = try findCapabilityOffset(device_info, PCI_CAPABILITY_MSIX) orelse
         return error.MsiCapabilityMissing;
-    const control_offset = @as(u16, capability) + 2;
-    const control = readConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        control_offset,
-    );
-    writeConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        control_offset,
-        control & ~PCI_MSI_ENABLE,
-    );
-    if ((readConfigWord(
-        device_info.bus,
-        device_info.device,
-        device_info.function,
-        control_offset,
-    ) & PCI_MSI_ENABLE) != 0) return error.InterruptDisableFailed;
+    return @as(u16, capability) + 2;
+}
+
+fn maskMsix(device_info: PCIDevice, control_offset: u16) void {
+    const control = readLocked(u16, device_info, control_offset);
+    writeLocked(u16, device_info, control_offset, (control | PCI_MSIX_FUNCTION_MASK) & ~PCI_MSIX_ENABLE);
+}
+
+/// Enable MSI-X with the whole function masked and program entry 0 with its
+/// vector masked. `unmaskSingleMsix` later opens delivery.
+pub fn beginSingleMsix(device_info: PCIDevice, entry: MsixEntry, message: MsiMessage) MsiError!void {
+    const control_offset = try msixControlOffset(device_info);
+    const masked_enable = PCI_MSIX_ENABLE | PCI_MSIX_FUNCTION_MASK;
+    writeLocked(u16, device_info, control_offset, readLocked(u16, device_info, control_offset) | masked_enable);
+    errdefer maskMsix(device_info, control_offset);
+    if (readLocked(u16, device_info, control_offset) & masked_enable != masked_enable) return error.MsiEnableFailed;
+    entry[3] = PCI_MSIX_VECTOR_MASKED;
+    entry[0] = @truncate(message.address);
+    entry[1] = @truncate(message.address >> 32);
+    entry[2] = message.data;
+    if (entry[0] != @as(u32, @truncate(message.address)) or
+        entry[1] != @as(u32, @truncate(message.address >> 32)) or
+        entry[2] != message.data or
+        entry[3] & PCI_MSIX_VECTOR_MASKED == 0) return error.MsiEnableFailed;
+}
+
+pub fn unmaskSingleMsix(device_info: PCIDevice, entry: MsixEntry) MsiError!void {
+    const control_offset = try msixControlOffset(device_info);
+    errdefer maskMsix(device_info, control_offset);
+    entry[3] = 0;
+    const control = readLocked(u16, device_info, control_offset);
+    writeLocked(u16, device_info, control_offset, (control | PCI_MSIX_ENABLE) & ~PCI_MSIX_FUNCTION_MASK);
+    if (readLocked(u16, device_info, control_offset) & (PCI_MSIX_ENABLE | PCI_MSIX_FUNCTION_MASK) != PCI_MSIX_ENABLE or
+        entry[3] & PCI_MSIX_VECTOR_MASKED != 0) return error.MsiEnableFailed;
+}
+
+pub fn enableSingleMsix(device_info: PCIDevice, entry: MsixEntry, message: MsiMessage) MsiError!void {
+    try beginSingleMsix(device_info, entry, message);
+    try unmaskSingleMsix(device_info, entry);
+}
+
+/// Disable MSI and mask and disable MSI-X on every capability the function
+/// exposes.
+pub fn disableMessageInterrupts(device_info: PCIDevice) QuiesceError!void {
+    _ = try inspectMessageSignaledInterrupts(device_info, true);
 }
 
 fn inspectMessageSignaledInterrupts(device_info: PCIDevice, disable: bool) QuiesceError!usize {
@@ -960,10 +988,6 @@ pub fn matchesClass(device_info: PCIDevice, class_code: u8, subclass: u8, prog_i
         device_info.prog_if == prog_if;
 }
 
-pub fn isNvmeController(device_info: PCIDevice) bool {
-    return matchesClass(device_info, PCI_CLASS_STORAGE_CONTROLLER, PCI_SUBCLASS_NVM, PCI_PROG_IF_NVME);
-}
-
 pub fn isIntelI225Lm(device_info: PCIDevice) bool {
     return device_info.vendor_id == PCI_VENDOR_INTEL and device_info.device_id == PCI_DEVICE_INTEL_I225_LM;
 }
@@ -995,80 +1019,6 @@ pub fn stableDeviceId(device_info: PCIDevice) u64 {
 
 pub fn findDeviceByStableId(target_device_id: u64) ?PCIDevice {
     return firstMatchingDevice(StableIdQuery, .{ .device_id = target_device_id }, matchesStableId);
-}
-
-pub fn scanBus() void {
-    console.print("Scanning PCI bus...\n");
-
-    for (bootDevices()) |pci_device| {
-        console.print("PCI ");
-        printHex8(pci_device.bus);
-        console.print(":");
-        printHex8(pci_device.device);
-        console.print(".");
-        printHex8(pci_device.function);
-        console.print(" - Vendor: ");
-        printHex16(pci_device.vendor_id);
-        console.print(" Device: ");
-        printHex16(pci_device.device_id);
-        console.print(" Class: ");
-        printHex8(pci_device.class_code);
-        console.print(":");
-        printHex8(pci_device.subclass);
-        console.print("\n");
-    }
-}
-
-fn printHex8(value: u8) void {
-    const high = value >> 4;
-    const low = value & 0x0F;
-    console.printChar(if (high < 10) '0' + high else 'A' + high - 10);
-    console.printChar(if (low < 10) '0' + low else 'A' + low - 10);
-}
-
-fn printHex16(value: u16) void {
-    printHex8(@intCast((value >> U16_HIGH_BYTE_SHIFT) & PCI_U8_MASK));
-    printHex8(@intCast(value & PCI_U8_MASK));
-}
-
-pub fn readConfigByte(bus: u8, device: u8, function: u8, offset: u16) u8 {
-    acquireConfigurationLock();
-    defer releaseConfigurationLock();
-    const data = readConfigUnlocked(bus, device, function, offset);
-    const shift: u5 = @intCast((offset & 3) * BITS_PER_BYTE);
-    return @as(u8, @truncate(data >> shift));
-}
-
-pub fn readConfigWord(bus: u8, device: u8, function: u8, offset: u16) u16 {
-    acquireConfigurationLock();
-    defer releaseConfigurationLock();
-    const data = readConfigUnlocked(bus, device, function, offset);
-    const shift: u5 = @intCast((offset & 2) * BITS_PER_BYTE);
-    return @as(u16, @truncate(data >> shift));
-}
-
-pub fn readConfigDword(bus: u8, device: u8, function: u8, offset: u16) u32 {
-    return readConfig(bus, device, function, offset);
-}
-
-pub fn writeConfigByte(bus: u8, device: u8, function: u8, offset: u16, value: u8) void {
-    acquireConfigurationLock();
-    defer releaseConfigurationLock();
-    const old_data = readConfigUnlocked(bus, device, function, offset);
-    const shift = (offset & 3) * BITS_PER_BYTE;
-    const mask = ~(PCI_U8_MASK << shift);
-    const new_data = (old_data & mask) | (@as(u32, value) << shift);
-    writeConfigUnlocked(bus, device, function, offset, new_data);
-}
-
-pub fn writeConfigWord(bus: u8, device: u8, function: u8, offset: u16, value: u16) void {
-    acquireConfigurationLock();
-    defer releaseConfigurationLock();
-    const old_data = readConfigUnlocked(bus, device, function, offset);
-    const shift: u5 = @intCast((offset & 2) * BITS_PER_BYTE);
-    const mask = ~(PCI_U16_MASK << shift);
-    const new_data = (old_data & mask) | (@as(u32, value) << shift);
-    writeConfigUnlocked(bus, device, function, offset, new_data);
 }
 
 fn syntheticPciDevice(vendor_id: u16, device_id: u16, class_code: u8, subclass: u8, prog_if: u8) PCIDevice {
@@ -1136,14 +1086,6 @@ test "PCIe ECAM address calculation honors allocation bus origins" {
     );
 }
 
-test "PCI helpers identify NVMe controllers" {
-    const nvme = syntheticPciDevice(0x144D, 0xA80A, PCI_CLASS_STORAGE_CONTROLLER, PCI_SUBCLASS_NVM, PCI_PROG_IF_NVME);
-    try @import("std").testing.expect(isNvmeController(nvme));
-
-    const ahci = syntheticPciDevice(0x8086, 0x2922, PCI_CLASS_STORAGE_CONTROLLER, 0x06, 0x01);
-    try @import("std").testing.expect(!isNvmeController(ahci));
-}
-
 test "PCI helpers identify Intel I225-LM network controller" {
     const i225_lm = syntheticPciDevice(PCI_VENDOR_INTEL, PCI_DEVICE_INTEL_I225_LM, PCI_CLASS_NETWORK_ADAPTER, 0, 0);
     try @import("std").testing.expect(isIntelI225Lm(i225_lm));
@@ -1193,12 +1135,6 @@ test "PCI inventory queries reuse one discovered device set" {
     try std.testing.expectEqual(@as(u16, 0xA80A), nvme.device_id);
 }
 
-test "PCI inventory retains its capacity with a bounded freestanding handle" {
-    try std.testing.expectEqual(@as(usize, 5_120), inventory_layout.inventory_size_bytes);
-    try std.testing.expectEqual(@sizeOf(?*anyopaque), inventory_layout.freestanding_handle_size_bytes);
-    try std.testing.expect(inventory_layout.heap_backs_inventory_on_freestanding);
-}
-
 test "PCI interrupt quiesce disables MSI and masks MSI-X" {
     const msi = messageInterruptControl(PCI_CAPABILITY_MSI, PCI_MSI_ENABLE | 0x0180).?;
     try std.testing.expect(msi.enabled);
@@ -1222,8 +1158,4 @@ test "PCI MSI layout supports one 32-bit or 64-bit message" {
     try std.testing.expectEqual(@as(u16, 0x4C), extended.data_offset);
     try std.testing.expectEqual(@as(?u16, 0x50), extended.mask_offset);
     try std.testing.expect(msiLayout(0xF8, PCI_MSI_64_BIT_CAPABLE) == null);
-}
-
-pub fn writeConfigDword(bus: u8, device: u8, function: u8, offset: u16, value: u32) void {
-    writeConfig(bus, device, function, offset, value);
 }

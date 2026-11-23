@@ -7,7 +7,6 @@ const dataplane_handoff = @import("../../native/drivers/dataplane_handoff.zig");
 const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_runtime = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
-const first_target_telemetry = @import("../../kernel/drivers/first_target_telemetry.zig");
 const intel_i225_tx = @import("../../kernel/drivers/intel_i225_tx.zig");
 const interrupt_context = @import("../../kernel/interrupts/context.zig");
 const nvme_completion = @import("../../kernel/drivers/nvme_completion.zig");
@@ -23,7 +22,7 @@ test "driver host tests import native driver modules" {
     // entry points in a hosted Debug executable.
     _ = @import("../../kernel/drivers/xhci_hw.zig").keyboardContinuityEpoch;
     _ = @import("../../kernel/boot/profiles/zigos_native.zig").INTERRUPT_DRIVEN_IDLE;
-    _ = @import("../../kernel/drivers/intel_i225_hw.zig").transmitCount;
+    _ = @import("../../kernel/drivers/intel_i225_hw.zig").MAX_PAYLOAD_BYTES;
     _ = @import("../../kernel/drivers/virtio_net_hw.zig").interruptCount;
     _ = @import("../../kernel/interrupts/syscall64.zig");
     std.testing.refAllDecls(tpm2_crb_test);
@@ -35,7 +34,6 @@ test "driver host tests import native driver modules" {
     std.testing.refAllDecls(device_inventory);
     std.testing.refAllDecls(driver_runtime);
     std.testing.refAllDecls(driver_service);
-    std.testing.refAllDecls(first_target_telemetry);
     std.testing.refAllDecls(intel_i225_tx);
     std.testing.refAllDecls(@import("../../kernel/drivers/virtio_queue.zig"));
     std.testing.refAllDecls(@import("../../kernel/drivers/virtio_pci.zig"));

@@ -7,10 +7,8 @@ const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const device_graph = @import("device_graph.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");
-const hardware_target = @import("../platform/hardware_target.zig");
 const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
-const intel_i225 = @import("../../kernel/drivers/intel_i225.zig");
 const manifest = @import("../policy/manifest.zig");
 const measured_boot = @import("../platform/measured_boot.zig");
 const network_driver_task = @import("../drivers/network_driver_task.zig");
@@ -46,7 +44,6 @@ pub const Error = harness.Error || endpoint.Error || network_driver_task.Error |
     NativeTransportDisconnected,
     NativeTransportDeviceRevoked,
     NativeTransportFrameMissing,
-    NativeTransportHardwareProofMissing,
     NativeTransportMalformedFrame,
     NativeTransportReplayRejected,
     NativeTransportSequenceExhausted,
@@ -65,7 +62,7 @@ pub const NativePayloadLength = u8;
 pub const ObjectSharePayloadLength = u16;
 pub const CAPTURED_PACKET_SIZE_CEILING_BYTES: usize = 272;
 pub const PACKET_CAPTURE_SIZE_CEILING_BYTES: usize = 4_808;
-pub const HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 16_264;
+pub const HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 16_240;
 pub const FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 128;
 pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES
@@ -140,30 +137,6 @@ pub const CapturedFrameExpectation = struct {
     capability_id: u64,
     forbidden_plaintext: []const u8 = "",
 };
-
-pub const IntelI225TransportProof = struct {
-    evidence: hardware_target.EvidenceSummary,
-    ring_plan: intel_i225.RingPlan,
-    packet_proof: intel_i225.PacketProof,
-    kernel_data_plane_disabled: bool = intel_i225.network_data_plane_exports_fail_closed,
-    i225_driver_present: bool = true,
-
-    pub fn satisfied(self: IntelI225TransportProof) bool {
-        if (!self.kernel_data_plane_disabled or !self.i225_driver_present) return false;
-        intel_i225.validateRingPlan(self.ring_plan) catch return false;
-        if (!self.packet_proof.verified()) return false;
-        if (!sameRingPlan(self.ring_plan, self.packet_proof.ring_plan)) return false;
-        if (self.packet_proof.tx_rx_cycles < hardware_target.first_supported_target.proof_minimums.network_frame_cycles) return false;
-        return hardware_target.hardwareProofSatisfied(&hardware_target.first_supported_target, self.evidence);
-    }
-};
-
-fn sameRingPlan(left: intel_i225.RingPlan, right: intel_i225.RingPlan) bool {
-    return left.rx_descriptors == right.rx_descriptors and
-        left.tx_descriptors == right.tx_descriptors and
-        left.rx_ring_address == right.rx_ring_address and
-        left.tx_ring_address == right.tx_ring_address;
-}
 
 pub const CapturedPacket = struct {
     in_use: bool = false,
@@ -422,14 +395,6 @@ pub const NativeTransportService = struct {
     revoked_device_rejection_count: TelemetryCount = 0,
     peer_address_miss_count: TelemetryCount = 0,
     production_attested_sessions_required: bool = false,
-    i225_proof_required: bool = false,
-    i225_proof_attached: bool = false,
-    i225_proof_cycles: u16 = 0,
-    i225_tx_tail_register_writes: u32 = 0,
-    i225_rx_tail_register_writes: u32 = 0,
-    i225_interrupt_cause_reads: u32 = 0,
-    i225_link_speed_mbps: u32 = 0,
-    i225_mac_address: [6]u8 = @as([6]u8, @splat(0)),
     trust_graph: ?*const device_graph.Graph = null,
 
     pub fn init() NativeTransportService {
@@ -490,35 +455,8 @@ pub const NativeTransportService = struct {
         try self.peer_links.bind(device, mac);
     }
 
-    pub fn requireIntelI225Proof(self: *NativeTransportService) void {
-        self.i225_proof_required = true;
-    }
-
     pub fn requireProductionAttestedSessions(self: *NativeTransportService) void {
         self.production_attested_sessions_required = true;
-    }
-
-    pub fn intelI225NetworkReady(self: *const NativeTransportService) bool {
-        const minimum = hardware_target.first_supported_target.proof_minimums.network_frame_cycles;
-        const expected_interrupts = @as(u32, minimum) * 2;
-        return self.i225_proof_attached and
-            self.i225_proof_cycles >= minimum and
-            self.i225_tx_tail_register_writes >= minimum and
-            self.i225_rx_tail_register_writes >= minimum and
-            self.i225_interrupt_cause_reads >= expected_interrupts and
-            self.i225_link_speed_mbps != 0 and
-            macAddressPresent(self.i225_mac_address);
-    }
-
-    pub fn attachIntelI225Proof(self: *NativeTransportService, proof: IntelI225TransportProof) Error!void {
-        if (!proof.satisfied()) return error.NativeTransportHardwareProofMissing;
-        self.i225_proof_attached = true;
-        self.i225_proof_cycles = proof.packet_proof.tx_rx_cycles;
-        self.i225_tx_tail_register_writes = proof.packet_proof.mmio.tx_tail_register_writes;
-        self.i225_rx_tail_register_writes = proof.packet_proof.mmio.rx_tail_register_writes;
-        self.i225_interrupt_cause_reads = proof.packet_proof.mmio.interrupt_cause_reads;
-        self.i225_link_speed_mbps = proof.packet_proof.mmio.link_speed_mbps;
-        self.i225_mac_address = proof.packet_proof.mac_address;
     }
 
     pub fn openDeviceToDevice(
@@ -652,7 +590,6 @@ pub const NativeTransportService = struct {
         if (!connection.connected) return error.NativeTransportDisconnected;
         try self.ensureTrustedTransportDevices(connection.session.source_device, connection.session.target_device);
         try self.ensureProductionSessionReady(&connection.session);
-        try self.ensureHardwareBackedNetworkReady();
         if (plaintext.len > MAX_NATIVE_PAYLOAD_BYTES) return error.PacketTooLarge;
         if (connection.in_flight_frames >= MAX_NATIVE_IN_FLIGHT_FRAMES) {
             self.congestion_drop_count +|= 1;
@@ -721,7 +658,6 @@ pub const NativeTransportService = struct {
             error.NativeTransportDisconnected, error.NativeTransportCongested => {
                 try self.ensureTrustedTransportDevices(connection.session.source_device, connection.session.target_device);
                 try self.ensureProductionSessionReady(&connection.session);
-                try self.ensureHardwareBackedNetworkReady();
                 const sequence = try self.pendingSequence(connection);
                 const signed_frame = try self.harness.encryptSignedFrame(&connection.session, plaintext, signer);
                 try relay_service.submitSignedFrame(connection.session.task_id, &connection.session, signed_frame);
@@ -832,12 +768,6 @@ pub const NativeTransportService = struct {
         if (!graph.isTrusted(source_device) or !graph.isTrusted(target_device)) {
             self.revoked_device_rejection_count +|= 1;
             return error.NativeTransportDeviceRevoked;
-        }
-    }
-
-    fn ensureHardwareBackedNetworkReady(self: *const NativeTransportService) Error!void {
-        if (self.i225_proof_required and !self.intelI225NetworkReady()) {
-            return error.NativeTransportHardwareProofMissing;
         }
     }
 
@@ -1073,13 +1003,6 @@ fn parsePrincipalKind(raw: u8) Error!principal.PrincipalKind {
         @backingInt(principal.PrincipalKind.team) => .team,
         else => error.NativeTransportMalformedFrame,
     };
-}
-
-fn macAddressPresent(mac_address: [6]u8) bool {
-    for (mac_address) |byte| {
-        if (byte != 0) return true;
-    }
-    return false;
 }
 
 fn expectNativeEncodeError(
@@ -1486,7 +1409,7 @@ fn verifiedSyncPeerBoot(generation: u64) !measured_boot.BootRecord {
     return boot;
 }
 
-test "native sync transport rejects revoked trusted devices and requires real I225 proof" {
+test "native sync transport rejects revoked trusted devices and unattested production sessions" {
     var graph = device_graph.Graph.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 170 };
     const source = principal.PrincipalId{ .kind = .device, .serial = 171 };
@@ -1550,60 +1473,6 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     }, 176, 177, source, target, "relay.revoked.sync"));
     try std.testing.expectEqual(@as(usize, 4), native_transport.revoked_device_rejection_count);
 
-    const good_ring_plan = intel_i225.RingPlan{
-        .rx_descriptors = 256,
-        .tx_descriptors = 256,
-        .rx_ring_address = 0x1000,
-        .tx_ring_address = 0x2000,
-    };
-    var i225_adapter = try intel_i225.SoftwareAdapter.initWithMmio(
-        good_ring_plan,
-        .{ 0x02, 0x15, 0xF2, 0, 0, 8 },
-        intel_i225.defaultPhyLinkState(),
-        intel_i225.defaultPacketBufferPlan(),
-    );
-    const packet_proof = try i225_adapter.proveFrameCycles(hardware_target.first_supported_target.proof_minimums.network_frame_cycles);
-    const incomplete_proof = IntelI225TransportProof{
-        .evidence = .{
-            .target_id = hardware_target.first_supported_target.id,
-            .source = .qemu,
-        },
-        .ring_plan = good_ring_plan,
-        .packet_proof = packet_proof,
-    };
-    try std.testing.expectError(error.NativeTransportHardwareProofMissing, native_transport.attachIntelI225Proof(incomplete_proof));
-
-    const complete_proof = IntelI225TransportProof{
-        .evidence = .{
-            .target_id = hardware_target.first_supported_target.id,
-            .source = .real_hardware,
-            .hardware_cold_boots = hardware_target.first_supported_target.proof_minimums.cold_boots,
-            .hardware_warm_reboots = hardware_target.first_supported_target.proof_minimums.warm_reboots,
-            .storage_write_read_cycles = hardware_target.first_supported_target.proof_minimums.storage_write_read_cycles,
-            .network_frame_cycles = hardware_target.first_supported_target.proof_minimums.network_frame_cycles,
-            .suspend_resume_cycles = hardware_target.first_supported_target.proof_minimums.suspend_resume_cycles,
-            .crash_recovery_cycles = hardware_target.first_supported_target.proof_minimums.crash_recovery_cycles,
-            .crash_record_persistence_cycles = hardware_target.first_supported_target.proof_minimums.crash_record_persistence_cycles,
-            .update_rollback_cycles = hardware_target.first_supported_target.proof_minimums.update_rollback_cycles,
-            .proof_manifest_captured = true,
-            .serial_log_captured = true,
-            .required_markers_captured = true,
-            .firmware_settings_captured = true,
-            .power_cycle_notes_captured = true,
-            .artifact_digests_captured = true,
-        },
-        .ring_plan = good_ring_plan,
-        .packet_proof = packet_proof,
-    };
-    try native_transport.attachIntelI225Proof(complete_proof);
-    try std.testing.expect(native_transport.i225_proof_attached);
-    try std.testing.expect(native_transport.intelI225NetworkReady());
-    try std.testing.expectEqual(hardware_target.first_supported_target.proof_minimums.network_frame_cycles, native_transport.i225_proof_cycles);
-    try std.testing.expectEqual(@as(u32, hardware_target.first_supported_target.proof_minimums.network_frame_cycles), native_transport.i225_tx_tail_register_writes);
-    try std.testing.expectEqual(@as(u32, hardware_target.first_supported_target.proof_minimums.network_frame_cycles), native_transport.i225_rx_tail_register_writes);
-    try std.testing.expectEqual(@as(u32, hardware_target.first_supported_target.proof_minimums.network_frame_cycles) * 2, native_transport.i225_interrupt_cause_reads);
-    try std.testing.expectEqual(@as(u32, 2500), native_transport.i225_link_speed_mbps);
-
     const ProductionDriver = struct {
         var send_count: usize = 0;
         var authorized_native_frames: usize = 0;
@@ -1623,7 +1492,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
 
         fn driverEgressBroker(request: network_driver_task.EgressRequest) network_driver_task.EgressDecision {
             const native_sync_frame = std.mem.startsWith(u8, request.frame, &NativeTransportAbi.magic);
-            const no_plaintext = std.mem.indexOf(u8, request.frame, "production after i225 proof") == null;
+            const no_plaintext = std.mem.indexOf(u8, request.frame, "production attested frame") == null;
             const allowed = request.egress_capability_id == allowed_capability_id and
                 request.network_policy_id == allowed_policy_id and
                 native_sync_frame and
@@ -1653,8 +1522,6 @@ test "native sync transport rejects revoked trusted devices and requires real I2
 
     var production_transport = NativeTransportService.init();
     try production_transport.bindPeerLink(target, .{ 0x02, 0x15, 0xF2, 0, 0, 9 });
-    production_transport.requireIntelI225Proof();
-    try std.testing.expect(!production_transport.intelI225NetworkReady());
     var production_connection = try production_transport.openRelay(&broker, .{
         .task_id = 176,
         .principal_id = app,
@@ -1663,17 +1530,8 @@ test "native sync transport rejects revoked trusted devices and requires real I2
         .evidence = .{ .destination = .{ .domain = "relay.revoked.sync" } },
         .now_ticks = 30,
     }, 176, 177, source, target, "relay.revoked.sync");
-    try std.testing.expectError(error.NativeTransportHardwareProofMissing, production_transport.sendSigned(&production_connection, "blocked until i225 proof", frame_signer));
-    try std.testing.expectEqual(@as(usize, 0), production_transport.endpoint_frame_count);
-    try std.testing.expectEqual(@as(usize, 0), production_transport.network_frame_count);
-    try std.testing.expectEqual(@as(usize, 0), production_transport.capture.capturedCount());
-    try std.testing.expectEqual(@as(usize, 0), production_connection.in_flight_frames);
-    try std.testing.expectEqual(@as(usize, 0), network_driver_task.activeDriverTransmitCount());
-
-    try production_transport.attachIntelI225Proof(complete_proof);
-    try std.testing.expect(production_transport.intelI225NetworkReady());
     production_transport.requireProductionAttestedSessions();
-    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.sendSigned(&production_connection, "blocked lab session after i225 proof", frame_signer));
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.sendSigned(&production_connection, "blocked lab session", frame_signer));
     try std.testing.expectError(error.ProductionAttestationRequired, production_transport.encryptObjectShare(&production_connection, 1, 2, 3, "blocked lab object share"));
     production_transport.disconnect(&production_connection);
     var production_relay_service = try BootedOverlayRelayService.init(179, 176, "relay.revoked.sync");
@@ -1810,7 +1668,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
         &peer_attestation_metadata_digest,
         &production_service_connection.session.attestation_verifier_metadata_digest,
     ));
-    const production_delivery = try production_transport.sendSigned(&production_service_connection, "production after i225 proof", frame_signer);
+    const production_delivery = try production_transport.sendSigned(&production_service_connection, "production attested frame", frame_signer);
     try std.testing.expect(production_delivery.endpoint_delivered);
     try std.testing.expect(production_delivery.network_delivered);
     try std.testing.expectEqual(@as(usize, 1), production_transport.endpoint_frame_count);

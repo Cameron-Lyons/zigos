@@ -8,8 +8,10 @@ const interrupt_context = @import("../interrupts/context.zig");
 const x2apic = @import("../interrupts/x2apic.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
-const dmar = @import("../platform/dmar.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
+const numfmt = @import("../utils/numfmt.zig");
+const device_isolation = @import("device_isolation.zig");
+const dma_enforcement = @import("dma_enforcement.zig");
 const nvme_completion = @import("nvme_completion.zig");
 const nvme_interrupt = @import("nvme_interrupt.zig");
 const nvme_pipeline = @import("nvme_pipeline.zig");
@@ -24,9 +26,6 @@ const cooperative = @import("../../native/task/cooperative_worker.zig");
 
 pub const SECTOR_BYTES: usize = 512;
 pub const INTERRUPT_VECTOR = nvme_interrupt.INTERRUPT_VECTOR;
-pub const INTERRUPT_STATE_USES_PROTOCOL_ORDERING = true;
-pub const BOOTSTRAP_BOUNCE_ONLY = true;
-pub const RUNTIME_IO_FORBIDDEN_AFTER_CLAIM = true;
 const PAGE_SIZE: u32 = 4096;
 
 const IO_PIPELINE_DEPTH: usize = nvme_pipeline.DEPTH;
@@ -61,10 +60,12 @@ const ADMIN_QUEUE_ENTRIES: u32 = 32;
 const SQ_ENTRY_BYTES: usize = 64;
 const CQ_ENTRY_BYTES: usize = 16;
 const BAR_MAP_BYTES: u32 = 0x2000;
+const MSIX_ENTRY_WINDOW: usize = mmio_windows.nvme.base + BAR_MAP_BYTES;
+const MSIX_ENTRY_BYTES: u64 = 16;
 
 comptime {
-    if (@as(usize, BAR_MAP_BYTES) > mmio_windows.nvme.bytes) {
-        @compileError("NVMe BAR mapping exceeds its reserved MMIO window");
+    if (@as(usize, BAR_MAP_BYTES) + PAGE_SIZE > mmio_windows.nvme.bytes) {
+        @compileError("NVMe BAR and MSI-X entry mappings exceed their reserved MMIO window");
     }
 }
 
@@ -90,11 +91,11 @@ pub const Error = error{
     NamespaceMissing,
     UnsupportedLbaFormat,
     DmaIsolationBypassed,
-    TooManyDmaDomains,
     DmaFault,
     InterruptIsolationUnavailable,
     InterruptRouteInstallFailed,
     MsiEnableFailed,
+    DmaIsolationPlanInvalid,
 };
 
 const ADMIN_OPC_CREATE_IO_SQ: u32 = 0x01;
@@ -111,7 +112,6 @@ const IO_QUEUE_ID: u16 = 1;
 const IO_QUEUE_ENTRIES: u32 = 32;
 const DMA_FRAME_COUNT: u32 = PRP_LIST_FIRST_FRAME + PRP_LIST_PAGE_COUNT;
 const DMA_WINDOW_COUNT: usize = 6;
-const MAX_ADDITIONAL_DMA_DOMAINS: usize = 2;
 
 const DmaAddress = struct {
     physical: u32 = 0,
@@ -176,6 +176,7 @@ const DmaFrames = struct {
 };
 
 pub const Controller = struct {
+    device: pci.PCIDevice,
     bar: usize,
     doorbell_stride: usize,
     admin: Queue,
@@ -222,15 +223,8 @@ pub const Controller = struct {
     }
 };
 
-fn barPhysicalAddress(dev: pci.PCIDevice) ?usize {
-    const bar = pci.memoryBar0(dev) orelse return null;
-    if (bar.width != .bits64) return null;
-    return bar.address;
-}
-
-fn mapBar(phys: usize) Error!usize {
+fn mapBar(phys: u64) Error!usize {
     paging.mapKernelDeviceRange(mmio_windows.nvme.base, phys, BAR_MAP_BYTES, true) catch return error.BarUnmappable;
-    published_bar_physical = phys;
     return mmio_windows.nvme.base;
 }
 
@@ -261,10 +255,11 @@ fn spinUntilReady(controller: *const Controller, want_ready: bool) bool {
     return false;
 }
 
-fn prepare(bar_phys: usize, frames: DmaFrames) Error!Controller {
+fn prepare(dev: pci.PCIDevice, bar_phys: u64, frames: DmaFrames) Error!Controller {
     const bar = try mapBar(bar_phys);
 
     var controller = Controller{
+        .device = dev,
         .bar = bar,
         .doorbell_stride = doorbellStride((@as(u64, @as(*volatile u32, @ptrFromInt(bar + REG_CAP + 4)).*) << 32) |
             @as(u64, @as(*volatile u32, @ptrFromInt(bar + REG_CAP)).*)),
@@ -361,8 +356,11 @@ const CompletionIo = struct {
     pub fn fatal(self: *@This()) bool {
         return self.controller.fatal();
     }
-    pub fn checkDma(_: *@This()) nvme_poll.Error!void {
-        if (intel_vtd.faultMonitoringEnabled() and (intel_vtd.pollFault() catch return error.DmaFault) != null) return error.DmaFault;
+    pub fn checkDma(self: *@This()) nvme_poll.Error!void {
+        switch (device_isolation.pollFault(self.controller.device)) {
+            .clear, .monitoring_unavailable => {},
+            .fail_closed, .fault => return error.DmaFault,
+        }
     }
     pub fn status(self: *@This(), head: u32) u32 {
         return self.entry(head)[3];
@@ -491,10 +489,14 @@ var active_controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
 var active_present: bool = false;
 var operation_lease = nvme_operation.Lease{};
-var published_bar_physical: u64 = 0;
 var bounce: [IO_PIPELINE_DEPTH]DmaAddress = @as([IO_PIPELINE_DEPTH]DmaAddress, @splat(.{}));
 var io_interrupts_active: bool = false;
-var completion_interrupt_count: u64 = 0;
+// DMA frames are allocated once, before VT-d enforcement, and stay pinned:
+// the enforced isolation domain names exactly these windows.
+var dma_frames: ?DmaFrames = null;
+var dma_device_id: u64 = 0;
+var dma_windows: [DMA_WINDOW_COUNT]intel_vtd.DmaWindow = undefined;
+var msix_entry_physical: ?u64 = null;
 
 fn interruptsActive() bool {
     return @atomicLoad(bool, &io_interrupts_active, .acquire);
@@ -504,17 +506,8 @@ fn publishInterruptsActive(value: bool) void {
     @atomicStore(bool, &io_interrupts_active, value, .release);
 }
 
-fn resetCompletionInterruptCount() void {
-    @atomicStore(u64, &completion_interrupt_count, 0, .monotonic);
-}
-
 pub fn attached() bool {
     return active_present;
-}
-
-pub fn publishedBar() ?struct { physical_base: u64, length: u64 } {
-    if (!active_present or published_bar_physical == 0) return null;
-    return .{ .physical_base = published_bar_physical, .length = BAR_MAP_BYTES };
 }
 
 pub fn attachedDeviceId() ?u64 {
@@ -535,34 +528,46 @@ fn runtimeIoPermitted() bool {
 
 extern fn zigosStorageOwnedSubmitAuthorityCurrent(device_id: u64) callconv(.c) bool;
 
+/// Route the I/O completion queue's single interrupt. MSI-X entry 0 is
+/// preferred when its table lies in the admitted BAR0 aperture; MSI is the
+/// fallback for controllers without one.
 pub fn activateInterrupts() Error!void {
     const identity = try beginOperation();
     defer operation_lease.release(identity);
     if (!active_present) return error.NamespaceMissing;
     if (interruptsActive()) return;
     if (!intel_vtd.interruptIsolationEnabled()) return error.InterruptIsolationUnavailable;
-    const remapped = intel_vtd.routeInterrupt(
-        active_device,
-        INTERRUPT_VECTOR,
-        smp.irqDestinationId(),
-    ) catch return error.InterruptRouteInstallFailed;
-    pci.enableSingleMsi(active_device, .{
-        .address = remapped.address,
-        .data = remapped.data,
-    }) catch return error.MsiEnableFailed;
-    resetCompletionInterruptCount();
+    const target: device_isolation.MessageTarget = if (msix_entry_physical) |physical| target: {
+        const page = physical & ~@as(u64, PAGE_SIZE - 1);
+        paging.mapKernelDeviceRange(MSIX_ENTRY_WINDOW, page, PAGE_SIZE, true) catch return error.MsiEnableFailed;
+        break :target .{ .msix = @ptrFromInt(MSIX_ENTRY_WINDOW + @as(usize, @intCast(physical - page))) };
+    } else .msi;
+    device_isolation.routeInterrupt(active_device, INTERRUPT_VECTOR, target) catch |err| return switch (err) {
+        error.InterruptRouteInstallFailed => error.InterruptRouteInstallFailed,
+        else => error.MsiEnableFailed,
+    };
     publishInterruptsActive(true);
 }
 
 pub fn handleInterrupt() void {
-    if (interruptsActive()) {
-        _ = @atomicRmw(u64, &completion_interrupt_count, .Add, 1, .monotonic);
-    }
     x2apic.acknowledge();
 }
 
-pub fn completionInterruptCount() u64 {
-    return @atomicLoad(u64, &completion_interrupt_count, .monotonic);
+/// Locate MSI-X entry 0 inside the sized BAR0 aperture, beyond the register
+/// mapping, or report that the controller must use MSI.
+fn msixEntryPhysical(table: pci.MsixTable, aperture: pci.BarAperture) ?u64 {
+    if (table.bar_index != 0 or table.offset % MSIX_ENTRY_BYTES != 0 or
+        table.offset < BAR_MAP_BYTES or table.offset + MSIX_ENTRY_BYTES > aperture.length) return null;
+    return aperture.address + table.offset;
+}
+
+test "NVMe MSI-X entry zero must lie in BAR0 outside the register mapping" {
+    const std = @import("std");
+    const aperture = pci.BarAperture{ .address = 0xFE00_0000, .length = 0x4000 };
+    try std.testing.expectEqual(@as(?u64, 0xFE00_2000), msixEntryPhysical(.{ .bar_index = 0, .offset = 0x2000, .entries = 65 }, aperture));
+    try std.testing.expectEqual(@as(?u64, null), msixEntryPhysical(.{ .bar_index = 4, .offset = 0x2000, .entries = 65 }, aperture));
+    try std.testing.expectEqual(@as(?u64, null), msixEntryPhysical(.{ .bar_index = 0, .offset = 0x1000, .entries = 65 }, aperture));
+    try std.testing.expectEqual(@as(?u64, null), msixEntryPhysical(.{ .bar_index = 0, .offset = 0x3FF8, .entries = 1 }, aperture));
 }
 
 fn identifyNamespace(self: *Controller, buffer: DmaAddress) Error!void {
@@ -630,57 +635,52 @@ fn guardPatternIntact(bytes: []const u8) bool {
     return true;
 }
 
-pub fn attachAsBackend(
-    dev: pci.PCIDevice,
-    vtd_summary: ?*const dmar.Summary,
-    additional_domains: []const intel_vtd.DmaDomain,
-    scoped_dmar: ?[]const u8,
-) !?intel_vtd.FaultRecord {
+/// Allocate the queue, bounce and PRP frames for `dev` and return its DMA
+/// isolation domain. This runs inside the device-independent enforcement step
+/// while bus mastering is revoked; attach later programs exactly these frames.
+pub fn prepareDma(dev: pci.PCIDevice) Error!intel_vtd.DmaDomain {
+    if (pci.busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
+    if (dma_frames == null) {
+        const dma_base = paging.allocIdentityDmaFrames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
+        const dma_alias = paging.directMapAddress(dma_base) orelse {
+            paging.releaseIdentityDmaFrames(dma_base, DMA_FRAME_COUNT) catch {};
+            return error.QueueAllocationFailed;
+        };
+        const frames = DmaFrames{ .base = .{ .physical = dma_base, .alias = dma_alias } };
+        dma_windows = frames.windows();
+        dma_frames = frames;
+        dma_device_id = pci.stableDeviceId(dev);
+    } else if (dma_device_id != pci.stableDeviceId(dev)) return error.DmaIsolationPlanInvalid;
+    return .{ .device = dev, .windows = &dma_windows };
+}
+
+pub fn attachAsBackend(dev: pci.PCIDevice) !?intel_vtd.FaultRecord {
     const operation_identity = try beginOperation();
     defer operation_lease.release(operation_identity);
-    if (scoped_dmar != null and vtd_summary != null) return error.InvalidDmaFirmware;
-    const isolation_required = scoped_dmar != null or vtd_summary != null;
-    if (pci.busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
-    const bar_phys = barPhysicalAddress(dev) orelse return error.BarUnmappable;
-    const aperture = (pci.probeMemoryBars(dev) catch return error.BarUnmappable)[0];
-    if (bar_phys == 0 or aperture.address != bar_phys or aperture.length < BAR_MAP_BYTES) return error.BarUnmappable;
-    if (additional_domains.len > MAX_ADDITIONAL_DMA_DOMAINS) {
-        return error.TooManyDmaDomains;
-    }
+    try dma_enforcement.ensureEnforced();
+    const frames = dma_frames orelse return error.QueueAllocationFailed;
+    if (dma_device_id != pci.stableDeviceId(dev)) return error.DmaIsolationPlanInvalid;
+    // Without a platform IOMMU (virtual machines only), storage alone attaches
+    // unisolated. Otherwise this requester must already be enforced.
+    const isolation_required = intel_vtd.dmaIsolationEnabled();
+    if (isolation_required and !intel_vtd.requesterProtected(dev)) return error.DmaIsolationBypassed;
+    const bar = pci.memoryBar0(dev) orelse return error.BarUnmappable;
+    if (bar.width != .bits64) return error.BarUnmappable;
+    const aperture = pci.admitMemoryBar0(dev, BAR_MAP_BYTES) catch |err| return switch (err) {
+        error.BusMasteringNotRevoked => error.BusMasteringNotRevoked,
+        else => error.BarUnmappable,
+    };
+    msix_entry_physical = if (pci.msixTable(dev) catch null) |table| msixEntryPhysical(table, aperture) else null;
     publishInterruptsActive(false);
-    resetCompletionInterruptCount();
-    const dma_base = paging.allocIdentityDmaFrames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
-    var retain_dma_frames = isolation_required;
-    errdefer if (!retain_dma_frames) paging.releaseIdentityDmaFrames(dma_base, DMA_FRAME_COUNT) catch {};
-    const dma_alias = paging.directMapAddress(dma_base) orelse return error.QueueAllocationFailed;
-    const frames = DmaFrames{ .base = .{ .physical = dma_base, .alias = dma_alias } };
     for (0..DMA_FRAME_COUNT) |index| zeroFrame(frames.frame(@intCast(index)).alias);
 
-    var controller = try prepare(bar_phys, frames);
+    var controller = try prepare(dev, aperture.address, frames);
     var bus_master_enabled = false;
     errdefer if (bus_master_enabled) {
         controller.writeReg32(REG_CC, controller.reg32(REG_CC) & ~CC_EN);
         pci.disableBusMastering(dev);
         _ = spinUntilReady(&controller, false);
     };
-    const windows = frames.windows();
-    if (isolation_required) {
-        var domains: [1 + MAX_ADDITIONAL_DMA_DOMAINS]intel_vtd.DmaDomain = undefined;
-        domains[0] = .{ .device = dev, .windows = &windows };
-        var domain_count: usize = 1;
-        for (additional_domains) |domain| {
-            domains[domain_count] = domain;
-            domain_count += 1;
-        }
-        if (vtd_summary) |summary| {
-            try intel_vtd.enforceDevices(summary, domains[0..domain_count]);
-        } else {
-            try intel_vtd.enforceScopedDevices(scoped_dmar.?, domains[0..domain_count]);
-        }
-    }
-    // A failed configuration readback does not prove that DMA stayed stopped.
-    // Retain the queue run from the first attempt to enable this requester.
-    retain_dma_frames = true;
     bus_master_enabled = true;
     pci.enableMemoryBusMastering(dev) catch return error.BusMasterEnableFailed;
     try enable(&controller);
@@ -696,11 +696,11 @@ pub fn attachAsBackend(
         };
         fillGuardPage(guard.alias);
         issueFaultProbe(&controller, guard.physical);
-        fault_proof = try intel_vtd.waitForBlockedWrite(guard.physical);
+        fault_proof = try intel_vtd.waitForBlockedWrite(dev, guard.physical);
 
         // Reuse the aperture admitted before bus mastering. BAR sizing writes
         // are forbidden while this requester owns live DMA commands.
-        controller = try prepare(bar_phys, frames);
+        controller = try prepare(dev, aperture.address, frames);
         if (!guardPageIntact(guard.alias)) return error.DmaIsolationBypassed;
         guard_releasable = true;
         try enable(&controller);
@@ -716,7 +716,6 @@ pub fn attachAsBackend(
     active_controller = controller;
     active_device = dev;
     active_present = true;
-    retain_dma_frames = true;
     return fault_proof;
 }
 
@@ -834,9 +833,9 @@ fn handleBackendError(err: anyerror) void {
     active_present = false;
     bounce = @as([IO_PIPELINE_DEPTH]DmaAddress, @splat(.{}));
     publishInterruptsActive(false);
-    pci.disableMsi(active_device) catch {};
     active_controller.writeReg32(REG_CC, active_controller.reg32(REG_CC) & ~CC_EN);
     pci.disableBusMastering(active_device);
+    device_isolation.revokeInterrupt(active_device);
     _ = spinUntilReady(&active_controller, false);
     console.print(if (err == error.DmaFault)
         "ZIGOS:NVME:HW:DMA_FAULT_CONTAINED\n"
@@ -873,6 +872,8 @@ export fn zigosStorageBootstrapNvmeFlush() callconv(.c) bool {
     return backendFlush();
 }
 
+/// Report the windows VT-d enforces for the attached controller, so the
+/// device broker publishes the same isolation domain.
 export fn zigosStorageBootstrapNvmeDmaWindow(
     index: u32,
     base_out: *u64,
@@ -880,69 +881,23 @@ export fn zigosStorageBootstrapNvmeDmaWindow(
     device_readable_out: *bool,
     device_writable_out: *bool,
 ) callconv(.c) bool {
-    if (!active_present) return false;
-    const Window = struct { phys: u32, length: u64 = PAGE_SIZE, readable: bool, writable: bool };
-    const window: Window = switch (index) {
-        0 => .{ .phys = active_controller.admin.sq.physical, .readable = true, .writable = false },
-        1 => .{ .phys = active_controller.admin.cq.physical, .readable = false, .writable = true },
-        2 => .{ .phys = active_controller.io.sq.physical, .readable = true, .writable = false },
-        3 => .{ .phys = active_controller.io.cq.physical, .readable = false, .writable = true },
-        4 => .{
-            .phys = bounce[0].physical,
-            .length = nvme_prp.MAX_TRANSFER_BYTES * IO_PIPELINE_DEPTH,
-            .readable = true,
-            .writable = true,
-        },
-        5 => .{
-            .phys = active_controller.io_prp_lists[0].physical,
-            .length = PAGE_SIZE * IO_PIPELINE_DEPTH,
-            .readable = true,
-            .writable = false,
-        },
-        else => return false,
-    };
-    base_out.* = window.phys;
+    if (!active_present or index >= DMA_WINDOW_COUNT) return false;
+    const window = dma_windows[index];
+    base_out.* = window.base;
     length_out.* = window.length;
-    device_readable_out.* = window.readable;
-    device_writable_out.* = window.writable;
+    device_readable_out.* = window.device_readable;
+    device_writable_out.* = window.device_writable;
     return true;
 }
 
-pub fn probeAndReport(
-    dev: pci.PCIDevice,
-    vtd_summary: ?*const dmar.Summary,
-    additional_domains: []const intel_vtd.DmaDomain,
-    scoped_dmar: ?[]const u8,
-) !?intel_vtd.FaultRecord {
-    const fault_proof = try attachAsBackend(dev, vtd_summary, additional_domains, scoped_dmar);
+pub fn probeAndReport(dev: pci.PCIDevice) !?intel_vtd.FaultRecord {
+    const fault_proof = try attachAsBackend(dev);
     console.print("ZIGOS:NVME:HW:CAP=");
-    printHex64(active_controller.capabilities());
+    numfmt.printHex(active_controller.capabilities());
     console.print(" VS=");
-    printHex32(active_controller.version());
+    numfmt.printHex(active_controller.version());
     console.print(" RDY=1\n");
     console.print("ZIGOS:NVME:HW:BRINGUP_OK\n");
     console.print("ZIGOS:NVME:HW:IOQ_OK\n");
     return fault_proof;
-}
-
-const hex_digits = "0123456789abcdef";
-
-fn printHex32(value: u32) void {
-    var buffer: [8]u8 = undefined;
-    var i: usize = 0;
-    while (i < 8) : (i += 1) {
-        const shift: u5 = @intCast((7 - i) * 4);
-        buffer[i] = hex_digits[(value >> shift) & 0xF];
-    }
-    console.print(buffer[0..]);
-}
-
-fn printHex64(value: u64) void {
-    var buffer: [16]u8 = undefined;
-    var i: usize = 0;
-    while (i < 16) : (i += 1) {
-        const shift: u6 = @intCast((15 - i) * 4);
-        buffer[i] = hex_digits[@as(usize, @intCast((value >> shift) & 0xF))];
-    }
-    console.print(buffer[0..]);
 }

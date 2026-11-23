@@ -30,7 +30,7 @@ const storage_scenarios = @import("../demo/storage_scenarios.zig");
 const sync_scenarios = @import("../demo/sync_scenarios.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
 const transient_sync_service = @import("../sync/transient_service.zig");
-const xhci = @import("../../kernel/drivers/xhci.zig");
+const modeled_xhci = @import("proofs/modeled_xhci.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
@@ -84,8 +84,8 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     var expected_physical_review_reports: usize = 0;
     for (physical_review_commands) |command| {
         modeled_review_input.enqueueTextCommand(
-            xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
-            xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
+            modeled_xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
+            modeled_xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
             command,
         ) catch |err| native_util.bootProofFailure("booted evidence", err);
         expected_physical_review_reports += command.len + 1;

@@ -4,6 +4,7 @@ const pci = @import("pci.zig");
 const intel_nic = @import("intel_i225_hw.zig");
 const virtio = @import("virtio_net_hw.zig");
 const inventory = @import("../../native/drivers/device_inventory.zig");
+const dma_enforcement = @import("dma_enforcement.zig");
 
 pub fn prepare() !void {
     const record = inventory.recordForClass(.network_adapter);
@@ -19,6 +20,7 @@ pub fn prepare() !void {
 }
 
 pub fn activate() !void {
+    try dma_enforcement.ensureEnforced();
     if (virtio.isolationDomain() != null) {
         try virtio.activate();
     } else if (intel_nic.publishedBar() != null and !intel_nic.attached()) {

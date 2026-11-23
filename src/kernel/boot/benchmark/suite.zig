@@ -51,7 +51,6 @@ const recovery_environment = @import("../../../native/platform/recovery_environm
 const secure_secret_store = @import("../../../native/platform/secure_secret_store.zig");
 const update_health = @import("../../../native/platform/update_health.zig");
 const driver_service = @import("../../../native/drivers/driver_service.zig");
-const kernel_nvme = @import("../../drivers/nvme.zig");
 const kernel_xhci = @import("../../drivers/xhci.zig");
 const contract = @import("../../../native/session/contract.zig");
 const supervisor_mod = @import("../../../native/session/supervisor.zig");
@@ -286,7 +285,6 @@ const cases = benchmark_cases.benchmarkCases(.{
     .driver_recovery_restart = benchmarkDriverRecoveryRestart,
     .slo_irq_to_task = benchmarkSloIrqToTask,
     .slo_irq_teardown = releaseSloIrqFixture,
-    .slo_nvme_queued_io = benchmarkSloNvmeQueuedIo,
     .slo_endpoint_rtt = benchmarkSloEndpointRtt,
     .slo_focused_input = benchmarkSloFocusedInput,
     .text_navigation = benchmarkTextNavigation,
@@ -2466,13 +2464,6 @@ const SloIrqContext = struct {
     tick: u64 = 1,
 };
 
-const SloNvmeContext = struct {
-    image: [kernel_nvme.SECTOR_BYTES * 8]u8 = @as([kernel_nvme.SECTOR_BYTES * 8]u8, @splat(0)),
-    namespaces: [1]kernel_nvme.Namespace = undefined,
-    controller: kernel_nvme.Controller = undefined,
-    ready: bool = false,
-};
-
 const SloEndpointContext = struct {
     table: endpoint.Table = endpoint.Table.init(),
     source_id: ids.EndpointId = ids.endpoint(0),
@@ -2493,7 +2484,6 @@ const SloInputContext = struct {
 };
 
 var slo_irq_context = SloIrqContext{};
-var slo_nvme_context = SloNvmeContext{};
 var slo_endpoint_context = SloEndpointContext{};
 var slo_input_context = SloInputContext{};
 
@@ -2544,29 +2534,6 @@ fn benchmarkSloIrqToTask(iteration: u32) u64 {
     if (stats.last_dispatch_tick < stats.last_wake_tick) return 0;
     if (!scheduler.parkTaskUntilEvent(slo_irq_context.task_id)) return 0;
     return stats.last_dispatch_tick - stats.last_wake_tick + stats.wake_event_count;
-}
-
-fn prepareSloNvmeFixture() void {
-    if (slo_nvme_context.ready) return;
-    slo_nvme_context.namespaces[0] = .{
-        .id = 1,
-        .sector_count = 8,
-        .image = slo_nvme_context.image[0..],
-    };
-    slo_nvme_context.controller = kernel_nvme.Controller.init(
-        kernel_nvme.softwareQueueCapabilities(),
-        slo_nvme_context.namespaces[0..],
-        16,
-    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    slo_nvme_context.ready = true;
-}
-
-fn benchmarkSloNvmeQueuedIo(iteration: u32) u64 {
-    _ = iteration;
-    prepareSloNvmeFixture();
-    const proof = slo_nvme_context.controller.proveWriteReadCycles(1, 0, 8) catch |err|
-        benchmark_reporting.benchStepFailure("benchmark suite", err);
-    return proof.write_completions + proof.read_completions + proof.mmio.completed_commands;
 }
 
 fn prepareSloEndpointFixture() void {

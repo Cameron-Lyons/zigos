@@ -12,9 +12,7 @@ const i225_irq = @import("intel_i225_irq.zig");
 const i225_rx = @import("intel_i225_rx.zig");
 const i225_tx = @import("intel_i225_tx.zig");
 const pci = @import("pci.zig");
-const smp = @import("../smp.zig");
-
-pub const INTERRUPT_STATE_USES_PROTOCOL_ORDERING = true;
+const device_isolation = @import("device_isolation.zig");
 
 const PAGE_SIZE: u32 = 4096;
 const TX_DESCRIPTOR_FRAME: u32 = 0;
@@ -178,12 +176,9 @@ var controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
 var published_bar_physical: u64 = 0;
 var dma_windows: [DMA_WINDOW_COUNT]intel_vtd.DmaWindow = undefined;
-var completed_transmit_frames: u64 = 0;
-var failed_transmit_frames: u64 = 0;
-var received_frames: u64 = 0;
-var dropped_receive_frames: u64 = 0;
-var failed_receive_polls: u64 = 0;
 var pending_interrupt_causes: u32 = 0;
+// Set when the ISR masks queue causes, so polling reopens them only once.
+var queue_causes_masked: bool = false;
 var empty_interrupt_streak: u8 = 0;
 
 fn controllerState() ControllerState {
@@ -211,8 +206,7 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
     if (!pci.isIntelI225Lm(device_info)) return error.UnsupportedDevice;
     if (pci.busMasteringEnabled(device_info)) return error.BusMasteringNotRevoked;
 
-    const bar_phys = barPhysicalAddress(device_info) orelse return error.BarUnmappable;
-    if (bar_phys == 0) return error.BarUnmappable;
+    const bar_phys = (pci.admitMemoryBar0(device_info, BAR_MAP_BYTES) catch return error.BarUnmappable).address;
     const bar = try mapBar(bar_phys);
     published_bar_physical = bar_phys;
     var pending = Controller{
@@ -283,11 +277,6 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
     };
     controller = pending;
     active_device = device_info;
-    completed_transmit_frames = 0;
-    failed_transmit_frames = 0;
-    received_frames = 0;
-    dropped_receive_frames = 0;
-    failed_receive_polls = 0;
     resetPendingInterruptCauses();
     empty_interrupt_streak = 0;
     publishControllerState(.prepared);
@@ -299,23 +288,12 @@ pub fn isolationDomain() ?intel_vtd.DmaDomain {
     return .{ .device = active_device, .windows = &dma_windows };
 }
 
+/// The caller (network_hw.activate) has already run IOMMU enforcement.
 pub fn activate() Error!void {
-    if (!controllerPrepared() or !intel_vtd.requesterProtected(active_device)) {
-        return error.DmaIsolationBypassed;
-    }
-    if (!intel_vtd.faultMonitoringEnabled()) return error.DmaFaultMonitoringUnavailable;
-    if (!intel_vtd.interruptIsolationEnabled()) return error.InterruptIsolationUnavailable;
-    const remapped = intel_vtd.routeInterrupt(
-        active_device,
-        INTERRUPT_VECTOR,
-        smp.irqDestinationId(),
-    ) catch return error.InterruptRouteInstallFailed;
-    pci.enableSingleMsi(active_device, .{
-        .address = remapped.address,
-        .data = remapped.data,
-    }) catch return error.MsiEnableFailed;
-    var msi_enabled = true;
-    errdefer if (msi_enabled) pci.disableMsi(active_device) catch {};
+    if (!controllerPrepared()) return error.DmaIsolationBypassed;
+    try device_isolation.requireIsolated(active_device);
+    try device_isolation.routeInterrupt(active_device, INTERRUPT_VECTOR, .msi);
+    errdefer device_isolation.revokeInterrupt(active_device);
     pci.enableMemoryBusMastering(active_device) catch {
         pci.disableBusMastering(active_device);
         return error.BusMasterEnableFailed;
@@ -323,9 +301,9 @@ pub fn activate() Error!void {
     resetPendingInterruptCauses();
     empty_interrupt_streak = 0;
     _ = controller.reg32(REG_ICR);
+    @atomicStore(bool, &queue_causes_masked, false, .release);
     controller.writeReg32(REG_IMS, i225_irq.QUEUE_CAUSES);
     publishControllerState(.active);
-    msi_enabled = false;
 }
 
 pub fn attached() bool {
@@ -340,26 +318,6 @@ pub fn publishedBar() ?struct { physical_base: u64, length: u64 } {
 pub fn macAddress() [6]u8 {
     if (!controllerPrepared()) return @as([6]u8, @splat(0));
     return controller.mac;
-}
-
-pub fn transmitCount() u64 {
-    return completed_transmit_frames;
-}
-
-pub fn failedTransmitCount() u64 {
-    return failed_transmit_frames;
-}
-
-pub fn receiveCount() u64 {
-    return received_frames;
-}
-
-pub fn droppedReceiveCount() u64 {
-    return dropped_receive_frames;
-}
-
-pub fn failedReceivePollCount() u64 {
-    return failed_receive_polls;
 }
 
 pub fn networkWorkPending() bool {
@@ -381,6 +339,7 @@ pub fn nextWake() ?u64 {
 pub fn handleInterrupt() void {
     if (controllerPrepared()) {
         controller.writeReg32(REG_IMC, i225_irq.QUEUE_CAUSES);
+        @atomicStore(bool, &queue_causes_masked, true, .release);
         const cause = controller.reg32(REG_ICR);
         _ = @atomicRmw(
             u32,
@@ -395,23 +354,13 @@ pub fn handleInterrupt() void {
 
 pub fn sendPayload(destination: [6]u8, payload: []const u8) bool {
     if (!controllerActive() or !i225_frame.validDestinationMac(destination) or
-        payload.len == 0 or payload.len > MAX_PAYLOAD_BYTES or !controller.linkUp())
-    {
-        failed_transmit_frames +%= 1;
-        return false;
-    }
-    if (pollDmaFault()) {
-        failed_transmit_frames +%= 1;
-        return false;
-    }
+        payload.len == 0 or payload.len > MAX_PAYLOAD_BYTES or !controller.linkUp()) return false;
+    if (pollDmaFault()) return false;
     timer.synchronize();
     const now_ticks = timer.getTicks();
     if (!serviceTransmitQueue(now_ticks)) return false;
 
-    const descriptor_index = controller.tx_queue.reserve(now_ticks) catch {
-        failed_transmit_frames +%= 1;
-        return false;
-    };
+    const descriptor_index = controller.tx_queue.reserve(now_ticks) catch return false;
     const buffer_address = txBufferAddress(descriptor_index);
     const buffer: [*]u8 = @ptrFromInt(buffer_address.alias);
     const frame_len = i225_frame.buildEthernetFrame(
@@ -431,20 +380,10 @@ pub fn sendPayload(destination: [6]u8, payload: []const u8) bool {
 }
 
 pub fn pollReceive(output: []u8) ReceiveResult {
-    if (!controllerActive()) {
-        failed_receive_polls +%= 1;
-        return .{ .status = .failed };
-    }
-    if (pollDmaFault()) {
-        failed_receive_polls +%= 1;
-        return .{ .status = .failed };
-    }
+    if (!controllerActive() or pollDmaFault()) return .{ .status = .failed };
     timer.synchronize();
-    if (!serviceTransmitQueue(timer.getTicks())) {
-        failed_receive_polls +%= 1;
-        return .{ .status = .failed };
-    }
-    defer rearmQueueInterrupts();
+    if (!serviceTransmitQueue(timer.getTicks())) return .{ .status = .failed };
+    defer rearmMaskedQueueInterrupts();
     if (!controller.linkUp()) return .{ .status = .empty };
 
     const descriptor_index = controller.rx_head;
@@ -459,23 +398,13 @@ pub fn pollReceive(output: []u8) ReceiveResult {
 
     const completion = observeReceiveCompletion(writeback);
     const frame_len: usize = completion.length;
-    if (!completion.validSingleBuffer() or frame_len < i225_frame.ETHERNET_HEADER_BYTES) {
-        dropped_receive_frames +%= 1;
-        return .{ .status = .dropped };
-    }
+    if (!completion.validSingleBuffer() or frame_len < i225_frame.ETHERNET_HEADER_BYTES) return .{ .status = .dropped };
 
     const buffer_address = rxBufferAddress(descriptor_index);
     const frame = @as([*]const u8, @ptrFromInt(buffer_address.alias))[0..frame_len];
-    const view = i225_frame.parseEthernetFrame(frame, controller.mac) catch {
-        dropped_receive_frames +%= 1;
-        return .{ .status = .dropped };
-    };
-    if (view.payload.len > output.len) {
-        dropped_receive_frames +%= 1;
-        return .{ .status = .dropped };
-    }
+    const view = i225_frame.parseEthernetFrame(frame, controller.mac) catch return .{ .status = .dropped };
+    if (view.payload.len > output.len) return .{ .status = .dropped };
     @memcpy(output[0..view.payload.len], view.payload);
-    received_frames +%= 1;
     return .{ .status = .frame, .length = view.payload.len };
 }
 
@@ -510,7 +439,6 @@ fn reapTransmitCompletions() u32 {
         acquireDescriptor();
         const completion_status = descriptor.olinfo_status;
         _ = controller.tx_queue.reclaimCompleted(completion_status) orelse return reaped;
-        completed_transmit_frames +%= 1;
         reaped += 1;
     }
     return reaped;
@@ -548,7 +476,6 @@ fn serviceTransmitQueueWith(comptime Backend: type, now_ticks: u64) bool {
     if (!controllerActive() or !Backend.serviceInterrupt()) return false;
     _ = reapTransmitCompletions();
     if (!controller.tx_queue.oldestSubmissionExpired(now_ticks, TRANSMIT_TIMEOUT_TICKS)) return true;
-    failed_transmit_frames +%= 1;
     Backend.contain();
     return false;
 }
@@ -602,7 +529,15 @@ fn transmitCompletionReady() bool {
 }
 
 fn rearmQueueInterrupts() void {
-    if (controllerActive()) controller.writeReg32(REG_IMS, i225_irq.QUEUE_CAUSES);
+    if (!controllerActive()) return;
+    @atomicStore(bool, &queue_causes_masked, false, .release);
+    controller.writeReg32(REG_IMS, i225_irq.QUEUE_CAUSES);
+}
+
+fn rearmMaskedQueueInterrupts() void {
+    if (controllerActive() and @atomicRmw(bool, &queue_causes_masked, .Xchg, false, .acq_rel)) {
+        controller.writeReg32(REG_IMS, i225_irq.QUEUE_CAUSES);
+    }
 }
 
 fn configureReceiveQueue(pending: *Controller) Error!void {
@@ -661,40 +596,28 @@ fn recycleRxDescriptor(index: u32, descriptor: *volatile i225_rx.Descriptor) voi
 }
 
 fn pollDmaFault() bool {
-    if (!intel_vtd.faultMonitoringEnabled()) {
-        containFailure("ZIGOS:I225:HW:FAULT_MONITOR_UNAVAILABLE\n");
-        return true;
-    }
-    if ((intel_vtd.pollFaultForDevice(active_device) catch {
-        containFailure("ZIGOS:I225:HW:FAULT_MONITOR_FAIL_CLOSED\n");
-        return true;
-    }) != null) {
-        containFailure("ZIGOS:I225:HW:DMA_FAULT_CONTAINED\n");
-        return true;
-    }
-    return false;
+    containFailure(switch (device_isolation.pollFault(active_device)) {
+        .clear => return false,
+        .monitoring_unavailable => "ZIGOS:I225:HW:FAULT_MONITOR_UNAVAILABLE\n",
+        .fail_closed => "ZIGOS:I225:HW:FAULT_MONITOR_FAIL_CLOSED\n",
+        .fault => "ZIGOS:I225:HW:DMA_FAULT_CONTAINED\n",
+    });
+    return true;
 }
 
 fn containFailure(marker: []const u8) void {
     controller.writeReg32(REG_IMC, 0xFFFF_FFFF);
     controller.writeReg32(REG_EIMC, 0xFFFF_FFFF);
     publishControllerState(.prepared);
-    pci.disableMsi(active_device) catch {};
     pci.disableBusMastering(active_device);
+    device_isolation.revokeInterrupt(active_device);
     controller.writeReg32(REG_TXDCTL0, 0);
     controller.writeReg32(REG_RXDCTL0, 0);
     controller.writeReg32(REG_RCTL, controller.reg32(REG_RCTL) & ~RCTL_ENABLE);
     console.print(marker);
 }
 
-fn barPhysicalAddress(device_info: pci.PCIDevice) ?usize {
-    const bar = pci.memoryBar0(device_info) orelse return null;
-    const aperture = (pci.probeMemoryBars(device_info) catch return null)[0];
-    if (aperture.address != bar.address or aperture.length < BAR_MAP_BYTES) return null;
-    return bar.address;
-}
-
-fn mapBar(physical: usize) Error!usize {
+fn mapBar(physical: u64) Error!usize {
     paging.mapKernelDeviceRange(mmio_windows.intel_i225.base, physical, BAR_MAP_BYTES, true) catch return error.BarUnmappable;
     return mmio_windows.intel_i225.base;
 }
@@ -732,12 +655,10 @@ fn acquireDescriptor() void {
 test "I225 polled transmit completions preserve liveness across delayed interrupts" {
     const saved_state = controllerState();
     const saved_controller: ?Controller = if (controllerPrepared()) controller else null;
-    const saved_completed = completed_transmit_frames;
     const saved_streak = empty_interrupt_streak;
     defer {
         if (saved_controller) |previous| controller = previous;
         publishControllerState(saved_state);
-        completed_transmit_frames = saved_completed;
         empty_interrupt_streak = saved_streak;
     }
     var descriptors = std.mem.zeroes([i225_tx.DESCRIPTOR_COUNT]i225_tx.Descriptor);
@@ -766,7 +687,6 @@ test "I225 polled transmit completions preserve liveness across delayed interrup
         try std.testing.expect(!i225_irq.shouldContain(empty_interrupt_streak));
         try std.testing.expectEqual(@as(u8, 1), empty_interrupt_streak);
     }
-    try std.testing.expectEqual(saved_completed + i225_tx.DESCRIPTOR_COUNT * 2, completed_transmit_frames);
     for (0..i225_irq.EMPTY_INTERRUPT_LIMIT - 1) |_| {
         try std.testing.expectEqual(@as(u32, 0), reapTransmitCompletions());
         empty_interrupt_streak = i225_irq.nextEmptyStreak(empty_interrupt_streak, false);
@@ -816,15 +736,11 @@ test "I225 idle transmit deadlines service polled completion and contain one sta
     };
     const saved_state = controllerState();
     const saved_controller: ?Controller = if (controllerPrepared()) controller else null;
-    const saved_completed = completed_transmit_frames;
-    const saved_failed = failed_transmit_frames;
     const saved_pending = @atomicLoad(u32, &pending_interrupt_causes, .monotonic);
     const saved_streak = empty_interrupt_streak;
     defer {
         if (saved_controller) |previous| controller = previous;
         publishControllerState(saved_state);
-        completed_transmit_frames = saved_completed;
-        failed_transmit_frames = saved_failed;
         @atomicStore(u32, &pending_interrupt_causes, saved_pending, .monotonic);
         empty_interrupt_streak = saved_streak;
     }
@@ -867,7 +783,6 @@ test "I225 idle transmit deadlines service polled completion and contain one sta
     try std.testing.expect(networkWorkPendingAt(300));
     try std.testing.expect(!serviceTransmitQueueWith(Backend, 300));
     try std.testing.expectEqual(@as(usize, 1), Backend.contained);
-    try std.testing.expectEqual(saved_failed + 1, failed_transmit_frames);
     try std.testing.expectEqual(@as(u32, 1), controller.tx_queue.in_flight);
     try std.testing.expect(nextWake() == null);
     try std.testing.expect(!networkWorkPendingAt(300));

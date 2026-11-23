@@ -254,22 +254,11 @@ pub fn blockedDmaProof() ?FaultRecord {
     return blocked_dma_proof;
 }
 
-pub fn pollFault() Error!?FaultRecord {
-    if (!faultMonitoringEnabled()) return null;
-    const source_id = protectedRequesterId() orelse return error.UnexpectedDmaFault;
-    return pollFaultForSource(source_id);
-}
-
 pub fn pollFaultForDevice(device_info: pci.PCIDevice) Error!?FaultRecord {
     if (!faultMonitoringEnabled()) return null;
     const source_id = requesterId(device_info);
     if (protectedRequesterIndex(source_id) == null) return error.UnexpectedDmaFault;
     return pollFaultForSource(source_id);
-}
-
-fn protectedRequesterId() ?u16 {
-    if (!enabled or protected_requester_count == 0) return null;
-    return protected_requester_ids[0];
 }
 
 pub fn requesterProtected(device_info: pci.PCIDevice) bool {
@@ -733,24 +722,38 @@ pub fn routeInterrupt(
     publishDmaRange(@intFromPtr(entry), @sizeOf(@TypeOf(entry.*)));
     entry[0] = encoded[0];
     publishDmaRange(@intFromPtr(entry), @sizeOf(@TypeOf(entry.*)));
-    errdefer {
-        entry[0] = 0;
-        entry[1] = 0;
-        publishDmaRange(@intFromPtr(entry), @sizeOf(@TypeOf(entry.*)));
-        for (activeUnits(), 0..) |unit, unit_index| {
-            globallyInvalidateInterruptEntries(
-                unit.base,
-                activeInvalidationQueueAddress(unit_index),
-            ) catch {};
-        }
-    }
+    errdefer revokeInterruptEntry(entry) catch {};
+    try invalidateInterruptEntries();
+    return remappableMessage(index);
+}
+
+/// Revoke a requester's remapped interrupt so a later activation can route it
+/// again. Callers disable the device's MSI and MSI-X capabilities first.
+pub fn clearInterruptRoute(device_info: pci.PCIDevice) Error!void {
+    const index = protectedRequesterIndex(requesterId(device_info)) orelse return;
+    const table = activeInterruptTable() orelse return;
+    if ((table[index][0] & PRESENT) == 0) return;
+    try revokeInterruptEntry(&table[index]);
+}
+
+fn revokeInterruptEntry(entry: *[2]u64) Error!void {
+    entry[0] = 0;
+    entry[1] = 0;
+    publishDmaRange(@intFromPtr(entry), @sizeOf(@TypeOf(entry.*)));
+    try invalidateInterruptEntries();
+}
+
+fn invalidateInterruptEntries() Error!void {
+    var result: Error!void = {};
     for (activeUnits(), 0..) |unit, unit_index| {
-        try globallyInvalidateInterruptEntries(
+        globallyInvalidateInterruptEntries(
             unit.base,
             activeInvalidationQueueAddress(unit_index),
-        );
+        ) catch |err| {
+            result = err;
+        };
     }
-    return remappableMessage(index);
+    return result;
 }
 
 fn interruptRemappingEntry(source_id: u16, vector: u8, destination_id: u32) [2]u64 {
@@ -823,12 +826,13 @@ fn invalidationDescriptors(status_address: u64) [2][2]u64 {
     };
 }
 
-pub fn waitForBlockedWrite(expected_address: u32) Error!FaultRecord {
+pub fn waitForBlockedWrite(device_info: pci.PCIDevice, expected_address: u32) Error!FaultRecord {
     if (!faultMonitoringEnabled()) return error.DmaFaultMissing;
-    const expected_requester = protectedRequesterId() orelse return error.DmaFaultMissing;
+    const expected_requester = requesterId(device_info);
+    if (protectedRequesterIndex(expected_requester) == null) return error.DmaFaultMissing;
     const deadline = tsc_clock.afterMilliseconds(FAULT_PROBE_TIMEOUT_MILLISECONDS);
     while (!deadline.expired()) {
-        if (try pollFault()) |fault| {
+        if (try pollFaultForSource(expected_requester)) |fault| {
             if (!fault.provesBlockedWrite(expected_requester, expected_address)) {
                 return error.UnexpectedDmaFault;
             }
@@ -978,13 +982,16 @@ fn publishTables() void {
 /// Only dirty translation/interrupt entries and invalidation command/status
 /// lines need maintenance. The normal coherent-hardware path keeps its fence.
 fn publishDmaRange(address: usize, length: usize) void {
-    if (page_walk_cache_line_bytes != 0) {
-        var line = address & ~(page_walk_cache_line_bytes - 1);
-        while (line < address + length) : (line += page_walk_cache_line_bytes) {
-            asm volatile ("clflush (%[address])"
-                :
-                : [address] "r" (line),
-                : .{ .memory = true });
+    // Hosted tests never program VT-d hardware or flush its page-walk lines.
+    if (comptime builtin.target.os.tag == .freestanding) {
+        if (page_walk_cache_line_bytes != 0) {
+            var line = address & ~(page_walk_cache_line_bytes - 1);
+            while (line < address + length) : (line += page_walk_cache_line_bytes) {
+                asm volatile ("clflush (%[address])"
+                    :
+                    : [address] "r" (line),
+                    : .{ .memory = true });
+            }
         }
     }
     publishTables();
@@ -1310,6 +1317,39 @@ test "VT-d remapped MSI binds vector destination and exact requester" {
     try std.testing.expectEqual(@as(u16, 0), first.data);
     const second = remappableMessage(1);
     try std.testing.expectEqual(@as(u64, 0xFEE0_0030), second.address);
+}
+
+test "VT-d interrupt routes can be revoked and installed again" {
+    var table: InterruptTable align(PAGE_SIZE) = undefined;
+    @memset(std.mem.asBytes(&table), 0);
+    const saved = .{ enabled, interrupt_remapping_enabled, protected_requester_ids, protected_requester_count, active_table_memory, active_unit_count };
+    defer {
+        enabled = saved[0];
+        interrupt_remapping_enabled = saved[1];
+        protected_requester_ids = saved[2];
+        protected_requester_count = saved[3];
+        active_table_memory = saved[4];
+        active_unit_count = saved[5];
+    }
+    enabled = true;
+    interrupt_remapping_enabled = true;
+    protected_requester_ids = .{ requesterId(syntheticNvme()), requesterId(syntheticXhci()), 0 };
+    protected_requester_count = 2;
+    active_unit_count = 0;
+    active_table_memory = .{
+        .physical = 0x0100_0000,
+        .alias = @intFromPtr(&table) - @as(usize, INTERRUPT_TABLE_PAGE) * PAGE_SIZE,
+    };
+    const first = try routeInterrupt(syntheticXhci(), 67, 3);
+    try std.testing.expectEqual(remappableMessage(1), first);
+    try std.testing.expectError(error.InterruptRouteAlreadyPresent, routeInterrupt(syntheticXhci(), 67, 3));
+    try clearInterruptRoute(syntheticXhci());
+    try std.testing.expectEqual(@as(u64, 0), table[1][0] | table[1][1]);
+    try clearInterruptRoute(syntheticNvme());
+    try clearInterruptRoute(syntheticI225());
+    try std.testing.expectEqual(first, try routeInterrupt(syntheticXhci(), 67, 3));
+    try std.testing.expect((table[1][0] & PRESENT) != 0);
+    try std.testing.expectEqual(@as(u64, 0), table[0][0]);
 }
 
 test "VT-d primary fault parser binds requester address and write direction" {
