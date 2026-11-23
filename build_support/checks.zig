@@ -63,7 +63,7 @@ pub fn addCheckSteps(
     const prod_readiness_test_cmd = addHostToolTestRun(b, optimize, "check-production-readiness-tests", "tools/check_production_readiness.zig");
     b.step("production-readiness-tests", "Test the production-readiness manifest, retired-source and security-control gates").dependOn(&prod_readiness_test_cmd.step);
     host_tests_step.dependOn(&prod_readiness_test_cmd.step);
-    const hardware_proof_checker_cmd = host_tools.addRun(b, "test-nuc15crsu7-hardware-proof-checker");
+    const hardware_proof_checker_cmd = host_tools.addHardwareProofFixture(b);
     const hardware_proof_checker_step = b.step("hardware-proof-checker-test", "Exercise the RNUC15CRSU7 proof-bundle checker with synthetic pass/fail fixtures");
     hardware_proof_checker_step.dependOn(&hardware_proof_checker_cmd.step);
 

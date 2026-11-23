@@ -30,26 +30,23 @@ fn pinnedVersion(contents: []const u8, tool: []const u8) ![]const u8 {
     return found orelse error.MissingToolVersion;
 }
 
-fn matchesVersion(output: []const u8, tool: []const u8, expected: []const u8) bool {
+fn matchesJujutsuVersion(output: []const u8, expected: []const u8) bool {
     const actual = std.mem.trim(u8, output, " \t\r\n");
-    if (std.mem.eql(u8, tool, "zig")) return std.mem.eql(u8, actual, expected);
     if (!std.mem.startsWith(u8, actual, "jj ")) return false;
     const version = actual[3..];
     return std.mem.eql(u8, version, expected) or
         (std.mem.startsWith(u8, version, expected) and version.len > expected.len + 1 and version[expected.len] == '-');
 }
 
+/// build.zig already rejects any Zig other than the pin, so only Jujutsu is checked here.
 fn verifyToolchain(ctx: *common.Context) !void {
-    const pins = try ctx.read(".tool-versions");
-    for ([_][]const u8{ "zig", "jujutsu" }, [_][]const u8{ "zig", "jj" }) |name, executable| {
-        const expected = try pinnedVersion(pins, name);
-        const output = try ctx.captureChecked(&.{ if (std.mem.eql(u8, executable, "zig")) ctx.envDefault("ZIG_BIN", "zig") else executable, if (std.mem.eql(u8, executable, "zig")) "version" else "--version" });
-        if (!matchesVersion(output, executable, expected)) {
-            try ctx.warn("Installed {s} version mismatch: expected {s}, got {s}\n", .{ name, expected, std.mem.trim(u8, output, " \t\r\n") });
-            return error.ToolVersionMismatch;
-        }
-        try ctx.print("Using {s} {s}\n", .{ name, expected });
+    const expected = try pinnedVersion(try ctx.read(".tool-versions"), "jujutsu");
+    const output = try ctx.captureChecked(&.{ "jj", "--version" });
+    if (!matchesJujutsuVersion(output, expected)) {
+        try ctx.warn("Installed jujutsu version mismatch: expected {s}, got {s}\n", .{ expected, std.mem.trim(u8, output, " \t\r\n") });
+        return error.ToolVersionMismatch;
     }
+    try ctx.print("Using jujutsu {s}\n", .{expected});
 }
 
 fn initJujutsu(ctx: *common.Context) !void {
@@ -93,7 +90,7 @@ fn setupEfiTools(ctx: *common.Context) !void {
     const environment_path = ctx.env("GITHUB_ENV") orelse return error.MissingGithubEnvironmentFile;
     const firmware = try secureBootFirmware(ctx, "/usr/share/OVMF");
     try ctx.run(&.{ "python3", "-m", "venv", "build/efi-test-tools" });
-    try ctx.run(&.{ "build/efi-test-tools/bin/pip", "install", "--disable-pip-version-check", "virt-firmware==26.9", "pefile==2024.8.26" });
+    try ctx.run(&.{ "build/efi-test-tools/bin/pip", "install", "--disable-pip-version-check", "virt-firmware==26.9" });
     const executable = try std.Io.Dir.cwd().realPathFileAlloc(ctx.io, "build/efi-test-tools/bin/virt-fw-vars", ctx.allocator);
     try append(ctx, environment_path, try ctx.fmt("EFI_VARS_TOOL={s}\nOVMF_SECURE_BOOT_CODE={s}\nOVMF_SECURE_BOOT_VARS={s}\n", .{ executable, firmware.code, firmware.vars }));
 }
@@ -133,12 +130,11 @@ test "CI toolchain pins reject missing and ambiguous versions" {
     try std.testing.expectError(error.MissingToolVersion, pinnedVersion(pins, "other"));
     try std.testing.expectError(error.AmbiguousToolVersion, pinnedVersion("zig 0.17.0\nzig 0.17.0\n", "zig"));
     try std.testing.expectError(error.AmbiguousToolVersion, pinnedVersion("zig 0.16.0 0.17.0\n", "zig"));
-    try std.testing.expect(matchesVersion("0.17.0\n", "zig", "0.17.0"));
-    try std.testing.expect(!matchesVersion("0.17.0-dev\n", "zig", "0.17.0"));
-    try std.testing.expect(matchesVersion("jj 0.43.0\n", "jj", "0.43.0"));
-    try std.testing.expect(matchesVersion("jj 0.43.0-release\n", "jj", "0.43.0"));
-    try std.testing.expect(!matchesVersion("jj 0.43.01\n", "jj", "0.43.0"));
-    try std.testing.expect(!matchesVersion("jj 0.43.0-\n", "jj", "0.43.0"));
+    try std.testing.expect(matchesJujutsuVersion("jj 0.43.0\n", "0.43.0"));
+    try std.testing.expect(matchesJujutsuVersion("jj 0.43.0-release\n", "0.43.0"));
+    try std.testing.expect(!matchesJujutsuVersion("jj 0.43.01\n", "0.43.0"));
+    try std.testing.expect(!matchesJujutsuVersion("jj 0.43.0-\n", "0.43.0"));
+    try std.testing.expect(!matchesJujutsuVersion("0.43.0\n", "0.43.0"));
 }
 
 test "CI firmware selection requires a matching pair and prefers 4M" {

@@ -11,17 +11,34 @@ const relay = @import("qemu/relay.zig");
 const deps = @import("deps.zig");
 const ci = @import("ci.zig");
 
+const usage =
+    \\Usage: zig build tool -- COMMAND [ARGUMENTS]
+    \\
+    \\Media:    clean-build, build-native-store, build-efi-iso, build-grub-iso,
+    \\          check-efi-image, check-multiboot2-image, check-production-boot-log,
+    \\          test-production-boot-log-checker, prepare-unified-efi-test
+    \\Source:   fmt-check, lint-zig, lint-actions, generate-unicode
+    \\Host:     setup-deps, ci-verify-toolchain, ci-init-jj, ci-enable-kvm,
+    \\          ci-setup-efi-tools, ci-install-linters, ci-render-summary
+    \\QEMU:     qemu-harness, qemu-peer-relay, run-zigos-native-smoke, run-uefi-boot-test,
+    \\          run-x86-64-kernel-smoke, run-long-mode-entry-smoke, run-native-crypto-smoke,
+    \\          run-high-half-smoke, run-mapping-xstate-smoke, run-ap-cache-rejection-smoke,
+    \\          run-smp-cache-enabled-match-smoke, run-storage-durability-qemu,
+    \\          run-sync-two-node-qemu, run-tpm2-qemu, run-unified-efi-qemu,
+    \\          run-kernel-recovery, capture-kernel-benchmark
+    \\Release:  generate-release-sbom-provenance, check-reproducible-build,
+    \\          finalize-release-manifest, verify-release-bundle
+    \\Hardware: prepare-nuc15crsu7-hardware-proof, write-nuc15crsu7-capture-statement,
+    \\          check-nuc15crsu7-hardware-proof
+    \\
+;
+
 pub fn main(init: std.process.Init) !void {
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
     var ctx: common.Context = .{ .allocator = init.arena.allocator(), .io = init.io, .environ = init.environ_map };
     const args = ctx.buildCommandArgs(argv[1..]) catch |err| fail("build arguments", err);
-    const basename = std.fs.path.basename(argv[0]);
-    if (std.mem.startsWith(u8, basename, "hardware-fixture-")) {
-        hardware.run(&ctx, basename, args) catch |err| fail(basename, err);
-        return;
-    }
     if (args.len == 0 or std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "help")) {
-        try ctx.print("Usage: zig build tool -- COMMAND [ARGUMENTS]\n\nCommands use the former script names without their extension:\n  clean-build, build-native-store, check-efi-image, check-multiboot2-image\n  build-efi-iso, build-grub-iso, check-production-boot-log\n  test-production-boot-log-checker, fmt-check, lint-zig, lint-actions\n  generate-unicode, prepare-unified-efi-test, qemu-peer-relay\n  setup-deps, ci-verify-toolchain, ci-init-jj, ci-enable-kvm\n  ci-setup-efi-tools, ci-install-linters, ci-render-summary\n  qemu-harness, run-headless-qemu, run-zigos-native-smoke\n  run-with-qemu-boot-iso, run-uefi-boot-test\n  run-x86-64-kernel-smoke, run-long-mode-entry-smoke, run-native-crypto-smoke, run-high-half-smoke\n  run-mapping-xstate-smoke ISO LOG positive|unsupported\n  run-storage-durability-qemu, run-sync-two-node-qemu, run-tpm2-qemu\n  run-unified-efi-qemu, run-kernel-recovery, capture-kernel-benchmark\n  generate-release-sbom-provenance, check-reproducible-build\n  finalize-release-manifest, verify-release-bundle\n  prepare-nuc15crsu7-hardware-proof, write-nuc15crsu7-capture-statement\n  check-nuc15crsu7-hardware-proof, test-nuc15crsu7-hardware-proof-checker\n", .{});
+        try ctx.print("{s}", .{usage});
         return;
     }
     dispatch(&ctx, args[0], args[1..]) catch |err| fail(args[0], err);
@@ -53,6 +70,7 @@ test {
     std.testing.refAllDecls(qemu);
     std.testing.refAllDecls(release);
     std.testing.refAllDecls(hardware);
+    std.testing.refAllDecls(@import("hardware_fixture_main.zig"));
     std.testing.refAllDecls(unicode);
     std.testing.refAllDecls(efi_fixture);
     std.testing.refAllDecls(relay);

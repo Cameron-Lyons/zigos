@@ -46,27 +46,19 @@ jobs:
       shell: sh
       run: zig build lint
 
-  kernel-build:
-    needs: zig-toolchain
-    uses: ./.github/workflows/run-zig-command.yml
-    with:
-      job-name: Kernel Build
-      command: zig build -Doptimize=fast kernel
-      install-build-dependencies: false
-
   spec-conformance:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Spec Conformance
-      command: zig build -Doptimize=fast spec-conformance
+      command: zig build spec-tests && zig build -Doptimize=fast recovery-qemu-test
 
   host-tests:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Host Tests
-      command: zig build host-tests
+      command: zig build host-tests prod-readiness
       install-build-dependencies: false
 
   native-smoke:
@@ -77,29 +69,13 @@ jobs:
       command: zig build -Doptimize=fast zigos-native-smoke-test
       timeout-minutes: 30
 
-  long-mode-entry:
+  architecture-probes:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
-      job-name: x86-64 Boot Path
-      command: zig build -Doptimize=fast x86_64-long-mode-entry-check x86_64-userspace-launch-check
-      timeout-minutes: 30
-
-  native-crypto:
-    needs: zig-toolchain
-    uses: ./.github/workflows/run-zig-command.yml
-    with:
-      job-name: Native CPU and Crypto
-      command: zig build -Doptimize=fast native-crypto-check
-      timeout-minutes: 10
-
-  high-half-entry:
-    needs: zig-toolchain
-    uses: ./.github/workflows/run-zig-command.yml
-    with:
-      job-name: Upper-Half Kernel Entry
-      command: zig build -Doptimize=fast high-half-entry-check
-      timeout-minutes: 10
+      job-name: Native CPU, Crypto and Upper-Half Entry
+      command: zig build -Doptimize=fast native-crypto-check high-half-entry-check
+      timeout-minutes: 15
 
   tpm-quotes:
     needs: zig-toolchain
@@ -124,6 +100,6 @@ jobs:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
-      job-name: Production and Verification ISO Build
-      command: zig build -Doptimize=fast iso iso-verification
+      job-name: Kernel and ISO Build
+      command: zig build -Doptimize=fast kernel iso iso-verification
       timeout-minutes: 20

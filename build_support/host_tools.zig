@@ -72,6 +72,21 @@ pub fn addRelayTests(b: *std.Build) *std.Build.Step.Run {
     return run;
 }
 
+/// The hardware-proof fixture answers as the trusted hardware and release
+/// verifiers, so it is a separate executable that zigos-tool can never become.
+pub fn addHardwareProofFixture(b: *std.Build) *std.Build.Step.Run {
+    const root = b.createModule(.{
+        .root_source_file = b.path("tools/host/hardware_fixture_main.zig"),
+        .target = b.graph.host,
+        .optimize = .fast,
+        .link_libc = true,
+    });
+    root.addImport("release_catalog", b.createModule(.{ .root_source_file = b.path("src/tools/release_catalog.zig") }));
+    const run = b.addRunArtifact(b.addExecutable(.{ .name = "hardware-proof-fixture", .root_module = root }));
+    run.setCwd(b.path("."));
+    return run;
+}
+
 /// The fixture is a separate executable, so deterministic software signing keys
 /// cannot become an available signing provider in the production host tool.
 pub fn addReleaseFixture(b: *std.Build, verifier: *std.Build.Step.Compile) *std.Build.Step.Run {

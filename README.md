@@ -1482,9 +1482,8 @@ concurrent cached reuse while another CPU requests large spans.
 
 Use the pinned toolchain and repo entrypoints:
 
-- Preinstalled Zig 0.17.0 on `PATH` (pinned in `.tool-versions` and `mise.toml`)
-- Jujutsu `jj` (pinned in `.tool-versions` and `mise.toml`)
-- `nasm`
+- Preinstalled Zig 0.17.0 on `PATH` (pinned in `.tool-versions`)
+- Jujutsu `jj` (pinned in `.tool-versions`)
 - `qemu-system-x86_64`
 - Python 3 only for the external `virt-fw-vars` tool used by unified EFI tests
 - An x86-64 CPU with NX, SMEP, SMAP, UMIP, RDSEED, RDPID, PGE, PCID/INVPCID,
@@ -1664,11 +1663,9 @@ Use the pinned toolchain and repo entrypoints:
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses
   them when available
 
-For ISO and full disk-image workflows, install the tools verified by
-`zig build setup-deps`:
-
-- x86-64 EFI-capable GRUB `mkrescue` and modules
-- `xorriso` (the EFI system partition itself is written natively)
+For ISO and full disk-image workflows, install `xorriso`, which
+`zig build setup-deps` verifies; the EFI system partition itself is written
+natively.
 
 `build.zig` rejects any Zig version other than the repo pin. Install Zig 0.17.0
 before setup and invoke it directly as `zig` from `PATH`.
@@ -1825,8 +1822,10 @@ firmware image hash and prepares the tampered images.
 Set `OVMF_SECURE_BOOT_CODE` and matching `OVMF_SECURE_BOOT_VARS` (or `OVMF_VARS`);
 `EFI_VARS_TOOL` can select the variables tool installed in an isolated Python
 virtual environment. The test enrolls
-only disposable VM variables and never accesses host firmware. CI supplies the
-isolated tools, and release-security-preflight includes this gate. The production
+only disposable VM variables and never accesses host firmware. No CI job runs
+this test; a job that does must set the setup action's `install-efi-auth-tools`
+and `install-build-dependencies` inputs to install the isolated tools.
+release-security-preflight includes this gate. The production
 hardware proof requires Secure Boot enabled, a firmware-authenticated image,
 and a verified live TPM boot measurement.
 Release signing, signer enrollment, TPM measured-boot quotes, and anti-rollback
@@ -1862,8 +1861,9 @@ zig build setup-deps
 
 The native setup command requires preinstalled Zig 0.17.0 and supports macOS
 through Homebrew and Linux through `apt`, `dnf`, or `pacman`. It installs and
-verifies the remaining dependencies and discovers GRUB and OVMF paths. It is
-also available as `zig build tool -- setup-deps`.
+verifies the remaining dependencies and discovers OVMF firmware. `swtpm` and
+Python 3 are reported as optional because only the TPM and unified EFI QEMU
+tests use them. It is also available as `zig build tool -- setup-deps`.
 
 ```sh
 # Verify dependencies without installing packages.
@@ -2241,14 +2241,14 @@ The remaining data and test helpers also use the native host utility:
 GitHub Actions run these primary jobs:
 
 - lint
-- kernel build
-- spec conformance
-- host tests
-- native smoke
-- native CPU and crypto proofs
+- spec conformance: spec tests and the recovery QEMU proof
+- host tests, production readiness and release-security gates
+- native smoke, including the negative tamper boots
+- native CPU, crypto and upper-half entry proofs
+- TPM quotes
 - native benchmarks
-- ISO build
+- kernel and ISO build
 
-CI installs the pinned Zig toolchain first, then uses direct `zig` commands and
-the shared `.github/actions/setup-zigos-ci` action to install and verify the
-remaining dependencies.
+The shared `.github/actions/setup-zigos-ci` action installs the Zig and
+Jujutsu versions pinned in `.tool-versions`, then uses direct `zig` commands to
+install and verify the remaining dependencies.

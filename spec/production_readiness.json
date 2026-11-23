@@ -97,7 +97,6 @@
         ],
         "implementation_anchors": [
           "build.zig",
-          "mise.toml",
           ".tool-versions",
           "tools/host/images.zig",
           "tools/host/release.zig",

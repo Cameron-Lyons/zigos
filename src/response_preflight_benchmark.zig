@@ -6,7 +6,3 @@ pub const AddressSpaceRecord = @import("native/task/task_runtime.zig").AddressSp
 pub const preflightResponse = dispatch.preflightResponse;
 pub const validateUserRange = dispatch.validateUserRange;
 pub const prepareUserRange = dispatch.prepareUserRange;
-
-comptime {
-    if (@import("builtin").is_test) _ = dispatch;
-}

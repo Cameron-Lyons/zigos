@@ -568,24 +568,14 @@ fn validateDerivedKeyId(key_id: []const u8, public_key_hex: []const u8) !void {
 }
 
 fn decodeCanonicalPublicKey(value: []const u8) ![Ed25519.PublicKey.encoded_length]u8 {
-    if (value.len != Ed25519.PublicKey.encoded_length * 2) return error.InvalidPublicKey;
-    for (value) |byte| {
-        if (!((byte >= '0' and byte <= '9') or (byte >= 'a' and byte <= 'f'))) {
-            return error.InvalidPublicKey;
-        }
-    }
     return decodeHexFixed(Ed25519.PublicKey.encoded_length, value) catch return error.InvalidPublicKey;
 }
 
-fn validateSha256Hex(value: []const u8) !void {
+pub fn validateSha256Hex(value: []const u8) !void {
     _ = try decodeCanonicalSha256(value);
 }
 
 fn decodeCanonicalSha256(value: []const u8) ![Sha256.digest_length]u8 {
-    if (value.len != sha256_hex_len) return error.InvalidSha256;
-    for (value) |byte| {
-        if (!((byte >= '0' and byte <= '9') or (byte >= 'a' and byte <= 'f'))) return error.InvalidSha256;
-    }
     return decodeHexFixed(Sha256.digest_length, value) catch return error.InvalidSha256;
 }
 
@@ -596,7 +586,7 @@ fn findRootKey(root: *const RootMetadata, key_id: []const u8) ?*const RootKey {
     return null;
 }
 
-fn findReleaseKey(policy: *const TrustPolicy, key_id: []const u8) ?*const ReleaseKey {
+pub fn findReleaseKey(policy: *const TrustPolicy, key_id: []const u8) ?*const ReleaseKey {
     for (policy.releaseKeys) |*key| {
         if (std.mem.eql(u8, key.keyId, key_id)) return key;
     }
@@ -640,7 +630,7 @@ fn decodeBase64(allocator: std.mem.Allocator, text: []const u8, maximum: usize) 
     return decoded;
 }
 
-fn dssePreauthEncoding(allocator: std.mem.Allocator, payload_type: []const u8, payload: []const u8) ![]u8 {
+pub fn dssePreauthEncoding(allocator: std.mem.Allocator, payload_type: []const u8, payload: []const u8) ![]u8 {
     const prefix = try std.fmt.allocPrint(allocator, "DSSEv1 {d} {s} {d} ", .{
         payload_type.len,
         payload_type,
@@ -665,7 +655,8 @@ pub fn encodeHexLower(bytes: []const u8, output: []u8) void {
     }
 }
 
-fn decodeHexFixed(comptime len: usize, text: []const u8) ![len]u8 {
+/// Decodes canonical lowercase hex; every signed record encodes hex that way.
+pub fn decodeHexFixed(comptime len: usize, text: []const u8) ![len]u8 {
     if (text.len != len * 2) return error.InvalidHexLength;
     var result: [len]u8 = undefined;
     for (&result, 0..) |*byte, index| {
@@ -679,7 +670,6 @@ fn decodeHexFixed(comptime len: usize, text: []const u8) ![len]u8 {
 fn hexValue(byte: u8) ?u8 {
     if (byte >= '0' and byte <= '9') return byte - '0';
     if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
-    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
     return null;
 }
 

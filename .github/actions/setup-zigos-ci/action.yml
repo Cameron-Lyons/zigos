@@ -1,30 +1,35 @@
 name: Setup ZigOS CI
-description: Install Zig and required build dependencies for CI jobs
+description: Install the Zig and Jujutsu versions pinned in .tool-versions and, optionally, the OS build dependencies
 inputs:
-  zig-version:
-    description: Zig version to install
-    required: false
-    default: "0.17.0"
   install-build-dependencies:
     description: Install and verify OS build dependencies after Zig is available
     required: false
     default: "true"
+  install-efi-auth-tools:
+    description: Install the isolated Secure Boot variable tools that unified-efi-qemu-test needs; ignored unless install-build-dependencies is also true
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
+    - name: Read pinned tool versions
+      id: pins
+      shell: sh
+      run: awk 'NF == 2 { print $1 "=" $2 }' .tool-versions >> "$GITHUB_OUTPUT"
+
     - name: Install Zig
       uses: mlugg/setup-zig@v2.2.1
       with:
-        version: ${{ inputs.zig-version }}
-        cache-key: zigos-ci-${{ inputs.zig-version }}
+        version: ${{ steps.pins.outputs.zig }}
+        cache-key: zigos-ci-${{ steps.pins.outputs.zig }}
 
     - name: Install Jujutsu
       uses: jdx/mise-action@v4
       with:
-        install_args: jujutsu@0.43.0
+        install_args: jujutsu@${{ steps.pins.outputs.jujutsu }}
         cache: true
 
-    - name: Verify pinned toolchain
+    - name: Verify pinned Jujutsu
       shell: sh
       run: zig build tool -- ci-verify-toolchain
 
@@ -43,6 +48,6 @@ runs:
       run: zig build tool -- ci-enable-kvm
 
     - name: Install isolated EFI authentication test tools
-      if: inputs.install-build-dependencies == 'true'
+      if: inputs.install-efi-auth-tools == 'true' && inputs.install-build-dependencies == 'true'
       shell: sh
       run: zig build tool -- ci-setup-efi-tools

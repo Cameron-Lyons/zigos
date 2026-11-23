@@ -134,7 +134,7 @@ pub fn build(b: *std.Build) void {
     const verify_release_cli = b.addExecutable(.{
         .name = "zigos-verify-release",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/zigos_verify_release_main.zig"),
+            .root_source_file = b.path("src/tools/zigos_verify_release.zig"),
             .target = b.graph.host,
             .optimize = optimize,
         }),

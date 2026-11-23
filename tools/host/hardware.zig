@@ -1,6 +1,5 @@
 const std = @import("std");
 const common = @import("common.zig");
-const fixtures = @import("hardware/fixtures.zig");
 const Ctx = common.Context;
 pub const Context = Ctx;
 const target = "asus-nuc15crsu7";
@@ -8,6 +7,10 @@ const board = "RNUC15CRSU7";
 const prefix = "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7";
 pub const production_contract = "spec/hardware/nuc15crsu7-production-required-markers.txt";
 pub const verification_contract = "spec/hardware/nuc15crsu7-required-markers.txt";
+/// The checker runs only private copies of the external verifiers whose digests
+/// match their pins; these are the copies' file names.
+pub const pinned_verifier_name = "trusted-hardware-verifier";
+pub const pinned_release_verifier_name = "trusted-release-verifier";
 pub const artifacts = @import("release_catalog").production_target_paths;
 const inputs = [_][]const u8{ "build/os-verification.iso", "zig-out/bin/kernel-zigos-native-verification.elf", "build/release-security/release-manifest.dsse.json", "build/release-security/release-trust-policy.dsse.json", "build/release-security/root-metadata.json", production_contract, verification_contract };
 
@@ -32,10 +35,6 @@ pub fn run(ctx: *Ctx, command: []const u8, args: []const []const u8) !void {
         try check(ctx, args[0], try Options.fromEnv(ctx));
         return ctx.print("RNUC15CRSU7 authenticated hardware proof bundle OK: {s}\n", .{args[0]});
     }
-    if (eq(command, "test-nuc15crsu7-hardware-proof-checker")) return fixtures.selfTest(ctx);
-    if (eq(command, "hardware-fixture-verifier")) return fixtures.hardwareVerifier(ctx, args);
-    if (eq(command, "hardware-fixture-release-verifier")) return fixtures.releaseVerifier(ctx, args);
-    if (eq(command, "hardware-fixture-compiler")) return fixtures.compiler(ctx, args);
     return error.UnknownHardwareCommand;
 }
 
@@ -373,8 +372,8 @@ fn checkImpl(ctx: *Ctx, path: []const u8, options: Options) !void {
     }
     const tmp = try tempDir(ctx);
     defer std.Io.Dir.cwd().deleteTree(ctx.io, tmp) catch {};
-    const pinned_hw = try pin(ctx, verifier, tmp, if (eq(std.fs.path.basename(verifier), "hardware-fixture-verifier")) "hardware-fixture-verifier" else "trusted-hardware-verifier", options.verifier_digest);
-    const pinned_release = try pin(ctx, release_verifier, tmp, if (eq(std.fs.path.basename(release_verifier), "hardware-fixture-release-verifier")) "hardware-fixture-release-verifier" else "trusted-release-verifier", options.release_verifier_digest);
+    const pinned_hw = try pin(ctx, verifier, tmp, pinned_verifier_name, options.verifier_digest);
+    const pinned_release = try pin(ctx, release_verifier, tmp, pinned_release_verifier_name, options.release_verifier_digest);
     const root_data = try readEvidence(ctx, std.fs.path.dirname(trust_root).?, std.fs.path.basename(trust_root));
     if (!eq(&digest(root_data), options.trust_root_digest)) return error.PinnedRootDigestMismatch;
     const release_bundle = try join(ctx, root, "build/release-security");

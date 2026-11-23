@@ -906,13 +906,12 @@
     {
       "path": "tools/host/deps.zig",
       "categories": [
-        "release-gate-static-scan",
         "allocator-owned-buffer"
       ],
       "owner": "release-tooling-owner",
       "review_state": "release-reviewed",
       "mitigations": [
-        "The static asm scan matches the nasm package and command strings; this host-only dependency utility contains no inline assembly or pointer casts. Installation plans use explicit literal argv with platform-specific package lists. --check verifies without package installation, while --dry-run returns after printing plans and native repair descriptions. Native apt repairs restrict paths to three fixed source files, traverse bounded allocator-owned file slices, and atomically replace only changed regular files while retaining permissions. Privileged repair re-executes the current native executable with a fixed setup-deps --repair-apt-sources command; that command accepts no other arguments and requires Linux root. Tests cover option exclusions, manager and privilege planning, argv plans, missing files, byte-preserving rewrites, unchanged-file identity, permissions, and GRUB/OVMF discovery without installing packages."
+        "This host-only dependency utility contains no inline assembly or pointer casts. Installation plans use explicit literal argv with platform-specific package lists. --check verifies without package installation, while --dry-run returns after printing plans and native repair descriptions. Native apt repairs restrict paths to three fixed source files, traverse bounded allocator-owned file slices, and atomically replace only changed regular files while retaining permissions. Privileged repair re-executes the current native executable with a fixed setup-deps --repair-apt-sources command; that command accepts no other arguments and requires Linux root. Tests cover option exclusions, manager and privilege planning, argv plans, missing files, byte-preserving rewrites, unchanged-file identity, permissions, and OVMF discovery without installing packages. --check reports swtpm and python3 as optional rather than failing, because only the TPM and unified EFI QEMU tests use them."
       ],
       "tests": [
         "zig build host-tool-tests",
