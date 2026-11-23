@@ -58,23 +58,9 @@ pub fn recordHeaderLen() usize {
 
 pub fn readRecordHeader(reader: anytype) Error!RecordHeader {
     return .{
-        .kind = try parseRecordKind(try reader.readByte()),
+        .kind = try reader.readEnum(RecordKind),
         .payload_len = try reader.readU32(),
         .checksum = try reader.readU64(),
-    };
-}
-
-fn parseRecordKind(value: u8) Error!RecordKind {
-    return switch (value) {
-        @backingInt(RecordKind.checkpoint) => .checkpoint,
-        @backingInt(RecordKind.object_state) => .object_state,
-        @backingInt(RecordKind.version_state) => .version_state,
-        @backingInt(RecordKind.workspace_state) => .workspace_state,
-        @backingInt(RecordKind.snapshot_state) => .snapshot_state,
-        @backingInt(RecordKind.blob_state) => .blob_state,
-        @backingInt(RecordKind.chunk_state) => .chunk_state,
-        @backingInt(RecordKind.segment_boundary) => .segment_boundary,
-        else => error.CorruptImage,
     };
 }
 

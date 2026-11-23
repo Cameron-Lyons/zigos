@@ -20,9 +20,6 @@ else
 
 pub const MAX_PACKET_BYTES: usize = 256;
 pub const MAX_RELAY_PACKETS: usize = 16;
-pub const COMPACT_RELAY_METADATA = true;
-pub const COMPACT_TRANSPORT_TELEMETRY = true;
-pub const HEAP_BACKED_RELAY_QUEUE_ON_FREESTANDING = true;
 pub const TelemetryCount = u32;
 pub const ENCRYPTED_PACKET_SIZE_CEILING_BYTES: usize = 352;
 pub const SIGNED_ENCRYPTED_FRAME_SIZE_CEILING_BYTES: usize = 504;
@@ -41,7 +38,6 @@ else
     HOST_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES;
 pub const TRANSPORT_SESSION_SIZE_CEILING_BYTES: usize = 320;
 pub const HARNESS_SIZE_CEILING_BYTES: usize = 24;
-pub const EMULATED_NATIVE_TRANSPORT_SIZE_CEILING_BYTES: usize = 40;
 
 comptime {
     if (MAX_PACKET_BYTES > std.math.maxInt(u16) or network_policy.MAX_TARGET_BYTES > std.math.maxInt(u8)) {
@@ -158,17 +154,8 @@ const RelayQueueState = struct {
     }
 };
 
-const heap_backed_relay_queue = HEAP_BACKED_RELAY_QUEUE_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
+const heap_backed_relay_queue = builtin.target.os.tag == .freestanding;
 const RelayQueueBacking = if (heap_backed_relay_queue) ?*RelayQueueState else RelayQueueState;
-
-pub const relay_queue_layout = .{
-    .heap_backs_queue_on_freestanding = HEAP_BACKED_RELAY_QUEUE_ON_FREESTANDING,
-    .freestanding_handle_size_bytes = @sizeOf(?*RelayQueueState),
-    .backing_size_bytes = @sizeOf(RelayQueueState),
-    .freestanding_resident_savings_bytes = @sizeOf(RelayQueueState) - @sizeOf(?*RelayQueueState),
-    .uses_packet_arena = @hasField(RelayQueueState, "packets"),
-    .uses_session_index = @hasField(RelayQueueState, "session_index"),
-};
 
 pub const Relay = struct {
     queue: RelayQueueBacking = if (heap_backed_relay_queue) null else .{},
@@ -707,71 +694,6 @@ fn nextMonotonicId(id: u64) u64 {
     std.debug.assert(id != 0);
     return if (id == std.math.maxInt(u64)) 0 else id + 1;
 }
-
-pub const EmulatedNativeTransport = struct {
-    harness: Harness = Harness.init(),
-    attempted_connections: TelemetryCount = 0,
-    denied_before_transmit: TelemetryCount = 0,
-    transmitted_packets: TelemetryCount = 0,
-
-    pub fn init() EmulatedNativeTransport {
-        return .{};
-    }
-
-    pub fn openServiceIdentity(
-        self: *EmulatedNativeTransport,
-        broker: *network_policy.EgressBroker,
-        request: network_policy.EgressConnectionRequest,
-        source_device: principal.PrincipalId,
-        target_device: principal.PrincipalId,
-    ) Error!TransportSession {
-        self.attempted_connections +|= 1;
-        return self.harness.openServiceIdentity(
-            broker,
-            request,
-            source_device,
-            target_device,
-        ) catch |err| {
-            self.denied_before_transmit +|= 1;
-            return err;
-        };
-    }
-
-    pub fn openVerifiedServiceIdentity(
-        self: *EmulatedNativeTransport,
-        broker: *network_policy.EgressBroker,
-        request: VerifiedServiceIdentityOpenRequest,
-        source_device: principal.PrincipalId,
-        target_device: principal.PrincipalId,
-    ) Error!TransportSession {
-        self.attempted_connections +|= 1;
-        return self.harness.openVerifiedServiceIdentity(
-            broker,
-            request,
-            source_device,
-            target_device,
-        ) catch |err| {
-            self.denied_before_transmit +|= 1;
-            return err;
-        };
-    }
-
-    pub fn send(
-        self: *EmulatedNativeTransport,
-        session: *const TransportSession,
-        plaintext: []const u8,
-    ) Error!EncryptedPacket {
-        const packet = try self.harness.encryptPacket(session, plaintext);
-        self.transmitted_packets +|= 1;
-        return packet;
-    }
-
-    comptime {
-        if (@sizeOf(@This()) > EMULATED_NATIVE_TRANSPORT_SIZE_CEILING_BYTES) {
-            @compileError("emulated native transport exceeds its compact size ceiling");
-        }
-    }
-};
 
 pub fn signPacket(
     packet: EncryptedPacket,
@@ -1380,7 +1302,7 @@ test "encrypted transport harness binds device sessions to attested identity and
     try std.testing.expectEqual(@as(usize, 1), harness.denied_sessions);
 }
 
-test "emulated native transport denies service identity before packet transmission" {
+test "service identity sessions are denied before any packet is encrypted" {
     var policies = network_policy.Directory.init();
     var capabilities = capability.CapabilityTable.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 5 };
@@ -1412,7 +1334,7 @@ test "emulated native transport denies service identity before packet transmissi
     });
 
     var broker = network_policy.EgressBroker.init(&policies, &capabilities);
-    var transport = EmulatedNativeTransport.init();
+    var transport = Harness.init();
 
     try std.testing.expectError(error.EgressDenied, transport.openServiceIdentity(&broker, .{
         .task_id = 44,
@@ -1443,10 +1365,8 @@ test "emulated native transport denies service identity before packet transmissi
         .now_ticks = 5,
     }, source, target));
 
-    try std.testing.expectEqual(@as(usize, 2), transport.attempted_connections);
-    try std.testing.expectEqual(@as(usize, 2), transport.denied_before_transmit);
-    try std.testing.expectEqual(@as(usize, 0), transport.transmitted_packets);
-    try std.testing.expectEqual(@as(usize, 0), transport.harness.created_sessions);
+    try std.testing.expectEqual(@as(usize, 2), transport.denied_sessions);
+    try std.testing.expectEqual(@as(usize, 0), transport.created_sessions);
 
     const session = try transport.openServiceIdentity(&broker, .{
         .task_id = 44,
@@ -1478,30 +1398,19 @@ test "emulated native transport denies service identity before packet transmissi
     try std.testing.expect(session.attestation_verifier_metadata_digest_bound);
     try std.testing.expect(std.mem.eql(u8, &metadata_digest, &session.attestation_verifier_metadata_digest));
 
-    const packet = try transport.send(&session, "attested payload");
+    const packet = try transport.encryptPacket(&session, "attested payload");
     try std.testing.expect(packet.encrypted);
     try std.testing.expect(packet.egress_allowed);
     try std.testing.expect(!std.mem.eql(u8, packet.ciphertextSlice(), "attested payload"));
-    try std.testing.expectEqual(@as(usize, 3), transport.attempted_connections);
-    try std.testing.expectEqual(@as(usize, 2), transport.denied_before_transmit);
-    try std.testing.expectEqual(@as(usize, 1), transport.transmitted_packets);
-    try std.testing.expectEqual(@as(usize, 1), transport.harness.created_sessions);
+    try std.testing.expectEqual(@as(usize, 2), transport.denied_sessions);
+    try std.testing.expectEqual(@as(usize, 1), transport.created_sessions);
 }
 
 test "compact relay metadata preserves exact packet and domain capacities" {
-    try std.testing.expect(COMPACT_TRANSPORT_TELEMETRY);
     try std.testing.expectEqual(TelemetryCount, @FieldType(Relay, "accepted_packets"));
     try std.testing.expectEqual(TelemetryCount, @FieldType(BootedOverlayRelayService, "rejected_packets"));
     try std.testing.expectEqual(TelemetryCount, @FieldType(Harness, "created_sessions"));
-    try std.testing.expectEqual(TelemetryCount, @FieldType(EmulatedNativeTransport, "attempted_connections"));
     try std.testing.expectEqual(@as(usize, HARNESS_SIZE_CEILING_BYTES), @sizeOf(Harness));
-    try std.testing.expectEqual(@as(usize, EMULATED_NATIVE_TRANSPORT_SIZE_CEILING_BYTES), @sizeOf(EmulatedNativeTransport));
-    try std.testing.expect(relay_queue_layout.heap_backs_queue_on_freestanding);
-    try std.testing.expectEqual(@sizeOf(?*anyopaque), relay_queue_layout.freestanding_handle_size_bytes);
-    try std.testing.expectEqual(@as(usize, 6_808), relay_queue_layout.backing_size_bytes);
-    try std.testing.expectEqual(@as(usize, 6_800), relay_queue_layout.freestanding_resident_savings_bytes);
-    try std.testing.expect(relay_queue_layout.uses_packet_arena);
-    try std.testing.expect(relay_queue_layout.uses_session_index);
     try std.testing.expect(@sizeOf(Relay) <= RELAY_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(@as(usize, RELAY_SIZE_CEILING_BYTES), @sizeOf(Relay));
     try std.testing.expect(@sizeOf(BootedOverlayRelayService) <= BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES);

@@ -20,7 +20,6 @@ const StoragePort = storage_service.StoragePort;
 const SHARE_SHEET_TEST_BUFFER_BYTES: usize = 360;
 
 test "storage core checkpoint metadata stays compact" {
-    try std.testing.expect(storage_service.COMPACT_CHECKPOINT_METADATA);
     try std.testing.expectEqual(u16, storage_service.DeferredCheckpointCount);
     try std.testing.expectEqual(u16, storage_service.CheckpointBatchDepth);
     try std.testing.expectEqual(storage_service.DeferredCheckpointCount, @FieldType(StorageCore, "deferred_checkpoint_count"));
@@ -462,7 +461,7 @@ test "storage port object-target aggregate reads deny queries snapshots and work
     try std.testing.expectEqual(@as(usize, 2), (try port.queryObjects(service_authority, .{}, &output)).len);
 }
 
-test "storage port sibling history and operating model denials replace the allowed audit trace" {
+test "storage port sibling history denials replace the allowed audit trace" {
     var checkpoint_store = CheckpointStore{};
     defer std.debug.assert(checkpoint_store.resetPersistent());
     var fixture = try ObjectReadFixture.init(&checkpoint_store);
@@ -473,13 +472,10 @@ test "storage port sibling history and operating model denials replace the allow
     const history = try port.objectHistory(authority, fixture.first.object_id, &output);
     try std.testing.expectEqual(@as(usize, 1), history.len);
     try std.testing.expectEqual(fixture.first.version_id, history[0].version_id);
-    _ = try port.objectOperatingModel(authority, fixture.first.object_id);
     var missing_denials: u8 = 0;
     try std.testing.expectError(error.PermissionDenied, port.objectHistory(authority, fixture.sibling.object_id, &output));
     if (trace.decision != .denied) missing_denials |= 1 else try fixture.expectTargetDenial(trace);
     try std.testing.expectEqual(fixture.first.version_id, output[0].version_id);
-    try std.testing.expectError(error.PermissionDenied, port.objectOperatingModel(authority, fixture.sibling.object_id));
-    if (trace.decision != .denied) missing_denials |= 2 else try fixture.expectTargetDenial(trace);
     try std.testing.expectEqual(@as(u8, 0), missing_denials);
 }
 
@@ -909,11 +905,8 @@ test "storage port queries object history and grants object capabilities" {
         .capability_id = object_share.capability.id,
         .now_ticks = 30,
     };
-    const model = try port.objectOperatingModel(reviewer_authority, second.object_id);
-    try std.testing.expect(model.isWholeOsObject());
-    try std.testing.expectEqual(object_store.ObjectAccessModel.capability_scoped, model.access_model);
-    try std.testing.expectEqual(object_store.ObjectHistoryPolicy.signed_version_chain, model.history_policy);
-    try std.testing.expectEqual(object_store.ObjectSyncPolicy.local_first_selective, model.sync_policy);
+    var reviewer_history: [object_store.MAX_OBJECT_HISTORY_RESULTS]object_store.ObjectHistoryEntry = @splat(.{});
+    try std.testing.expectEqual(second.version_id, (try port.objectHistory(reviewer_authority, second.object_id, &reviewer_history))[0].version_id);
     var share_sheet_buffer: [SHARE_SHEET_TEST_BUFFER_BYTES]u8 = undefined;
     const share_sheet = try humane_permissions.renderShareSheetToBuffer(
         &share_sheet_buffer,
@@ -1307,7 +1300,7 @@ test "storage service records checkpoint transport write and barrier failures" {
             return false;
         }
     };
-    const failures = [_]storage_volume.Error{ error.DeviceReadFailed, error.CorruptImage, error.DurabilityBarrierFailed };
+    const failures = [_]storage_volume.Error{ error.DeviceReadFailed, error.DeviceWriteFailed, error.DurabilityBarrierFailed };
     for ([_]FailingBackend.Stage{ .read, .write, .flush }, failures) |stage, failure| {
         FailingBackend.stage = stage;
         FailingBackend.writes = 0;
@@ -1337,7 +1330,7 @@ test "storage service records checkpoint transport write and barrier failures" {
         try std.testing.expect(checkpoint_store.dirty);
         try std.testing.expect(!checkpoint_store.checkpointHealthy());
         try std.testing.expectEqual(failure, checkpoint_store.last_checkpoint_error.?);
-        try std.testing.expectEqual(@as(u64, if (stage == .read) 0 else 1), checkpoint_store.checkpoint_retry_count);
+        try std.testing.expectEqual(@as(u64, 1), checkpoint_store.checkpoint_retry_count);
         try std.testing.expectEqual(@as(usize, if (stage == .read) 0 else 2), FailingBackend.writes);
         try std.testing.expectEqual(@as(usize, if (stage == .flush) 2 else 0), FailingBackend.flushes);
     }

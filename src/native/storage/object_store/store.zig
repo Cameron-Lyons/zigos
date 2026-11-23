@@ -33,6 +33,8 @@ pub const MAX_OBJECT_HISTORY_RESULTS: usize = 16;
 pub const MAX_METADATA_MESSAGE_BYTES: usize = 256;
 pub const MAX_METADATA_LABEL_BYTES: usize = 48;
 pub const MAX_CONTENT_TYPE_BYTES: usize = 64;
+pub const MAX_SIGNER_BYTES: usize = 48;
+pub const MAX_SIGNERS: usize = 64;
 const BlobPayloadLength = u17;
 const BlobRefCount = u10;
 const ChunkPayloadLength = u13;
@@ -48,29 +50,6 @@ const ChunkState = packed struct(u16) {
     arena_in_use: bool = false,
     reserved: u2 = 0,
 };
-pub const COMPACT_OBJECT_RESULT_METADATA = true;
-pub const SKIPS_EMPTY_ARENA_RESET_WORK = true;
-pub const DERIVES_LATEST_INSERTED_VERSION_FROM_ARENA_STATE = true;
-pub const DERIVES_OBJECT_MODEL_VERSION_IDS_FROM_CANONICAL_HEAD = true;
-pub const DERIVES_OBJECT_MODEL_COUNTERS_FROM_VERSION_COUNT = true;
-pub const DERIVES_OBJECT_POLICY_AND_RECOVERY_FROM_CANONICAL_DATA = true;
-pub const DERIVES_OBJECT_PROVENANCE_FROM_CANONICAL_VERSIONS = true;
-pub const DERIVES_PREVIOUS_VERSION_ID_FROM_CANONICAL_PARENTS = true;
-pub const DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS = true;
-pub const PACKS_VERSION_TYPE_INTO_TRAILING_PADDING = true;
-pub const DERIVES_BLOB_MERKLE_ROOT_FROM_CANONICAL_CHUNKS = true;
-pub const DERIVES_BLOB_CHUNK_COUNT_FROM_PAYLOAD_LENGTH = true;
-pub const CAPACITY_SIZED_BLOB_CHUNK_SLOT_INDEXES = true;
-pub const PACKS_BLOB_STATE_INTO_BOUNDED_METADATA = true;
-pub const PACKS_BLOB_SLOT_MEMBERSHIP_INTO_STATE = true;
-pub const PACKS_OBJECT_STORE_MEMBERSHIP_INTO_RECORD_PADDING = true;
-pub const PACKS_CHUNK_SLOT_MEMBERSHIP_INTO_PAYLOAD_STATE = true;
-pub const ELIDES_UNUSED_OBJECT_STORE_SLOT_GENERATIONS = true;
-pub const DERIVES_OBJECT_STORE_ARENA_KEYS_FROM_PAYLOADS = true;
-pub const DERIVES_OBJECT_STORE_RECORD_ARENA_KEYS_FROM_PAYLOADS = true;
-pub const DERIVES_VERSION_ADDRESS_FROM_CANONICAL_STATE = true;
-pub const RETURNS_SINGLE_CHUNK_PAYLOADS_WITHOUT_COPIES = true;
-pub const RIGHT_SIZES_OBJECT_STORE_DIRTY_ID_INDEXES = indexed_arena.RIGHT_SIZES_DIRTY_ID_INDEXES;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
@@ -81,7 +60,7 @@ pub const OBJECT_SLOT_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_SLOT_SIZE_CEILING_BYTES: usize = 288;
 pub const CHUNK_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 48 else 4_130;
 pub const CHUNK_SLOT_SIZE_CEILING_BYTES: usize = CHUNK_RECORD_SIZE_CEILING_BYTES;
-pub const STORE_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 384_984 else 2_997_464;
+pub const STORE_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 388_112 else 3_000_592;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -93,7 +72,9 @@ const ChunkPayload = if (heap_backed_chunk_payloads) ?[*]u8 else [MAX_CHUNK_BYTE
 
 comptime {
     if (MAX_METADATA_LABEL_BYTES > std.math.maxInt(u8) or
-        MAX_CONTENT_TYPE_BYTES > std.math.maxInt(u8))
+        MAX_CONTENT_TYPE_BYTES > std.math.maxInt(u8) or
+        MAX_SIGNER_BYTES > std.math.maxInt(u8) or
+        MAX_SIGNERS > std.math.maxInt(u8))
     {
         @compileError("object metadata text exceeds its compact length fields");
     }
@@ -192,13 +173,35 @@ pub const SignedMetadata = struct {
         object_type: ObjectType,
         payload: []const u8,
     ) bool {
+        const prepared = PreparedBlob.init(payload) catch return false;
+        return self.verifyForBlob(object_type, payload.len, prepared.address);
+    }
+
+    fn verifyForBlob(self: *const SignedMetadata, object_type: ObjectType, payload_len: usize, blob_address: BlobAddress) bool {
         var message_buffer: [MAX_METADATA_MESSAGE_BYTES]u8 = undefined;
-        const message = metadataMessage(&message_buffer, object_type, payload, self.*) catch return false;
+        const message = metadataMessage(&message_buffer, object_type, payload_len, blob_address, self.*) catch return false;
         return signing.verify(self.signature, message);
     }
 
-    pub fn signingMessage(self: *const SignedMetadata, buffer: *[MAX_METADATA_MESSAGE_BYTES]u8, object_type: ObjectType, payload: []const u8) error{NoSpaceLeft}![]const u8 {
-        return metadataMessage(buffer, object_type, payload, self.*);
+    pub fn signingMessage(self: *const SignedMetadata, buffer: *[MAX_METADATA_MESSAGE_BYTES]u8, object_type: ObjectType, payload: []const u8) error{ NoSpaceLeft, PayloadTooLarge }![]const u8 {
+        const prepared = PreparedBlob.init(payload) catch return error.PayloadTooLarge;
+        return metadataMessage(buffer, object_type, payload.len, prepared.address, self.*);
+    }
+};
+
+/// The chunk references and Merkle manifest address of one payload, computed
+/// in a single pass and shared by signing, verification and insertion.
+const PreparedBlob = struct {
+    chunk_refs: [MAX_BLOB_CHUNKS]ChunkRef = undefined,
+    chunk_count: usize = 0,
+    address: BlobAddress = undefined,
+
+    fn init(payload: []const u8) Error!PreparedBlob {
+        var prepared = PreparedBlob{};
+        prepared.chunk_count = try buildChunkRefs(payload, &prepared.chunk_refs);
+        const merkle_root = computeBlobMerkleRoot(prepared.chunk_refs[0..prepared.chunk_count]);
+        prepared.address = blobManifestAddressFromMerkleRoot(payload.len, prepared.chunk_count, merkle_root);
+        return prepared;
     }
 };
 
@@ -241,7 +244,6 @@ pub const ObjectQueryResult = struct {
     latest_version_id: ids.VersionId = ids.VersionId.zero,
     object_type: ObjectType = .blob,
     version_count: u16 = 0,
-    snapshot_count: u16 = 0,
     updated_at_ticks: u64 = 0,
     label_len: u8 = 0,
     label: [MAX_METADATA_LABEL_BYTES]u8 = @as([MAX_METADATA_LABEL_BYTES]u8, @splat(0)),
@@ -288,50 +290,6 @@ pub const ObjectHistoryEntry = struct {
         if (@sizeOf(@This()) > OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES) {
             @compileError("object history entry exceeds its compact size ceiling");
         }
-    }
-};
-
-pub const ObjectAccessModel = enum(u8) {
-    capability_scoped,
-};
-
-pub const ObjectSyncPolicy = enum(u8) {
-    local_first_selective,
-};
-
-pub const ObjectHistoryPolicy = enum(u8) {
-    signed_version_chain,
-};
-
-pub const ObjectOperatingModel = struct {
-    object_id: ids.ObjectId = ids.ObjectId.zero,
-    object_type: ObjectType = .blob,
-    latest_version_id: ids.VersionId = ids.VersionId.zero,
-    version_count: u16 = 0,
-    typed: bool = false,
-    signed: bool = false,
-    versioned: bool = false,
-    access_model: ObjectAccessModel = .capability_scoped,
-    sync_policy: ObjectSyncPolicy = .local_first_selective,
-    history_policy: ObjectHistoryPolicy = .signed_version_chain,
-    sync_generation: u32 = 0,
-    sharing_policy_generation: u32 = 0,
-    has_history: bool = false,
-    has_sync_policy: bool = false,
-    has_sharing_policy: bool = false,
-    recoverable: bool = false,
-
-    pub fn isWholeOsObject(self: *const ObjectOperatingModel) bool {
-        return self.typed and
-            self.signed and
-            self.versioned and
-            self.access_model == .capability_scoped and
-            self.sync_policy == .local_first_selective and
-            self.history_policy == .signed_version_chain and
-            self.has_history and
-            self.has_sync_policy and
-            self.has_sharing_policy and
-            self.recoverable;
     }
 };
 
@@ -523,7 +481,48 @@ pub const PayloadTransferSummary = struct {
     chunks_transferred: usize = 0,
 };
 
-pub const SignMetadataError = error{ ContentTypeTooLong, LabelTooLong, NoSpaceLeft, SigningFailed };
+pub const SignMetadataError = error{ ContentTypeTooLong, LabelTooLong, NoSpaceLeft, PayloadTooLarge, SigningFailed };
+
+/// Owns the signer text that stored version metadata points at, so a caller's
+/// signer buffer (for example a vault slot zeroed on lock) never backs a version.
+const SignerTable = struct {
+    lens: [MAX_SIGNERS]u8 = @as([MAX_SIGNERS]u8, @splat(0)),
+    text: [MAX_SIGNERS][MAX_SIGNER_BYTES]u8 = @as([MAX_SIGNERS][MAX_SIGNER_BYTES]u8, @splat(@as([MAX_SIGNER_BYTES]u8, @splat(0)))),
+    count: u8 = 0,
+
+    /// Finds the slot `signer` occupies, or the free slot it would take,
+    /// without changing the table.
+    fn reserve(self: *const SignerTable, signer: []const u8) Error!u8 {
+        if (!signerLenValid(signer)) return error.InvalidSignature;
+        for (self.text[0..self.count], self.lens[0..self.count], 0..) |*text, len, index| {
+            if (std.mem.eql(u8, text[0..len], signer)) return @intCast(index);
+        }
+        if (self.count == MAX_SIGNERS) return error.NoSpaceLeft;
+        return self.count;
+    }
+
+    /// Publishes a slot from `reserve` for the same signer; a free slot is
+    /// filled only here, after every fallible step of the caller has passed.
+    fn commit(self: *SignerTable, slot: u8, signer: []const u8) []const u8 {
+        const text = &self.text[slot];
+        if (slot == self.count) {
+            @memcpy(text[0..signer.len], signer);
+            self.lens[slot] = @intCast(signer.len);
+            self.count += 1;
+        }
+        return text[0..signer.len];
+    }
+
+    fn intern(self: *SignerTable, signer: []const u8) Error![]const u8 {
+        return self.commit(try self.reserve(signer), signer);
+    }
+
+    fn reset(self: *SignerTable) void {
+        for (self.text[0..self.count]) |*text| @memset(text, 0);
+        @memset(self.lens[0..self.count], 0);
+        self.count = 0;
+    }
+};
 pub const PutLocallySignedError = Error || SignMetadataError;
 
 const ObjectSlot = struct {
@@ -754,9 +753,11 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         dirty_revision: u64 = 0,
         next_object_id: u64 = 1,
         next_version_id: u64 = 1,
-        max_blob_payload_bytes: usize = 0,
         objects: ObjectArena = ObjectArena.init(),
         object_type_index: ObjectTypeIndex = ObjectTypeIndex.init(),
+        // Version metadata borrows signer slices from this table, so a Store
+        // holding versions must stay in place rather than be copied by value.
+        signers: SignerTable = .{},
         versions: VersionArena = VersionArena.init(),
         blobs: BlobArena = BlobArena.init(),
         chunks: ChunkArena = ChunkArena.init(),
@@ -777,7 +778,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             self.noteDirtyMutation();
             self.next_object_id = 1;
             self.next_version_id = 1;
-            self.max_blob_payload_bytes = 0;
+            self.signers.reset();
             if (initialize_indexes or self.objects.next_unclaimed_index != 0) {
                 for (self.objects.slots[0..self.objects.next_unclaimed_index]) |*slot| {
                     if (slot.arenaInUse()) slot.* = ObjectSlot{};
@@ -824,15 +825,15 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
         pub fn rebuildDerivedIndexes(self: *Self) void {
             self.rebuildObjectTypeIndex();
-            self.rebuildMaxBlobPayloadBytes();
+        }
+
+        /// Returns a stable Store-owned copy of signer text for replayed versions.
+        pub fn internSigner(self: *Self, signer: []const u8) Error![]const u8 {
+            return self.signers.intern(signer);
         }
 
         pub fn indexReplayedObjectSlot(self: *Self, slot_index: usize) void {
             self.indexObjectTypeSlot(slot_index);
-        }
-
-        pub fn recordReplayedBlobPayloadBytes(self: *Self, payload_len: usize) void {
-            self.recordBlobPayloadBytes(payload_len);
         }
 
         pub fn putVersion(self: *Self, request: PutRequest) Error!PutResult {
@@ -842,23 +843,30 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         pub fn putVersionRef(self: *Self, request: *const PutRequest) Error!PutResult {
             if (!request.metadata.isSigned()) return error.UnsignedMetadata;
             if (request.payload.len > MAX_PAYLOAD_BYTES) return error.PayloadTooLarge;
-            if (!request.metadata.signature.isComplete() or !request.metadata.verifyFor(request.object_type, request.payload)) {
+            if (!signerLenValid(request.metadata.signature.signer)) return error.InvalidSignature;
+            const prepared = try PreparedBlob.init(request.payload);
+            if (!request.metadata.signature.isComplete() or
+                !request.metadata.verifyForBlob(request.object_type, request.payload.len, prepared.address))
+            {
                 return error.InvalidSignature;
             }
 
             var result: PutResult = undefined;
-            try self.insertVersionRefInto(&result, request);
+            try self.insertVersionRefInto(&result, request, &prepared);
             return result;
         }
 
         pub inline fn putLocallySignedVersion(self: *Self, request: PutLocallySignedRequest) PutLocallySignedError!PutResult {
             if (request.payload.len > MAX_PAYLOAD_BYTES) return error.PayloadTooLarge;
-            const metadata = try signMetadata(
+            if (!signerLenValid(request.signer.label)) return error.InvalidSignature;
+            const prepared = try PreparedBlob.init(request.payload);
+            const metadata = try signMetadataForBlob(
                 request.signer,
                 request.label,
                 request.content_type,
                 request.object_type,
-                request.payload,
+                request.payload.len,
+                prepared.address,
                 request.created_at_ticks,
             );
             var result: PutResult = undefined;
@@ -868,11 +876,11 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 .payload = request.payload,
                 .metadata = metadata,
                 .parent_version_id = request.parent_version_id,
-            });
+            }, &prepared);
             return result;
         }
 
-        fn insertVersionRefInto(self: *Self, out: *PutResult, request: *const PutRequest) Error!void {
+        fn insertVersionRefInto(self: *Self, out: *PutResult, request: *const PutRequest, prepared: *const PreparedBlob) Error!void {
             if (request.preferred_object_id) |object_id| {
                 if (object_id.isZero()) return error.InvalidObjectId;
             }
@@ -915,13 +923,13 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 return error.ParentMismatch;
             }
 
-            var chunk_refs: [MAX_BLOB_CHUNKS]ChunkRef = undefined;
-            const chunk_count = try buildChunkRefs(request.payload, &chunk_refs);
-            const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
-            const blob_address = blobManifestAddressFromMerkleRoot(request.payload.len, chunk_count, merkle_root);
-            const blob_slot_index = try self.putBlobPrepared(blob_address, request.payload, &chunk_refs, chunk_count);
-            // All fallible payload allocation precedes publication. Object and
-            // version capacity and issuance were checked above in this call.
+            const signer_slot = try self.signers.reserve(request.metadata.signature.signer);
+            const blob_address = prepared.address;
+            const blob_slot_index = try self.putBlobPrepared(blob_address, request.payload, &prepared.chunk_refs, prepared.chunk_count);
+            // All fallible payload allocation precedes publication. Object,
+            // version and signer capacity and issuance were checked above.
+            var metadata = request.metadata;
+            metadata.signature.signer = self.signers.commit(signer_slot, request.metadata.signature.signer);
             const created_new_object = pending_object_id != null;
             if (pending_object_id) |object_id| {
                 object_record = self.createObject(object_id, request.object_type) catch
@@ -930,13 +938,13 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const target_object = object_record orelse native_util.impossibleByInvariant("version target must resolve to an object");
             const parents = versionParents(previous_version_id);
             const parent_count = countVersionParents(parents);
-            const version_address = computeVersionAddress(parents[0..@as(usize, @intCast(parent_count))], request.metadata, blob_address);
+            const version_address = computeVersionAddress(parents[0..@as(usize, @intCast(parent_count))], metadata, blob_address);
             self.insertVersion(.{
                 .id = version_id,
                 .object_id = target_object.id,
                 .parent_version_ids = parents,
                 .object_type = request.object_type,
-                .metadata = &request.metadata,
+                .metadata = &metadata,
                 .blob_slot_index = blob_slot_index,
             }) catch native_util.impossibleByInvariant("preflighted version publication has capacity");
 
@@ -1077,27 +1085,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 current_version_id = version_record.previousVersionId();
             }
             return output[0..count];
-        }
-
-        pub fn objectOperatingModel(self: *const Self, object_id: anytype) Error!ObjectOperatingModel {
-            const object_record = self.objectConst(object_id) orelse return error.ObjectNotFound;
-            const latest = self.versionConst(object_record.latest_version_id) orelse return error.VersionNotFound;
-            const has_canonical_version = object_record.version_count > 0 and !object_record.latest_version_id.isZero();
-            return .{
-                .object_id = object_record.id,
-                .object_type = object_record.object_type,
-                .latest_version_id = object_record.latest_version_id,
-                .version_count = object_record.version_count,
-                .typed = true,
-                .signed = has_canonical_version and latest.metadata.isSigned(),
-                .versioned = has_canonical_version,
-                .sync_generation = @as(u32, object_record.version_count),
-                .sharing_policy_generation = 1,
-                .has_history = has_canonical_version,
-                .has_sync_policy = has_canonical_version,
-                .has_sharing_policy = true,
-                .recoverable = has_canonical_version,
-            };
         }
 
         /// Returns a verified zero-copy view for single-chunk objects. Larger
@@ -1244,10 +1231,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return self.blobs.countInUse();
         }
 
-        pub fn maxBlobPayloadBytes(self: *const Self) usize {
-            return self.max_blob_payload_bytes;
-        }
-
         pub fn chunkCount(self: *const Self) usize {
             return self.chunks.countInUse();
         }
@@ -1385,49 +1368,31 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             slot.version.object_id = request.object_id;
             slot.version.parent_version_ids = request.parent_version_ids;
             slot.version.object_type = request.object_type;
-            writeMetadata(&slot.version.metadata, request.metadata);
+            slot.version.metadata = request.metadata.*;
             slot.version.blob_slot_index = @intCast(request.blob_slot_index);
             if (request.id.raw() >= self.next_version_id) {
                 self.next_version_id = request.id.raw() +% 1;
             }
         }
 
-        fn rebuildMaxBlobPayloadBytes(self: *Self) void {
-            self.max_blob_payload_bytes = 0;
-            var blob_slot_index: usize = 0;
-            while (blob_slot_index < self.blobSlotCapacity()) : (blob_slot_index += 1) {
-                const slot = self.blobSlotAtConst(blob_slot_index);
-                if (!slot.arenaInUse()) continue;
-                self.recordBlobPayloadBytes(slot.blob.payloadLen());
-            }
-        }
-
-        fn recordBlobPayloadBytes(self: *Self, payload_len: usize) void {
-            self.max_blob_payload_bytes = @max(self.max_blob_payload_bytes, payload_len);
-        }
-
         pub fn putBlob(self: *Self, address: BlobAddress, payload: []const u8) Error!usize {
             if (payload.len > MAX_PAYLOAD_BYTES) return error.PayloadTooLarge;
-            var chunk_refs: [MAX_BLOB_CHUNKS]ChunkRef = undefined;
-            const chunk_count = try buildChunkRefs(payload, &chunk_refs);
-            const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
-            const computed_address = blobManifestAddressFromMerkleRoot(payload.len, chunk_count, merkle_root);
-            if (!std.mem.eql(u8, &computed_address, &address)) return error.CorruptBlob;
-            return self.putBlobPrepared(address, payload, &chunk_refs, chunk_count);
+            const prepared = try PreparedBlob.init(payload);
+            if (!std.mem.eql(u8, &prepared.address, &address)) return error.CorruptBlob;
+            return self.putBlobPrepared(address, payload, &prepared.chunk_refs, prepared.chunk_count);
         }
 
         fn putBlobPrepared(
             self: *Self,
             address: BlobAddress,
             payload: []const u8,
-            chunk_refs: *[MAX_BLOB_CHUNKS]ChunkRef,
+            chunk_refs: *const [MAX_BLOB_CHUNKS]ChunkRef,
             chunk_count: usize,
         ) Error!usize {
             if (self.blobSlotIndex(address)) |slot_index| {
                 const slot = self.blobSlotAt(slot_index);
                 if (!blobManifestMatches(self, &slot.blob, payload, chunk_refs[0..chunk_count])) return error.CorruptBlob;
                 slot.blob.incrementRefCount();
-                self.recordBlobPayloadBytes(payload.len);
                 return slot_index;
             }
             const slot_index = self.blobs.reserveIndex(indexIdForBytes(&address)) orelse return error.BlobTableFull;
@@ -1455,7 +1420,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             }
             slot.blob.chunk_slot_indexes = chunk_slot_indexes;
             slot.blob.setPayloadState(payload.len, 1);
-            self.recordBlobPayloadBytes(payload.len);
             return slot_index;
         }
 
@@ -1536,9 +1500,22 @@ pub fn signMetadata(
     payload: []const u8,
     created_at_ticks: u64,
 ) SignMetadataError!SignedMetadata {
+    const prepared = PreparedBlob.init(payload) catch return error.PayloadTooLarge;
+    return signMetadataForBlob(identity, label, content_type, object_type, payload.len, prepared.address, created_at_ticks);
+}
+
+fn signMetadataForBlob(
+    identity: signing.SignerIdentity,
+    label: []const u8,
+    content_type: []const u8,
+    object_type: ObjectType,
+    payload_len: usize,
+    blob_address: BlobAddress,
+    created_at_ticks: u64,
+) SignMetadataError!SignedMetadata {
     var metadata = try SignedMetadata.init(label, content_type, .{}, created_at_ticks);
     var message_buffer: [MAX_METADATA_MESSAGE_BYTES]u8 = undefined;
-    const message = try metadataMessage(&message_buffer, object_type, payload, metadata);
+    const message = try metadataMessage(&message_buffer, object_type, payload_len, blob_address, metadata);
     metadata.signature = signing.sign(identity, message) catch return error.SigningFailed;
     return metadata;
 }
@@ -1549,7 +1526,6 @@ fn queryResultFor(object_record: *const ObjectRecord, latest: *const VersionReco
         .latest_version_id = object_record.latest_version_id,
         .object_type = object_record.object_type,
         .version_count = object_record.version_count,
-        .snapshot_count = object_record.version_count,
         .updated_at_ticks = latest.metadata.created_at_ticks,
     };
     result.label_len = latest.metadata.label_len;
@@ -1634,13 +1610,8 @@ fn indexOfFold(haystack: []const u8, needle: []const u8) ?usize {
     return null;
 }
 
-fn writeMetadata(dest: *SignedMetadata, src: *const SignedMetadata) void {
-    dest.signature = src.signature;
-    dest.label_len = src.label_len;
-    dest.label = src.label;
-    dest.content_type_len = src.content_type_len;
-    dest.content_type = src.content_type;
-    dest.created_at_ticks = src.created_at_ticks;
+fn signerLenValid(signer: []const u8) bool {
+    return signer.len != 0 and signer.len <= MAX_SIGNER_BYTES;
 }
 
 fn indexIdForBytes(bytes: []const u8) u64 {
@@ -1804,34 +1775,24 @@ fn blobManifestMatches(store: anytype, blob_record: *const BlobRecord, payload: 
     return true;
 }
 
+// The signature binds the payload through its blob manifest address, the
+// Merkle commitment that insertion computes anyway, so a put hashes once.
 fn metadataMessage(
     buffer: []u8,
     object_type: ObjectType,
-    payload: []const u8,
+    payload_len: usize,
+    blob_address: BlobAddress,
     metadata: SignedMetadata,
 ) error{NoSpaceLeft}![]const u8 {
     var writer = BinaryWriter{ .buffer = buffer };
-    try writer.writeBytes("zigos.object.metadata");
+    try writer.writeBytes("zigos.object.metadata.manifest");
     try writer.writeByte(@backingInt(object_type));
     try writeLengthPrefixed(&writer, metadata.labelSlice());
     try writeLengthPrefixed(&writer, metadata.contentTypeSlice());
     try writer.writeU64(metadata.created_at_ticks);
-    try writer.writeU64(@intCast(payload.len));
-    const payload_digest = computePayloadDigest(payload);
-    try writer.writeBytes(&payload_digest);
+    try writer.writeU64(@intCast(payload_len));
+    try writer.writeBytes(&blob_address);
     return buffer[0..writer.offset];
-}
-
-fn computePayloadDigest(payload: []const u8) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
-    var offset: usize = 0;
-    while (offset < payload.len) {
-        const end = @min(offset + MAX_CHUNK_BYTES, payload.len);
-        crypto_hash.updateBytes(&hasher, "payload-page", payload[offset..end]);
-        offset = end;
-    }
-    crypto_hash.updateInt(&hasher, "payload-len", payload.len);
-    return crypto_hash.finalize(&hasher);
 }
 
 const BinaryWriter = binary_cursor.Writer(error{NoSpaceLeft}, error.NoSpaceLeft);

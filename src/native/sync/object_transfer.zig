@@ -95,24 +95,6 @@ pub const Receiver = struct {
         return entry;
     }
 
-    pub fn receiveForVerification(self: *Receiver, channel: *channel_mod.Channel, authority: service_authority.Context, signer: signing.SignerIdentity, frame: []const u8) !Progress {
-        if (comptime @import("builtin").os.tag == .freestanding) {
-            if (comptime !@import("../../kernel/config.zig").includesVerificationEvidence()) return error.SealedSigningKeyRequired;
-        }
-        errdefer self.reset();
-        if (authority.now_ticks == 0 or authority.task_id != self.sync.task_id or !authority.principal.eql(self.sync.owner)) {
-            self.reset();
-            return error.PermissionDenied;
-        }
-        _ = service_authority.requireServiceAuthority(self.capabilities, self.sync.service_id, authority, .endpoint_connect) catch |err| {
-            self.reset();
-            return err;
-        };
-        const entry = try self.authorize(channel, authority.now_ticks);
-        try self.store.requireDurableBoundary();
-        return self.receiveImpl(channel, authority, signer, frame, entry);
-    }
-
     fn receiveImpl(self: *Receiver, channel: *channel_mod.Channel, authority: service_authority.Context, signer: anytype, frame: []const u8, entry: workspace.Entry) !Progress {
         self.expire(authority.now_ticks);
         var plaintext: [channel_mod.MAX_PAYLOAD]u8 = undefined;

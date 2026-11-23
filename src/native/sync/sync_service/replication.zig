@@ -32,7 +32,7 @@ pub fn applyOutboundSemantic(
 ) Error!void {
     switch (semantic) {
         .mergeable_crdt => {
-            const result = try service.mergeable_document_adapter.merge(.{
+            const result = try sync_adapters.mergeDocument(.{
                 .store = store,
                 .entry = entry,
                 .remote_version_id = remote_version_id,
@@ -51,7 +51,7 @@ pub fn applyOutboundSemantic(
             }
         },
         .chunked_snapshot => {
-            const result = try service.chunk_media_adapter.replicate(.{
+            const result = try sync_adapters.replicateChunks(.{
                 .store = store,
                 .entry = entry,
             });
@@ -62,7 +62,7 @@ pub fn applyOutboundSemantic(
             }
         },
         .secure_transfer => {
-            const result = try service.secret_transfer_adapter.transfer(.{
+            const result = try sync_adapters.transferSecret(.{
                 .store = store,
                 .workspace_id = workspace_id,
                 .object_id = entry.object_id.raw(),
@@ -74,7 +74,7 @@ pub fn applyOutboundSemantic(
         },
         .transactional_contract => {
             const contract = service.findDatabaseContractForPath(workspace_id, entry.pathSlice()) orelse return error.DatabaseContractNotFound;
-            const result = try service.database_sync_adapter.replicate(.{
+            const result = try sync_adapters.replicateDatabaseContract(.{
                 .contract = contract,
                 .workspace_id = workspace_id,
                 .from_device = from_device,
@@ -94,16 +94,16 @@ pub fn applyInboundSemantic(
     semantic: SyncSemantic,
 ) Error!void {
     switch (semantic) {
-        .mergeable_crdt => _ = try service.mergeable_document_adapter.merge(.{
+        .mergeable_crdt => _ = try sync_adapters.mergeDocument(.{
             .store = store,
             .entry = entry,
             .remote_version_id = request.version_id,
         }),
-        .chunked_snapshot => _ = try service.chunk_media_adapter.replicate(.{
+        .chunked_snapshot => _ = try sync_adapters.replicateChunks(.{
             .store = store,
             .entry = entry,
         }),
-        .secure_transfer => _ = try service.secret_transfer_adapter.transfer(.{
+        .secure_transfer => _ = try sync_adapters.transferSecret(.{
             .store = store,
             .workspace_id = request.workspace_id,
             .object_id = request.object_id,
@@ -113,7 +113,7 @@ pub fn applyInboundSemantic(
         }),
         .transactional_contract => {
             const contract = service.findDatabaseContractForPath(request.workspace_id, entry.pathSlice()) orelse return error.DatabaseContractNotFound;
-            _ = try service.database_sync_adapter.replicate(.{
+            _ = try sync_adapters.replicateDatabaseContract(.{
                 .contract = contract,
                 .workspace_id = request.workspace_id,
                 .from_device = request.source_device,

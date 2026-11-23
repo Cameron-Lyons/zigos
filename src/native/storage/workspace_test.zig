@@ -122,6 +122,46 @@ test "complete workspace replacement rejects invalid targets and active transact
     try std.testing.expectEqualDeep(original, try directory.resolve(workspace.id, original.pathSlice()));
 }
 
+test "identical workspace replacement keeps its generation, root and clean state" {
+    var directory = Directory.init();
+    defer directory.reset();
+    const workspace = try directory.create(.{ .owner = .{ .kind = .service, .serial = 1 }, .label = "unchanged" });
+    const entries = try completeReplacementEntries("same", 1);
+    _ = try directory.replaceEntries(workspace.id, &entries, 1);
+    directory.clearDirty();
+    const generation = workspace.generation;
+    const root = workspace.rootAddress();
+    const mutations = workspace.counts.entry_mutation_count;
+    try std.testing.expectEqual(generation, try directory.replaceEntries(workspace.id, &entries, 2));
+    try std.testing.expectEqual(generation, workspace.generation);
+    try std.testing.expectEqualDeep(root, workspace.rootAddress());
+    try std.testing.expectEqual(mutations, workspace.counts.entry_mutation_count);
+    try std.testing.expectEqual(@as(usize, 0), directory.dirtyWorkspaceIds().len);
+}
+
+test "incremental workspace replacement leaf hashes match a full index rebuild" {
+    var directory = Directory.init();
+    defer directory.reset();
+    const workspace = try directory.create(.{ .owner = .{ .kind = .service, .serial = 1 }, .label = "leaves" });
+    const entries = try completeReplacementEntries("mix", 1);
+    _ = try directory.replaceEntries(workspace.id, entries[0..64], 1);
+    // Drop the first eight, append eight new paths and change one survivor.
+    var target: [64]Entry = undefined;
+    @memcpy(&target, entries[8..72]);
+    target[10].version_id = ids.version(999);
+    _ = try directory.replaceEntries(workspace.id, &target, 2);
+    const incremental_root = workspace.rootAddress();
+    const incremental_leaves = workspace.path_index.leafHashes().*;
+    try std.testing.expectEqualDeep(workspaceRootAddress(&target), incremental_root);
+    directory.rebuildDerivedIndexes();
+    try std.testing.expectEqualDeep(incremental_root, workspace.rootAddress());
+    try std.testing.expectEqualDeep(incremental_leaves, workspace.path_index.leafHashes().*);
+    for (target) |entry| {
+        try std.testing.expectEqualDeep(entry, try directory.resolve(workspace.id, entry.pathSlice()));
+        try std.testing.expectEqualDeep(entry, try directory.resolveObject(workspace.id, entry.object_id));
+    }
+}
+
 test "workspace transactions, snapshot restore, delete recovery, and signed export import work" {
     var store = object_store.Store.init();
     const signer = signing.SignerIdentity{

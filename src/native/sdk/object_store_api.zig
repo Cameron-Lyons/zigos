@@ -9,7 +9,6 @@ pub const ObjectType = object_store.ObjectType;
 pub const PutResult = object_store.PutResult;
 pub const ObjectQueryResult = object_store.ObjectQueryResult;
 pub const ObjectHistoryEntry = object_store.ObjectHistoryEntry;
-pub const ObjectOperatingModel = object_store.ObjectOperatingModel;
 pub const OBJECT_HANDLE_SIZE_CEILING_BYTES: usize = 136;
 pub const LOADED_OBJECT_SIZE_CEILING_BYTES: usize = 152;
 pub const Error = object_store.Error || error{
@@ -129,10 +128,6 @@ pub const Client = struct {
         return self.store.objectHistory(object_id, out);
     }
 
-    pub fn operatingModel(self: *Client, object_id: anytype) !ObjectOperatingModel {
-        return self.store.objectOperatingModel(object_id);
-    }
-
     fn put(
         self: *Client,
         object_type: ObjectType,
@@ -224,10 +219,8 @@ test "object-store SDK stores signed versions and queries developer fixtures" {
     const entries = try client.history(first.object_id, &history_entries);
     try std.testing.expectEqual(@as(usize, 2), entries.len);
 
-    const model = try client.operatingModel(first.object_id);
-    try std.testing.expect(model.isWholeOsObject());
-    try std.testing.expectEqual(ObjectType.document, model.object_type);
-    try std.testing.expectEqual(second.version_id, model.latest_version_id);
+    try std.testing.expectEqual(second.version_id, entries[0].version_id);
+    try std.testing.expectEqual(ObjectType.document, entries[0].object_type);
 
     const handle = try client.putDocumentObject("typed-note.md", "text/markdown", "# Typed");
     const updated = try client.compareAndUpdate(handle, "# Typed\n\nNative handle");

@@ -787,6 +787,17 @@ test "sync service treats per-object shares and conflict review as local-first p
     try std.testing.expectEqual(@as(u8, 1), summary.transport_frame_count);
     try std.testing.expect(service.latestTransportFrameForPath(workspace_record.id.raw(), tablet, private_path) == null);
 
+    // A standing conflict with nothing newly selected does not persist again.
+    const persist_tick = resident.next_state_tick;
+    const state_generation = storage.workspaces.find(object_store.ids.workspace(service.state_workspace_id)).?.generation;
+    const checkpoint_generation = storage_checkpoint_store.last_checkpoint_generation;
+    const standing = try port.replicateWorkspace(authority, &storage, workspace_record.id.raw(), laptop, tablet, .device_to_device);
+    try std.testing.expectEqual(@as(u8, 0), standing.selected_entry_count);
+    try std.testing.expectEqual(@as(u8, 1), standing.conflict_count);
+    try std.testing.expectEqual(persist_tick, resident.next_state_tick);
+    try std.testing.expectEqual(state_generation, storage.workspaces.find(object_store.ids.workspace(service.state_workspace_id)).?.generation);
+    try std.testing.expectEqual(checkpoint_generation, storage_checkpoint_store.last_checkpoint_generation);
+
     try std.testing.expectError(error.TransportDenied, port.acceptTransportFrame(authority, &storage, .{
         .workspace_id = workspace_record.id.raw(),
         .object_id = private.object_id.raw(),
@@ -1802,7 +1813,7 @@ test "sync service covers device graph policy replication semantics and restart 
         const path = entry.pathSlice();
         try std.testing.expect(!std.mem.eql(u8, path, "state/index"));
         try std.testing.expect(!std.mem.startsWith(u8, path, "state/chunks/"));
-        if (std.mem.startsWith(u8, path, "state/v8/")) sync_record_count += 1;
+        if (std.mem.startsWith(u8, path, "state/")) sync_record_count += 1;
     }
     try std.testing.expect(sync_record_count >= 10);
 

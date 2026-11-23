@@ -62,7 +62,7 @@
       "id": "TM-006",
       "domain": "storage-integrity",
       "abuse_case": "Malformed storage logs, oversized payloads, or torn records corrupt object or workspace state.",
-      "mitigation": "Storage volume replay validates root slots, checksums, payload bounds, segment counts, and quota behavior.",
+      "mitigation": "Storage volume replay validates root slots, checksums, payload bounds, segment counts, and table bounds.",
       "negative_tests": ["src/native/storage/storage_volume_test.zig", "src/tests/spec/adversarial_security.zig"],
       "residual_risk_owner": "storage-owner",
       "residual_risk_decision": "accepted-for-release-with-fuzz-and-durability-gates"

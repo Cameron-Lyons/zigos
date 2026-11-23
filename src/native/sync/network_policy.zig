@@ -12,9 +12,6 @@ const signing = @import("../core/signing.zig");
 pub const MAX_POLICIES: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_TARGET_BYTES: usize = 64;
-pub const COMPACT_POLICY_METADATA = true;
-pub const DENSE_POLICY_IDS = true;
-pub const DERIVES_POLICY_IDS_FROM_DENSE_SLOTS = true;
 pub const POLICY_RECORD_SIZE_CEILING_BYTES: usize = 224;
 pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 4_312;
 const POLICY_REQUEST_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
@@ -1126,8 +1123,6 @@ test "network policy ids address their dense slots directly" {
         .label = "full",
         .mode = .local_network,
     }));
-    try std.testing.expect(DERIVES_POLICY_IDS_FROM_DENSE_SLOTS);
-    try std.testing.expect(!@hasField(Directory, "next_policy_id"));
     try std.testing.expectEqual(@as(usize, DIRECTORY_SIZE_CEILING_BYTES), @sizeOf(Directory));
 }
 

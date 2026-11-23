@@ -897,6 +897,8 @@ fn statusForProductionJourneyError(err: anyerror) ProductionJourneyStatus {
         error.CheckpointDeferred,
         error.CheckpointPending,
         error.CorruptImage,
+        error.DeviceReadFailed,
+        error.DeviceWriteFailed,
         error.DurabilityBarrierFailed,
         error.ImageTooSmall,
         error.NoSpaceLeft,

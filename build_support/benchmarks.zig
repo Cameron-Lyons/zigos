@@ -35,8 +35,6 @@ pub fn addHostBenchmarks(b: *std.Build) void {
         .{ .name = "object-chunks", .source = "tools/benchmark_object_chunks.zig", .import_name = "object_chunks", .import_source = "src/object_chunk_benchmark.zig", .description = "Compare immutable hash scratch preparation and positioned object chunk cursors", .imports = &.{.{ .name = "binary_cursor", .source = "src/native/core/binary_cursor.zig" }} },
         .{ .name = "surface-text", .source = "tools/benchmark_surface_text.zig", .import_name = "surface_text", .import_source = "src/surface_text_benchmark.zig", .description = "Compare repeated and combined canonical text boundary validation" },
         .{ .name = "scheduler-wake", .source = "tools/benchmark_scheduler_wake.zig", .import_name = "scheduler", .import_source = "src/scheduler_benchmark.zig", .description = "Measure coalesced and reactivated native task wakes on the host", .architecture = .x86_64, .boot_options = true },
-        .{ .name = "storage-checksum", .source = "tools/benchmark_storage_checksum.zig", .import_name = "volume_checksum", .import_source = "src/native/storage/volume/checksum.zig", .description = "Compare portable root-v6 checksums with the previous byte-at-a-time hash on the host" },
-        .{ .name = "storage-quota", .source = "tools/benchmark_storage_quota.zig", .import_name = "storage_quota", .import_source = "src/storage_quota_benchmark.zig", .description = "Compare single-pass storage quota collection with repeated arena scans", .imports = &.{.{ .name = "binary_cursor", .source = "src/native/core/binary_cursor.zig" }} },
     };
     for (benchmarks) |benchmark| {
         const target = if (benchmark.native_instruction_floor) native: {

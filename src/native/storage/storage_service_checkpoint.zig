@@ -202,9 +202,11 @@ pub fn checkpointDurable(service: anytype) DurabilityError!u64 {
     return service.checkpoint_store.last_checkpoint_generation;
 }
 
+// Device transport and barrier failures may be transient, so each gets one
+// fresh save attempt; format and capacity errors would fail the same way again.
 fn retryableCheckpointError(err: storage_volume.Error) bool {
     return switch (err) {
-        error.CorruptImage, error.DurabilityBarrierFailed => true,
+        error.DeviceReadFailed, error.DeviceWriteFailed, error.DurabilityBarrierFailed => true,
         else => false,
     };
 }

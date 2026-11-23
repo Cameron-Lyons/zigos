@@ -3,114 +3,80 @@ const native_util = @import("../../core/util.zig");
 const object_store = @import("../../storage/object_store.zig");
 const workspace = @import("../../storage/workspace.zig");
 
-pub const capacity: usize = workspace.MAX_WORKSPACE_ENTRY_MUTATIONS * 2;
-pub const MutationIndex = u8;
-pub const COMPACT_MUTATION_INDEX_METADATA = true;
-pub const SLOT_SIZE_CEILING_BYTES: usize = 9;
-pub const INDEX_SIZE_CEILING_BYTES: usize = capacity * SLOT_SIZE_CEILING_BYTES;
+const max_mutations = workspace.MAX_WORKSPACE_ENTRY_MUTATIONS;
+const capacity: usize = max_mutations * 2;
+const MutationIndex = u8;
+const no_mutation: MutationIndex = std.math.maxInt(MutationIndex);
+// One path hash per mutation plus the latest-mutation bit set.
+pub const LATEST_SIZE_CEILING_BYTES: usize = max_mutations * @sizeOf(u64) + 32;
 
 comptime {
-    if (workspace.MAX_WORKSPACE_ENTRY_MUTATIONS > std.math.maxInt(MutationIndex)) {
+    if (max_mutations >= no_mutation) {
         @compileError("latest mutation indexes cannot represent the workspace mutation capacity");
     }
 }
 
-// Split references from hashes to avoid per-slot padding. Only references need
-// initialization; a hash is written before its reference becomes occupied.
-const no_mutation: MutationIndex = std.math.maxInt(MutationIndex);
+/// Marks the newest mutation of every path in a bounded workspace change log
+/// and keeps each mutation's path hash, so replication hashes each path once.
+pub const Latest = struct {
+    latest: std.bit_set.Static(max_mutations) = .empty,
+    path_hashes: [max_mutations]u64 = undefined,
 
-pub const Index = struct {
-    mutation_indices: [capacity]MutationIndex = @as([capacity]MutationIndex, @splat(no_mutation)),
-    path_hashes: [capacity]u64 = undefined,
-
-    fn put(self: *Index, changes: []const workspace.EntryMutation, mutation_index: usize) void {
-        requireMutationBounds(changes, mutation_index);
-        const entry = &changes[mutation_index].entry;
-        const path_hash = entry.pathHash();
-        const path = entry.pathSlice();
-        var slot_index = slotStart(path_hash);
-        var probes: usize = 0;
-        while (probes < capacity) : ({
-            probes += 1;
-            slot_index = (slot_index + 1) % capacity;
-        }) {
-            const slot = &self.mutation_indices[slot_index];
-            if (slot.* == no_mutation) {
-                self.path_hashes[slot_index] = path_hash;
-                slot.* = @intCast(mutation_index);
-                return;
-            }
-            if (self.path_hashes[slot_index] == path_hash and std.mem.eql(u8, changes[slot.*].entry.pathSlice(), path)) {
-                slot.* = @intCast(mutation_index);
-                return;
-            }
-        }
-        native_util.impossibleByInvariant("latest mutation index capacity covers workspace changes");
+    pub fn isLatest(self: *const Latest, mutation_index: usize) bool {
+        return self.latest.isSet(mutation_index);
     }
 
-    pub fn latestIndexFor(
-        self: *const Index,
-        changes: []const workspace.EntryMutation,
-        path_hash: u64,
-        path: []const u8,
-    ) ?usize {
-        var slot_index = slotStart(path_hash);
-        var probes: usize = 0;
-        while (probes < capacity) : ({
-            probes += 1;
-            slot_index = (slot_index + 1) % capacity;
-        }) {
-            const slot = self.mutation_indices[slot_index];
-            if (slot == no_mutation) return null;
-            if (self.path_hashes[slot_index] == path_hash and std.mem.eql(u8, changes[slot].entry.pathSlice(), path)) {
-                return slot;
-            }
-        }
-        return null;
-    }
-
-    pub fn isLatest(self: *const Index, changes: []const workspace.EntryMutation, mutation_index: usize) bool {
-        requireMutationBounds(changes, mutation_index);
-        const entry = &changes[mutation_index].entry;
-        return self.latestIndexFor(changes, entry.pathHash(), entry.pathSlice()) == mutation_index;
+    pub fn pathHash(self: *const Latest, mutation_index: usize) u64 {
+        return self.path_hashes[mutation_index];
     }
 };
 
 comptime {
-    if (@sizeOf(Index) > INDEX_SIZE_CEILING_BYTES) {
-        @compileError("latest mutation index exceeds its compact size ceiling");
+    if (@sizeOf(Latest) > LATEST_SIZE_CEILING_BYTES) {
+        @compileError("latest mutation set exceeds its compact size ceiling");
     }
 }
 
-pub fn build(changes: []const workspace.EntryMutation) Index {
-    if (changes.len > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS) {
-        native_util.impossibleByInvariant("latest mutation index requires a bounded workspace change log");
+pub fn build(changes: []const workspace.EntryMutation) Latest {
+    if (changes.len > max_mutations) {
+        native_util.impossibleByInvariant("latest mutation set requires a bounded workspace change log");
     }
-    var index = Index{};
-    for (changes, 0..) |_, mutation_index| {
-        index.put(changes, mutation_index);
+    var result = Latest{};
+    for (changes, result.path_hashes[0..changes.len]) |*change, *path_hash| {
+        path_hash.* = change.entry.pathHash();
     }
-    return index;
+    markLatest(changes, &result);
+    return result;
 }
 
-fn requireMutationBounds(changes: []const workspace.EntryMutation, mutation_index: usize) void {
-    if (changes.len > workspace.MAX_WORKSPACE_ENTRY_MUTATIONS or mutation_index >= changes.len) {
-        native_util.impossibleByInvariant("latest mutation reference belongs to a bounded workspace change log");
+// Later mutations of a path replace earlier ones in an open-addressed table
+// keyed by the exact path; the survivors are the latest mutations.
+fn markLatest(changes: []const workspace.EntryMutation, result: *Latest) void {
+    var slots: [capacity]MutationIndex = @as([capacity]MutationIndex, @splat(no_mutation));
+    for (changes, 0..) |*change, mutation_index| {
+        const path_hash = result.path_hashes[mutation_index];
+        var slot_index: usize = @intCast(path_hash % capacity);
+        var probes: usize = 0;
+        while (true) : ({
+            probes += 1;
+            slot_index = (slot_index + 1) % capacity;
+        }) {
+            if (probes == capacity) native_util.impossibleByInvariant("latest mutation table capacity covers workspace changes");
+            const slot = &slots[slot_index];
+            if (slot.* == no_mutation or (result.path_hashes[slot.*] == path_hash and
+                std.mem.eql(u8, changes[slot.*].entry.pathSlice(), change.entry.pathSlice())))
+            {
+                slot.* = @intCast(mutation_index);
+                break;
+            }
+        }
+    }
+    for (slots) |slot| {
+        if (slot != no_mutation) result.latest.set(slot);
     }
 }
 
-fn slotStart(path_hash: u64) usize {
-    return @intCast(path_hash % capacity);
-}
-
-test "latest mutation index uses capacity-sized slot metadata" {
-    try std.testing.expect(COMPACT_MUTATION_INDEX_METADATA);
-    try std.testing.expectEqual([capacity]MutationIndex, @FieldType(Index, "mutation_indices"));
-    try std.testing.expectEqual([capacity]u64, @FieldType(Index, "path_hashes"));
-    try std.testing.expect(@sizeOf(Index) <= INDEX_SIZE_CEILING_BYTES);
-}
-
-test "latest mutation index tracks newest mutation per path hash" {
+test "latest mutation set tracks newest mutation per path" {
     var changes: [4]workspace.EntryMutation = undefined;
     changes[0] = .{
         .generation = 1,
@@ -130,26 +96,22 @@ test "latest mutation index tracks newest mutation per path hash" {
     };
 
     const latest = build(changes[0..]);
-    try std.testing.expect(!latest.isLatest(changes[0..], 0));
-    try std.testing.expect(latest.isLatest(changes[0..], 1));
-    try std.testing.expect(latest.isLatest(changes[0..], 2));
-    try std.testing.expect(latest.isLatest(changes[0..], 3));
-    try std.testing.expectEqual(@as(?usize, 2), latest.latestIndexFor(
-        changes[0..],
-        changes[0].entry.pathHash(),
-        "documents/notes.md",
-    ));
+    try std.testing.expect(!latest.isLatest(0));
+    try std.testing.expect(latest.isLatest(1));
+    try std.testing.expect(latest.isLatest(2));
+    try std.testing.expect(latest.isLatest(3));
+    for (changes, 0..) |change, index| try std.testing.expectEqual(change.entry.pathHash(), latest.pathHash(index));
 }
 
-test "latest mutation index resolves colliding paths and repeated deletions exactly" {
-    var colliding_entries: [4]workspace.Entry = undefined;
+test "latest mutation set resolves colliding paths and repeated deletions exactly" {
+    var colliding_entries: [3]workspace.Entry = undefined;
     var count: usize = 0;
     var home: usize = 0;
     for (0..capacity * 32) |candidate| {
         var path_buffer: [48]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buffer, "documents/probe-{d}.md", .{candidate});
         const entry = try workspace.Entry.init(path, object_store.ids.object(candidate + 1), object_store.ids.version(candidate + 1), .document);
-        const entry_home = slotStart(entry.pathHash());
+        const entry_home = entry.pathHash() % capacity;
         if (count == 0) home = entry_home;
         if (entry_home != home) continue;
         colliding_entries[count] = entry;
@@ -169,30 +131,20 @@ test "latest mutation index resolves colliding paths and repeated deletions exac
     changes[3].entry.object_id = object_store.ids.ObjectId.zero;
     changes[3].entry.version_id = object_store.ids.VersionId.zero;
     const latest = build(&changes);
-    for (0..3) |index| try std.testing.expect(!latest.isLatest(&changes, index));
-    for (3..6) |index| try std.testing.expect(latest.isLatest(&changes, index));
-    for ([_][2]usize{ .{ 0, 4 }, .{ 1, 3 }, .{ 2, 5 } }) |pair| {
-        const entry = &colliding_entries[pair[0]];
-        try std.testing.expectEqual(@as(?usize, pair[1]), latest.latestIndexFor(&changes, entry.pathHash(), entry.pathSlice()));
-    }
-    const absent = &colliding_entries[3];
-    try std.testing.expectEqual(@as(?usize, null), latest.latestIndexFor(&changes, absent.pathHash(), absent.pathSlice()));
+    for (0..3) |index| try std.testing.expect(!latest.isLatest(index));
+    for (3..6) |index| try std.testing.expect(latest.isLatest(index));
 
-    // Simulate a full-hash collision as well as a shared home. Hash equality
-    // must still resolve the exact canonical path instead of merging entries.
-    var equal_hashes = latest;
-    const shared_hash = colliding_entries[0].pathHash();
-    for (&equal_hashes.path_hashes, equal_hashes.mutation_indices) |*hash, index| {
-        if (index != no_mutation) hash.* = shared_hash;
-    }
-    for ([_][2]usize{ .{ 0, 4 }, .{ 1, 3 }, .{ 2, 5 } }) |pair| {
-        try std.testing.expectEqual(@as(?usize, pair[1]), equal_hashes.latestIndexFor(&changes, shared_hash, colliding_entries[pair[0]].pathSlice()));
-    }
-    try std.testing.expectEqual(@as(?usize, null), equal_hashes.latestIndexFor(&changes, shared_hash, absent.pathSlice()));
+    // A full-hash collision must still resolve the exact canonical path
+    // instead of merging distinct entries.
+    var equal_hashes = Latest{};
+    @memset(equal_hashes.path_hashes[0..changes.len], colliding_entries[0].pathHash());
+    markLatest(&changes, &equal_hashes);
+    for (0..3) |index| try std.testing.expect(!equal_hashes.isLatest(index));
+    for (3..6) |index| try std.testing.expect(equal_hashes.isLatest(index));
 }
 
-test "latest mutation index covers the full log and its highest mutation index" {
-    var changes: [workspace.MAX_WORKSPACE_ENTRY_MUTATIONS]workspace.EntryMutation = undefined;
+test "latest mutation set covers the full log and its highest mutation index" {
+    var changes: [max_mutations]workspace.EntryMutation = undefined;
     for (&changes, 0..) |*change, index| {
         var path_buffer: [48]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buffer, "documents/full-log-{d}.md", .{index});
@@ -202,14 +154,13 @@ test "latest mutation index covers the full log and its highest mutation index" 
         };
     }
     const unique = build(&changes);
-    for (&changes, 0..) |_, index| try std.testing.expect(unique.isLatest(&changes, index));
+    for (0..changes.len) |index| try std.testing.expect(unique.isLatest(index));
 
     for (&changes) |*change| change.entry = changes[0].entry;
     const repeated = build(&changes);
-    for (0..changes.len - 1) |index| try std.testing.expect(!repeated.isLatest(&changes, index));
-    try std.testing.expect(repeated.isLatest(&changes, changes.len - 1));
-    try std.testing.expectEqual(@as(?usize, changes.len - 1), repeated.latestIndexFor(&changes, changes[0].entry.pathHash(), changes[0].entry.pathSlice()));
+    for (0..changes.len - 1) |index| try std.testing.expect(!repeated.isLatest(index));
+    try std.testing.expect(repeated.isLatest(changes.len - 1));
 
     const empty = build(&.{});
-    try std.testing.expectEqual(@as(?usize, null), empty.latestIndexFor(&.{}, changes[0].entry.pathHash(), changes[0].entry.pathSlice()));
+    try std.testing.expectEqual(@as(usize, 0), empty.latest.count());
 }

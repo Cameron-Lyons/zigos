@@ -33,7 +33,6 @@ pub const TransportSession = harness.TransportSession;
 pub const VerifiedServiceIdentityOpenRequest = harness.VerifiedServiceIdentityOpenRequest;
 pub const Harness = harness.Harness;
 pub const TelemetryCount = harness.TelemetryCount;
-pub const EmulatedNativeTransport = harness.EmulatedNativeTransport;
 pub const signPacket = harness.signPacket;
 pub const verifySignedFrame = harness.verifySignedFrame;
 pub const decryptForSession = harness.decryptForSession;
@@ -53,11 +52,6 @@ pub const Error = harness.Error || endpoint.Error || error{
 pub const MAX_CAPTURED_PACKETS: usize = 16;
 pub const MAX_NATIVE_IN_FLIGHT_FRAMES: usize = 4;
 pub const NATIVE_TRANSPORT_ABI_VERSION: u16 = 4;
-pub const COMPACT_CAPTURE_METADATA = true;
-pub const DERIVES_CAPTURE_METADATA_FROM_ARENA_STATE = true;
-pub const HEAP_BACKED_PACKET_CAPTURE_ON_FREESTANDING = true;
-pub const HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING = true;
-pub const COMPACT_NATIVE_RESULT_METADATA = true;
 pub const NativePayloadLength = u8;
 pub const ObjectSharePayloadLength = u16;
 pub const CAPTURED_PACKET_SIZE_CEILING_BYTES: usize = 272;
@@ -217,7 +211,7 @@ pub const PacketCapture = struct {
     }
 };
 
-const heap_backed_packet_capture = HEAP_BACKED_PACKET_CAPTURE_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
+const heap_backed_packet_capture = builtin.target.os.tag == .freestanding;
 const PacketCaptureBacking = if (heap_backed_packet_capture) ?*PacketCapture else PacketCapture;
 
 pub const TransportPacketCapture = struct {
@@ -295,22 +289,8 @@ pub const TransportPacketCapture = struct {
     }
 };
 
-pub const transport_packet_capture_layout = .{
-    .heap_backs_capture_on_freestanding = HEAP_BACKED_PACKET_CAPTURE_ON_FREESTANDING,
-    .freestanding_handle_size_bytes = @sizeOf(?*PacketCapture),
-    .backing_size_bytes = @sizeOf(PacketCapture),
-    .freestanding_resident_savings_bytes = @sizeOf(PacketCapture) - @sizeOf(?*PacketCapture),
-};
-
-const heap_backed_endpoint_table = HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
+const heap_backed_endpoint_table = builtin.target.os.tag == .freestanding;
 const EndpointTableBacking = if (heap_backed_endpoint_table) ?*endpoint.Table else endpoint.Table;
-
-pub const transport_endpoint_table_layout = .{
-    .heap_backs_table_on_freestanding = HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING,
-    .freestanding_handle_size_bytes = @sizeOf(?*endpoint.Table),
-    .freestanding_backing_size_bytes = endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES,
-    .freestanding_resident_savings_bytes = endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES - @sizeOf(?*endpoint.Table),
-};
 
 fn packetIdAfter(packet_id: u64) u64 {
     const next = packet_id +% 1;
@@ -333,10 +313,6 @@ pub const NativeConnection = struct {
     highest_sent_sequence: u64 = 0,
     highest_delivered_sequence: u64 = 0,
     in_flight_frames: usize = 0,
-
-    pub fn isConnected(self: *const NativeConnection) bool {
-        return self.connected;
-    }
 
     pub fn deinit(self: *NativeConnection) void {
         self.session.deinit();
@@ -846,9 +822,9 @@ pub fn inspectNativeSyncFrame(frame: []const u8) Error!NativeSyncFrameView {
     const target_task_id = try reader.readU64();
     if (session_id == 0 or sequence == 0) return error.NativeTransportMalformedFrame;
     if (source_task_id == 0 or target_task_id == 0 or source_task_id == target_task_id) return error.NativeTransportMalformedFrame;
-    const transport = try parseTransportMode(try reader.readByte());
-    const source_kind = try parsePrincipalKind(try reader.readByte());
-    const target_kind = try parsePrincipalKind(try reader.readByte());
+    const transport = try reader.readEnum(sync_state.TransportMode);
+    const source_kind = try reader.readEnum(principal.PrincipalKind);
+    const target_kind = try reader.readEnum(principal.PrincipalKind);
     const flags = try reader.readByte();
     const known_flags: u8 = NativeTransportAbi.flag_encrypted | NativeTransportAbi.flag_egress_allowed;
     if ((flags & ~known_flags) != 0) return error.NativeTransportMalformedFrame;
@@ -983,26 +959,6 @@ fn validateNativeFrameForSession(
     {
         return error.NativeTransportMalformedFrame;
     }
-}
-
-fn parseTransportMode(raw: u8) Error!sync_state.TransportMode {
-    return switch (raw) {
-        @backingInt(sync_state.TransportMode.device_to_device) => .device_to_device,
-        @backingInt(sync_state.TransportMode.relay_assisted) => .relay_assisted,
-        else => error.NativeTransportMalformedFrame,
-    };
-}
-
-fn parsePrincipalKind(raw: u8) Error!principal.PrincipalKind {
-    return switch (raw) {
-        @backingInt(principal.PrincipalKind.user) => .user,
-        @backingInt(principal.PrincipalKind.device) => .device,
-        @backingInt(principal.PrincipalKind.app) => .app,
-        @backingInt(principal.PrincipalKind.service) => .service,
-        @backingInt(principal.PrincipalKind.policy_authority) => .policy_authority,
-        @backingInt(principal.PrincipalKind.team) => .team,
-        else => error.NativeTransportMalformedFrame,
-    };
 }
 
 fn expectNativeEncodeError(
@@ -1767,26 +1723,11 @@ test "native sync transport falls back through booted relay and encrypts object 
 }
 
 test "compact capture metadata preserves maximum native frames" {
-    try std.testing.expect(harness.COMPACT_TRANSPORT_TELEMETRY);
     try std.testing.expectEqual(TelemetryCount, @FieldType(NativeTransportService, "opened_connections"));
     try std.testing.expectEqual(TelemetryCount, @FieldType(NativeTransportService, "relay_fallback_count"));
     try std.testing.expectEqual(TelemetryCount, @FieldType(NativeTransportService, "replay_rejection_count"));
-    try std.testing.expect(DERIVES_CAPTURE_METADATA_FROM_ARENA_STATE);
-    try std.testing.expect(!@hasField(PacketCapture, "last_packet_id"));
-    try std.testing.expect(!@hasField(PacketCapture, "captured_count"));
     try std.testing.expectEqual(@as(usize, PACKET_CAPTURE_SIZE_CEILING_BYTES), @sizeOf(PacketCapture));
     try std.testing.expectEqual(@as(usize, NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES), @sizeOf(NativeTransportService));
-    try std.testing.expect(transport_packet_capture_layout.heap_backs_capture_on_freestanding);
-    try std.testing.expectEqual(@sizeOf(?*anyopaque), transport_packet_capture_layout.freestanding_handle_size_bytes);
-    try std.testing.expectEqual(@as(usize, 4_808), transport_packet_capture_layout.backing_size_bytes);
-    try std.testing.expectEqual(@as(usize, 4_800), transport_packet_capture_layout.freestanding_resident_savings_bytes);
-    try std.testing.expect(transport_endpoint_table_layout.heap_backs_table_on_freestanding);
-    try std.testing.expectEqual(@sizeOf(?*anyopaque), transport_endpoint_table_layout.freestanding_handle_size_bytes);
-    try std.testing.expectEqual(@as(usize, endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES), transport_endpoint_table_layout.freestanding_backing_size_bytes);
-    try std.testing.expectEqual(
-        endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES - @sizeOf(?*endpoint.Table),
-        transport_endpoint_table_layout.freestanding_resident_savings_bytes,
-    );
 
     var transport_capture = TransportPacketCapture{};
     defer transport_capture.deinit();
@@ -1821,7 +1762,6 @@ test "compact capture metadata preserves maximum native frames" {
 }
 
 test "compact native result metadata preserves bounded payload capacities" {
-    try std.testing.expect(COMPACT_NATIVE_RESULT_METADATA);
     try std.testing.expectEqual(NativePayloadLength, @FieldType(NativeDelivery, "payload_len"));
     try std.testing.expectEqual(ObjectSharePayloadLength, @FieldType(ObjectShareEnvelope, "payload_len"));
     try std.testing.expectEqual(@as(usize, 512), @sizeOf(NativeDelivery));

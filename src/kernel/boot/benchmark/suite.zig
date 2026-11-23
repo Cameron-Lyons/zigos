@@ -1515,7 +1515,7 @@ fn benchmarkStorageVolumeReplaySegmentedLog(iteration: u32) u64 {
     return generation + record.generation + record.entryCount() +
         storage_volume_context.store.objectCount() + storage_volume_context.store.versionCount() +
         storage_volume_context.store.blobCount() + storage_volume_context.store.chunkCount() +
-        storage_volume_context.store.maxBlobPayloadBytes() + stored_object.latest_version_id.raw();
+        stored_object.latest_version_id.raw();
 }
 
 fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
@@ -1546,8 +1546,7 @@ fn benchmarkStorageVolumeCompactCheckpoint(iteration: u32) u64 {
     const after_compacted = storage_volume.testing.latestImageCompactedGeneration(storage_volume_context.seed_image[0..]) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return result.generation + after_compacted - before_compacted + record.generation +
         storage_volume_context.store.objectCount() + storage_volume_context.store.versionCount() +
-        storage_volume_context.store.blobCount() + storage_volume_context.store.chunkCount() +
-        storage_volume_context.store.maxBlobPayloadBytes();
+        storage_volume_context.store.blobCount() + storage_volume_context.store.chunkCount();
 }
 
 fn benchmarkPackageRevision(iteration: u32) u64 {

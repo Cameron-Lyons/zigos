@@ -17,9 +17,10 @@ const Error = state_support.Error;
 const CursorWriter = binary_cursor.Writer(Error, error.StateTooLarge);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptState);
 
+// Records carry no format version: a volume from another format is refused
+// as a whole by the storage root, and an undecodable record is corrupt state.
 const record_magic = "ZGSYNCR";
-const record_version: u16 = 8;
-const record_prefix = "state/v8/";
+const record_prefix = "state/";
 const transport_cursor_path = record_prefix ++ "qc";
 const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
@@ -27,26 +28,17 @@ const max_record_bytes: usize = 2048;
 const max_u64_decimal_bytes: usize = 20;
 const max_u64_hex_bytes: usize = 16;
 const max_principal_kind_decimal_bytes: usize = 1;
-pub const COMPACT_PATH_SET_METADATA = true;
-pub const COMPACT_PATH_SET_FINGERPRINTS = true;
-pub const BOUNDS_SYNC_RECORD_PATHS_TO_SCHEMA = true;
-pub const BORROWS_PERSISTENT_STATE_COLLECTIONS = true;
 pub const MAX_RECORD_PATH_BYTES: usize = record_prefix.len + 1 + 1 + max_u64_decimal_bytes + 1 +
     max_principal_kind_decimal_bytes + 1 + max_u64_decimal_bytes + 1 + max_u64_hex_bytes;
-pub const PATH_SET_SIZE_CEILING_BYTES: usize = 7_300;
-pub const PERSIST_PATH_METADATA_SIZE_CEILING_BYTES: usize = 7_316;
 
 comptime {
-    if (workspace.MAX_WORKSPACE_ENTRIES > std.math.maxInt(u8) or
-        workspace.MAX_ENTRY_PATH_BYTES > std.math.maxInt(u8))
-    {
-        @compileError("sync persistence path metadata no longer fits in u8");
-    }
     if (MAX_RECORD_PATH_BYTES > workspace.MAX_ENTRY_PATH_BYTES) {
         @compileError("sync record paths exceed workspace path capacity");
     }
-    if (@backingInt(principal.PrincipalKind.policy_authority) >= 10) {
-        @compileError("sync record principal kinds exceed their decimal path field");
+    for (std.enums.values(principal.PrincipalKind)) |kind| {
+        if (@backingInt(kind) >= 10) {
+            @compileError("sync record principal kinds exceed their decimal path field");
+        }
     }
 }
 
@@ -62,53 +54,6 @@ const RecordKind = enum(u8) {
     transport_frame = 9,
     transport_cursor = 10,
 };
-
-const Envelope = struct {
-    kind: RecordKind,
-};
-
-pub const PathSet = struct {
-    paths: [workspace.MAX_WORKSPACE_ENTRIES][MAX_RECORD_PATH_BYTES]u8 =
-        @as([workspace.MAX_WORKSPACE_ENTRIES][MAX_RECORD_PATH_BYTES]u8, @splat(@as([MAX_RECORD_PATH_BYTES]u8, @splat(0)))),
-    lens: [workspace.MAX_WORKSPACE_ENTRIES]u8 = @as([workspace.MAX_WORKSPACE_ENTRIES]u8, @splat(0)),
-    fingerprints: [workspace.MAX_WORKSPACE_ENTRIES]u32 = @as([workspace.MAX_WORKSPACE_ENTRIES]u32, @splat(0)),
-    count: u8 = 0,
-
-    fn add(self: *PathSet, path: []const u8) Error!void {
-        if (path.len > MAX_RECORD_PATH_BYTES) return error.PathTooLong;
-        if (self.contains(path)) return;
-        const index: usize = self.count;
-        if (index >= workspace.MAX_WORKSPACE_ENTRIES) return error.StateTooLarge;
-        @memset(self.paths[index][0..], 0);
-        @memcpy(self.paths[index][0..path.len], path);
-        self.lens[index] = @intCast(path.len);
-        self.fingerprints[index] = pathFingerprint(path);
-        self.count += 1;
-    }
-
-    fn contains(self: *const PathSet, path: []const u8) bool {
-        if (path.len > MAX_RECORD_PATH_BYTES) return false;
-        const fingerprint = pathFingerprint(path);
-        var index: usize = 0;
-        while (index < @as(usize, self.count)) : (index += 1) {
-            const path_len: usize = self.lens[index];
-            if (self.fingerprints[index] != fingerprint or path_len != path.len) continue;
-            if (std.mem.eql(u8, self.paths[index][0..path_len], path)) return true;
-        }
-        return false;
-    }
-
-    comptime {
-        if (@sizeOf(@This()) > PATH_SET_SIZE_CEILING_BYTES) {
-            @compileError("sync persistence path set exceeded its stack-size ceiling");
-        }
-    }
-};
-
-fn pathFingerprint(path: []const u8) u32 {
-    const hash = workspace.pathHash(path);
-    return @truncate(hash ^ (hash >> 32));
-}
 
 pub fn ensureWorkspace(storage: *storage_service.Service, owner: principal.PrincipalId) Error!u64 {
     const existing = storage.findWorkspace(owner, state_support.state_workspace_label) orelse try storage.createWorkspace(.{
@@ -129,7 +74,7 @@ pub fn load(
     const entries = try storage.entries(workspace_id);
     for (entries) |entry| {
         const path = entry.pathSlice();
-        if (!isCurrentRecordPath(path)) continue;
+        if (!isRecordPath(path)) continue;
         const version = storage.version(entry.version_id) orelse return error.CorruptState;
         try decodeRecordInto(resident, try storage.versionPayload(version));
         loaded = true;
@@ -164,15 +109,15 @@ pub fn persist(
     // it is not a durability receipt, including on the first failed checkpoint.
     resident.markDirty();
     resident.checkpoint_retry_pending = true;
-    var live_paths = PathSet{};
-    try collectLivePaths(resident, &live_paths);
     const scratch = table_backing.alloc([workspace.MAX_WORKSPACE_ENTRIES]workspace.Entry) orelse return error.NoSpaceLeft;
     defer table_backing.free([workspace.MAX_WORKSPACE_ENTRIES]workspace.Entry, scratch);
     var target = TargetEntries{ .entries = scratch };
     for (try storage.entries(workspace_id)) |entry| {
-        if (!isManagedRecordPath(entry.pathSlice())) try target.append(entry);
+        if (!isRecordPath(entry.pathSlice())) try target.append(entry);
     }
-    if (target.count + live_paths.count > workspace.MAX_WORKSPACE_ENTRIES) return error.StateTooLarge;
+    // Reject before any record version is written so StateTooLarge never
+    // leaves a partial set of new record heads behind.
+    if (target.count + liveRecordCount(resident) > workspace.MAX_WORKSPACE_ENTRIES) return error.StateTooLarge;
 
     // Record versions are immutable, but their workspace pointers publish as
     // one generation. Keep automatic checkpoints away from intermediate heads.
@@ -206,50 +151,19 @@ pub fn persist(
     resident.checkpoint_retry_pending = false;
 }
 
-fn collectLivePaths(resident: *const state_support.ResidentState, out: *PathSet) Error!void {
-    var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
-    try out.add(transport_cursor_path);
-
-    for (&resident.persisted_state.graph.user_roots.slots) |*slot| {
-        if (!slot.in_use) continue;
-        try out.add(try userRootPath(path_buffer[0..], slot.root.principal_id));
-    }
-    for (&resident.persisted_state.graph.devices.slots) |*slot| {
-        if (!slot.in_use) continue;
-        try out.add(try devicePath(path_buffer[0..], slot.device.principal_id));
-    }
-    for (&resident.persisted_state.network_policies.policies.slots) |*slot| {
-        if (!slot.in_use) continue;
-        try out.add(try networkPolicyPath(path_buffer[0..], slot.policy.id));
-    }
-    for (&resident.persisted_state.workspace_policies.slots) |*slot| {
-        if (!slot.in_use) continue;
-        try out.add(try workspacePolicyPath(path_buffer[0..], slot.policy.workspace_id));
-    }
-    for (&resident.persisted_state.replica_entries.slots) |*slot| {
-        if (!slot.in_use) continue;
-        try out.add(try replicaPath(path_buffer[0..], slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash()));
-    }
-    for (&resident.persisted_state.conflicts.slots) |*slot| {
-        if (!slot.in_use) continue;
-        try out.add(try conflictPath(path_buffer[0..], slot.conflict.workspace_id, slot.conflict.device_id, workspace.pathHash(slot.conflict.pathSlice())));
-    }
-    for (&resident.persisted_state.database_contracts.slots) |*slot| {
-        if (!slot.in_use) continue;
-        try out.add(try databaseContractPath(path_buffer[0..], slot.contract.id));
-    }
-    for (&resident.persisted_state.overlays.slots) |*slot| {
-        if (!slot.in_use) continue;
-        try out.add(try overlayPath(path_buffer[0..], slot.overlay.workspace_id));
-    }
-    for (&resident.persisted_state.outbound_transport_frames.slots) |*slot| {
-        if (!slot.in_use) continue;
-        try out.add(try transportFramePath(path_buffer[0..], .outbound, slot.frame.id));
-    }
-    for (&resident.persisted_state.inbound_transport_frames.slots) |*slot| {
-        if (!slot.in_use) continue;
-        try out.add(try transportFramePath(path_buffer[0..], .inbound, slot.frame.id));
-    }
+/// One record per live resident slot plus the transport cursor.
+fn liveRecordCount(resident: *const state_support.ResidentState) usize {
+    return 1 +
+        resident.userRootCount() +
+        resident.deviceCount() +
+        resident.networkPolicyCount() +
+        resident.workspacePolicyCount() +
+        resident.replicaCount() +
+        resident.conflictCount() +
+        resident.databaseContractCount() +
+        resident.overlayCount() +
+        resident.outboundTransportFrameCount() +
+        resident.inboundTransportFrameCount();
 }
 
 fn persistUserRoots(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64, target: *TargetEntries) Error!void {
@@ -412,7 +326,7 @@ fn putRecord(
         .preferred_object_id = object_id,
         .object_type = .blob,
         .payload = payload,
-        .signer = state_support.state_signer,
+        .signer = state_support.unauthenticated_state_signer,
         .label = record_metadata_label,
         .content_type = record_content_type,
         .created_at_ticks = tick,
@@ -423,8 +337,7 @@ fn putRecord(
 
 fn decodeRecordInto(resident: *state_support.ResidentState, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
-    const envelope = try readEnvelope(&reader);
-    switch (envelope.kind) {
+    switch (try readRecordKind(&reader)) {
         .user_root => try decodeUserRoot(resident, &reader),
         .device => try decodeDevice(resident, &reader),
         .network_policy => try decodeNetworkPolicy(resident, &reader),
@@ -613,7 +526,7 @@ fn decodeDevice(resident: *state_support.ResidentState, reader: *CursorReader) E
     device.owner = try readPrincipal(reader);
     try readTextInto(reader, &device.label, &device.label_len);
     device.overlay_id = try reader.readU64();
-    device.status = try parseDeviceStatus(try reader.readByte());
+    device.status = try reader.readEnum(device_graph.DeviceStatus);
     device.trust_generation = try reader.readU32();
     device.key_rotation_generation = try reader.readU32();
     const slot_index = resident.persisted_state.graph.installDeviceRecord(device) orelse return error.CorruptState;
@@ -624,13 +537,13 @@ fn decodeDevice(resident: *state_support.ResidentState, reader: *CursorReader) E
     slot.device.revocation_signature = try readSignature(reader, &resident.device_signature_signers[slot_index][3]);
     slot.device.last_rotated_at_ticks = try reader.readU64();
     slot.device.revoked_at_ticks = try reader.readU64();
-    slot.device.device_key_origin = try parseDeviceKeyOrigin(try reader.readByte());
+    slot.device.device_key_origin = try reader.readEnum(device_graph.DeviceKeyOrigin);
     slot.device.platform_key_bound = (try reader.readByte()) != 0;
     try readTextInto(reader, &slot.device.platform_key_label, &slot.device.platform_key_label_len);
     if (slot.device.platform_key_bound) {
         try reader.readBytes(&slot.device.platform_key_digest);
         slot.device.platform_root_generation = try reader.readU64();
-        slot.device.platform_root_provenance = try parseRootProvenance(try reader.readByte());
+        slot.device.platform_root_provenance = try reader.readEnum(measured_boot.RootProvenance);
         try reader.readBytes(&slot.device.platform_root_digest);
         if (!slot.device.hasFirmwareAuthenticatedPlatformRoot()) return error.CorruptState;
     } else if (slot.device.device_key_origin != .software or slot.device.platform_key_label_len != 0) {
@@ -658,7 +571,7 @@ fn decodeNetworkPolicy(resident: *state_support.ResidentState, reader: *CursorRe
     const workspace_id = try reader.readU64();
     policy.workspace_id = if (workspace_id == 0) null else workspace_id;
     try readTextInto(reader, &policy.label, &policy.label_len);
-    policy.mode = try parsePolicyMode(try reader.readByte());
+    policy.mode = try reader.readEnum(network_policy.PolicyMode);
     try readTextInto(reader, &policy.target, &policy.target_len);
     policy.explicit_internet_grant = (try reader.readByte()) != 0;
     policy.require_remote_attestation = (try reader.readByte()) != 0;
@@ -714,7 +627,7 @@ fn decodeConflict(resident: *state_support.ResidentState, reader: *CursorReader)
     try readTextInto(reader, &conflict.path, &conflict.path_len);
     conflict.local_version_id = try reader.readU64();
     conflict.remote_version_id = try reader.readU64();
-    conflict.semantic = try parseSyncSemantic(try reader.readByte());
+    conflict.semantic = try reader.readEnum(state_support.SyncSemantic);
     const slot_index = resident.persisted_state.conflicts.reserveIndex(state_support.conflictArenaKey(conflict.workspace_id, conflict.device_id, conflict.pathSlice())) orelse return error.CorruptState;
     resident.persisted_state.conflicts.slots[slot_index].conflict = conflict;
 }
@@ -749,7 +662,7 @@ fn decodeOverlay(resident: *state_support.ResidentState, reader: *CursorReader) 
 }
 
 fn decodeTransportFrame(resident: *state_support.ResidentState, reader: *CursorReader) Error!void {
-    const queue_kind = try parseTransportQueueKind(try reader.readByte());
+    const queue_kind = try reader.readEnum(state_support.TransportQueueKind);
     const duplicate_count = try reader.readU16();
     const next_frame_id_after_publish = try reader.readU64();
     const frame = try readTransportFrame(reader);
@@ -813,8 +726,8 @@ fn readTransportFrame(reader: *CursorReader) Error!state_support.TransportFrame 
     frame.version_id = try reader.readU64();
     frame.source_device = try readPrincipal(reader);
     frame.target_device = try readPrincipal(reader);
-    frame.transport = try parseTransportMode(try reader.readByte());
-    frame.semantic = try parseSyncSemantic(try reader.readByte());
+    frame.transport = try reader.readEnum(state_support.TransportMode);
+    frame.semantic = try reader.readEnum(state_support.SyncSemantic);
     frame.encrypted = (try reader.readByte()) != 0;
     frame.workspace_generation = try reader.readU32();
     try readTextInto(reader, &frame.path, &frame.path_len);
@@ -823,20 +736,14 @@ fn readTransportFrame(reader: *CursorReader) Error!state_support.TransportFrame 
 
 fn writeEnvelope(writer: *CursorWriter, kind: RecordKind) Error!void {
     try writer.writeBytes(record_magic);
-    try writer.writeU16(record_version);
-    try writer.writeByte(@backingInt(kind));
+    try writer.writeEnum(kind);
 }
 
-fn readEnvelope(reader: *CursorReader) Error!Envelope {
+fn readRecordKind(reader: *CursorReader) Error!RecordKind {
     var magic_buffer: [record_magic.len]u8 = undefined;
     try reader.readBytes(&magic_buffer);
     if (!std.mem.eql(u8, &magic_buffer, record_magic)) return error.CorruptState;
-    const version = try reader.readU16();
-
-    if (version != record_version) return error.UnsupportedStateVersion;
-    return .{
-        .kind = try parseRecordKind(try reader.readByte()),
-    };
+    return reader.readEnum(RecordKind);
 }
 
 fn writePrincipal(writer: *CursorWriter, id: principal.PrincipalId) Error!void {
@@ -846,7 +753,7 @@ fn writePrincipal(writer: *CursorWriter, id: principal.PrincipalId) Error!void {
 
 fn readPrincipal(reader: *CursorReader) Error!principal.PrincipalId {
     return .{
-        .kind = try parsePrincipalKind(try reader.readByte()),
+        .kind = try reader.readEnum(principal.PrincipalKind),
         .serial = try reader.readU64(),
     };
 }
@@ -964,12 +871,8 @@ fn devicePathWithHash(
     }) catch error.PathTooLong;
 }
 
-fn isCurrentRecordPath(path: []const u8) bool {
+fn isRecordPath(path: []const u8) bool {
     return std.mem.startsWith(u8, path, record_prefix);
-}
-
-fn isManagedRecordPath(path: []const u8) bool {
-    return std.mem.startsWith(u8, path, "state/v");
 }
 
 fn recordObjectId(workspace_id: u64, path: []const u8) u64 {
@@ -1020,132 +923,30 @@ fn retainedFrameCoversTransportCursor(resident: *const state_support.ResidentSta
     return false;
 }
 
-fn parseRecordKind(raw: u8) Error!RecordKind {
-    return switch (raw) {
-        1 => .user_root,
-        2 => .device,
-        3 => .network_policy,
-        4 => .workspace_policy,
-        5 => .replica,
-        6 => .conflict,
-        7 => .database_contract,
-        8 => .overlay,
-        9 => .transport_frame,
-        10 => .transport_cursor,
-        else => error.CorruptState,
-    };
-}
-
-fn parsePrincipalKind(raw: u8) Error!principal.PrincipalKind {
-    return switch (raw) {
-        0 => .user,
-        1 => .device,
-        2 => .app,
-        3 => .service,
-        4 => .policy_authority,
-        else => error.CorruptState,
-    };
-}
-
-fn parseDeviceStatus(raw: u8) Error!device_graph.DeviceStatus {
-    return switch (raw) {
-        0 => .trusted,
-        1 => .revoked,
-        else => error.CorruptState,
-    };
-}
-
-fn parseDeviceKeyOrigin(raw: u8) Error!device_graph.DeviceKeyOrigin {
-    return switch (raw) {
-        0 => .software,
-        1 => .secure_enclave,
-        2 => .tpm,
-        else => error.CorruptState,
-    };
-}
-
-fn parseRootProvenance(raw: u8) Error!measured_boot.RootProvenance {
-    return switch (raw) {
-        0 => .synthetic_host,
-        2 => .emulator_provided,
-        3 => .firmware_authenticated,
-        4 => .unverified_boot,
-        else => error.CorruptState,
-    };
-}
-
 test "sync state rejects the retired unauthenticated bootloader provenance" {
-    try std.testing.expectError(error.CorruptState, parseRootProvenance(1));
-    try std.testing.expectEqual(measured_boot.RootProvenance.unverified_boot, try parseRootProvenance(4));
-    try std.testing.expectEqual(measured_boot.RootProvenance.firmware_authenticated, try parseRootProvenance(3));
+    const Reader = CursorReader;
+    var retired = Reader{ .buffer = &.{1} };
+    try std.testing.expectError(error.CorruptState, retired.readEnum(measured_boot.RootProvenance));
+    var unverified = Reader{ .buffer = &.{4} };
+    try std.testing.expectEqual(measured_boot.RootProvenance.unverified_boot, try unverified.readEnum(measured_boot.RootProvenance));
+    var firmware = Reader{ .buffer = &.{3} };
+    try std.testing.expectEqual(measured_boot.RootProvenance.firmware_authenticated, try firmware.readEnum(measured_boot.RootProvenance));
 }
 
-fn parsePolicyMode(raw: u8) Error!network_policy.PolicyMode {
-    return switch (raw) {
-        0 => .none,
-        1 => .local_network,
-        2 => .local_subnet_discovery,
-        3 => .named_service_identity,
-        4 => .named_domain,
-        5 => .inbound_collaborative_session,
-        6 => .unrestricted_internet,
-        else => error.CorruptState,
-    };
-}
-
-fn parseSyncSemantic(raw: u8) Error!state_support.SyncSemantic {
-    return switch (raw) {
-        0 => .mergeable_crdt,
-        1 => .chunked_snapshot,
-        2 => .secure_transfer,
-        3 => .transactional_contract,
-        else => error.CorruptState,
-    };
-}
-
-fn parseTransportMode(raw: u8) Error!state_support.TransportMode {
-    return switch (raw) {
-        0 => .device_to_device,
-        1 => .relay_assisted,
-        else => error.CorruptState,
-    };
-}
-
-fn parseTransportQueueKind(raw: u8) Error!state_support.TransportQueueKind {
-    return switch (raw) {
-        0 => .outbound,
-        1 => .inbound,
-        else => error.CorruptState,
-    };
-}
-
-test "persistence path sets retain full capacity with compact metadata" {
-    try std.testing.expect(@FieldType(PathSet, "lens") == [workspace.MAX_WORKSPACE_ENTRIES]u8);
-    try std.testing.expect(@FieldType(PathSet, "fingerprints") == [workspace.MAX_WORKSPACE_ENTRIES]u32);
-    try std.testing.expect(@FieldType(PathSet, "count") == u8);
-    try std.testing.expectEqual(@as(usize, PATH_SET_SIZE_CEILING_BYTES), @sizeOf(PathSet));
-    try std.testing.expectEqual(@as(usize, PERSIST_PATH_METADATA_SIZE_CEILING_BYTES), @sizeOf(PathSet) + @sizeOf(TargetEntries));
-
-    var paths = PathSet{};
-    var path = [_]u8{ 'p', 0 };
-    for (0..workspace.MAX_WORKSPACE_ENTRIES) |index| {
-        path[1] = @intCast(index);
-        try paths.add(&path);
+test "sync state records round-trip every principal kind" {
+    for (std.enums.values(principal.PrincipalKind)) |kind| {
+        var policy = state_support.zeroWorkspacePolicy();
+        policy.workspace_id = 7;
+        policy.owner = .{ .kind = kind, .serial = 11 };
+        var payload: [max_record_bytes]u8 = undefined;
+        const bytes = try encodeWorkspacePolicy(&payload, &policy);
+        var resident = state_support.ResidentState{};
+        resident.resetForServiceInit();
+        try decodeRecordInto(&resident, bytes);
+        const policies = &resident.persisted_state.workspace_policies;
+        const slot_index = policies.slotIndexOf(state_support.workspacePolicyArenaKey(7)) orelse return error.CorruptState;
+        try std.testing.expect(policies.slots[slot_index].policy.owner.eql(policy.owner));
     }
-    try std.testing.expectEqual(@as(u8, @intCast(workspace.MAX_WORKSPACE_ENTRIES)), paths.count);
-    try std.testing.expect(paths.contains(&[_]u8{ 'p', 0 }));
-
-    try paths.add(&[_]u8{ 'p', 0 });
-    try std.testing.expectEqual(@as(u8, @intCast(workspace.MAX_WORKSPACE_ENTRIES)), paths.count);
-    try std.testing.expectError(error.StateTooLarge, paths.add(&[_]u8{'q'}));
-
-    var boundary_paths = PathSet{};
-    const max_path = @as([MAX_RECORD_PATH_BYTES]u8, @splat('x'));
-    try boundary_paths.add(&max_path);
-    try std.testing.expect(boundary_paths.contains(&max_path));
-    const overlong_path = @as([MAX_RECORD_PATH_BYTES + 1]u8, @splat('x'));
-    try std.testing.expectError(error.PathTooLong, boundary_paths.add(&overlong_path));
-    try std.testing.expect(!boundary_paths.contains(&overlong_path));
 }
 
 test "sync record path capacity covers the longest schema key" {

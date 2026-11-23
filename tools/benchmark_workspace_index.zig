@@ -137,10 +137,5 @@ fn iteration(comptime workload: Workload, state: *State, path_pool: *const [PATH
 }
 
 fn removeObject(comptime capacity: usize, slots: *[capacity]index.EntryObjectIndexSlot, entries: anytype, slot: usize, object_id: u64) void {
-    // Keep this tool runnable against the frozen parent API for paired timing.
-    if (comptime @typeInfo(@TypeOf(index.removeEntryObjectSlot)).@"fn".params.len == 5) {
-        index.removeEntryObjectSlot(capacity, slots, entries, slot, object_id);
-    } else {
-        index.removeEntryObjectSlot(capacity, slots, slot, object_id);
-    }
+    index.removeEntryObjectSlot(capacity, slots, entries, slot, object_id);
 }

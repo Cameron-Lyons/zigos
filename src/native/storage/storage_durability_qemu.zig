@@ -17,7 +17,8 @@ else
         pub fn printBootMarker(_: []const u8) void {}
     };
 
-const proof_lba: u64 = storage_volume.required_device_sectors + @as(u64, storage_volume.slot_sectors) * @as(u64, storage_volume.slot_count);
+// The guest proof sector sits one volume length past the volume.
+const proof_lba: u64 = 2 * storage_volume.required_device_sectors;
 const proof_magic = "ZSDP";
 const proof_version: u16 = 1;
 const proof_sector_size: usize = storage_volume.sector_size;

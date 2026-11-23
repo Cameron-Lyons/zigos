@@ -35,19 +35,11 @@ pub const MAX_PRIVATE_SERVICES = state_support.MAX_PRIVATE_SERVICES;
 pub const MAX_LABEL_BYTES = state_support.MAX_LABEL_BYTES;
 pub const MAX_TRANSPORT_FRAMES = state_support.MAX_TRANSPORT_FRAMES;
 pub const MAX_OVERLAY_SESSIONS = overlay_model.MAX_OVERLAY_SESSIONS;
-pub const COMPACT_OVERLAY_SESSION_METADATA = overlay_model.COMPACT_OVERLAY_SESSION_METADATA;
-pub const OVERWRITES_REUSED_SESSION_SLOTS = overlay_model.OVERWRITES_REUSED_SESSION_SLOTS;
-pub const GENERATIONAL_OVERLAY_SESSION_IDS = overlay_model.GENERATIONAL_OVERLAY_SESSION_IDS;
 pub const OVERLAY_SESSION_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SIZE_CEILING_BYTES;
 pub const OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES;
 pub const OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES;
-pub const COMPACT_SERVICE_QUEUE_METADATA = true;
-pub const IN_PLACE_DEFAULT_SERVICE_INITIALIZATION = true;
-pub const IN_PLACE_STORAGE_SERVICE_INITIALIZATION = true;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 87_712;
-pub const COMPACT_REPLICATION_SUMMARY_METADATA = state_support.COMPACT_REPLICATION_SUMMARY_METADATA;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 69_408;
 pub const REPLICATION_SUMMARY_SIZE_CEILING_BYTES = state_support.REPLICATION_SUMMARY_SIZE_CEILING_BYTES;
-pub const COMPACT_PEER_REPLICATION_RESULT_METADATA = replication_model.COMPACT_PEER_REPLICATION_RESULT_METADATA;
 pub const PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES = replication_model.PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES;
 pub const ServiceConfig = overlay_model.ServiceConfig;
 pub const TransportMode = state_support.TransportMode;
@@ -69,13 +61,8 @@ pub const DatabaseContract = state_support.DatabaseContract;
 pub const ReplicationSummary = state_support.ReplicationSummary;
 pub const PeerReplicationRequest = replication_model.PeerReplicationRequest;
 pub const PeerReplicationResult = replication_model.PeerReplicationResult;
-pub const MergeableDocumentAdapter = sync_adapters.MergeableDocumentAdapter;
-pub const ChunkMediaAdapter = sync_adapters.ChunkMediaAdapter;
-pub const SecretTransferAdapter = sync_adapters.SecretTransferAdapter;
-pub const DatabaseSyncAdapter = sync_adapters.DatabaseSyncAdapter;
 pub const TransportFrame = sync_adapters.TransportFrame;
 pub const TransportFrameRequest = sync_adapters.QueueFrameRequest;
-pub const TransportQueue = sync_adapters.TransportQueue;
 pub const Error = state_support.Error;
 pub const AuthorityContext = service_authority.Context;
 pub const AuthorityError = service_authority.Error;
@@ -228,11 +215,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         overlay_sessions: OverlaySessionArena = OverlaySessionArena.init(),
         closed_overlay_sessions: ClosedOverlaySessionIndex = ClosedOverlaySessionIndex.init(),
         active_overlay_session_count: u8 = 0,
-        mergeable_document_adapter: MergeableDocumentAdapter = sync_adapters.default_mergeable_document_adapter,
-        chunk_media_adapter: ChunkMediaAdapter = sync_adapters.default_chunk_media_adapter,
-        secret_transfer_adapter: SecretTransferAdapter = sync_adapters.default_secret_transfer_adapter,
-        database_sync_adapter: DatabaseSyncAdapter = sync_adapters.default_database_sync_adapter,
-        transport_queue: TransportQueue = TransportQueue.init(),
 
         replication_batch_depth: usize = 0,
         replication_checkpoint_pending: bool = false,
@@ -260,11 +242,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             self.inbound_source_frame_index.initializeAllocated();
             self.overlay_sessions.reset();
             self.closed_overlay_sessions.initializeAllocated();
-            self.mergeable_document_adapter = sync_adapters.default_mergeable_document_adapter;
-            self.chunk_media_adapter = sync_adapters.default_chunk_media_adapter;
-            self.secret_transfer_adapter = sync_adapters.default_secret_transfer_adapter;
-            self.database_sync_adapter = sync_adapters.default_database_sync_adapter;
-            self.transport_queue.initializeAllocated();
         }
 
         fn initWithPreparedResidentStateInto(
@@ -355,19 +332,6 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             initWithPreparedResidentStateInto(service, service_id, task_id, owner, resident_state, loaded_existing_state);
             service.storage = storage;
             service.state_workspace_id = workspace_id;
-        }
-
-        pub fn bindSyncAdapters(
-            self: *Self,
-            mergeable_document_adapter: MergeableDocumentAdapter,
-            chunk_media_adapter: ChunkMediaAdapter,
-            secret_transfer_adapter: SecretTransferAdapter,
-            database_sync_adapter: DatabaseSyncAdapter,
-        ) void {
-            self.mergeable_document_adapter = mergeable_document_adapter;
-            self.chunk_media_adapter = chunk_media_adapter;
-            self.secret_transfer_adapter = secret_transfer_adapter;
-            self.database_sync_adapter = database_sync_adapter;
         }
 
         pub fn transportFrameCount(self: *const Self) usize {
@@ -866,11 +830,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
             const last_replicated_generation = self.replicaWorkspaceGeneration(workspace_id, to_device);
             const changes = try store.entryChangesSince(workspace_id, last_replicated_generation);
-            const latest_mutation_index = latest_mutations.build(changes);
-            try self.preflightTransactionalEntries(workspace_id, to_device, changes, &latest_mutation_index, policy);
+            const latest = latest_mutations.build(changes);
+            try self.preflightTransactionalEntries(workspace_id, to_device, changes, &latest, policy);
             for (changes, 0..) |mutation, mutation_index| {
                 const entry = mutation.entry;
-                if (!latest_mutation_index.isLatest(changes, mutation_index)) continue;
+                if (!latest.isLatest(mutation_index)) continue;
                 if (!policy.matchesPath(entry.pathSlice())) {
                     summary.skipped_entry_count += 1;
                     continue;
@@ -883,7 +847,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
 
                 const semantic = sync_semantics.classifyEntry(entry);
                 const entry_path = entry.pathSlice();
-                const entry_path_hash = entry.pathHash();
+                const entry_path_hash = latest.pathHash(mutation_index);
                 const remote_version_id = self.replicaVersionForPathHash(workspace_id, to_device, entry_path, entry_path_hash) orelse 0;
                 if (remote_version_id == entry.version_id.raw()) continue;
                 summary.selected_entry_count += 1;
@@ -917,7 +881,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 try self.setReplicaVersionForPathHash(workspace_id, to_device, entry_path, entry_path_hash, entry.object_id, entry.version_id, mutation.generation);
             }
             summary.conflict_count = @intCast(self.countConflictsFor(workspace_id, to_device));
-            if (summary.selected_entry_count != 0 or summary.conflict_count != 0 or self.residentConst().checkpoint_retry_pending) {
+            // Conflicts are only created for selected entries, so standing
+            // conflicts alone leave nothing new to persist.
+            if (summary.selected_entry_count != 0 or self.residentConst().checkpoint_retry_pending) {
                 try self.checkpoint();
             }
             return summary;
@@ -1017,7 +983,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             if (!policy.personal_e2ee) return error.TransportDenied;
             try self.authorizeTransport(policy, transport, null);
 
-            const result = try self.secret_transfer_adapter.transfer(.{
+            const result = try sync_adapters.transferSecret(.{
                 .store = storage,
                 .workspace_id = workspace_id,
                 .object_id = object_store.ids.raw(object_id),
@@ -1041,7 +1007,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             try self.authorizeTransport(policy, transport, null);
 
             const record = self.findDatabaseContract(contract_id) orelse return error.DatabaseContractNotFound;
-            const result = try self.database_sync_adapter.replicate(.{
+            const result = try sync_adapters.replicateDatabaseContract(.{
                 .contract = record,
                 .workspace_id = workspace_id,
                 .from_device = from_device,
@@ -1426,16 +1392,16 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             workspace_id: u64,
             to_device: principal.PrincipalId,
             changes: []const workspace.EntryMutation,
-            latest_mutation_index: *const latest_mutations.Index,
+            latest: *const latest_mutations.Latest,
             policy: *const WorkspacePolicy,
         ) Error!void {
             for (changes, 0..) |mutation, mutation_index| {
                 const entry = mutation.entry;
-                if (!latest_mutation_index.isLatest(changes, mutation_index)) continue;
+                if (!latest.isLatest(mutation_index)) continue;
                 if (!policy.matchesPath(entry.pathSlice())) continue;
                 if (sync_semantics.classifyEntry(entry) != .transactional_contract) continue;
 
-                const remote_version_id = self.replicaVersionForPathHash(workspace_id, to_device, entry.pathSlice(), entry.pathHash()) orelse 0;
+                const remote_version_id = self.replicaVersionForPathHash(workspace_id, to_device, entry.pathSlice(), latest.pathHash(mutation_index)) orelse 0;
                 if (remote_version_id == entry.version_id.raw()) continue;
                 _ = self.findDatabaseContractForEntry(workspace_id, entry) orelse return error.DatabaseContractNotFound;
             }

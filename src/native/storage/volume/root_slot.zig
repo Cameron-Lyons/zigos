@@ -7,8 +7,6 @@ const volume_layout = @import("layout.zig");
 const workspace = @import("../workspace.zig");
 
 pub const Error = volume_errors.Error;
-pub const COMPACT_ROOT_SUMMARY_METADATA = true;
-pub const DERIVES_DELTA_WATERMARKS_FROM_ALLOCATION_CURSORS = true;
 pub const ROOT_STATE_SIZE_CEILING_BYTES: usize = 256;
 
 const CursorWriter = binary_cursor.Writer(Error, error.NoSpaceLeft);
@@ -72,9 +70,6 @@ pub fn hasRootMagic(buffer: []const u8) bool {
 }
 
 test "delta watermarks derive from allocation cursors" {
-    try std.testing.expect(DERIVES_DELTA_WATERMARKS_FROM_ALLOCATION_CURSORS);
-    try std.testing.expect(!@hasField(RootState, "last_version_id"));
-    try std.testing.expect(!@hasField(RootState, "last_snapshot_id"));
     try std.testing.expectEqual(@as(u64, 0), versionWatermark(.{}));
     try std.testing.expectEqual(@as(u64, 0), snapshotWatermark(.{}));
     const exhausted = RootState{
@@ -104,18 +99,6 @@ pub fn findLatestImageRoot(image: []const u8) Error!?LoadedRoot {
     return best;
 }
 
-pub fn findLatestBackendRoot(volume: anytype) Error!?LoadedRoot {
-    var best: ?LoadedRoot = null;
-    var sector_index: u32 = 0;
-    while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
-        const root = readBackendRoot(volume, sector_index) catch continue;
-        if (best == null or root.root.generation > best.?.root.generation) {
-            best = root;
-        }
-    }
-    return best;
-}
-
 pub fn readImageRoot(image: []const u8, sector_index: u32) Error!LoadedRoot {
     const offset = @as(usize, sector_index) * volume_layout.sector_size;
     if (offset + volume_layout.sector_size > image.len) return error.ImageTooSmall;
@@ -132,6 +115,7 @@ pub fn writeImageRoot(image: []u8, sector_index: u32, root: RootState) Error!voi
 }
 
 pub fn readBackendRoot(volume: anytype, sector_index: u32) Error!LoadedRoot {
+    // A short device read must not leave the other root slot's bytes behind.
     @memset(volume.sector_buffer[0..], 0);
     if (!volume_backend.readAttachedRange(volume, sector_index, volume.sector_buffer[0..])) return error.DeviceReadFailed;
     return .{
@@ -143,7 +127,7 @@ pub fn readBackendRoot(volume: anytype, sector_index: u32) Error!LoadedRoot {
 pub fn writeBackendRoot(volume: anytype, sector_index: u32, root: RootState) Error!void {
     @memset(volume.sector_buffer[0..], 0);
     try encodeRoot(volume.sector_buffer[0..], root);
-    if (!volume_backend.writeAttachedRange(volume, sector_index, volume.sector_buffer[0..])) return error.CorruptImage;
+    if (!volume_backend.writeAttachedRange(volume, sector_index, volume.sector_buffer[0..])) return error.DeviceWriteFailed;
 }
 
 pub fn encodeRoot(buffer: []u8, root: RootState) Error!void {
@@ -216,20 +200,19 @@ test "storage root summary metadata stays compact" {
     try std.testing.expectEqual(@as(usize, 264), @sizeOf(LoadedRoot));
 }
 
-test "storage roots bind the checksum algorithm and reject prior format versions" {
+test "storage roots bind the checksum and reject other format versions" {
     var buffer: [volume_layout.sector_size]u8 = @splat(0);
     const root = RootState{ .generation = 7, .log_record_count = 1 };
     try encodeRoot(&buffer, root);
     try std.testing.expectEqual(root.generation, (try parseRoot(&buffer)).generation);
 
     // The root version is checked before parsing data or accepting a checksum.
-    std.mem.writeInt(u16, buffer[volume_layout.root_magic.len..][0..2], 5, .little);
+    std.mem.writeInt(u16, buffer[volume_layout.root_magic.len..][0..2], volume_layout.root_format_version - 1, .little);
     try std.testing.expectError(error.UnsupportedVersion, parseRoot(&buffer));
 
     try encodeRoot(&buffer, root);
     // No workspace summaries: the checksum follows the fixed root fields.
     const checksum_offset = volume_layout.root_magic.len + 2 + 8 + 4 + 4 + 8 * 4 + 2 + 2 + 8 + 2;
-    const prior_checksum = @import("../../core/util.zig").fnv1a64(buffer[0..checksum_offset]);
-    std.mem.writeInt(u64, buffer[checksum_offset..][0..8], prior_checksum, .little);
+    buffer[checksum_offset] ^= 1;
     try std.testing.expectError(error.ChecksumMismatch, parseRoot(&buffer));
 }

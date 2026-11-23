@@ -327,57 +327,6 @@ revisions with the current harness before comparing new timings with this table.
 | One task, reactivated | 24.77 ns | 20.45 ns | 17.4% |
 | 128 tasks, reactivated | 28.63 ns | 23.77 ns | 17.0% |
 
-`zig build storage-checksum-benchmark` compares the previous FNV-1a corruption
-checksum with root-v6 seed-zero XXH64 in the same native host `fast` build.
-Each case warms the exact input, checks every repeated result, and reports the
-median of five samples over at least 32 MiB or 100 hashes. The buffers cover a
-small record, one volume block, and one complete inactive checkpoint region.
-On 2026-10-09, Zig 0.17.0 on an Apple Silicon host measured:
-
-| Buffer | FNV-1a | XXH64 | Speedup |
-| --- | ---: | ---: | ---: |
-| 128 bytes | 117.51 ns | 10.92 ns | 10.8× |
-| 4096 bytes | 5407.35 ns | 326.14 ns | 16.6× |
-| 389120 bytes | 518364.58 ns | 28140.41 ns | 18.4× |
-
-A second same-build comparison using the OS's x86-64-v3 plus AES/PCLMUL/SHA
-target under Rosetta measured 110.72/13.45 ns, 5248.72/244.06 ns, and
-500822.09/21732.92 ns for FNV-1a/XXH64 at the same buffer sizes. Reproduce this
-hosted target with:
-
-```sh
-zig run -O ReleaseFast -target x86_64-macos -mcpu=x86_64_v3+aes+pclmul+sha \
-  --dep volume_checksum -Mroot=tools/benchmark_storage_checksum.zig \
-  -O ReleaseFast -target x86_64-macos -mcpu=x86_64_v3+aes+pclmul+sha \
-  -Mvolume_checksum=src/native/storage/volume/checksum.zig
-```
-
-These timings cover only checksumming, not complete storage operations or device
-latency. XXH64 detects accidental corruption; content addresses and metadata
-authentication continue to use SHA-256 and signatures. The new root format
-rejects earlier formats on load and save rather than migrating stored data.
-Fixed known answers, unaligned slices, stripe boundaries, mutation checks, and
-the x86-64 QEMU known answer cover the portable checksum contract.
-
-`zig build storage-quota-benchmark` compares the previous separate count and
-maximum-entry scans with one pass over each workspace/snapshot arena. Both paths
-use the real Store/Directory layouts and identical persistability predicates;
-the current path calls the production quota function. Changing entry counts
-checks exact usage before timing and prevents constant-input elimination.
-Seven alternating-order samples each evaluate 1,000,000 states. A Zig 0.17.0
-`fast` build on Apple Silicon on 2026-10-09 measured:
-
-| State | Previous | Single pass |
-| --- | ---: | ---: |
-| Empty | 18.01 ns | 9.35 ns |
-| Sparse | 17.99 ns | 9.23 ns |
-| Full | 35.60 ns | 19.93 ns |
-| Malformed | 31.57 ns | 17.55 ns |
-
-Checksums matched. These hosted timings include the shared changing-entry
-fixture writes and supplement the persistence and quota policy regressions;
-they do not measure complete saves or device latency.
-
 `zig build workspace-index-benchmark` measures 192 path buckets
 and 96 object buckets with 64 live entries. Cases cover hits, empty misses after
 every home bucket has been occupied and retired, and steady insertion/deletion.

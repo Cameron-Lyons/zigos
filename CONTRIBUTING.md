@@ -81,8 +81,6 @@ Use the pinned toolchain and repo entrypoints:
 | `zig build object-chunks-benchmark` | Compare scratch preparation for complete immutable hashes, then prefix scans and positioned cursors for forward, reverse, and retransmitted object ranges. Checks exact digests and reconstructed bytes; reports alternating hash samples and cursor page visits. |
 | `zig build surface-text-benchmark` | Compare repeated and combined canonical text validation for 512-byte ASCII and Unicode documents, with collapsed and selected cursors. Checks acceptance parity. |
 | `zig build scheduler-wake-benchmark` | Measure coalesced and reactivated wakes for one task and a full native task table. Checks queue, incarnation, budget, deadline, and wake accounting; reports the median of nine `fast` samples. Targets hosted x86-64; Apple Silicon needs Rosetta. |
-| `zig build storage-checksum-benchmark` | Compare prior FNV-1a and root-v6 XXH64 on 128-byte, 4 KiB, and checkpoint-sized buffers in the same native host `fast` build. Checks exact repeated hashes and reports the median of five samples. |
-| `zig build storage-quota-benchmark` | Compare repeated and single-pass quota collection across empty, sparse, full, and malformed workspace/snapshot arenas. Checks exact usage and reports seven alternating-order native host `fast` samples. |
 
 ## Build And Cleanup Commands
 

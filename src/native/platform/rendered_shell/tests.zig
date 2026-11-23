@@ -49,11 +49,13 @@ fn expectNotContains(haystack: []const u8, needle: []const u8) !void {
 const DocumentDisk = struct {
     var image: []u8 = &.{};
     var fail_flush: bool = false;
+    var fail_writes: bool = false;
 
     fn init() !void {
         image = try std.testing.allocator.alloc(u8, storage_volume.image_bytes);
         @memset(image, 0);
         fail_flush = false;
+        fail_writes = false;
         if (!storage_volume.attachBackend(.{ .sector_count = storage_volume.required_device_sectors, .read = read, .write = write, .flush = flush })) @panic("storage lifecycle transition was refused");
     }
 
@@ -71,6 +73,7 @@ const DocumentDisk = struct {
     }
 
     fn write(lba: u64, bytes: [*]const u8, len: usize) callconv(.c) bool {
+        if (fail_writes) return false;
         const offset: usize = @intCast(lba * storage_volume.sector_size);
         if (offset > image.len or len > image.len - offset) return false;
         @memcpy(image[offset..][0..len], bytes[0..len]);
@@ -410,6 +413,11 @@ test "production journey service rejects premature controls then routes lifecycl
     try std.testing.expectEqual(before_edit.version_id.raw(), journey.document_version_id);
     try expectNotContains(try journey.renderMarkerContract(&marker_buffer), boot_markers.notes_daily_driver_edit_saved_ok);
     DocumentDisk.fail_flush = false;
+    DocumentDisk.fail_writes = true;
+    try std.testing.expectEqual(ProductionJourneyStatus.storage_unavailable, journey.dispatch(.{ .control = .edit_document, .tick = 26 }).status);
+    try std.testing.expect(!journey.document_edited);
+    try std.testing.expectEqual(before_edit.version_id.raw(), journey.document_version_id);
+    DocumentDisk.fail_writes = false;
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .edit_document, .tick = 26 }).status);
     const edited_markers = try journey.renderMarkerContract(&marker_buffer);
     try expectContains(edited_markers, boot_markers.notes_daily_driver_edit_saved_ok);
@@ -1104,8 +1112,15 @@ test "booted rendered system runs input loop compositor prompts task switching r
     try std.testing.expect(system.hardware_text_dirty);
     try std.testing.expectEqual(text_before, shell.documentTextSlice().len);
     try std.testing.expect(!shell.state.document_edited);
-    const pending_count = storage.versionCount();
     DocumentDisk.fail_flush = false;
+    DocumentDisk.fail_writes = true;
+    const failed_write = system.dispatchKeyboardEvent(.{ .kind = .commit_text }, 25);
+    try std.testing.expect(!failed_write.accepted);
+    try std.testing.expectEqual(HumaneShellStatus.storage_unavailable, failed_write.status);
+    try std.testing.expect(system.hardware_text_dirty);
+    try std.testing.expectEqual(text_before, shell.documentTextSlice().len);
+    const pending_count = storage.versionCount();
+    DocumentDisk.fail_writes = false;
     const committed = system.dispatchKeyboardEvent(.{ .kind = .commit_text }, 25);
     try std.testing.expect(committed.accepted);
     try std.testing.expectEqual(pending_count, storage.versionCount());

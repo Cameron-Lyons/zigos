@@ -9,7 +9,6 @@ const storage_service = @import("../../storage/storage_service.zig");
 
 pub const TransportMode = state_support.TransportMode;
 pub const ReplicationSummary = state_support.ReplicationSummary;
-pub const COMPACT_PEER_REPLICATION_RESULT_METADATA = true;
 pub const PEER_REPLICATION_RESULT_SIZE_CEILING_BYTES: usize = 32;
 pub const MAX_PEER_RELAY_DELIVERIES: usize = state_support.MAX_TRANSPORT_FRAMES *
     ((object_store.MAX_PAYLOAD_BYTES + sync_transport.MAX_NATIVE_PAYLOAD_BYTES - 1) / sync_transport.MAX_NATIVE_PAYLOAD_BYTES);

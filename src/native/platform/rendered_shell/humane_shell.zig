@@ -1223,6 +1223,8 @@ pub fn statusForError(err: anyerror) HumaneShellStatus {
         error.CheckpointDeferred,
         error.CheckpointPending,
         error.CorruptImage,
+        error.DeviceReadFailed,
+        error.DeviceWriteFailed,
         error.DurabilityBarrierFailed,
         error.ImageTooSmall,
         error.NoSpaceLeft,

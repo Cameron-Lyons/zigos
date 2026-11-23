@@ -1225,17 +1225,16 @@ committed set is reconstructed from the selected root's version watermark;
 failed barriers retain dirty state, and retries or cold replay require no
 separate durability cache. Workspace-only and clean saves avoid reconstructing
 that set.
-Volume root format 6 uses seed-zero XXH64 for root and log corruption checksums.
-Earlier root formats are rejected on load and save without rewriting the image;
-there is no automatic migration. SHA-256 content addresses and signed metadata
-remain the authentication boundary. `zig build storage-checksum-benchmark`
-compares the checksum algorithms in one host build.
+Volume root format 7 uses seed-zero XXH64 for root and log corruption checksums.
+A volume with no current-format root is refused on load and save without
+rewriting the image; there is no automatic migration. SHA-256 content addresses
+and signed metadata remain the authentication boundary.
 Object hashing and blob replay initialize each live chunk reference and Merkle
 node before use, avoiding redundant clears of their local scratch arrays.
 Stored record tails retain canonical zeros; content addresses and signatures
 retain their exact bytes.
-Quota collection counts persistable workspaces and snapshots while finding their
-maximum entry count in one pass over each bounded arena. Attached byte transfers
+The fixed object and workspace tables are the storage capacity limits; saves
+refuse any live slot whose counts could not be encoded. Attached byte transfers
 reject overflowing or out-of-image ranges before calling the device backend.
 Workspace path and object indexes close affected probe chains after deletion,
 so repeated directory edits leave no tombstones. Object sync positions a
